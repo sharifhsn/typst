@@ -35,7 +35,7 @@ use std::str::FromStr;
 use ecow::{EcoString, eco_format};
 use icu_properties::CodePointSetDataBorrowed;
 use icu_properties::props::DefaultIgnorableCodePoint;
-use rustybuzz::Feature;
+use harfrust::Feature;
 use smallvec::SmallVec;
 use typst_syntax::Spanned;
 use typst_utils::singleton;
@@ -1396,7 +1396,7 @@ impl Fold for FontFeatures {
 pub fn features(styles: StyleChain) -> Vec<Feature> {
     let mut tags = vec![];
     let mut feat = |tag: &[u8; 4], value: u32| {
-        tags.push(Feature::new(ttf_parser::Tag::from_bytes(tag), value, ..));
+        tags.push(Feature::new(harfrust::Tag::new(tag), value, ..));
     };
 
     // Features that are on by default in Harfbuzz are only added if disabled.
@@ -1462,7 +1462,7 @@ pub fn features(styles: StyleChain) -> Vec<Feature> {
     }
 
     for (tag, value) in styles.get_cloned(TextElem::features).0 {
-        tags.push(Feature::new(tag.into(), value, ..))
+        tags.push(Feature::new(harfrust::Tag::new(&tag.to_bytes()), value, ..))
     }
 
     tags
@@ -1470,13 +1470,13 @@ pub fn features(styles: StyleChain) -> Vec<Feature> {
 
 /// Process the language and region of a style chain into a
 /// rustybuzz-compatible BCP 47 language.
-pub fn language(styles: StyleChain) -> rustybuzz::Language {
+pub fn language(styles: StyleChain) -> harfrust::Language {
     let mut bcp: EcoString = styles.get(TextElem::lang).as_str().into();
     if let Some(region) = styles.get(TextElem::region) {
         bcp.push('-');
         bcp.push_str(region.as_str());
     }
-    rustybuzz::Language::from_str(&bcp).unwrap()
+    harfrust::Language::from_str(&bcp).unwrap()
 }
 
 /// A toggle that turns on and off alternatingly if folded.

@@ -5,8 +5,7 @@ use std::sync::Arc;
 
 use az::SaturatingAs;
 use comemo::Tracked;
-use rustybuzz::{BufferFlags, Feature, ShapePlan, UnicodeBuffer};
-use ttf_parser::Tag;
+use harfrust::{BufferFlags, Feature, ShapeOptions, ShapePlan, UnicodeBuffer};
 use ttf_parser::gsub::SubstitutionSubtable;
 use typst_library::World;
 use typst_library::engine::Engine;
@@ -840,7 +839,7 @@ struct ShapingContext<'a> {
     styles: StyleChain<'a>,
     size: Abs,
     variant: FontVariant,
-    features: Vec<rustybuzz::Feature>,
+    features: Vec<Feature>,
     variations: FontVariations,
     fallback: bool,
     dir: Dir,
@@ -980,13 +979,14 @@ fn shape_segment<'a>(
     buffer.push_str(text);
     buffer.set_language(language(ctx.styles));
     if let Some(script) = ctx.styles.get(TextElem::script).custom().and_then(|script| {
-        rustybuzz::Script::from_iso15924_tag(Tag::from_bytes(script.as_bytes()))
+        let tag = harfrust::Tag::new_checked(script.as_bytes()).ok()?;
+        harfrust::Script::from_iso15924_tag(tag)
     }) {
         buffer.set_script(script)
     }
     buffer.set_direction(match ctx.dir {
-        Dir::LTR => rustybuzz::Direction::LeftToRight,
-        Dir::RTL => rustybuzz::Direction::RightToLeft,
+        Dir::LTR => harfrust::Direction::LeftToRight,
+        Dir::RTL => harfrust::Direction::RightToLeft,
         _ => unimplemented!("vertical text layout"),
     });
     buffer.guess_segment_properties();
@@ -1019,12 +1019,16 @@ fn shape_segment<'a>(
         &ctx.features,
     );
 
+    // Shape!
+    let shaper = font.shaper();
+    let buffer = shaper.shape(
+        buffer,
+        ShapeOptions::new().plan(Some(&plan)).features(&ctx.features),
+    );
+
     if has_shift_feature {
         ctx.features.pop();
     }
-
-    // Shape!
-    let buffer = rustybuzz::shape_with_plan(font.rusty(), &plan, buffer);
     let infos = buffer.glyph_infos();
     let pos = buffer.glyph_positions();
     let ltr = ctx.dir.is_positive();
@@ -1177,11 +1181,11 @@ fn determine_shift(
             // OpenType feature instead of synthesizing if possible), we add
             // "subs"/"sups" to the feature list if supported by the font.
             // In case of a problem, we just early exit
-            let gsub = font.rusty().tables().gsub?;
+            let gsub = font.ttf().tables().gsub?;
             let lookups = gsub.features.find(settings.kind.feature())?.lookup_indices;
             text.chars()
                 .all(|c| {
-                    let Some(i) = font.rusty().glyph_index(c) else { return false };
+                    let Some(i) = font.ttf().glyph_index(c) else { return false };
                     lookups
                         .into_iter()
                         .flat_map(|i| gsub.lookups.get(i))
@@ -1197,7 +1201,11 @@ fn determine_shift(
                         Em::zero(),
                         Em::zero(),
                         Em::one(),
-                        Some(Feature::new(settings.kind.feature(), 1, ..)),
+                        Some(Feature::new(
+                            harfrust::Tag::new(&settings.kind.feature().to_bytes()),
+                            1,
+                            ..,
+                        )),
                     )
                 })
         })
@@ -1219,13 +1227,14 @@ fn determine_shift(
 #[comemo::memoize]
 pub fn create_shape_plan(
     font: &FontInstance,
-    direction: rustybuzz::Direction,
-    script: rustybuzz::Script,
-    language: Option<&rustybuzz::Language>,
-    features: &[rustybuzz::Feature],
+    direction: harfrust::Direction,
+    script: harfrust::Script,
+    language: Option<&harfrust::Language>,
+    features: &[Feature],
 ) -> Arc<ShapePlan> {
-    Arc::new(rustybuzz::ShapePlan::new(
-        font.rusty(),
+    let shaper = font.shaper();
+    Arc::new(harfrust::ShapePlan::new(
+        &shaper,
         direction,
         Some(script),
         language,

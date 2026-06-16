@@ -52,6 +52,10 @@ struct FontInner {
     // declared after `ttf`.
     /// The underlying ttf-parser face.
     ttf: ttf_parser::Face<'static>,
+    /// The underlying fontations face, used for harfrust shaping.
+    fontations: harfrust::FontRef<'static>,
+    /// Cached, coordinate-independent shaper data for harfrust.
+    shaper_data: harfrust::ShaperData,
     /// The raw font data, possibly shared with other fonts from the same
     /// collection. The vector's allocation must not move, because `ttf`
     /// points into it using unsafe code.
@@ -71,9 +75,18 @@ impl Font {
             unsafe { std::slice::from_raw_parts(data.as_ptr(), data.len()) };
 
         let ttf = ttf_parser::Face::parse(slice, index).ok()?;
+        let fontations = harfrust::FontRef::from_index(slice, index).ok()?;
+        let shaper_data = harfrust::ShaperData::new(&fontations);
         let info = FontInfo::from_ttf(&ttf)?;
 
-        Some(Self(Arc::new(FontInner { index, info, ttf, data })))
+        Some(Self(Arc::new(FontInner {
+            index,
+            info,
+            ttf,
+            fontations,
+            shaper_data,
+            data,
+        })))
     }
 
     /// Parse all fonts in the given data.
@@ -95,6 +108,13 @@ impl Font {
     /// The font's metadata.
     pub fn info(&self) -> &FontInfo {
         &self.0.info
+    }
+
+    /// A reference to the underlying `fontations` face.
+    pub fn fontations(&self) -> &harfrust::FontRef<'_> {
+        // We can't implement Deref because that would leak the
+        // internal 'static lifetime.
+        &self.0.fontations
     }
 
     /// Determine the font's PostScript name.
@@ -128,16 +148,28 @@ impl Font {
         let slice: &'static [u8] =
             unsafe { std::slice::from_raw_parts(data.as_ptr(), data.len()) };
 
-        let mut rusty = rustybuzz::Face::from_slice(slice, index).unwrap();
+        // A ttf-parser face with the variation coordinates applied, used for
+        // metrics and glyph measurements.
+        let mut ttf = ttf_parser::Face::parse(slice, index).unwrap();
         for &(tag, value) in &variations.0 {
-            rusty.set_variation(tag.into(), value.0);
+            ttf.set_variation(tag.into(), value.0);
         }
 
-        let metrics = FontMetrics::from_ttf(&rusty);
+        // A harfrust shaping instance carrying the same variation coordinates.
+        let shaper_instance = harfrust::ShaperInstance::from_variations(
+            self.fontations(),
+            variations
+                .0
+                .iter()
+                .map(|&(tag, value)| (harfrust::Tag::new(&tag.to_bytes()), value.0)),
+        );
+
+        let metrics = FontMetrics::from_ttf(&ttf);
 
         FontInstance(Arc::new(FontInstanceInner {
             metrics,
-            rusty,
+            ttf,
+            shaper_instance,
             variations,
             font: self,
         }))
@@ -175,12 +207,14 @@ pub struct FontInstance(Arc<FontInstanceInner>);
 struct FontInstanceInner {
     /// The font's metrics.
     metrics: FontMetrics,
-    // NOTE: `rusty` references `font`, so it's important for `font` to be
-    // dropped after `rusty` or `rusty` will be left dangling while the font is
+    // NOTE: `ttf` references `font`'s data, so it's important for `font` to be
+    // dropped after `ttf` or `ttf` will be left dangling while the font is
     // dropped. Fields are dropped in declaration order, so `font` needs to be
-    // declared after `rusty`.
-    /// The underlying rustybuzz face.
-    rusty: rustybuzz::Face<'static>,
+    // declared after `ttf`.
+    /// The underlying ttf-parser face, with variation coordinates applied.
+    ttf: ttf_parser::Face<'static>,
+    /// The harfrust shaping instance carrying the variation coordinates.
+    shaper_instance: harfrust::ShaperInstance,
     // The instance's variation coordinates.
     variations: FontVariations,
     /// The underlying font.
@@ -222,7 +256,7 @@ impl FontInstance {
     /// Look up the horizontal advance width of a glyph.
     pub fn x_advance(&self, glyph: u16) -> Option<Em> {
         self.0
-            .rusty
+            .ttf
             .glyph_hor_advance(GlyphId(glyph))
             .map(|units| self.to_em(units))
     }
@@ -230,7 +264,7 @@ impl FontInstance {
     /// Look up the vertical advance width of a glyph.
     pub fn y_advance(&self, glyph: u16) -> Option<Em> {
         self.0
-            .rusty
+            .ttf
             .glyph_ver_advance(GlyphId(glyph))
             .map(|units| self.to_em(units))
     }
@@ -239,14 +273,19 @@ impl FontInstance {
     pub fn ttf(&self) -> &ttf_parser::Face<'_> {
         // We can't implement Deref because that would leak the
         // internal 'static lifetime.
-        &self.0.rusty
+        &self.0.ttf
     }
 
-    /// A reference to the underlying `rustybuzz` face.
-    pub fn rusty(&self) -> &rustybuzz::Face<'_> {
-        // We can't implement Deref because that would leak the
-        // internal 'static lifetime.
-        &self.0.rusty
+    /// Build a `harfrust` shaper for this instance, carrying its variation
+    /// coordinates.
+    pub fn shaper(&self) -> harfrust::Shaper<'_> {
+        self.0
+            .font
+            .0
+            .shaper_data
+            .shaper(&self.0.font.0.fontations)
+            .instance(Some(&self.0.shaper_instance))
+            .build()
     }
 
     /// Resolve the top and bottom edges of text.

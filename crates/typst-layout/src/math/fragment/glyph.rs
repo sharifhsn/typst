@@ -115,7 +115,7 @@ impl GlyphFragment {
         stretch: Stretch,
     ) -> Option<PlannedGlyph> {
         let features = features(styles);
-        let shape = |feats: &[rustybuzz::Feature]| {
+        let shape = |feats: &[harfrust::Feature]| {
             Self::base(world, styles, feats, text, class, math_size)
         };
 
@@ -147,7 +147,7 @@ impl GlyphFragment {
     fn base(
         world: Tracked<dyn World + '_>,
         styles: StyleChain,
-        features: &[rustybuzz::Feature],
+        features: &[harfrust::Feature],
         text: &str,
         class: MathClass,
         math_size: MathSize,
