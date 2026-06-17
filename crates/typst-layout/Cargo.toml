@@ -35,7 +35,6 @@ kurbo = { workspace = true }
 libm = { workspace = true }
 memchr = { workspace = true }
 rustc-hash = { workspace = true }
-rustybuzz = { workspace = true }
 skrifa = { workspace = true }
 smallvec = { workspace = true }
 ttf-parser = { workspace = true }

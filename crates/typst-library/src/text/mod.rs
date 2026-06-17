@@ -1469,7 +1469,7 @@ pub fn features(styles: StyleChain) -> Vec<Feature> {
 }
 
 /// Process the language and region of a style chain into a
-/// rustybuzz-compatible BCP 47 language.
+/// harfrust-compatible BCP 47 language.
 pub fn language(styles: StyleChain) -> harfrust::Language {
     let mut bcp: EcoString = styles.get(TextElem::lang).as_str().into();
     if let Some(region) = styles.get(TextElem::region) {
