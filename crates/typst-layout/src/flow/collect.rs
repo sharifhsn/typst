@@ -81,6 +81,7 @@ impl<'a> Collector<'a, '_, '_> {
         // below is fully deterministic.
         let mut plan = Vec::with_capacity(self.children.len());
         let mut jobs = Vec::new();
+        let mut block_jobs = Vec::new();
         for &(child, styles) in self.children {
             if let Some(elem) = child.to_packed::<TagElem>() {
                 plan.push(Planned::Child(Child::Tag(&elem.tag)));
@@ -89,7 +90,7 @@ impl<'a> Collector<'a, '_, '_> {
             } else if let Some(elem) = child.to_packed::<ParElem>() {
                 self.par(elem, styles, &mut plan, &mut jobs);
             } else if let Some(elem) = child.to_packed::<BlockElem>() {
-                self.block(elem, styles, &mut plan);
+                self.block(elem, styles, &mut plan, &mut block_jobs);
             } else if let Some(elem) = child.to_packed::<PlaceElem>() {
                 self.place(elem, styles, &mut plan)?;
             } else if child.is::<FlushElem>() {
@@ -132,6 +133,36 @@ impl<'a> Collector<'a, '_, '_> {
         } else {
             jobs.into_iter().map(|job| layout(self.engine, job)).collect()
         };
+
+        // Identical blocks resolve to the same cached layout, so warming each
+        // distinct one once is enough; this avoids recomputing duplicates in
+        // parallel (which would waste work and contend on the cache) and keeps
+        // the speedup independent of the core count.
+        let mut seen = std::collections::HashSet::new();
+        block_jobs.retain(|job| {
+            seen.insert(typst_utils::hash128(&(job.elem, job.styles, job.region)))
+        });
+
+        // Warm the cache for unbreakable blocks in parallel. Their layout is
+        // region-independent (the distributor always lays them out at the base
+        // region), so warming lets the serial distribution phase hit these
+        // results instead of computing them one block at a time.
+        if block_jobs.len() >= 2 {
+            self.engine.prewarm(block_jobs, |engine, job: BlockJob<'a>| {
+                let _ = layout_single_impl(
+                    engine.world,
+                    engine.library,
+                    engine.introspector.into_raw(),
+                    engine.traced,
+                    TrackedMut::reborrow_mut(&mut engine.sink),
+                    engine.route.track(),
+                    job.elem,
+                    job.locator.track(),
+                    job.styles,
+                    job.region,
+                );
+            });
+        }
 
         // Phase 3: Assemble the output in document order, expanding each
         // paragraph's laid-out lines (and their surrounding spacing) in place.
@@ -280,6 +311,7 @@ impl<'a> Collector<'a, '_, '_> {
         elem: &'a Packed<BlockElem>,
         styles: StyleChain<'a>,
         plan: &mut Vec<Planned<'a>>,
+        block_jobs: &mut Vec<BlockJob<'a>>,
     ) {
         let locator = self.locator.next(&elem.span());
         let align = styles.resolve(AlignElem::alignment);
@@ -301,6 +333,18 @@ impl<'a> Collector<'a, '_, '_> {
         plan.push(Planned::Child(spacing(elem.above.get(styles))));
 
         if !breakable || fr.is_some() {
+            // An unbreakable block's layout is region-independent, so warm it
+            // in parallel (unless it's the only child, when there's nothing to
+            // parallelize against). The distributor lays unbreakable blocks out
+            // at the base region with vertical expansion only kept when alone.
+            if !alone {
+                block_jobs.push(BlockJob {
+                    elem,
+                    styles,
+                    locator: locator.relayout(),
+                    region: Region::new(self.base, Axes::new(self.expand, false)),
+                });
+            }
             plan.push(Planned::Child(Child::Single(self.boxed(SingleChild {
                 align,
                 sticky,
@@ -410,6 +454,16 @@ struct ParJob<'a> {
     styles: StyleChain<'a>,
     locator: Locator<'a>,
     situation: ParSituation,
+}
+
+/// An unbreakable block whose (region-independent) layout is warmed in parallel
+/// during [`Collector::run_block`]. The `region` matches what the distribution
+/// phase will request, so warming populates the cache it later reads from.
+struct BlockJob<'a> {
+    elem: &'a Packed<BlockElem>,
+    styles: StyleChain<'a>,
+    locator: Locator<'a>,
+    region: Region,
 }
 
 /// A prepared child in flow layout.

@@ -101,6 +101,39 @@ impl Engine<'_> {
         pairs.into_iter().map(|(output, _)| output)
     }
 
+    /// Runs cache-warming tasks in parallel, discarding their side effects.
+    ///
+    /// This populates the memoization cache from multiple threads ahead of a
+    /// later, authoritative pass that reads from it. The tasks' sinks are
+    /// intentionally dropped rather than merged: comemo replays the recorded
+    /// warnings, delayed errors, and introspections when the authoritative
+    /// pass hits the cache, so merging them here would double-count them.
+    pub fn prewarm<P, I, T, F>(&self, iter: P, f: F)
+    where
+        P: IntoIterator<IntoIter = I>,
+        I: Iterator<Item = T>,
+        T: Send,
+        F: Fn(&mut Engine, T) + Send + Sync,
+    {
+        let Engine {
+            world, introspector, traced, ref route, library, ..
+        } = *self;
+
+        let work: Vec<T> = iter.into_iter().collect();
+        work.into_par_iter().for_each(|value| {
+            let mut sink = Sink::new();
+            let mut engine = Engine {
+                world,
+                introspector,
+                traced,
+                sink: sink.track_mut(),
+                route: route.clone(),
+                library,
+            };
+            f(&mut engine, value);
+        });
+    }
+
     /// Performs an introspection on the introspector and returns its result.
     ///
     /// As a side effect, the introspection is stored in the sink. If the
