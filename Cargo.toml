@@ -96,7 +96,7 @@ parking_lot = "0.12.1"
 pathdiff = "0.2"
 percent-encoding = "2.3.2"
 phf = { version = "0.13", features = ["macros"] }
-pixglyph = { git = "https://github.com/mkorje/pixglyph", rev = "c588ad4" }
+pixglyph = { path = "../pixglyph" }
 png = "0.18"
 portable-atomic = "1.6"
 proc-macro2 = "1"

@@ -200,7 +200,17 @@ fn draw_raster_glyph(
         y_offset -= 0.128 * upem;
     }
 
-    let position = TypstPoint::new(-x_offset, -(image_height + y_offset));
+    // `skrifa` reports the inner bearing relative to the bitmap's placement
+    // origin, unlike `ttf-parser` which always normalized to a bottom-left
+    // origin. Honor the origin so the image sits on the baseline correctly:
+    // for a top-left origin (e.g. CBDT/EBDT), the bearing already points at the
+    // image's top edge, so we must not add the image height again.
+    let position = match bitmap_glyph.placement_origin {
+        skrifa::bitmap::Origin::TopLeft => TypstPoint::new(-x_offset, -y_offset),
+        skrifa::bitmap::Origin::BottomLeft => {
+            TypstPoint::new(-x_offset, -(image_height + y_offset))
+        }
+    };
     let size = Size::new(image_width, image_height);
     Some(GlyphFrameItem::Image(position, image, size))
 }

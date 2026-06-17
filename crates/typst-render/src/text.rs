@@ -110,7 +110,11 @@ fn render_outline_glyph(
         y: u32,
         size: u32,
     ) -> Option<Arc<Bitmap>> {
-        let glyph = pixglyph::Glyph::load(font.skrifa(), skrifa::GlyphId::from(id.0))?;
+        let glyph = pixglyph::Glyph::load(
+            font.skrifa(),
+            skrifa::GlyphId::from(id.0),
+            font.location(),
+        )?;
         Some(Arc::new(glyph.rasterize(
             f32::from_bits(x),
             f32::from_bits(y),
