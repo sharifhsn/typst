@@ -229,6 +229,16 @@ fn linebreak_optimized<'a>(
     p: &'a Preparation<'a>,
     width: Abs,
 ) -> Vec<Line<'a>> {
+    // Fast path: if the whole paragraph fits on a single line, there is exactly
+    // one optimal layout. The last line of a paragraph is never justified, so a
+    // single fitting line cannot be improved by breaking it (that would only add
+    // justified lines and break penalties). We can thus skip both Knuth-Plass
+    // passes. This is very common for headings, captions, list items, table
+    // cells, and short paragraphs.
+    if let Some(line) = linebreak_single(engine, p, width) {
+        return vec![line];
+    }
+
     let metrics = CostMetrics::compute(p);
 
     // Determines the exact costs of a likely good layout through Knuth-Plass
@@ -238,6 +248,48 @@ fn linebreak_optimized<'a>(
 
     // Using the upper bound, perform exact optimized linebreaking.
     linebreak_optimized_bounded(engine, p, width, &metrics, upper_bound)
+}
+
+/// Attempts to lay out the entire paragraph on a single line.
+///
+/// Returns `Some` only when the whole paragraph genuinely fits on one line and
+/// contains no interior mandatory break. In that case the layout is unambiguous
+/// and we can avoid the (expensive) two-pass optimization entirely.
+fn linebreak_single<'a>(
+    engine: &Engine,
+    p: &'a Preparation<'a>,
+    width: Abs,
+) -> Option<Line<'a>> {
+    // Cheap rejection: if the summed natural width already exceeds the available
+    // width, the paragraph cannot fit on a single line. Trailing whitespace is
+    // included here, so this never yields a false positive (the trimmed line can
+    // only be narrower). We accumulate with early exit so long, clearly
+    // multi-line paragraphs bail quickly.
+    let mut natural = Abs::zero();
+    for (_, item) in p.items.iter() {
+        natural += item.natural_width();
+        if !width.fits(natural) {
+            return None;
+        }
+    }
+
+    // A mandatory break (e.g. due to `\n`) before the end of the text forces
+    // multiple lines, so the single-line layout is not applicable.
+    let mut interior_break = false;
+    breakpoints(p, |end, breakpoint| {
+        if breakpoint == Breakpoint::Mandatory && end < p.text.len() {
+            interior_break = true;
+        }
+    });
+    if interior_break {
+        return None;
+    }
+
+    // Build the actual single line and confirm it really fits. The paragraph's
+    // final breakpoint is `Mandatory`, matching what the optimized passes use
+    // for a last line (which is never justified).
+    let single = line(engine, p, 0..p.text.len(), Breakpoint::Mandatory, None);
+    width.fits(single.width).then_some(single)
 }
 
 /// Performs line breaking in optimized Knuth-Plass style, but with an upper
