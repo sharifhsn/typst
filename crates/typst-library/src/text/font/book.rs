@@ -1,6 +1,10 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use std::fmt::{self, Debug, Formatter};
+use std::hash::{Hash, Hasher};
+use std::sync::RwLock;
 
+use rustc_hash::FxHashMap;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::text::{
@@ -15,12 +19,50 @@ pub struct FontBook {
     families: BTreeMap<String, Vec<usize>>,
     /// Metadata about each font in the collection.
     infos: Vec<FontInfo>,
+    /// Caches, per codepoint, the indices of the fonts that cover it. Used to
+    /// speed up font fallback.
+    fallback: FallbackCache,
+}
+
+/// Caches, per codepoint, which fonts in the book cover it.
+///
+/// Font fallback otherwise scans the entire font collection for every fallback
+/// lookup, which is costly and recurs heavily for text whose requested font
+/// lacks coverage (most notably CJK). The covering set depends only on the
+/// codepoint, so it can be cached and reused; the (cheap) variant scoring still
+/// runs live, so results are identical.
+///
+/// This is a pure performance side-table and is intentionally excluded from the
+/// book's hash, equality, and clone semantics — it does not affect the book's
+/// logical identity (and must not, since the book's hash feeds memoization).
+#[derive(Default)]
+struct FallbackCache(RwLock<FxHashMap<u32, Vec<usize>>>);
+
+impl Clone for FallbackCache {
+    fn clone(&self) -> Self {
+        // A clone starts empty; the cache is derived from `infos`.
+        Self::default()
+    }
+}
+
+impl Hash for FallbackCache {
+    fn hash<H: Hasher>(&self, _: &mut H) {}
+}
+
+impl Debug for FallbackCache {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.pad("FallbackCache(..)")
+    }
 }
 
 impl FontBook {
     /// Create a new, empty font book.
     pub fn new() -> Self {
-        Self { families: BTreeMap::new(), infos: vec![] }
+        Self {
+            families: BTreeMap::new(),
+            infos: vec![],
+            fallback: FallbackCache::default(),
+        }
     }
 
     /// Create a font book from a collection of font infos.
@@ -102,16 +144,26 @@ impl FontBook {
         let c = text
             .chars()
             .find(|&c| !c.is_whitespace() && !is_default_ignorable(c))?;
+        let cp = c as u32;
 
-        let ids = self
+        // ... and find the best variant among them. The set of covering fonts
+        // depends only on the codepoint, so we cache it: scanning the whole
+        // collection for coverage is costly and recurs heavily (e.g. for CJK
+        // text). Scoring still runs live, so the result is unchanged.
+        if let Some(ids) = self.fallback.0.read().unwrap().get(&cp) {
+            return self.find_best_variant(like, variant, ids.iter().copied());
+        }
+
+        let ids: Vec<usize> = self
             .infos
             .iter()
             .enumerate()
-            .filter(|(_, info)| info.coverage.contains(c as u32))
-            .map(|(index, _)| index);
-
-        // ... and find the best variant among them.
-        self.find_best_variant(like, variant, ids)
+            .filter(|(_, info)| info.coverage.contains(cp))
+            .map(|(index, _)| index)
+            .collect();
+        let best = self.find_best_variant(like, variant, ids.iter().copied());
+        self.fallback.0.write().unwrap().insert(cp, ids);
+        best
     }
 
     /// Find the font in the passed iterator that
