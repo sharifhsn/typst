@@ -207,10 +207,8 @@ fn shape_text<'a, 'b>(
     );
 
     let shaper = font.shaper();
-    let buffer = shaper.shape(
-        buffer,
-        ShapeOptions::new().plan(Some(&plan)).features(ctx.features),
-    );
+    let buffer = shaper
+        .shape(buffer, ShapeOptions::new().plan(Some(&plan)).features(ctx.features));
     // Because we will only ever shape single grapheme clusters, we will
     // (incorrectly) assume that the output from the shaper is a single cluster
     // that spans the entire range of the given text. The only problem this

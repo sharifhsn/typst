@@ -26,7 +26,13 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 
-use ttf_parser::{GlyphId, name_id};
+use skrifa::MetadataProvider;
+use skrifa::instance::Size;
+use skrifa::outline::DrawSettings;
+use skrifa::outline::pen::ControlBoundsPen;
+use skrifa::raw::types::BoundingBox;
+use skrifa::string::StringId;
+use ttf_parser::GlyphId;
 
 use self::exceptions::find_exception;
 use self::info::find_name;
@@ -46,19 +52,23 @@ struct FontInner {
     index: u32,
     /// Metadata about the font.
     info: FontInfo,
-    // NOTE: `ttf` references `data`, so it's important for `data` to be
-    // dropped after `ttf` or `ttf` will be left dangling while the data is
-    // dropped. Fields are dropped in declaration order, so `data` needs to be
-    // declared after `ttf`.
-    /// The underlying ttf-parser face.
-    ttf: ttf_parser::Face<'static>,
-    /// The underlying fontations face, used for harfrust shaping.
+    // NOTE: `fontations` and `skrifa` both reference `data`, so it's important
+    // for `data` to be dropped after them or they will be left dangling while
+    // the data is dropped. Fields are dropped in declaration order, so `data`
+    // needs to be declared after them.
+    /// The underlying fontations face, used for harfrust shaping. This is a
+    /// `read-fonts` 0.40 `FontRef` (harfrust's transitive `read-fonts`).
     fontations: harfrust::FontRef<'static>,
+    /// A `skrifa` face over the same data. `skrifa` rides its own (older)
+    /// `read-fonts`, so this is a *distinct* `FontRef` type from `fontations`
+    /// and must be parsed separately. Used for metadata, metrics, outlines,
+    /// charmap, attributes, and color.
+    skrifa: skrifa::FontRef<'static>,
     /// Cached, coordinate-independent shaper data for harfrust.
     shaper_data: harfrust::ShaperData,
     /// The raw font data, possibly shared with other fonts from the same
-    /// collection. The vector's allocation must not move, because `ttf`
-    /// points into it using unsafe code.
+    /// collection. The vector's allocation must not move, because `fontations`
+    /// and `skrifa` point into it using unsafe code.
     data: Bytes,
 }
 
@@ -69,21 +79,21 @@ impl Font {
         // - The slices's location is stable in memory:
         //   - We don't move the underlying vector
         //   - Nobody else can move it since we have a strong ref to the `Arc`.
-        // - The internal 'static lifetime is not leaked because its rewritten
-        //   to the self-lifetime in `ttf()`.
+        // - The internal 'static lifetime is not leaked because it's rewritten
+        //   to the self-lifetime in `fontations()` and `skrifa()`.
         let slice: &'static [u8] =
             unsafe { std::slice::from_raw_parts(data.as_ptr(), data.len()) };
 
-        let ttf = ttf_parser::Face::parse(slice, index).ok()?;
         let fontations = harfrust::FontRef::from_index(slice, index).ok()?;
+        let skrifa = skrifa::FontRef::from_index(slice, index).ok()?;
         let shaper_data = harfrust::ShaperData::new(&fontations);
-        let info = FontInfo::from_ttf(&ttf)?;
+        let info = FontInfo::from_skrifa(&skrifa)?;
 
         Some(Self(Arc::new(FontInner {
             index,
             info,
-            ttf,
             fontations,
+            skrifa,
             shaper_data,
             data,
         })))
@@ -91,7 +101,7 @@ impl Font {
 
     /// Parse all fonts in the given data.
     pub fn iter(data: Bytes) -> impl Iterator<Item = Self> {
-        let count = ttf_parser::fonts_in_collection(&data).unwrap_or(1);
+        let count = font_count(&data);
         (0..count).filter_map(move |index| Self::new(data.clone(), index))
     }
 
@@ -110,16 +120,29 @@ impl Font {
         &self.0.info
     }
 
-    /// A reference to the underlying `fontations` face.
+    /// A reference to the underlying `fontations` face (harfrust's
+    /// `read-fonts`).
     pub fn fontations(&self) -> &harfrust::FontRef<'_> {
         // We can't implement Deref because that would leak the
         // internal 'static lifetime.
         &self.0.fontations
     }
 
+    /// A reference to the underlying `skrifa` face.
+    ///
+    /// Used as the entry point for `skrifa`'s metadata providers (metrics,
+    /// outlines, charmap, attributes, color). Note that this is a *different*
+    /// `read-fonts` version than [`Font::fontations`], so the two `FontRef`
+    /// types are not interchangeable.
+    pub fn skrifa(&self) -> &skrifa::FontRef<'_> {
+        // We can't implement Deref because that would leak the
+        // internal 'static lifetime.
+        &self.0.skrifa
+    }
+
     /// Determine the font's PostScript name.
     pub fn post_script_name(&self) -> Option<String> {
-        find_name(&self.0.ttf, name_id::POST_SCRIPT_NAME)
+        find_name(&self.0.skrifa, StringId::POSTSCRIPT_NAME)
     }
 
     /// Instantiates the font with specific text properties. The resulting
@@ -164,12 +187,22 @@ impl Font {
                 .map(|&(tag, value)| (harfrust::Tag::new(&tag.to_bytes()), value.0)),
         );
 
+        // The same variation coordinates, normalized into `skrifa`'s space for
+        // variation-aware metrics and outlines.
+        let location = self.skrifa().axes().location(
+            variations
+                .0
+                .iter()
+                .map(|&(tag, value)| (skrifa::Tag::new(&tag.to_bytes()), value.0)),
+        );
+
         let metrics = FontMetrics::from_ttf(&ttf);
 
         FontInstance(Arc::new(FontInstanceInner {
             metrics,
             ttf,
             shaper_instance,
+            location,
             variations,
             font: self,
         }))
@@ -215,6 +248,11 @@ struct FontInstanceInner {
     ttf: ttf_parser::Face<'static>,
     /// The harfrust shaping instance carrying the variation coordinates.
     shaper_instance: harfrust::ShaperInstance,
+    /// The instance's variation coordinates, normalized into `skrifa`'s
+    /// coordinate space. Pass these to `skrifa` metadata providers (via
+    /// [`FontInstance::location`]) to obtain variation-aware metrics and
+    /// outlines.
+    location: skrifa::instance::Location,
     // The instance's variation coordinates.
     variations: FontVariations,
     /// The underlying font.
@@ -270,10 +308,27 @@ impl FontInstance {
     }
 
     /// A reference to the underlying `ttf-parser` face.
+    ///
+    /// Retained for the MATH table (`MathConstants`) and math layout/export,
+    /// which `read-fonts`/`skrifa` do not cover.
     pub fn ttf(&self) -> &ttf_parser::Face<'_> {
         // We can't implement Deref because that would leak the
         // internal 'static lifetime.
         &self.0.ttf
+    }
+
+    /// A reference to the underlying `skrifa` face.
+    ///
+    /// Combine with [`FontInstance::location`] to query variation-aware
+    /// metrics, outlines, and color data via `skrifa`'s metadata providers.
+    pub fn skrifa(&self) -> &skrifa::FontRef<'_> {
+        self.0.font.skrifa()
+    }
+
+    /// The instance's variation coordinates in `skrifa`'s normalized space,
+    /// for use with `skrifa` metadata providers.
+    pub fn location(&self) -> skrifa::instance::LocationRef<'_> {
+        (&self.0.location).into()
     }
 
     /// Build a `harfrust` shaper for this instance, carrying its variation
@@ -288,6 +343,21 @@ impl FontInstance {
             .build()
     }
 
+    /// The tight bounding box of a glyph in font units.
+    ///
+    /// This mirrors `ttf_parser`'s `glyph_bounding_box`: it computes a *tight*
+    /// box from the glyph's outline (applying this instance's variation
+    /// coordinates), rather than reading the stored `glyf` header box, so the
+    /// result is identical across `glyf`, CFF, and variable fonts.
+    pub fn glyph_bbox(&self, glyph: u16) -> Option<BoundingBox<f32>> {
+        let outlines = self.skrifa().outline_glyphs();
+        let outline = outlines.get(skrifa::GlyphId::new(u32::from(glyph)))?;
+        let mut pen = ControlBoundsPen::new();
+        let settings = DrawSettings::unhinted(Size::unscaled(), self.location());
+        outline.draw(settings, &mut pen).ok()?;
+        pen.bounding_box()
+    }
+
     /// Resolve the top and bottom edges of text.
     pub fn edges(
         &self,
@@ -297,8 +367,8 @@ impl FontInstance {
         bounds: TextEdgeBounds,
     ) -> (Abs, Abs) {
         let cell = OnceCell::new();
-        let bbox = |gid, f: fn(ttf_parser::Rect) -> i16| {
-            cell.get_or_init(|| self.ttf().glyph_bounding_box(GlyphId(gid)))
+        let bbox = |gid, f: fn(BoundingBox<f32>) -> f32| {
+            cell.get_or_init(|| self.glyph_bbox(gid))
                 .map(|bbox| self.to_em(f(bbox)).at(font_size))
                 .unwrap_or_default()
         };
@@ -360,5 +430,16 @@ impl Eq for FontInstance {}
 impl PartialEq for FontInstance {
     fn eq(&self, other: &Self) -> bool {
         self.0.font == other.0.font && self.0.variations == other.0.variations
+    }
+}
+
+/// The number of fonts contained in the given (possibly collection) data.
+///
+/// Returns 1 for a single font or unrecognized data, matching the previous
+/// `ttf_parser::fonts_in_collection(..).unwrap_or(1)` behavior.
+fn font_count(data: &[u8]) -> u32 {
+    match skrifa::raw::FileRef::new(data) {
+        Ok(skrifa::raw::FileRef::Collection(collection)) => collection.len(),
+        _ => 1,
     }
 }

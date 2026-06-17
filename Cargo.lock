@@ -2112,11 +2112,10 @@ checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
 
 [[package]]
 name = "pixglyph"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47945e80a49d08350e4a007ac4294c6498d23956c18ea5e6ff480dc93d31643c"
+version = "0.6.0"
+source = "git+https://github.com/mkorje/pixglyph?rev=c588ad4#c588ad439473709cee1402712dc1881ce8db0f59"
 dependencies = [
- "ttf-parser",
+ "skrifa",
 ]
 
 [[package]]
@@ -3355,6 +3354,7 @@ dependencies = [
  "memchr",
  "rustc-hash",
  "rustybuzz",
+ "skrifa",
  "smallvec",
  "ttf-parser",
  "typst-assets",
@@ -3413,6 +3413,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "siphasher",
+ "skrifa",
  "smallvec",
  "syntect",
  "time",
@@ -3501,6 +3502,7 @@ dependencies = [
  "libm",
  "pixglyph",
  "resvg",
+ "skrifa",
  "tiny-skia",
  "ttf-parser",
  "typst-assets",
@@ -3526,6 +3528,7 @@ dependencies = [
  "itoa",
  "rustc-hash",
  "ryu",
+ "skrifa",
  "ttf-parser",
  "typst-assets",
  "typst-layout",

@@ -114,8 +114,16 @@ cast! {
     }
 }
 
+// Retained: still consumed by the `ttf_parser` metrics face's `set_variation`
+// in `text/font/mod.rs`, which stays on `ttf_parser`.
 impl From<Tag> for ttf_parser::Tag {
     fn from(value: Tag) -> Self {
         ttf_parser::Tag::from_bytes(&value.to_bytes())
+    }
+}
+
+impl From<Tag> for harfrust::Tag {
+    fn from(value: Tag) -> Self {
+        harfrust::Tag::new(&value.to_bytes())
     }
 }

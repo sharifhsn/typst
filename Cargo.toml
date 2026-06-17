@@ -96,7 +96,7 @@ parking_lot = "0.12.1"
 pathdiff = "0.2"
 percent-encoding = "2.3.2"
 phf = { version = "0.13", features = ["macros"] }
-pixglyph = "0.6.1"
+pixglyph = { git = "https://github.com/mkorje/pixglyph", rev = "c588ad4" }
 png = "0.18"
 portable-atomic = "1.6"
 proc-macro2 = "1"
@@ -120,6 +120,7 @@ shell-escape = "0.1.5"
 sigpipe = "0.1"
 similar = { version = "3.1.0", features = ["inline", "unicode"] }
 siphasher = "1"
+skrifa = "0.42.1"
 smallvec = { version = "1.11.1", features = ["union", "const_generics", "const_new"] }
 stacker = "0.1.19"
 syn = { version = "2", features = ["full", "extra-traits"] }

@@ -1021,10 +1021,8 @@ fn shape_segment<'a>(
 
     // Shape!
     let shaper = font.shaper();
-    let buffer = shaper.shape(
-        buffer,
-        ShapeOptions::new().plan(Some(&plan)).features(&ctx.features),
-    );
+    let buffer = shaper
+        .shape(buffer, ShapeOptions::new().plan(Some(&plan)).features(&ctx.features));
 
     if has_shift_feature {
         ctx.features.pop();
@@ -1182,7 +1180,9 @@ fn determine_shift(
             // "subs"/"sups" to the feature list if supported by the font.
             // In case of a problem, we just early exit
             let gsub = font.ttf().tables().gsub?;
-            let lookups = gsub.features.find(settings.kind.feature())?.lookup_indices;
+            let feature_tag =
+                ttf_parser::Tag::from_bytes(&settings.kind.feature().to_be_bytes());
+            let lookups = gsub.features.find(feature_tag)?.lookup_indices;
             text.chars()
                 .all(|c| {
                     let Some(i) = font.ttf().glyph_index(c) else { return false };
@@ -1201,11 +1201,7 @@ fn determine_shift(
                         Em::zero(),
                         Em::zero(),
                         Em::one(),
-                        Some(Feature::new(
-                            harfrust::Tag::new(&settings.kind.feature().to_bytes()),
-                            1,
-                            ..,
-                        )),
+                        Some(Feature::new(settings.kind.feature(), 1, ..)),
                     )
                 })
         })

@@ -1,4 +1,8 @@
 use ecow::EcoString;
+use skrifa::MetadataProvider;
+use skrifa::instance::Size as SkrifaSize;
+use skrifa::outline::DrawSettings;
+use skrifa::outline::pen::{ControlBoundsPen, PathStyle};
 use ttf_parser::GlyphId;
 use typst_library::layout::{Abs, Ratio, Size, Transform};
 use typst_library::text::TextItem;
@@ -61,14 +65,20 @@ impl SVGRenderer<'_> {
         x_offset: Abs,
         y_offset: Abs,
     ) {
-        if should_outline(&text.font, glyph_id) {
+        if should_outline(&text.font, glyph_id.0) {
             // Pre-scale outlined glyphs, so strokes and fill patterns don't
             // need to consider text size glyph scaling.
             let scale = Ratio::new(text.size.to_pt() / text.font.units_per_em());
             let key = (&text.font, glyph_id, scale);
             let (id, path) = self.glyphs.insert_with_val(key, || {
                 let mut builder = SvgPathBuilder::with_scale(scale);
-                text.font.ttf().outline_glyph(glyph_id, &mut builder)?;
+                draw_outline(text, glyph_id, &mut builder)?;
+                // `skrifa` succeeds (with zero pen commands) for empty glyphs
+                // like whitespace, where `ttf-parser`'s `outline_glyph` returned
+                // `None`. Preserve the old behavior of skipping them.
+                if builder.is_empty() {
+                    return None;
+                }
                 Some(RenderedGlyph::Path(builder.finsish()))
             });
 
@@ -126,15 +136,15 @@ impl SVGRenderer<'_> {
         // strokes and fills with gradients and tilings.
         let state = state.pre_concat(Transform::translate(x_offset, y_offset));
 
-        let Some(glyph_size) = text.font.ttf().glyph_bounding_box(glyph_id) else {
+        let Some(bbox) = glyph_control_bounds(text, glyph_id) else {
             // This shouldn't happen, because the glyph has been successfully
             // outlined to create the path.
             return;
         };
 
         let aspect_ratio = Size::new(
-            Abs::pt(glyph_size.width() as f64),
-            Abs::pt(glyph_size.height() as f64),
+            Abs::pt((bbox.x_max - bbox.x_min) as f64),
+            Abs::pt((bbox.y_max - bbox.y_min) as f64),
         )
         .aspect_ratio();
 
@@ -215,4 +225,53 @@ impl SVGRenderer<'_> {
         // produced from writing the glyph definitions.
         assert!(self.glyphs.is_empty());
     }
+}
+
+/// The settings used to draw glyph outlines via `skrifa`.
+///
+/// We request *unscaled* (font-unit) coordinates so the existing
+/// [`SvgPathBuilder`] scaling stays correct, and the `HarfBuzz` path style so
+/// the point-stream interpretation matches `ttf-parser` (which agrees with
+/// HarfBuzz, not FreeType, on contours that start with an off-curve point).
+/// This keeps the emitted path data byte-identical to the old `ttf-parser`
+/// output.
+fn draw_settings(text: &TextItem) -> DrawSettings<'_> {
+    DrawSettings::unhinted(SkrifaSize::unscaled(), text.font.location())
+        .with_path_style(PathStyle::HarfBuzz)
+}
+
+/// Draws a glyph's outline into the given pen using `skrifa`, in font units.
+///
+/// Returns `None` if the glyph has no outline (e.g. it is not present in the
+/// font or could not be drawn).
+fn draw_outline(
+    text: &TextItem,
+    glyph_id: GlyphId,
+    builder: &mut SvgPathBuilder,
+) -> Option<()> {
+    let glyph = text.font.skrifa().outline_glyphs().get(skrifa_gid(glyph_id))?;
+    glyph.draw(draw_settings(text), builder).ok()?;
+    Some(())
+}
+
+/// Computes the tight *control-point* bounding box of a glyph's outline, in font
+/// units.
+///
+/// This mirrors `ttf-parser`'s `glyph_bounding_box`, which traces the outline
+/// and extends the bounds by off-curve control points rather than returning the
+/// stored `glyf` header bbox. `skrifa`'s `GlyphMetrics::bounds` would return the
+/// header bbox instead, so we draw into a [`ControlBoundsPen`] to match exactly.
+fn glyph_control_bounds(
+    text: &TextItem,
+    glyph_id: GlyphId,
+) -> Option<skrifa::raw::types::BoundingBox<f32>> {
+    let glyph = text.font.skrifa().outline_glyphs().get(skrifa_gid(glyph_id))?;
+    let mut pen = ControlBoundsPen::new();
+    glyph.draw(draw_settings(text), &mut pen).ok()?;
+    pen.bounding_box()
+}
+
+/// Converts a `ttf-parser` glyph id into a `skrifa` glyph id.
+fn skrifa_gid(glyph_id: GlyphId) -> skrifa::GlyphId {
+    skrifa::GlyphId::from(glyph_id.0)
 }

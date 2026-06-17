@@ -12,6 +12,13 @@ pub struct SvgPathBuilder {
     last_close_point: Point,
     /// The end of the previous draw command, used for relative draw commands.
     last_point: Point,
+    /// Whether any contour has been started via the pen's `move_to`.
+    ///
+    /// Used to detect empty (e.g. whitespace) glyphs: `skrifa`'s outline
+    /// drawing succeeds with zero pen commands for them, whereas `ttf-parser`'s
+    /// `outline_glyph` returned `None`. Tracking this lets us preserve the old
+    /// behavior of skipping such glyphs instead of emitting an empty path.
+    started: bool,
 }
 
 impl SvgPathBuilder {
@@ -26,6 +33,7 @@ impl SvgPathBuilder {
             scale: Ratio::one(),
             last_close_point: pos,
             last_point: Point::zero(),
+            started: false,
         }
     }
 
@@ -36,6 +44,7 @@ impl SvgPathBuilder {
             scale,
             last_close_point: Point::zero(),
             last_point: Point::zero(),
+            started: false,
         }
     }
 
@@ -46,7 +55,14 @@ impl SvgPathBuilder {
             scale: Ratio::one(),
             last_close_point: Point::zero(),
             last_point: Point::zero(),
+            started: false,
         }
+    }
+
+    /// Whether no contour has been started via the pen's `move_to`, i.e. the
+    /// drawn outline was empty (as for whitespace glyphs).
+    pub fn is_empty(&self) -> bool {
+        !self.started
     }
 
     /// Finish building the path.
@@ -173,8 +189,9 @@ mod outline {
     use crate::path::SvgPathBuilder;
 
     /// A builder for SVG path. This is used to build the path for a glyph.
-    impl ttf_parser::OutlineBuilder for SvgPathBuilder {
+    impl skrifa::outline::pen::OutlinePen for SvgPathBuilder {
         fn move_to(&mut self, x: f32, y: f32) {
+            self.started = true;
             self.move_to(point(x, y));
         }
 

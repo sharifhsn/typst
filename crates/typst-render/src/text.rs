@@ -20,7 +20,7 @@ pub fn render_text(canvas: &mut sk::Pixmap, state: State, text: &TextItem) {
         let x_offset = x + glyph.x_offset.at(text.size);
         let y_offset = y + glyph.y_offset.at(text.size);
 
-        if should_outline(&text.font, id) {
+        if should_outline(&text.font, glyph.id) {
             let state = state.pre_translate(Point::new(x_offset, -y_offset));
             render_outline_glyph(canvas, state, text, id);
         } else {
@@ -110,7 +110,7 @@ fn render_outline_glyph(
         y: u32,
         size: u32,
     ) -> Option<Arc<Bitmap>> {
-        let glyph = pixglyph::Glyph::load(font.ttf(), id)?;
+        let glyph = pixglyph::Glyph::load(font.skrifa(), skrifa::GlyphId::from(id.0))?;
         Some(Arc::new(glyph.rasterize(
             f32::from_bits(x),
             f32::from_bits(y),

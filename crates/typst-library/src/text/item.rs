@@ -53,9 +53,7 @@ impl TextItem {
                 Point::new(glyph.x_advance.at(self.size), glyph.y_advance.at(self.size));
             let offset =
                 Point::new(glyph.x_offset.at(self.size), glyph.y_offset.at(self.size));
-            if let Some(rect) =
-                self.font.ttf().glyph_bounding_box(ttf_parser::GlyphId(glyph.id))
-            {
+            if let Some(rect) = self.font.glyph_bbox(glyph.id) {
                 let pos = cursor + offset;
                 let a = pos
                     + Point::new(

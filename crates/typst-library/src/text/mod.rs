@@ -33,9 +33,9 @@ use std::hash::Hash;
 use std::str::FromStr;
 
 use ecow::{EcoString, eco_format};
+use harfrust::Feature;
 use icu_properties::CodePointSetDataBorrowed;
 use icu_properties::props::DefaultIgnorableCodePoint;
-use harfrust::Feature;
 use smallvec::SmallVec;
 use typst_syntax::Spanned;
 use typst_utils::singleton;

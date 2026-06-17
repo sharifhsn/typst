@@ -1,5 +1,8 @@
 use kurbo::{BezPath, Line, ParamCurve};
-use ttf_parser::{GlyphId, OutlineBuilder};
+use skrifa::GlyphId;
+use skrifa::MetadataProvider;
+use skrifa::instance::Size as SkrifaSize;
+use skrifa::outline::{DrawSettings, OutlinePen};
 use typst_library::layout::{Abs, Em, Frame, FrameItem, Point, Size};
 use typst_library::text::{
     BottomEdge, DecoLine, Decoration, TextEdgeBounds, TextItem, TopEdge,
@@ -88,23 +91,44 @@ pub fn decorate(
     let mut x = pos.x;
     let mut intersections = vec![];
 
+    // Outlines and per-glyph bounding boxes in unscaled (font-unit) space,
+    // honoring the instance's variation coordinates. Hoisted out of the loop
+    // because constructing these wrappers per glyph would be wasteful.
+    let outlines = text.font.skrifa().outline_glyphs();
+    let glyph_metrics = text
+        .font
+        .skrifa()
+        .glyph_metrics(SkrifaSize::unscaled(), text.font.location());
+
     for glyph in text.glyphs.iter() {
         let dx = glyph.x_offset.at(text.size) + x;
         let mut builder =
             BezPathBuilder::new(font_metrics.units_per_em, text.size, dx.to_raw());
 
-        let bbox = text.font.ttf().outline_glyph(GlyphId(glyph.id), &mut builder);
+        let gid = GlyphId::new(u32::from(glyph.id));
+        let outline = outlines.get(gid);
+        if let Some(outline) = &outline {
+            // Emit the glyph's outline into the path builder in font units.
+            // Errors (e.g. malformed glyphs) are ignored, matching the
+            // previous behavior of treating them as having no outline.
+            let settings =
+                DrawSettings::unhinted(SkrifaSize::unscaled(), text.font.location());
+            let _ = outline.draw(settings, &mut builder);
+        }
         let path = builder.finish();
 
         x += glyph.x_advance.at(text.size);
 
         // Only do the costly segments intersection test if the line
-        // intersects the bounding box.
-        let intersect = bbox.is_some_and(|bbox| {
-            let y_min = -text.font.to_em(bbox.y_max).at(text.size);
-            let y_max = -text.font.to_em(bbox.y_min).at(text.size);
-            offset >= y_min && offset <= y_max
-        });
+        // intersects the bounding box. Gate on the glyph actually having an
+        // outline so that absent glyphs are skipped (skrifa returns a
+        // zero-sized bounding box for empty glyphs rather than `None`).
+        let intersect = outline.is_some()
+            && glyph_metrics.bounds(gid).is_some_and(|bbox| {
+                let y_min = -text.font.to_em(f64::from(bbox.y_max)).at(text.size);
+                let y_max = -text.font.to_em(f64::from(bbox.y_min)).at(text.size);
+                offset >= y_min && offset <= y_max
+            });
 
         if intersect {
             // Find all intersections of segments with the line.
@@ -190,7 +214,7 @@ impl BezPathBuilder {
     }
 }
 
-impl OutlineBuilder for BezPathBuilder {
+impl OutlinePen for BezPathBuilder {
     fn move_to(&mut self, x: f32, y: f32) {
         self.path.move_to(self.p(x, y));
     }

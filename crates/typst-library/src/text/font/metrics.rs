@@ -33,6 +33,27 @@ pub struct FontMetrics {
 
 impl FontMetrics {
     /// Extract the font's metrics.
+    ///
+    /// Intentionally retained on `ttf-parser` rather than migrated to
+    /// `skrifa`/`read-fonts`. A migration here cannot preserve byte-identical
+    /// output:
+    ///
+    /// - `skrifa`'s high-level `Metrics` selects ascender/descender the
+    ///   FreeType way (hhea unless `USE_TYPO_METRICS` is set), whereas the code
+    ///   below mirrors `ttf-parser`'s `typographic_ascender()`, which returns
+    ///   the raw OS/2 `sTypoAscender` whenever an OS/2 table exists. It also has
+    ///   no sub-/superscript fields at all.
+    /// - A hand-rolled `read-fonts` port can't match `ttf-parser`'s MVAR
+    ///   application either: `read-fonts`' public `Mvar::metric_delta` rounds
+    ///   the delta to an integer (`(accum + 0x8000) >> 16`), while `ttf-parser`
+    ///   keeps a fractional `f32` delta and truncates only after adding the base
+    ///   value. The unrounded `read-fonts` path (`compute_float_delta`) is
+    ///   `pub(crate)`, so the exact behavior is unreachable, and the difference
+    ///   shows up as 1-unit drift on variable fonts.
+    ///
+    /// Since `ttf-parser` is a retained dependency anyway, this stays on it to
+    /// guarantee identical metrics. (The MATH constants in `MathConstants`
+    /// below also stay on `ttf-parser`: `read-fonts` has no MATH table.)
     pub fn from_ttf(ttf: &ttf_parser::Face) -> Self {
         let units_per_em = f64::from(ttf.units_per_em());
         let to_em = |units| Em::from_units(units, units_per_em);
