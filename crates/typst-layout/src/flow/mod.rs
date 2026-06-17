@@ -105,7 +105,7 @@ pub fn layout_columns(
 }
 
 /// The cached, internal implementation of [`layout_fragment`].
-#[comemo::memoize]
+#[comemo::memoize(enabled = false)]
 #[allow(clippy::too_many_arguments)]
 fn layout_fragment_impl(
     world: Tracked<dyn World + '_>,
