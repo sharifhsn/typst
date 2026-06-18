@@ -4,14 +4,19 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::Ordering;
 
 use portable_atomic::AtomicU128;
-use siphasher::sip128::{Hasher128, SipHasher13};
+use xxhash_rust::xxh3::Xxh3;
 
-/// Calculate a 128-bit siphash of a value.
+/// Calculate a 128-bit hash of a value.
+///
+/// Uses XXH3 (128-bit), a high-quality non-cryptographic hash. We rely on 128
+/// bits to make accidental collisions astronomically unlikely, as equality of
+/// hashed types is determined by hash (see [`LazyHash`]). We do not need
+/// cryptographic / DoS resistance, so a fast seedless hash is appropriate.
 ///
 /// To make the hash stable between 64-bit and 32-bit architectures, usize is
 /// hashed as u64.
 pub fn hash128<T: Hash + ?Sized>(value: &T) -> u128 {
-    struct StableHasher(SipHasher13);
+    struct StableHasher(Xxh3);
 
     impl Hasher for StableHasher {
         fn finish(&self) -> u64 {
@@ -27,9 +32,9 @@ pub fn hash128<T: Hash + ?Sized>(value: &T) -> u128 {
         }
     }
 
-    let mut state = StableHasher(SipHasher13::new());
+    let mut state = StableHasher(Xxh3::new());
     value.hash(&mut state);
-    state.0.finish128().as_u128()
+    state.0.digest128()
 }
 
 /// A wrapper type with lazily-computed hash.
