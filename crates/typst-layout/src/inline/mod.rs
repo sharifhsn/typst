@@ -67,7 +67,7 @@ pub fn layout_par(
 }
 
 /// The internal, memoized implementation of `layout_par`.
-#[comemo::memoize]
+#[comemo::memoize(enabled = crate::flow::worth_caching(&elem.body))]
 #[allow(clippy::too_many_arguments)]
 fn layout_par_impl(
     elem: &Packed<ParElem>,

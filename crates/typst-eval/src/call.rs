@@ -12,7 +12,7 @@ use typst_library::introspection::Introspector;
 use typst_library::math::LrElem;
 use typst_library::{Library, World};
 use typst_syntax::ast::{self, AstNode};
-use typst_syntax::{Span, Spanned, SyntaxNode};
+use typst_syntax::{Span, Spanned, SyntaxKind, SyntaxNode};
 use typst_utils::{LazyHash, Protected};
 
 use crate::{
@@ -594,8 +594,58 @@ impl Eval for ast::Closure<'_> {
     }
 }
 
+/// Whether memoizing a closure's evaluation is worth its cost.
+///
+/// Caching a closure call hashes its arguments and stores the result. For cheap
+/// closures (e.g. `x => x * x`) that costs more than recomputing, and caching
+/// each (often unique) call just bloats memory — the pathology behind data-viz
+/// documents that call a tiny function per cell. We gate on a cheap, *bounded*
+/// estimate of the body's runtime cost, weighting constructs that can do
+/// unbounded work: loops heavily, calls moderately, straight-line code lightly.
+/// Substantial bodies stay memoized, so reused/expensive closures (e.g. across
+/// the introspection loop) are unaffected.
+///
+/// Note: a static estimate cannot see that an expensive-bodied closure is being
+/// called in a hot loop with unique arguments (where caching never hits) — that
+/// needs runtime information and is out of scope here.
+fn worth_memoizing(closure: &LazyHash<Closure>) -> bool {
+    fn walk(node: &SyntaxNode, budget: &mut usize) {
+        if *budget == 0 {
+            return;
+        }
+        let cost = match node.kind() {
+            // A loop can do unbounded work, so its presence alone is decisive.
+            SyntaxKind::ForLoop | SyntaxKind::WhileLoop => 32,
+            // Calls may be expensive; weight them moderately.
+            SyntaxKind::FuncCall => 8,
+            // Count structural nodes; ignore leaf tokens (idents, operators,
+            // literals, trivia) so straight-line arithmetic stays cheap.
+            _ if node.children().next().is_some() => 1,
+            _ => 0,
+        };
+        *budget = budget.saturating_sub(cost);
+        for child in node.children() {
+            walk(child, budget);
+            if *budget == 0 {
+                return;
+            }
+        }
+    }
+    // Score the body only (not the parameter list / name).
+    let body = match &closure.node {
+        ClosureNode::Closure(node) => match node.cast::<ast::Closure>() {
+            Some(closure) => closure.body().to_untyped(),
+            None => return true,
+        },
+        ClosureNode::Context(node) => node,
+    };
+    let mut budget = 32;
+    walk(body, &mut budget);
+    budget == 0
+}
+
 /// Call the function in the context with the arguments.
-#[comemo::memoize]
+#[comemo::memoize(enabled = worth_memoizing(closure))]
 #[allow(clippy::too_many_arguments)]
 pub fn eval_closure(
     func: &Func,
