@@ -121,7 +121,7 @@ pub fn layout_columns(
 /// hashing it gates, while correctly treating a long paragraph (a single
 /// merged `TextElem`) as substantial — keying on sequence length alone would
 /// wrongly classify it as trivial.
-fn worth_caching(content: &Content) -> bool {
+pub(crate) fn worth_caching(content: &Content) -> bool {
     fn walk(content: &Content, budget: &mut usize) {
         if *budget == 0 {
             return;
