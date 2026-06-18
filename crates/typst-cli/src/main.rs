@@ -16,6 +16,13 @@ mod update;
 mod watch;
 mod world;
 
+/// Typst allocates heavily and in small pieces across eval, realization,
+/// layout, and export. mimalloc's thread-caching is faster than the system
+/// allocator (and contends far less under parallel layout), so we use it
+/// globally.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::cell::Cell;
 use std::io::{self, Write};
 use std::process::ExitCode;
