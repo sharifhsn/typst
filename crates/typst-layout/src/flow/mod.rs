@@ -16,7 +16,7 @@ use ecow::EcoVec;
 use rustc_hash::FxHashSet;
 use typst_library::diag::{At, SourceDiagnostic, SourceResult, bail};
 use typst_library::engine::{Engine, Route, Sink, Traced};
-use typst_library::foundations::{Content, Packed, Resolve, StyleChain};
+use typst_library::foundations::{Content, Packed, Resolve, SequenceElem, StyleChain};
 use typst_library::introspection::{
     Introspector, Location, Locator, LocatorLink, SplitLocator, Tag,
 };
@@ -104,8 +104,47 @@ pub fn layout_columns(
     )
 }
 
+/// Whether caching the layout of this content is worth its cost.
+///
+/// Memoizing a fragment means hashing all of its inputs and storing the result.
+/// For trivial content — most prominently table and grid cells — that costs
+/// more than just laying it out again, and it also bloats the cache (a major
+/// source of memory use on large, low-redundancy documents). We therefore only
+/// memoize content with enough top-level structure to be worth it; everything
+/// substantial (boxes of real content, nested layouts) is still cached, so the
+/// cases where memoization actually pays (measurement, reuse, the introspection
+/// loop) are unaffected.
+///
+/// The estimate is a cheap, *bounded* walk (cost capped at `BUDGET`): each
+/// element and each text character spends budget, and we cache only if the
+/// content is rich enough to exhaust it. This stays far cheaper than the
+/// hashing it gates, while correctly treating a long paragraph (a single
+/// merged `TextElem`) as substantial — keying on sequence length alone would
+/// wrongly classify it as trivial.
+fn worth_caching(content: &Content) -> bool {
+    fn walk(content: &Content, budget: &mut usize) {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        if let Some(seq) = content.to_packed::<SequenceElem>() {
+            for child in &seq.children {
+                walk(child, budget);
+                if *budget == 0 {
+                    return;
+                }
+            }
+        } else if let Some(text) = content.to_packed::<TextElem>() {
+            *budget = budget.saturating_sub(text.text.len());
+        }
+    }
+    let mut budget = 64;
+    walk(content, &mut budget);
+    budget == 0
+}
+
 /// The cached, internal implementation of [`layout_fragment`].
-#[comemo::memoize(enabled = false)]
+#[comemo::memoize(enabled = worth_caching(content))]
 #[allow(clippy::too_many_arguments)]
 fn layout_fragment_impl(
     world: Tracked<dyn World + '_>,
