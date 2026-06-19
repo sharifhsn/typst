@@ -722,7 +722,7 @@ pub fn shape_range<'a>(
     items: &mut Vec<(Range, Item<'a>)>,
     engine: &Engine,
     text: &'a str,
-    bidi: &BidiInfo<'a>,
+    bidi: Option<&BidiInfo<'a>>,
     range: Range,
     styles: StyleChain<'a>,
 ) {
@@ -748,7 +748,8 @@ pub fn shape_range<'a>(
             continue;
         }
 
-        let level = bidi.levels[i];
+        // Without BiDi info the text is uniformly the base (LTR) direction.
+        let level = bidi.map_or_else(BidiLevel::ltr, |bidi| bidi.levels[i]);
         let curr_script = match script {
             Smart::Auto => {
                 text[i..].chars().next().map_or(Script::Unknown, |c| c.script())
