@@ -75,11 +75,15 @@ pub fn prepare<'a>(
         _ => BidiLevel::ltr(),
     };
 
-    let bidi = BidiInfo::new(text, Some(default_level));
-    let is_bidi = bidi
-        .levels
-        .iter()
-        .any(|level| level.is_ltr() != default_level.is_ltr());
+    // BiDi analysis allocates several per-paragraph vectors. ASCII text under an
+    // LTR base direction is always uniformly LTR, so skip it entirely in that
+    // (very common) case; `shape_range` and line reordering both handle the
+    // absence of BiDi info as uniform base direction.
+    let info = if default_level.is_ltr() && text.is_ascii() {
+        None
+    } else {
+        Some(BidiInfo::new(text, Some(default_level)))
+    };
 
     let mut cursor = 0;
     let mut items = Vec::with_capacity(segments.len());
@@ -92,7 +96,7 @@ pub fn prepare<'a>(
 
         match segment {
             Segment::Text(_, styles) => {
-                shape_range(&mut items, engine, text, &bidi, range, styles);
+                shape_range(&mut items, engine, text, info.as_ref(), range, styles);
             }
             Segment::Item(item) => items.push((range, item)),
         }
@@ -110,10 +114,17 @@ pub fn prepare<'a>(
         add_cjk_latin_spacing(&mut items);
     }
 
+    // Only retain the BiDi info for line reordering if the text is actually
+    // bidirectional (some level differs from the base); otherwise reordering can
+    // treat the whole line as the uniform base direction.
+    let bidi = info.filter(|info| {
+        info.levels.iter().any(|level| level.is_ltr() != default_level.is_ltr())
+    });
+
     Ok(Preparation {
         config,
         text,
-        bidi: is_bidi.then_some(bidi),
+        bidi,
         items,
         indices,
         spans,
