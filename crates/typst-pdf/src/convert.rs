@@ -287,6 +287,15 @@ pub(crate) struct GlobalContext<'a> {
     /// The spans of all images that appear in the document. We use this so
     /// we can give more accurate error messages.
     pub(crate) image_spans: FxHashSet<Span>,
+    /// Caches each unique SVG's conversion to a reusable krilla form XObject,
+    /// keyed by the SVG's content hash and its rendered size. This both avoids
+    /// re-converting a repeated same-size SVG (e.g. a per-page logo) and lets
+    /// krilla emit it once and reference it via `/Do` on each use, rather than
+    /// inlining its drawing operations every time. The size is part of the key
+    /// because the XObject is rendered at the display size (so rasterized
+    /// filters such as blur stay cheap), so a different size needs a different
+    /// XObject.
+    pub(crate) svg_graphics: FxHashMap<(u128, u32, u32), krilla::graphic::Graphic>,
     /// The document to convert.
     pub(crate) document: &'a PagedDocument,
     /// Options for PDF export.
@@ -318,6 +327,7 @@ impl<'a> GlobalContext<'a> {
             loc_to_names,
             image_to_spans: FxHashMap::default(),
             image_spans: FxHashSet::default(),
+            svg_graphics: FxHashMap::default(),
             page_index_converter,
             tags,
         }

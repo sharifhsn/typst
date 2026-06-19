@@ -14,7 +14,7 @@ use typst_library::visualize::{
     ExchangeFormat, Image, ImageKind, ImageScaling, PdfImage, RasterFormat, RasterImage,
 };
 use typst_syntax::Span;
-use typst_utils::defer;
+use typst_utils::{defer, hash128};
 
 use crate::convert::{FrameContext, GlobalContext};
 use crate::tags;
@@ -63,11 +63,37 @@ pub(crate) fn handle_image(
         }
         ImageKind::Svg(svg) => {
             if let Some(size) = size.to_krilla() {
-                surface.draw_svg(
-                    svg.tree(),
-                    size,
-                    SvgSettings { embed_text: true, ..Default::default() },
-                );
+                // Convert each unique SVG to a reusable form XObject once, keyed
+                // by content hash *and rendered size*. krilla then emits the
+                // XObject a single time and references it via `/Do` on every use,
+                // instead of re-converting the tree and re-emitting all of its
+                // drawing operations into the content stream each time.
+                //
+                // The XObject is rendered at the requested display size (not the
+                // SVG's native size). For pure-vector SVGs this is equivalent —
+                // vectors are scale-independent — but it is crucial for SVGs with
+                // rasterized filters (e.g. `feGaussianBlur`, used for soft
+                // shadows): rendering those at an inflated native size makes the
+                // O(pixels) filter cost explode. Including the size in the key
+                // means the common case (the same SVG repeated at the same size,
+                // such as a per-page logo) still deduplicates to one XObject.
+                let key = (hash128(svg), size.width().to_bits(), size.height().to_bits());
+                if !gc.svg_graphics.contains_key(&key) {
+                    let mut stream_builder = surface.stream_builder();
+                    let mut sub = stream_builder.surface();
+                    sub.draw_svg(
+                        svg.tree(),
+                        size,
+                        SvgSettings { embed_text: true, ..Default::default() },
+                    );
+                    sub.finish();
+                    let graphic =
+                        krilla::graphic::Graphic::new(stream_builder.finish(), false);
+                    gc.svg_graphics.insert(key, graphic);
+                }
+                if let Some(graphic) = gc.svg_graphics.get(&key) {
+                    surface.draw_graphic(graphic.clone());
+                }
             }
         }
         ImageKind::Pdf(pdf) => {

@@ -91,7 +91,7 @@ b2f406383459a06672f7aefd0698da31 cjk-punctuation-adjustment-1
 10d53aa94a7e03a195072090316bd20f cjk-punctuation-adjustment-2
 f382ed18c8e52c6462d61a2ee2d88cd4 cjk-punctuation-adjustment-3
 43667677589c42a07fef10d6338fffa4 closure-capture-in-lvalue
-415f20896e1d57d36b6c6f0779feee48 closure-path-resolve-in-layout-phase
+3a0ed304a69cfd6e896f27f5722661d6 closure-path-resolve-in-layout-phase
 f3bd3d6d437027073c80e1274226b1a5 closure-without-params-non-atomic
 dfafa6fc90031f3a34ee1bf792bb4918 code-block-basic-syntax
 eb77e10182c20317a7e7adb79ce99425 colbreak-weak
@@ -217,7 +217,7 @@ aeea6c3220ae01c465ccd7becb12f7be eval-path-resolve
 5d2839de537371d4b707d634e5e0950f field-function
 0067efc5f7e0f5e00fdd461ee3e0c5a4 figure-align
 f1b179f932dcb5a202aa2fb48e99eab3 figure-and-caption-show
-75b62780b34352b709f794c8ec5ad631 figure-basic
+2b18e4eb75c1261db420a11e56162398 figure-basic
 c8098dc21a16ff6bf5005b250f6ab8c7 figure-breakable
 08cd79423e97d44662d7d78003141c76 figure-caption-separator
 5d5042df6d8f0713d9f0e0fc2f37722c figure-caption-show
@@ -228,7 +228,7 @@ ed01db1f3d4ce09594e0248281f7ce99 figure-localization-fr
 48d7c1aa7f2e9e334487ded0bd34f6fd figure-localization-zh
 29b416dd66876435ea292a27c3b645c2 figure-par
 fa10f447e24a56cbb04f3519eb1f21a5 figure-placement
-f96885f76eb853b34c3792b369d85da5 figure-table
+fe1a057c88e799b7b893110d2500214e figure-table
 48244becb01e2851fc5a54eb5f0f6618 figure-theorem
 66bbb7f44d412eedba0176e3f16306a5 float-display
 8442983cac78ed12cdc7adce7132c09f flow-first-region-counter-update
@@ -612,9 +612,9 @@ b68fe0d021f382a465a2b8fa087a6f06 hyphenate-pt-repeat-hyphen-hyphenate-true-with-
 0adbf8e07d8e100abf161a7060e73473 image-baseline-with-box
 749a46c35d9a499fd6b0ea919d97259e image-decode-detect-format
 5f58a768d82a5538ef96cdab90c7c5df image-decode-specify-format
-19baf7ccd2b888f52e1c0066d9e48647 image-decode-svg
+981a37261c90f8914b95a914774390b0 image-decode-svg
 6f4d4f0d9fa4761011f6633574a177bb image-exif-rotation
-8bceb5bb4997875a52bcad2ab5a28147 image-fit
+3aab7d199a5f15643d1c1ab3f0b28c47 image-fit
 364849ef231ce5da69cd5c34669fae09 image-jpg
 e2c28abda075f98a1be7605f762b4291 image-jump-to-next-page
 07039aa01c420df97eccf75a61fe6c2d image-natural-dpi-sizing
@@ -628,15 +628,15 @@ d7745ce3cafb9fe332e6dfa398bddc76 image-pixmap-lumaa8
 cb4d72e9cc3a018f9c34e3e6bb03daec image-pixmap-rgba8
 6aac6244e82b974ddcd0b8db538a244d image-png
 65267f2280a0f6f6ba9804519bab4dd7 image-scaling-methods
-2e0bb459820fbfa3a02fa45f0321a87b image-sizing
-44c2e2e556d8a1411be2199d31ae4da0 image-svg-auto-detection
-42c7a88bdb12de376dade21c6a511195 image-svg-complex
-36f9e8783c9bc375d0ffbaf1d8801b64 image-svg-linked-jpg1
-0479e49319ad36244b3f60c32587de70 image-svg-linked-jpg2
-e93d7c9432f08f7fc399bd77c6ec97f9 image-svg-linked-many-formats
-d05b7da1f1d97090f754947cf35aad77 image-svg-text
-10665a9d33a3ea4626a24fb49769456e image-svg-text-font
-df3bb9369dd6be9214558c66dff3fd09 image-svg-variable-font
+3e74197234b3dd3fe012766dd5b6ec3a image-sizing
+6b67f6c26c42676e60e8e670aa579bb2 image-svg-auto-detection
+a4ad309ceb8bbdc9f3dc61a0a5217a09 image-svg-complex
+3c8fb4edcbce39abf3dc5d57925ce247 image-svg-linked-jpg1
+b27ad4f0a4ec3873d2d0d1179a97b6ac image-svg-linked-jpg2
+84096ee2a8c70ea43acf79573617d705 image-svg-linked-many-formats
+98ff4f097abee6d2945e659a4f8454f2 image-svg-text
+62e238e186dd73e96661b45591f5c283 image-svg-text-font
+9e6f99ed91b162473bfa4d5177853f76 image-svg-variable-font
 3ea4355a38eefc5703c9ddbd7ac0dc9c import-basic
 742bdca982ef3c38d93851cbfb7057d0 import-from-function-scope
 94d338771fe3b0b2a019df2ecc0965a8 import-source-field-access
@@ -669,7 +669,7 @@ fa5ea038d5409164cd1c6cbdf13fd3bb issue-1920-linebreak-guillemets
 ded6ad9e6f2cffe1a3a4d3ec0d6bd001 issue-1948-math-text-break
 6f378b948bd8ea7190ef3e5f904e30c4 issue-2044-invalid-parsed-ident
 bb6b4f0ce6fb6857e9b46869739f14f6 issue-2048-outline-multiline
-54c4f6e4d40284045926ca5d8edea52b issue-2051-new-cm-svg
+2ce8d350906f2512e64b685ecff68d57 issue-2051-new-cm-svg
 0655fe9948d0d4bb6f09f328dd398944 issue-2055-math-eval
 9766dc1eba6f7e41094b7c988b83272a issue-2095-pagebreak-numbering
 c0733a0c484268029da6ee2ab6050b39 issue-2105-linebreak-tofu
@@ -719,7 +719,7 @@ ac3a856d74fa3d1b606ee3b5f2868758 issue-3624-spacing-behaviour
 eb0e9dfe76d58b916f888ef31752f787 issue-3699-cite-twice-et-al
 65edd7919824d6561dd74152c771ec00 issue-3700-deformed-stroke
 201e2af73c0e38da4570510a74a389db issue-3726-query-show-set
-41ae5214193db193d666eae92db3a032 issue-3733-dpi-svg
+b5feaf2a9dae035b175b82dd963d0991 issue-3733-dpi-svg
 344a79859034501c8d7d4288e8a9a979 issue-3774-math-call-empty-2d-args
 0b20f8b839447d8fb5f898e1dd3a4517 issue-3820-raw-space-when-end-with-backtick
 461cf7472601267f0202cfa39932ff0f issue-3841-tabs-in-raw-type-code
@@ -821,7 +821,7 @@ ff9ffb70bb4aad13c86fe697e97649d1 issue-6666-auto-hlines-around-footer
 235e60046edf64f088ea9a8483e9ffaa issue-6961-tab-crlf-raw-indent
 e6c3701e2842f398fcb0758a4f9533ab issue-7103-wrong-state-calculation
 db8f9c5dfa35d2bc3d14d90b43e77392 issue-7113-cjk-latin-spacing-shift
-4f81a8ca1011318abd32f9cbdf0dee3e issue-7178-svg-fallback-deadlock
+390e33e69055c28e69a64fc0b7ad458f issue-7178-svg-fallback-deadlock
 e19de6f6cc98aee84f9224675d8d3982 issue-7188-grid-counter-order
 d53e781aebb56c78a58c1997e2a4982b issue-7249-multiple-lookup-tables
 105f4476e362e0454efea8fb7e436b3e issue-7292-page-height-auto-margin-zero
@@ -1227,7 +1227,7 @@ c268b70338bac426cc163bfbb2a8a8bc math-multiline-no-trailing-linebreak
 170c61142f92c1c17c69dae774038d5e math-multiline-string
 12f00478e20aeacd482c03a21523fab6 math-multiline-string-alignment
 c207fa218b4845bce58a2939e1c74446 math-multiline-trailing-linebreak
-6dbc7a60e859ce81ba9a3658dd117dbc math-nested-normal-layout
+bf9516958162c69c00e075ba42b12397 math-nested-normal-layout
 50cbec65a2db87aed58bb61621810779 math-no-stretch-fallback
 78b51a35ce683fd175ac895c24d8dd00 math-non-math-content
 c93dc2460563802c00edda3de87e597c math-op-call
@@ -1521,7 +1521,7 @@ ab6e4aa0424d94ba6a60aeee7187a735 place-horizon-in-boxes
 4c1457dd50bade9c61fbbc7087804936 polygon-line-join
 59337b302f76e4c5daa5ae49c8c807fe presentation-selectors
 61d378e66d3f0573b8bb654c66a09576 query-complex
-8b62f44945849e1ed9b51ceafea01359 query-list-of-figures
+a1a1d56027e02cf74f683a3930e32f52 query-list-of-figures
 79dacabd77d00f0808d2df88d239ee48 query-quote
 062e382d54acd55a2c758bf43d05a3de query-running-header
 2c37b3aab7ef756ed4cf62c8ce1a6ef6 query-within
@@ -1588,7 +1588,7 @@ d8e2f467ccd279c02256d42f41056e7e rect-stroke-variations-with-radius-and-adjacent
 382c4da755e77b7791143faea2bd94dd ref-basic
 42eeda4981e0d8ed7d12126eb1e99f67 ref-form-page
 140368d81f9f14c0e8d0d0ff7185d65e ref-form-page-unambiguous
-54713f31f68c55e7f03f7dd796f0858d ref-supplements
+7e5f0216e62133ed6a932642b83a4345 ref-supplements
 85c1f362553ecc6b1e7f3789ae0377bd ref-to-empty-label-not-possible
 43fbce05661ba560895b9538275e51c1 repeat-align-and-dir
 6ae57abd9306b07b0ce43b9e89ca9ea5 repeat-basic
@@ -1906,7 +1906,7 @@ f6de3385d5f162db0f00b8444dfe635e title-with-body
 2722c902b6adabd70ef15b338d431c85 transform-rotate-origin
 eb27b32b65a0b36ff34993fb4290ea81 transform-rotate-relative-sizing
 28b0112decf713a3cb5384ea6edfe895 transform-scale
-2b5709c2082a55a9b6ba0a97eeaa6a3c transform-scale-abs-and-auto
+8430592c6997d188b1c563240c28e130 transform-scale-abs-and-auto
 19d73693a42f218cd7cdac62271d0c87 transform-scale-origin
 55a31161124dfb859e88be66998aa73a transform-scale-relative-sizing
 1bf17e1a22cda3a99cef8031319bad25 transform-skew
