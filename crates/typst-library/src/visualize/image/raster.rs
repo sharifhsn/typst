@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::diag::{StrResult, bail};
 use crate::foundations::{Bytes, Cast, Dict, Smart, Value, cast, dict};
@@ -22,10 +22,18 @@ pub struct RasterImage(Arc<RasterImageInner>);
 struct RasterImageInner {
     data: Bytes,
     format: RasterFormat,
-    dynamic: Arc<DynamicImage>,
+    /// Pixel width, with any EXIF rotation already applied.
+    width: u32,
+    /// Pixel height, with any EXIF rotation already applied.
+    height: u32,
     exif_rotation: Option<u32>,
     icc: Option<Bytes>,
     dpi: Option<f64>,
+    /// The decoded pixels. For JPEGs this is filled lazily on first
+    /// [`dynamic`](RasterImage::dynamic) access, since they are embedded
+    /// losslessly into PDF/SVG output without ever decoding the pixels. All
+    /// other formats populate it eagerly during construction.
+    dynamic: OnceLock<Arc<DynamicImage>>,
 }
 
 impl RasterImage {
@@ -51,104 +59,87 @@ impl RasterImage {
         format: RasterFormat,
         icc: Smart<Bytes>,
     ) -> StrResult<RasterImage> {
-        let mut exif_rot = None;
-
-        let (dynamic, icc, dpi) = match format {
-            RasterFormat::Exchange(format) => {
-                fn decode<T: ImageDecoder>(
-                    decoder: ImageResult<T>,
-                    icc: Smart<Bytes>,
-                ) -> ImageResult<(image::DynamicImage, Option<Bytes>)> {
-                    let mut decoder = decoder?;
-                    let icc = icc.custom().or_else(|| {
-                        decoder
-                            .icc_profile()
-                            .ok()
-                            .flatten()
-                            .filter(|icc| !icc.is_empty())
-                            .map(Bytes::new)
-                    });
-                    decoder.set_limits(Limits::default())?;
-                    let dynamic = image::DynamicImage::from_decoder(decoder)?;
-                    Ok((dynamic, icc))
-                }
-
-                let cursor = io::Cursor::new(&data);
-                let (mut dynamic, icc) = match format {
-                    ExchangeFormat::Jpg => decode(JpegDecoder::new(cursor), icc),
-                    ExchangeFormat::Png => decode(PngDecoder::new(cursor), icc),
-                    ExchangeFormat::Gif => decode(GifDecoder::new(cursor), icc),
-                    ExchangeFormat::Webp => decode(WebPDecoder::new(cursor), icc),
-                }
-                .map_err(format_image_error)?;
-
+        let inner = match format {
+            RasterFormat::Exchange(exchange) => {
+                // Read metadata from the header without decoding the pixels.
                 let exif = exif::Reader::new()
-                    .read_from_container(&mut std::io::Cursor::new(&data))
+                    .read_from_container(&mut io::Cursor::new(&data))
                     .ok();
-
-                // Apply rotation from EXIF metadata.
-                if let Some(rotation) = exif.as_ref().and_then(exif_rotation) {
-                    apply_rotation(&mut dynamic, rotation);
-                    exif_rot = Some(rotation);
-                }
-
-                // Extract pixel density.
+                let exif_rotation = exif.as_ref().and_then(exif_rotation);
                 let dpi = determine_dpi(&data, exif.as_ref());
 
-                (dynamic, icc, dpi)
+                match exchange {
+                    // JPEGs and PNGs are embedded into PDF/SVG output without
+                    // their decoded pixels (JPEG via DCTDecode; PNG via
+                    // FlateDecode + a predictor, with any alpha split off into a
+                    // soft mask). So read just the dimensions and ICC profile from
+                    // the header now and defer the expensive pixel decode to the
+                    // first `dynamic()` access — needed only when rasterizing.
+                    ExchangeFormat::Jpg | ExchangeFormat::Png => {
+                        let (w, h, icc) = if exchange == ExchangeFormat::Jpg {
+                            let mut decoder = JpegDecoder::new(io::Cursor::new(&data))
+                                .map_err(format_image_error)?;
+                            let (w, h) = decoder.dimensions();
+                            (w, h, pick_icc(icc, &mut decoder))
+                        } else {
+                            let mut decoder = PngDecoder::new(io::Cursor::new(&data))
+                                .map_err(format_image_error)?;
+                            let (w, h) = decoder.dimensions();
+                            (w, h, pick_icc(icc, &mut decoder))
+                        };
+                        let (width, height) = rotated_dimensions(w, h, exif_rotation);
+                        RasterImageInner {
+                            data,
+                            format,
+                            width,
+                            height,
+                            exif_rotation,
+                            icc,
+                            dpi,
+                            dynamic: OnceLock::new(),
+                        }
+                    }
+                    // GIF and WebP are always rasterized for output, so decode
+                    // eagerly to surface any error at load time.
+                    ExchangeFormat::Gif | ExchangeFormat::Webp => {
+                        let (dynamic, icc) =
+                            decode_exchange(exchange, &data, icc, exif_rotation)
+                                .map_err(format_image_error)?;
+                        let (width, height) = (dynamic.width(), dynamic.height());
+                        let cell = OnceLock::new();
+                        let _ = cell.set(Arc::new(dynamic));
+                        RasterImageInner {
+                            data,
+                            format,
+                            width,
+                            height,
+                            exif_rotation,
+                            icc,
+                            dpi,
+                            dynamic: cell,
+                        }
+                    }
+                }
             }
 
-            RasterFormat::Pixel(format) => {
-                if format.width == 0 || format.height == 0 {
-                    bail!("zero-sized images are not allowed");
+            RasterFormat::Pixel(pixel) => {
+                let dynamic = decode_pixel(&data, pixel)?;
+                let cell = OnceLock::new();
+                let _ = cell.set(Arc::new(dynamic));
+                RasterImageInner {
+                    data,
+                    format,
+                    width: pixel.width,
+                    height: pixel.height,
+                    exif_rotation: None,
+                    icc: icc.custom(),
+                    dpi: None,
+                    dynamic: cell,
                 }
-
-                let channels = match format.encoding {
-                    PixelEncoding::Rgb8 => 3,
-                    PixelEncoding::Rgba8 => 4,
-                    PixelEncoding::Luma8 => 1,
-                    PixelEncoding::Lumaa8 => 2,
-                };
-
-                let Some(expected_size) = format
-                    .width
-                    .checked_mul(format.height)
-                    .and_then(|size| size.checked_mul(channels))
-                else {
-                    bail!("pixel dimensions are too large");
-                };
-
-                if expected_size as usize != data.len() {
-                    bail!("pixel dimensions and pixel data do not match");
-                }
-
-                fn to<P: Pixel<Subpixel = u8>>(
-                    data: &Bytes,
-                    format: PixelFormat,
-                ) -> ImageBuffer<P, Vec<u8>> {
-                    ImageBuffer::from_raw(format.width, format.height, data.to_vec())
-                        .unwrap()
-                }
-
-                let dynamic = match format.encoding {
-                    PixelEncoding::Rgb8 => to::<image::Rgb<u8>>(&data, format).into(),
-                    PixelEncoding::Rgba8 => to::<image::Rgba<u8>>(&data, format).into(),
-                    PixelEncoding::Luma8 => to::<image::Luma<u8>>(&data, format).into(),
-                    PixelEncoding::Lumaa8 => to::<image::LumaA<u8>>(&data, format).into(),
-                };
-
-                (dynamic, icc.custom(), None)
             }
         };
 
-        Ok(Self(Arc::new(RasterImageInner {
-            data,
-            format,
-            exif_rotation: exif_rot,
-            dynamic: Arc::new(dynamic),
-            icc,
-            dpi,
-        })))
+        Ok(Self(Arc::new(inner)))
     }
 
     /// The raw image data.
@@ -161,14 +152,14 @@ impl RasterImage {
         self.0.format
     }
 
-    /// The image's pixel width.
+    /// The image's pixel width (with EXIF rotation applied).
     pub fn width(&self) -> u32 {
-        self.dynamic().width()
+        self.0.width
     }
 
-    /// The image's pixel height.
+    /// The image's pixel height (with EXIF rotation applied).
     pub fn height(&self) -> u32 {
-        self.dynamic().height()
+        self.0.height
     }
 
     /// The EXIF orientation value of the original image.
@@ -186,9 +177,27 @@ impl RasterImage {
         self.0.dpi
     }
 
-    /// Access the underlying dynamic image.
+    /// Access the underlying dynamic image, decoding it on first access.
+    ///
+    /// For JPEGs the pixel decode is deferred to here, and is skipped entirely
+    /// when the image is only embedded into PDF/SVG output.
     pub fn dynamic(&self) -> &Arc<DynamicImage> {
-        &self.0.dynamic
+        self.0.dynamic.get_or_init(|| {
+            let RasterFormat::Exchange(format) = self.0.format else {
+                // Pixel images always populate the cell eagerly.
+                unreachable!("pixel images are decoded eagerly");
+            };
+            let dynamic =
+                decode_exchange(format, &self.0.data, Smart::Auto, self.0.exif_rotation)
+                    .map(|(dynamic, _)| dynamic)
+                    .unwrap_or_else(|_| {
+                        // The header decoded fine but the pixel data is corrupt
+                        // (rare). Degrade to a blank image so rendering doesn't
+                        // panic; layout still uses the header dimensions.
+                        DynamicImage::new_rgba8(1, 1)
+                    });
+            Arc::new(dynamic)
+        })
     }
 
     /// Access the ICC profile, if any.
@@ -204,6 +213,99 @@ impl Hash for RasterImageInner {
         self.format.hash(state);
         self.icc.hash(state);
     }
+}
+
+/// Pick the ICC profile: a user-provided one wins, else the image's embedded one.
+fn pick_icc<T: ImageDecoder>(icc: Smart<Bytes>, decoder: &mut T) -> Option<Bytes> {
+    icc.custom().or_else(|| {
+        decoder
+            .icc_profile()
+            .ok()
+            .flatten()
+            .filter(|icc| !icc.is_empty())
+            .map(Bytes::new)
+    })
+}
+
+/// The pixel dimensions after applying an EXIF rotation. The 90°/270° rotations
+/// (orientation values 5–8) swap width and height.
+fn rotated_dimensions(width: u32, height: u32, rotation: Option<u32>) -> (u32, u32) {
+    match rotation {
+        Some(5 | 6 | 7 | 8) => (height, width),
+        _ => (width, height),
+    }
+}
+
+/// Fully decode an exchange-format image, extracting the ICC profile and
+/// applying any EXIF rotation.
+fn decode_exchange(
+    format: ExchangeFormat,
+    data: &[u8],
+    icc: Smart<Bytes>,
+    rotation: Option<u32>,
+) -> ImageResult<(DynamicImage, Option<Bytes>)> {
+    fn decode<T: ImageDecoder>(
+        decoder: ImageResult<T>,
+        icc: Smart<Bytes>,
+        rotation: Option<u32>,
+    ) -> ImageResult<(DynamicImage, Option<Bytes>)> {
+        let mut decoder = decoder?;
+        let icc = pick_icc(icc, &mut decoder);
+        decoder.set_limits(Limits::default())?;
+        let mut dynamic = DynamicImage::from_decoder(decoder)?;
+        if let Some(rotation) = rotation {
+            apply_rotation(&mut dynamic, rotation);
+        }
+        Ok((dynamic, icc))
+    }
+
+    let cursor = io::Cursor::new(data);
+    match format {
+        ExchangeFormat::Jpg => decode(JpegDecoder::new(cursor), icc, rotation),
+        ExchangeFormat::Png => decode(PngDecoder::new(cursor), icc, rotation),
+        ExchangeFormat::Gif => decode(GifDecoder::new(cursor), icc, rotation),
+        ExchangeFormat::Webp => decode(WebPDecoder::new(cursor), icc, rotation),
+    }
+}
+
+/// Build a dynamic image from raw, already-decoded pixel data.
+fn decode_pixel(data: &Bytes, format: PixelFormat) -> StrResult<DynamicImage> {
+    if format.width == 0 || format.height == 0 {
+        bail!("zero-sized images are not allowed");
+    }
+
+    let channels = match format.encoding {
+        PixelEncoding::Rgb8 => 3,
+        PixelEncoding::Rgba8 => 4,
+        PixelEncoding::Luma8 => 1,
+        PixelEncoding::Lumaa8 => 2,
+    };
+
+    let Some(expected_size) = format
+        .width
+        .checked_mul(format.height)
+        .and_then(|size| size.checked_mul(channels))
+    else {
+        bail!("pixel dimensions are too large");
+    };
+
+    if expected_size as usize != data.len() {
+        bail!("pixel dimensions and pixel data do not match");
+    }
+
+    fn to<P: Pixel<Subpixel = u8>>(
+        data: &Bytes,
+        format: PixelFormat,
+    ) -> ImageBuffer<P, Vec<u8>> {
+        ImageBuffer::from_raw(format.width, format.height, data.to_vec()).unwrap()
+    }
+
+    Ok(match format.encoding {
+        PixelEncoding::Rgb8 => to::<image::Rgb<u8>>(data, format).into(),
+        PixelEncoding::Rgba8 => to::<image::Rgba<u8>>(data, format).into(),
+        PixelEncoding::Luma8 => to::<image::Luma<u8>>(data, format).into(),
+        PixelEncoding::Lumaa8 => to::<image::LumaA<u8>>(data, format).into(),
+    })
 }
 
 /// A raster graphics format.

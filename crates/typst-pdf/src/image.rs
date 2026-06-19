@@ -268,6 +268,10 @@ fn png_passthrough_eligible(data: &[u8]) -> bool {
                     && match color_type {
                         0 | 3 => matches!(bit_depth, 1 | 2 | 4 | 8),
                         2 => bit_depth == 8,
+                        // Alpha (4/6) can be split into a color image + soft mask
+                        // without un-filtering (krilla's `from_png` does this),
+                        // but re-deflating both streams costs more wall time than
+                        // reusing the decoded pixels, so it stays on `from_custom`.
                         _ => false,
                     };
             }
