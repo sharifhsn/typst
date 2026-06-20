@@ -202,6 +202,22 @@ pub(super) struct FinishedHeaderRowInfo {
     pub(super) repeated_height: Abs,
 }
 
+/// An independent single-cell layout job within a single row.
+///
+/// Carries everything `layout_cell` needs plus the deterministic output
+/// position, so that a batch of these can be laid out in parallel and the
+/// resulting frames pushed back in left-to-right order.
+struct CellJob<'a> {
+    /// The cell to lay out.
+    cell: &'a Cell,
+    /// The pre-assigned, relayout'd locator for this cell.
+    locator: Locator<'a>,
+    /// The regions to lay the cell out into.
+    pod: Regions<'a>,
+    /// The deterministic position of the cell's frame within the row frame.
+    pos: Point,
+}
+
 /// Details about a resulting row piece.
 #[derive(Debug)]
 pub struct RowPiece {
@@ -1480,8 +1496,14 @@ impl<'a> GridLayouter<'a> {
         }
 
         let mut output = Frame::soft(Size::new(self.width, height));
-        let mut offset = Point::zero();
 
+        // Phase 1: Sequential scan. Collect one independent layout job per cell
+        // in this row. The cell locators were assigned upfront in `new`, so
+        // `cell_locator` is a pure function of `self` and the jobs are mutually
+        // independent. We compute the deterministic output position here so the
+        // parallel phase only needs the per-cell inputs.
+        let mut jobs: Vec<CellJob<'a>> = Vec::with_capacity(self.rcols.len());
+        let mut offset = Point::zero();
         for (x, &rcol) in self.rcols.iter().enumerate() {
             if let Some(cell) = self.grid.cell(x, y) {
                 // Rowspans have a separate layout step
@@ -1498,26 +1520,46 @@ impl<'a> GridLayouter<'a> {
                         pod.full = self.regions.full;
                     }
                     let locator = self.cell_locator(Axes::new(x, y), disambiguator);
-                    let frame = layout_cell(
-                        cell,
-                        engine,
-                        locator,
-                        self.styles,
-                        pod,
-                        self.row_state.is_being_repeated,
-                    )?
-                    .into_frame();
                     let mut pos = offset;
                     if self.is_rtl {
                         // In RTL cells expand to the left, thus the position
                         // must additionally be offset by the cell's width.
                         pos.x = self.width - (pos.x + width);
                     }
-                    output.push_frame(pos, frame);
+                    jobs.push(CellJob { cell, locator, pod, pos });
                 }
             }
 
             offset.x += rcol;
+        }
+
+        // Phase 2: Lay out the cells. They are mutually independent (locators
+        // assigned upfront, deterministic positions), so we run them in
+        // parallel when there are at least two. The single-cell case (and the
+        // common narrow-table case) skips the parallel overhead.
+        let styles = self.styles;
+        let is_being_repeated = self.row_state.is_being_repeated;
+        let layout = move |engine: &mut Engine, job: CellJob<'a>| {
+            layout_cell(
+                job.cell,
+                engine,
+                job.locator,
+                styles,
+                job.pod,
+                is_being_repeated,
+            )
+            .map(|fragment| (job.pos, fragment.into_frame()))
+        };
+        let results: Vec<SourceResult<(Point, Frame)>> = if jobs.len() >= 2 {
+            engine.parallelize(jobs, layout).collect()
+        } else {
+            jobs.into_iter().map(|job| layout(engine, job)).collect()
+        };
+
+        // Phase 3: Assemble the output in deterministic (left-to-right) order.
+        for result in results {
+            let (pos, frame) = result?;
+            output.push_frame(pos, frame);
         }
 
         Ok(output)
