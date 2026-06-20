@@ -987,7 +987,13 @@ impl<'a> GridLayouter<'a> {
                 continue;
             }
 
-            let mut resolved = Abs::zero();
+            // Phase 1 (serial): collect the measurement jobs for this column.
+            // This scan is cheap (no layout) and accesses the layouter's shared
+            // state. Each job carries everything `layout_cell` needs plus the
+            // `already_covered_width` to subtract afterwards. The cell locators
+            // are pre-assigned deterministically in `new()`, so building them
+            // here is order-independent and parallel-safe.
+            let mut jobs: Vec<(&Cell, Abs, Locator<'a>, Abs)> = Vec::new();
             for y in 0..self.grid.rows.len() {
                 // We get the parent cell in case this is a merged position.
                 let Some(parent) = self.grid.parent_cell_position(x, y) else {
@@ -1075,20 +1081,58 @@ impl<'a> GridLayouter<'a> {
                 // cell if it spans all fractional columns in a finite region.
                 let already_covered_width = self.cell_spanned_width(cell, parent.x);
 
-                let size = Size::new(available, height);
-                let pod = Region::new(size, Axes::splat(false));
                 let locator = self.cell_locator(parent, 0);
-                let frame = layout_cell(
-                    cell,
-                    engine,
-                    locator,
-                    self.styles,
-                    pod.into(),
-                    self.row_state.is_being_repeated,
-                )?
-                .into_frame();
-                resolved.set_max(frame.width() - already_covered_width);
+                jobs.push((cell, height, locator, already_covered_width));
             }
+
+            // Phase 2 (parallel): lay out each measurement cell. `layout_cell`
+            // is a pure function of `(cell, locator, styles, region)` given a
+            // forked engine, and the only output we keep is the resolved width.
+            // Taking the max over the candidate widths is commutative, so this
+            // is independent of evaluation order and remains byte-identical.
+            // `parallelize` collects in input order and merges subsinks in that
+            // same order, preserving determinism of warnings/introspections.
+            let styles = self.styles;
+            let is_being_repeated = self.row_state.is_being_repeated;
+            let resolved = if jobs.len() > 1 {
+                let widths = engine
+                    .parallelize(jobs, move |engine, (cell, height, locator, covered)| {
+                        let size = Size::new(available, height);
+                        let pod = Region::new(size, Axes::splat(false));
+                        layout_cell(
+                            cell,
+                            engine,
+                            locator,
+                            styles,
+                            pod.into(),
+                            is_being_repeated,
+                        )
+                        .map(|fragment| fragment.into_frame().width() - covered)
+                    })
+                    .collect::<SourceResult<Vec<_>>>()?;
+                let mut resolved = Abs::zero();
+                for width in widths {
+                    resolved.set_max(width);
+                }
+                resolved
+            } else {
+                let mut resolved = Abs::zero();
+                for (cell, height, locator, covered) in jobs {
+                    let size = Size::new(available, height);
+                    let pod = Region::new(size, Axes::splat(false));
+                    let frame = layout_cell(
+                        cell,
+                        engine,
+                        locator,
+                        styles,
+                        pod.into(),
+                        is_being_repeated,
+                    )?
+                    .into_frame();
+                    resolved.set_max(frame.width() - covered);
+                }
+                resolved
+            };
 
             self.rcols[x] = resolved;
             auto += resolved;
