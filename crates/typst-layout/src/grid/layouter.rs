@@ -1489,14 +1489,16 @@ impl<'a> GridLayouter<'a> {
         // (distinct from the measure pass at the resolved width).
         //
         // First, gather the region-independent layout jobs serially.
-        let full = if self.grid.rows[y] == Sizing::Auto && self.unbreakable_rows_left == 0
-        {
-            // Cells at breakable auto rows have lengths relative to the entire
-            // page, unlike cells in unbreakable auto rows.
-            self.regions.full
-        } else {
-            Abs::zero()
-        };
+        //
+        // For breakable auto rows, the pod's `full` height must be overridden to
+        // the entire page height (cells there have lengths relative to the page,
+        // unlike unbreakable auto rows). For all other rows, `pod.full` keeps
+        // its default of the cell's own height (`size.y`, set by
+        // `Region::new(..).into()`). We must NOT zero it, or relative / fr /
+        // rowspan rows would mislayout.
+        let override_full =
+            (self.grid.rows[y] == Sizing::Auto && self.unbreakable_rows_left == 0)
+                .then_some(self.regions.full);
         let is_being_repeated = self.row_state.is_being_repeated;
 
         let mut jobs: Vec<(&Cell, Regions, Locator<'a>)> = Vec::new();
@@ -1509,7 +1511,9 @@ impl<'a> GridLayouter<'a> {
                     let width = self.cell_spanned_width(cell, x);
                     let size = Size::new(width, height);
                     let mut pod: Regions = Region::new(size, Axes::splat(true)).into();
-                    pod.full = full;
+                    if let Some(full) = override_full {
+                        pod.full = full;
+                    }
                     let locator = self.cell_locator(Axes::new(x, y), disambiguator);
                     let mut pos = offset;
                     if self.is_rtl {
