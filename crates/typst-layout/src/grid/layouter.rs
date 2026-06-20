@@ -1480,8 +1480,28 @@ impl<'a> GridLayouter<'a> {
         }
 
         let mut output = Frame::soft(Size::new(self.width, height));
-        let mut offset = Point::zero();
 
+        // A cell's content layout at a fixed column width and fixed row height
+        // is region-independent (the pod is a single, non-breakable region), so
+        // it can be computed in parallel and the resulting frames placed
+        // serially afterwards. This is the only cell layout for fixed-width
+        // tables (no auto-measure pass), and the final layout for auto rows
+        // (distinct from the measure pass at the resolved width).
+        //
+        // First, gather the region-independent layout jobs serially.
+        let full = if self.grid.rows[y] == Sizing::Auto && self.unbreakable_rows_left == 0
+        {
+            // Cells at breakable auto rows have lengths relative to the entire
+            // page, unlike cells in unbreakable auto rows.
+            self.regions.full
+        } else {
+            Abs::zero()
+        };
+        let is_being_repeated = self.row_state.is_being_repeated;
+
+        let mut jobs: Vec<(&Cell, Regions, Locator<'a>)> = Vec::new();
+        let mut positions: Vec<Point> = Vec::new();
+        let mut offset = Point::zero();
         for (x, &rcol) in self.rcols.iter().enumerate() {
             if let Some(cell) = self.grid.cell(x, y) {
                 // Rowspans have a separate layout step
@@ -1489,38 +1509,58 @@ impl<'a> GridLayouter<'a> {
                     let width = self.cell_spanned_width(cell, x);
                     let size = Size::new(width, height);
                     let mut pod: Regions = Region::new(size, Axes::splat(true)).into();
-                    if self.grid.rows[y] == Sizing::Auto
-                        && self.unbreakable_rows_left == 0
-                    {
-                        // Cells at breakable auto rows have lengths relative
-                        // to the entire page, unlike cells in unbreakable auto
-                        // rows.
-                        pod.full = self.regions.full;
-                    }
+                    pod.full = full;
                     let locator = self.cell_locator(Axes::new(x, y), disambiguator);
-                    let frame = layout_cell(
-                        cell,
-                        engine,
-                        locator,
-                        self.styles,
-                        pod,
-                        self.row_state.is_being_repeated,
-                    )?
-                    .into_frame();
                     let mut pos = offset;
                     if self.is_rtl {
                         // In RTL cells expand to the left, thus the position
                         // must additionally be offset by the cell's width.
                         pos.x = self.width - (pos.x + width);
                     }
-                    output.push_frame(pos, frame);
+                    positions.push(pos);
+                    jobs.push((cell, pod, locator));
                 }
             }
 
             offset.x += rcol;
         }
 
+        // Lay out the cells, in parallel if the row is wide enough to amortize
+        // the dispatch overhead, then place the resulting frames serially. The
+        // serial placement preserves the exact same output ordering as before,
+        // and locators are pre-assigned deterministically, so results are
+        // byte-identical regardless of the thread schedule.
+        let styles = self.styles;
+        if Self::should_parallelize_row(&jobs) {
+            let frames = engine
+                .parallelize(jobs.into_iter(), move |engine, (cell, pod, loc)| {
+                    layout_cell(cell, engine, loc, styles, pod, is_being_repeated)
+                        .map(Fragment::into_frame)
+                })
+                .collect::<Vec<_>>();
+            for (pos, frame) in positions.into_iter().zip(frames) {
+                output.push_frame(pos, frame?);
+            }
+        } else {
+            for (pos, (cell, pod, loc)) in positions.into_iter().zip(jobs.into_iter()) {
+                let frame =
+                    layout_cell(cell, engine, loc, styles, pod, is_being_repeated)?
+                        .into_frame();
+                output.push_frame(pos, frame);
+            }
+        }
+
         Ok(output)
+    }
+
+    /// Cost gate for parallelizing a row's cell layout. Dispatching work onto
+    /// the thread pool only pays off when there are enough independent cells in
+    /// the row; otherwise the overhead dominates. We use a conservative
+    /// threshold based on the number of cells to lay out.
+    fn should_parallelize_row<T>(jobs: &[T]) -> bool {
+        // Require at least this many cells before parallelizing a single row.
+        const MIN_CELLS_PER_ROW: usize = 4;
+        jobs.len() >= MIN_CELLS_PER_ROW
     }
 
     /// Layout a row spanning multiple regions.
