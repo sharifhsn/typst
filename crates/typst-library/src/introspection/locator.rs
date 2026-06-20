@@ -264,6 +264,26 @@ impl<'a> SplitLocator<'a> {
         self.next_inner(typst_utils::hash128(key))
     }
 
+    /// Produces a sublocator for a subtree, using an externally supplied
+    /// disambiguator instead of the internal mutable counter.
+    ///
+    /// This is the "frozen-hash" / pure variant of [`next_inner`]. The
+    /// disambiguator must equal the number of times the same `key` has been
+    /// produced by the equivalent sequence of `next_inner` calls before this
+    /// one. When `disambiguator` is computed by an upfront, deterministic scan
+    /// (e.g. the number of prior cells in row-major order sharing this key),
+    /// the resulting locator is byte-identical to the one the sequential
+    /// `next_inner` would have produced — but because it reads no mutable state
+    /// on `self`, it can be called for many subtrees concurrently.
+    ///
+    /// Note: callers that mix `next_pure` and `next_inner` on the same
+    /// `SplitLocator` would desynchronize the internal `disambiguators` map; in
+    /// practice a given split locator should use one or the other exclusively.
+    pub fn next_pure(&self, key: u128, disambiguator: usize) -> Locator<'a> {
+        let local = typst_utils::hash128(&(key, disambiguator, self.local));
+        Locator { outer: self.outer, local }
+    }
+
     /// Produces a sublocator for a subtree.
     pub fn next_inner(&mut self, key: u128) -> Locator<'a> {
         // Produce a locator disambiguator, for elements with the same key

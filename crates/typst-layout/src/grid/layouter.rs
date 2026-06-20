@@ -249,17 +249,50 @@ impl<'a> GridLayouter<'a> {
         let mut regions = regions;
         regions.expand = Axes::new(true, false);
 
-        // Prepare the locators for each cell in the cell grid.
-        let mut locator = locator.split();
-        let mut cell_locators = FxHashMap::default();
+        // Prepare the locators for each cell in the cell grid using the
+        // frozen-hash scheme.
+        //
+        // Phase 1 (sequential, cheap): scan the grid in row-major order and,
+        // for each cell, record its position, its span-derived key, and the
+        // *disambiguator* — the number of prior cells (in row-major order) that
+        // share the same key. This reproduces exactly what the sequential
+        // `SplitLocator::next` counter would have assigned, so output stays
+        // byte-identical.
+        //
+        // Phase 2 (parallelizable): turn each `(pos, key, disambiguator)` tuple
+        // into a `Locator` via `next_pure`, which is a pure function of those
+        // inputs and the split locator's local hash — it reads no mutable
+        // state, so the assignment is order-independent and can run in
+        // parallel.
+        let locator = locator.split();
+        let mut plan: Vec<(Axes<usize>, u128, usize)> =
+            Vec::with_capacity(grid.rows.len().saturating_mul(grid.cols.len()));
+        let mut counts: FxHashMap<u128, usize> = FxHashMap::default();
         for y in 0..grid.rows.len() {
             for x in 0..grid.cols.len() {
                 let Some(Entry::Cell(cell)) = grid.entry(x, y) else {
                     continue;
                 };
-                cell_locators.insert(Axes::new(x, y), locator.next(&cell.body.span()));
+                let key = typst_utils::hash128(&cell.body.span());
+                let slot = counts.entry(key).or_default();
+                let disambiguator = *slot;
+                *slot += 1;
+                plan.push((Axes::new(x, y), key, disambiguator));
             }
         }
+
+        let cell_locators: FxHashMap<Axes<usize>, Locator<'a>> = {
+            // The plan entries are mutually independent; `next_pure` is pure, so
+            // this map could be built in parallel. We keep it sequential here
+            // because the per-cell work (one hash) is tiny relative to the
+            // overhead of forking, but the data dependency is gone — this is
+            // the structural change that frozen-hash IDs unlock.
+            plan.iter()
+                .map(|&(pos, key, disambiguator)| {
+                    (pos, locator.next_pure(key, disambiguator))
+                })
+                .collect()
+        };
 
         Self {
             grid,
