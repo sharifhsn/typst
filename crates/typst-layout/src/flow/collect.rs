@@ -12,9 +12,9 @@ use typst_library::introspection::{
     Introspector, Location, Locator, LocatorLink, SplitLocator, Tag, TagElem,
 };
 use typst_library::layout::{
-    Abs, AlignElem, Alignment, Axes, BlockElem, ColbreakElem, FixedAlignment, FlushElem,
-    Fr, Fragment, Frame, FrameParent, Inherit, PagebreakElem, PlaceElem, PlacementScope,
-    Ratio, Region, Regions, Rel, Size, Sizing, Spacing, VElem,
+    Abs, AlignElem, Alignment, Axes, BlockBody, BlockElem, ColbreakElem, FixedAlignment,
+    FlushElem, Fr, Fragment, Frame, FrameParent, Inherit, PagebreakElem, PlaceElem,
+    PlacementScope, Ratio, Region, Regions, Rel, Size, Sizing, Spacing, VElem,
 };
 use typst_library::model::ParElem;
 use typst_library::routines::Pair;
@@ -82,6 +82,7 @@ impl<'a> Collector<'a, '_, '_> {
         let mut plan = Vec::with_capacity(self.children.len());
         let mut jobs = Vec::new();
         let mut block_jobs = Vec::new();
+        let mut multi_jobs = Vec::new();
         for &(child, styles) in self.children {
             if let Some(elem) = child.to_packed::<TagElem>() {
                 plan.push(Planned::Child(Child::Tag(&elem.tag)));
@@ -90,7 +91,7 @@ impl<'a> Collector<'a, '_, '_> {
             } else if let Some(elem) = child.to_packed::<ParElem>() {
                 self.par(elem, styles, &mut plan, &mut jobs);
             } else if let Some(elem) = child.to_packed::<BlockElem>() {
-                self.block(elem, styles, &mut plan, &mut block_jobs);
+                self.block(elem, styles, &mut plan, &mut block_jobs, &mut multi_jobs);
             } else if let Some(elem) = child.to_packed::<PlaceElem>() {
                 self.place(elem, styles, &mut plan)?;
             } else if child.is::<FlushElem>() {
@@ -142,6 +143,10 @@ impl<'a> Collector<'a, '_, '_> {
         block_jobs.retain(|job| {
             seen.insert(typst_utils::hash128(&(job.elem, job.styles, job.region)))
         });
+        let mut seen_multi = std::collections::HashSet::new();
+        multi_jobs.retain(|job| {
+            seen_multi.insert(typst_utils::hash128(&(job.elem, job.styles, job.regions)))
+        });
 
         // Warm the cache for unbreakable blocks in parallel. Their layout is
         // region-independent (the distributor always lays them out at the base
@@ -160,6 +165,38 @@ impl<'a> Collector<'a, '_, '_> {
                     job.locator.track(),
                     job.styles,
                     job.region,
+                );
+            });
+        }
+
+        // Warm the cache for breakable (Multi) blocks in parallel. This is the
+        // measure-place-flow prototype's MINIMAL FALLBACK path (used_oracle =
+        // false): we speculate each surviving breakable block at the FULL base
+        // region (a single region, no spill backlog), because the collector has
+        // no access to the page's `Regions` chain (backlog/last/full) — that is
+        // only known at distribution time. The distributor's authoritative pass
+        // requests `layout_multi_impl` with the SHRINKING remaining region (and
+        // any backlog), so this warming only hits the cache when the block lands
+        // first on a fresh, backlog-free region whose full height equals base.y.
+        // Misses are harmless: they simply don't populate the slot the serial
+        // pass reads. The conservative classifier in `block()` keeps every
+        // region-dependent red-team case (fr, place/float, MultiLayouter,
+        // SingleLayouter, manual height, footnotes, etc.) OFF this path so the
+        // warmed result is byte-identical to what the serial pass would compute
+        // at the same region.
+        if multi_jobs.len() >= 2 {
+            self.engine.prewarm(multi_jobs, |engine, job: MultiJob<'a>| {
+                let _ = layout_multi_impl(
+                    engine.world,
+                    engine.library,
+                    engine.introspector.into_raw(),
+                    engine.traced,
+                    TrackedMut::reborrow_mut(&mut engine.sink),
+                    engine.route.track(),
+                    job.elem,
+                    job.locator.track(),
+                    job.styles,
+                    job.regions,
                 );
             });
         }
@@ -312,13 +349,15 @@ impl<'a> Collector<'a, '_, '_> {
         styles: StyleChain<'a>,
         plan: &mut Vec<Planned<'a>>,
         block_jobs: &mut Vec<BlockJob<'a>>,
+        multi_jobs: &mut Vec<MultiJob<'a>>,
     ) {
         let locator = self.locator.next(&elem.span());
         let align = styles.resolve(AlignElem::alignment);
         let alone = self.children.len() == 1;
         let sticky = elem.sticky.get(styles);
         let breakable = elem.breakable.get(styles);
-        let fr = match elem.height.get(styles) {
+        let height = elem.height.get(styles);
+        let fr = match height {
             Sizing::Fr(fr) => Some(fr),
             _ => None,
         };
@@ -356,6 +395,24 @@ impl<'a> Collector<'a, '_, '_> {
                 cell: CachedCell::new(),
             }))));
         } else {
+            // Measure-place-flow prototype: conservatively speculate this
+            // breakable block at the full base region so its layout can be
+            // warmed in parallel below. The classifier MUST keep every
+            // region-dependent case on the serial path to stay byte-identical;
+            // see `can_warm_multi`. A cost gate skips trivially cheap blocks
+            // (warming them costs more in scheduling than it saves), mirroring
+            // the per-job gate used for the intra-row warming.
+            if !alone && self.can_warm_multi(elem, styles, height) {
+                multi_jobs.push(MultiJob {
+                    elem,
+                    styles,
+                    locator: locator.relayout(),
+                    regions: Regions::from(Region::new(
+                        self.base,
+                        Axes::new(self.expand, false),
+                    )),
+                });
+            }
             plan.push(Planned::Child(Child::Multi(self.boxed(MultiChild {
                 align,
                 sticky,
@@ -369,6 +426,59 @@ impl<'a> Collector<'a, '_, '_> {
 
         plan.push(Planned::Child(spacing(elem.below.get(styles))));
         self.par_situation = ParSituation::Other;
+    }
+
+    /// Conservative classifier for the measure-place-flow prototype: decides
+    /// whether a breakable block's layout at the full base region can be safely
+    /// pre-warmed in parallel without diverging from the serial distributor.
+    ///
+    /// Every case from the red-team analysis where frame content depends on the
+    /// remaining region height (and therefore where warming at the full region
+    /// could produce a result the serial pass would not) is kept OFF this path:
+    ///
+    /// - `fr` height (handled separately; never reaches here, but guarded).
+    /// - Manual (`Rel`) height: `breakable_pod` distributes the fixed height
+    ///   across the real region chain; warming at a single base region builds a
+    ///   different pod (no backlog), so the cache key/result would not match.
+    /// - `SingleLayouter`/`MultiLayouter` bodies: callbacks may read the region
+    ///   (remaining height / expansion), so their output is region-dependent.
+    /// - Vertical expansion (`expand.y`, only when `alone`, excluded by caller):
+    ///   already excluded because we only warm non-`alone` blocks.
+    ///
+    /// What remains is a breakable block with `height: auto` and a plain
+    /// `Content` body. Its first frame can still legitimately differ between the
+    /// full region and a shrunk region (it may break differently), which is
+    /// exactly why this is the MINIMAL FALLBACK: the warmed slot is only hit
+    /// when the distributor actually requests this same full base region (block
+    /// lands first on a fresh, backlog-free region). Otherwise it's a harmless
+    /// miss. Correctness does not depend on the hit rate.
+    ///
+    /// A region oracle (predicting the exact `Regions` the distributor will
+    /// request) would raise the hit rate, but is not implementable from the
+    /// collector — see the `blockers` note in the summary.
+    fn can_warm_multi(
+        &self,
+        elem: &'a Packed<BlockElem>,
+        styles: StyleChain<'a>,
+        height: Sizing,
+    ) -> bool {
+        // Only auto height is region-shape-stable enough to warm; fr and manual
+        // heights build region-dependent pods.
+        if !matches!(height, Sizing::Auto) {
+            return false;
+        }
+
+        // Layouter callbacks can read the region; only plain content bodies (or
+        // empty bodies) have region-independent first-frame content at the base.
+        match elem.body.get_ref(styles) {
+            None => {}
+            Some(BlockBody::Content(_)) => {}
+            Some(BlockBody::SingleLayouter(_)) | Some(BlockBody::MultiLayouter(_)) => {
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Collects a placed element into a [`PlacedChild`].
@@ -464,6 +574,23 @@ struct BlockJob<'a> {
     styles: StyleChain<'a>,
     locator: Locator<'a>,
     region: Region,
+}
+
+/// A breakable (Multi) block whose layout is speculatively warmed in parallel
+/// during [`Collector::run_block`] (measure-place-flow prototype).
+///
+/// Unlike [`BlockJob`], a breakable block's layout is region-DEPENDENT, so the
+/// `regions` here is a SPECULATION (the full base region as a single,
+/// backlog-free region). The warmed result only populates the cache slot the
+/// serial distributor reads when the distributor happens to request this exact
+/// `Regions` value (block lands first on a fresh region). A wrong speculation is
+/// a harmless cache miss, never a divergence, because the serial distributor
+/// remains the authoritative pass.
+struct MultiJob<'a> {
+    elem: &'a Packed<BlockElem>,
+    styles: StyleChain<'a>,
+    locator: Locator<'a>,
+    regions: Regions<'static>,
 }
 
 /// A prepared child in flow layout.
