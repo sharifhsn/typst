@@ -231,13 +231,21 @@ fn linebreak_optimized<'a>(
 ) -> Vec<Line<'a>> {
     let metrics = CostMetrics::compute(p);
 
+    // Determine the line break opportunities once. Both optimization passes
+    // below walk over the exact same breakpoints, and computing them involves
+    // running the ICU line segmenter and hyphenation, which is too expensive to
+    // do twice per paragraph.
+    let mut breaks = Vec::new();
+    breakpoints(p, |end, breakpoint| breaks.push((end, breakpoint)));
+
     // Determines the exact costs of a likely good layout through Knuth-Plass
     // with approximate metrics. We can use this cost as an upper bound to prune
     // the search space in our proper optimization pass below.
-    let upper_bound = linebreak_optimized_approximate(engine, p, width, &metrics);
+    let upper_bound =
+        linebreak_optimized_approximate(engine, p, width, &breaks, &metrics);
 
     // Using the upper bound, perform exact optimized linebreaking.
-    linebreak_optimized_bounded(engine, p, width, &metrics, upper_bound)
+    linebreak_optimized_bounded(engine, p, width, &breaks, &metrics, upper_bound)
 }
 
 /// Performs line breaking in optimized Knuth-Plass style, but with an upper
@@ -247,6 +255,7 @@ fn linebreak_optimized_bounded<'a>(
     engine: &Engine,
     p: &'a Preparation<'a>,
     width: Abs,
+    breaks: &[(usize, Breakpoint)],
     metrics: &CostMetrics,
     upper_bound: Cost,
 ) -> Vec<Line<'a>> {
@@ -264,7 +273,7 @@ fn linebreak_optimized_bounded<'a>(
     let mut active = 0;
     let mut prev_end = 0;
 
-    breakpoints(p, |end, breakpoint| {
+    for &(end, breakpoint) in breaks {
         // Find the optimal predecessor.
         let mut best: Option<Entry> = None;
 
@@ -347,7 +356,7 @@ fn linebreak_optimized_bounded<'a>(
 
         table.extend(best);
         prev_end = end;
-    });
+    }
 
     // Retrace the best path.
     let mut lines = Vec::with_capacity(16);
@@ -359,7 +368,14 @@ fn linebreak_optimized_bounded<'a>(
         panic!("bounded inline layout is incomplete");
 
         #[cfg(not(debug_assertions))]
-        return linebreak_optimized_bounded(engine, p, width, metrics, Cost::INFINITY);
+        return linebreak_optimized_bounded(
+            engine,
+            p,
+            width,
+            breaks,
+            metrics,
+            Cost::INFINITY,
+        );
     }
 
     while idx != 0 {
@@ -385,6 +401,7 @@ fn linebreak_optimized_approximate(
     engine: &Engine,
     p: &Preparation,
     width: Abs,
+    breaks: &[(usize, Breakpoint)],
     metrics: &CostMetrics,
 ) -> Cost {
     // Determine the cumulative estimation metrics.
@@ -411,7 +428,7 @@ fn linebreak_optimized_approximate(
     let mut active = 0;
     let mut prev_end = 0;
 
-    breakpoints(p, |end, breakpoint| {
+    for &(end, breakpoint) in breaks {
         // Find the optimal predecessor.
         let mut best: Option<Entry> = None;
         for (pred_index, pred) in table.iter().enumerate().skip(active) {
@@ -486,7 +503,7 @@ fn linebreak_optimized_approximate(
 
         table.extend(best);
         prev_end = end;
-    });
+    }
 
     // Retrace the best path.
     let mut indices = Vec::with_capacity(16);
