@@ -1,7 +1,7 @@
 use either::Either;
 use typst_library::layout::{Dir, Em};
 use typst_library::text::TextElem;
-use unicode_bidi::{BidiInfo, Level as BidiLevel};
+use unicode_bidi::{BidiClass, BidiInfo, Level as BidiLevel, bidi_class};
 
 use super::*;
 
@@ -75,11 +75,13 @@ pub fn prepare<'a>(
         _ => BidiLevel::ltr(),
     };
 
-    // BiDi analysis allocates several per-paragraph vectors. ASCII text under an
-    // LTR base direction is always uniformly LTR, so skip it entirely in that
+    // BiDi analysis allocates several per-paragraph vectors and runs the full
+    // Unicode bidirectional algorithm. Under an LTR base direction, text without
+    // any right-to-left or explicit directional-formatting characters resolves
+    // to a single uniform LTR run, so we can skip the analysis entirely in that
     // (very common) case; `shape_range` and line reordering both handle the
-    // absence of BiDi info as uniform base direction.
-    let info = if default_level.is_ltr() && text.is_ascii() {
+    // absence of BiDi info as the uniform base direction.
+    let info = if default_level.is_ltr() && !has_rtl_or_explicit(text) {
         None
     } else {
         Some(BidiInfo::new(text, Some(default_level)))
@@ -118,16 +120,46 @@ pub fn prepare<'a>(
     // bidirectional (some level differs from the base); otherwise reordering can
     // treat the whole line as the uniform base direction.
     let bidi = info.filter(|info| {
-        info.levels.iter().any(|level| level.is_ltr() != default_level.is_ltr())
+        info.levels
+            .iter()
+            .any(|level| level.is_ltr() != default_level.is_ltr())
     });
 
-    Ok(Preparation {
-        config,
-        text,
-        bidi,
-        items,
-        indices,
-        spans,
+    Ok(Preparation { config, text, bidi, items, indices, spans })
+}
+
+/// Whether `text` contains any character that requires the full BiDi algorithm
+/// under an LTR base direction, i.e. one that can introduce a right-to-left run
+/// or an explicit embedding, override, or isolate.
+///
+/// Every such character lives at or above U+0590 (the start of the Hebrew
+/// block; all bidi-control characters are higher still), so characters below
+/// that are always LTR-safe and we only consult the bidi class for the rest.
+/// This keeps the check as cheap as a byte scan for the common Latin/Cyrillic/
+/// Greek/CJK text while still covering it, not just ASCII.
+fn has_rtl_or_explicit(text: &str) -> bool {
+    // ASCII is always LTR-safe; this keeps the most common case as cheap as a
+    // vectorized byte scan rather than a `char`-by-`char` walk.
+    if text.is_ascii() {
+        return false;
+    }
+    text.chars().any(|c| {
+        c >= '\u{0590}'
+            && matches!(
+                bidi_class(c),
+                BidiClass::R
+                    | BidiClass::AL
+                    | BidiClass::AN
+                    | BidiClass::RLE
+                    | BidiClass::RLO
+                    | BidiClass::RLI
+                    | BidiClass::LRE
+                    | BidiClass::LRO
+                    | BidiClass::LRI
+                    | BidiClass::FSI
+                    | BidiClass::PDF
+                    | BidiClass::PDI
+            )
     })
 }
 
