@@ -219,7 +219,7 @@ impl ShapedGlyph {
 
     /// Whether the glyph is a western letter or number.
     pub fn is_letter_or_number(&self) -> bool {
-        matches!(self.c.script(), Script::Latin | Script::Greek | Script::Cyrillic)
+        matches!(char_script(self.c), Script::Latin | Script::Greek | Script::Cyrillic)
             || matches!(self.c, '#' | '$' | '%' | '&')
             || self.c.is_ascii_digit()
     }
@@ -751,9 +751,7 @@ pub fn shape_range<'a>(
         // Without BiDi info the text is uniformly the base (LTR) direction.
         let level = bidi.map_or_else(BidiLevel::ltr, |bidi| bidi.levels[i]);
         let curr_script = match script {
-            Smart::Auto => {
-                text[i..].chars().next().map_or(Script::Unknown, |c| c.script())
-            }
+            Smart::Auto => text[i..].chars().next().map_or(Script::Unknown, char_script),
             Smart::Custom(_) => Script::Unknown,
         };
 
@@ -770,6 +768,22 @@ pub fn shape_range<'a>(
     }
 
     process(cursor..range.end, prev_level);
+}
+
+/// The Unicode script of a character.
+///
+/// This is a fast path around [`UnicodeScript::script`], which does a binary
+/// search over the full script table for every character. Determining the
+/// script is hot (once per character while grouping shape runs and once per
+/// shaped glyph), and the overwhelmingly common ASCII range needs no table
+/// lookup: ASCII letters are `Latin` and every other ASCII character is
+/// `Common`.
+fn char_script(c: char) -> Script {
+    if c.is_ascii() {
+        if c.is_ascii_alphabetic() { Script::Latin } else { Script::Common }
+    } else {
+        c.script()
+    }
 }
 
 /// Whether this is not a specific script.
@@ -1087,7 +1101,7 @@ fn shape_segment<'a>(
             };
 
             let c = text[cluster..].chars().next().unwrap();
-            let script = c.script();
+            let script = char_script(c);
             let x_advance = font.to_em(pos[i].x_advance);
             ctx.glyphs.push(ShapedGlyph {
                 font: font.clone(),
