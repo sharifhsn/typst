@@ -23,6 +23,7 @@ smallvec = { workspace = true }
 thin-vec = { workspace = true }
 unicode-math-class = { workspace = true }
 libm = { workspace = true }
+xxhash-rust = { workspace = true }
 
 [lints]
 workspace = true
