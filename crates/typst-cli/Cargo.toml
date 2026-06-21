@@ -36,6 +36,7 @@ codespan-reporting = { workspace = true }
 color-print = { workspace = true }
 comemo = { workspace = true }
 dirs = { workspace = true }
+mimalloc = "0.1"
 ecow = { workspace = true }
 fs_extra = { workspace = true }
 open = { workspace = true }
