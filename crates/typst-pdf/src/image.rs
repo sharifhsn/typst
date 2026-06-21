@@ -192,22 +192,96 @@ fn convert_raster(
     raster: RasterImage,
     interpolate: bool,
 ) -> Result<krilla::image::Image, String> {
-    if let RasterFormat::Exchange(ExchangeFormat::Jpg) = raster.format() {
-        let image_data: Arc<dyn AsRef<[u8]> + Send + Sync> =
-            Arc::new(raster.data().clone());
-        let icc_profile = raster.icc().map(|i| {
-            let i: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(i.clone());
-            i
-        });
-
-        krilla::image::Image::from_jpeg_with_icc(
-            image_data.into(),
-            icc_profile.map(|i| i.into()),
-            interpolate,
-        )
-    } else {
-        krilla::image::Image::from_custom(PdfRasterImage::new(raster), interpolate)
+    // JPEG (DCTDecode) and eligible PNGs (FlateDecode + a PNG predictor) can be
+    // embedded into the PDF losslessly, so we hand krilla the original encoded
+    // bytes instead of decoded-and-re-encoded pixels. Other rasters keep the
+    // `from_custom` path, which reuses the pixels we already decoded.
+    match raster.format() {
+        RasterFormat::Exchange(ExchangeFormat::Jpg) => {
+            let image_data: Arc<dyn AsRef<[u8]> + Send + Sync> =
+                Arc::new(raster.data().clone());
+            krilla::image::Image::from_jpeg_with_icc(
+                image_data.into(),
+                icc_data(&raster),
+                interpolate,
+            )
+        }
+        RasterFormat::Exchange(ExchangeFormat::Png)
+            if png_passthrough_eligible(raster.data()) =>
+        {
+            let image_data: Arc<dyn AsRef<[u8]> + Send + Sync> =
+                Arc::new(raster.data().clone());
+            krilla::image::Image::from_png_with_icc(
+                image_data.into(),
+                icc_data(&raster),
+                interpolate,
+            )
+        }
+        _ => krilla::image::Image::from_custom(PdfRasterImage::new(raster), interpolate),
     }
+}
+
+/// The image's resolved ICC profile as krilla [`Data`](krilla::Data), if any.
+fn icc_data(raster: &RasterImage) -> Option<krilla::Data> {
+    raster.icc().map(|i| {
+        let i: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(i.clone());
+        i.into()
+    })
+}
+
+/// Whether a PNG qualifies for krilla's lossless passthrough: non-interlaced,
+/// opaque (no alpha channel and no `tRNS` chunk), grayscale or truecolor, at a
+/// bit depth of 8. This mirrors krilla's own eligibility check so that we only
+/// divert PNGs from the established `from_custom` decode path when the result is
+/// byte-for-byte the same image. Reads only the PNG's chunk headers, not pixels.
+fn png_passthrough_eligible(data: &[u8]) -> bool {
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if data.len() < 8 || &data[..8] != SIGNATURE {
+        return false;
+    }
+
+    let mut pos = 8;
+    let mut eligible = false;
+    while pos + 8 <= data.len() {
+        let Ok(len_bytes) = data[pos..pos + 4].try_into() else { return false };
+        let len = u32::from_be_bytes(len_bytes) as usize;
+        let kind = &data[pos + 4..pos + 8];
+        let body = pos + 8;
+        let Some(end) = body.checked_add(len) else { return false };
+        // Each chunk's data is followed by a 4-byte CRC.
+        if end.checked_add(4).is_none_or(|e| e > data.len()) {
+            return false;
+        }
+
+        match kind {
+            b"IHDR" if len >= 13 => {
+                let bit_depth = data[body + 8];
+                let color_type = data[body + 9];
+                let interlace = data[body + 12];
+                // Mirror krilla's `png_passthrough` eligibility: non-interlaced,
+                // and grayscale (0) / palette (3) at 1/2/4/8-bit or truecolor
+                // RGB (2) at 8-bit. krilla still validates the finer points (a
+                // present `PLTE`, no embedded ICC on palette) and falls back to
+                // decoding, so this only needs to gate the common case to avoid
+                // re-decoding images that can't be passed through.
+                eligible = interlace == 0
+                    && match color_type {
+                        0 | 3 => matches!(bit_depth, 1 | 2 | 4 | 8),
+                        2 => bit_depth == 8,
+                        _ => false,
+                    };
+            }
+            // Color-key transparency expands to an alpha mask, so disqualify. It
+            // always precedes the image data, so checking up to `IDAT` suffices.
+            b"tRNS" => return false,
+            b"IDAT" | b"IEND" => break,
+            _ => {}
+        }
+
+        pos = end + 4;
+    }
+
+    eligible
 }
 
 #[comemo::memoize]
