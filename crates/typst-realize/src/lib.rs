@@ -434,6 +434,42 @@ fn visit_show_rules<'a>(
     Ok(true)
 }
 
+/// Whether running pre-synthesis on an element of type `elem` could change
+/// whether any show rule in `styles` matches it.
+///
+/// Pre-synthesis (cloning the element and synthesizing it before preparation)
+/// exists only so that show rule selectors can match on synthesized fields,
+/// e.g. `show figure.where(kind: table)`. The work is otherwise wasted because
+/// `prepare` synthesizes the real element again. A selector only reads field
+/// values (and thus can be influenced by synthesis) through the dictionary of
+/// an `Elem` selector; all other selector kinds match on intrinsic properties
+/// (element type, label, location, capability) that synthesis never changes. So
+/// we only need pre-synthesis if some recipe carries an `Elem` selector with a
+/// field predicate that targets this element's type.
+fn presynthesis_may_affect_match(elem: Element, styles: StyleChain) -> bool {
+    fn selector_reads_fields(selector: &Selector, elem: Element) -> bool {
+        match selector {
+            Selector::Elem(e, dict) => *e == elem && dict.is_some(),
+            Selector::Or(sels) | Selector::And(sels) => {
+                sels.iter().any(|s| selector_reads_fields(s, elem))
+            }
+            Selector::Before { selector, .. }
+            | Selector::After { selector, .. }
+            | Selector::Within { selector, .. } => {
+                selector_reads_fields(selector, elem)
+            }
+            Selector::Location(_)
+            | Selector::Label(_)
+            | Selector::Regex(_)
+            | Selector::Can(_) => false,
+        }
+    }
+
+    styles
+        .recipes()
+        .any(|recipe| recipe.selector().is_some_and(|s| selector_reads_fields(s, elem)))
+}
+
 /// Inspects an element and the current styles and determines how to proceed
 /// with the styling.
 fn verdict<'a>(
@@ -451,7 +487,10 @@ fn verdict<'a>(
     // `show figure.where(kind: table)` won't work :(
     let mut elem = elem;
     let mut slot;
-    if !prepared && elem.can::<dyn Synthesize>() {
+    if !prepared
+        && elem.can::<dyn Synthesize>()
+        && presynthesis_may_affect_match(elem.elem(), styles)
+    {
         slot = elem.clone();
         slot.with_mut::<dyn Synthesize>()
             .unwrap()
