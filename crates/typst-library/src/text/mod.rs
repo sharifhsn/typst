@@ -40,9 +40,8 @@ use smallvec::SmallVec;
 use typst_syntax::Spanned;
 use typst_utils::singleton;
 
-use crate::World;
 use crate::diag::{Hint, HintedStrResult, SourceResult, StrResult, bail, warning};
-use crate::engine::Engine;
+use crate::engine::{Engine, Sink};
 use crate::foundations::{
     Args, Array, Cast, Construct, Content, Dict, Fold, IntoValue, NativeElement, Never,
     NoneValue, Packed, PlainText, Regex, Repr, Resolve, Scope, Set, Smart, Str,
@@ -1573,16 +1572,31 @@ pub fn is_default_ignorable(c: char) -> bool {
     DEFAULT_IGNORABLE_DATA.contains(c)
 }
 
-/// Checks for font families that are not available.
+/// Records font families for a deferred availability check.
+///
+/// Validation is deferred to [`resolve_font_checks`] (run once at the end of
+/// compilation) rather than performed here, because looking up a family in the
+/// font book forces a potentially expensive font scan. Targets that never lay
+/// out text themselves — HTML, where the browser performs layout — don't need
+/// the font book at all, so we avoid touching it during evaluation.
 fn check_font_list(engine: &mut Engine, list: &Spanned<FontList>) {
-    let book = engine.world.book();
     for family in &list.v {
-        if book.select_family(family.as_str()).next().is_none() {
-            engine.sink.warn(warning!(
-                list.span,
-                "unknown font family: {}",
-                family.as_str(),
-            ));
+        engine.sink.check_font(family.as_str().into(), list.span);
+    }
+}
+
+/// Resolves the font-family availability checks recorded by [`check_font_list`],
+/// emitting an "unknown font family" warning for each family that is not
+/// available in `book`.
+///
+/// This is called once at the end of compilation for targets that use fonts for
+/// layout. It is intentionally skipped for HTML, whose output never references
+/// the build machine's fonts (so the warning would be meaningless and forcing a
+/// font scan would be wasteful).
+pub fn resolve_font_checks(book: &FontBook, sink: &mut Sink) {
+    for (family, span) in sink.take_font_checks() {
+        if book.select_family(&family).next().is_none() {
+            sink.warn(warning!(span, "unknown font family: {family}"));
         }
     }
 }

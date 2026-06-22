@@ -78,6 +78,18 @@ where
     let mut sink = Sink::new();
     let output = compile_impl::<T>(world.track(), Traced::default().track(), &mut sink)
         .map_err(deduplicate);
+
+    // Resolve deferred font-family availability checks (recorded while
+    // evaluating `set text(font: ..)` rules). We skip this for HTML: its output
+    // never references the build machine's fonts (the browser lays out text), so
+    // the "unknown font family" warning would be meaningless and forcing the
+    // font-book scan it requires would be wasteful. For paged output the book is
+    // built during layout anyway, so this is essentially free; bundle keeps its
+    // existing behavior.
+    if T::target() != Target::Html {
+        typst_library::text::resolve_font_checks(world.book(), &mut sink);
+    }
+
     Warned { output, warnings: sink.warnings() }
 }
 
