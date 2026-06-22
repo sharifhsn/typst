@@ -178,3 +178,9 @@ wildcard_in_or_patterns = "allow"
 # See https://github.com/typst/typst/pull/6560#issuecomment-3045393640
 derived_hash_with_manual_eq = "allow"
 disallowed_methods = "warn"
+
+# Prototype: uses the unreleased `hayagriva::archive::locale` (branch
+# `locale-by-code`). For a real change, bump to the hayagriva release that
+# includes it instead of this local path patch.
+[patch.crates-io]
+hayagriva = { path = "/Users/sharif/Code/hayagriva" }

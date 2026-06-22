@@ -1028,10 +1028,33 @@ fn render<'a>(
     bib: &PreparedBibliography<'a>,
     offsets: &mut FxHashMap<Smart<&'a str>, usize>,
 ) -> hayagriva::Rendered {
-    static LOCALES: LazyLock<Vec<citationberg::Locale>> =
-        LazyLock::new(hayagriva::archive::locales);
-
     let database = &bib.elem.sources.derived;
+
+    // Determine which CSL locales this bibliography may need and deserialize
+    // only those. `hayagriva::archive::locales()` deserializes all ~64 bundled
+    // locale files, which dominates citation/bibliography cost on one-shot
+    // compiles even though a document typically uses a single locale.
+    //
+    // hayagriva's lookup for externally supplied locale files only ever consults
+    // the requested locale, its fallback, and `en-US`, so loading just those is
+    // equivalent to passing every bundled locale.
+    fn want(code: citationberg::LocaleCode, needed: &mut Vec<citationberg::LocaleCode>) {
+        let candidates =
+            [code.fallback(), Some(citationberg::LocaleCode::en_us()), Some(code)];
+        for c in candidates.into_iter().flatten() {
+            if !needed.contains(&c) {
+                needed.push(c);
+            }
+        }
+    }
+    let mut needed = Vec::new();
+    for group in &bib.subgroups {
+        let first = &group.citations[0];
+        want(locale(first.lang.unwrap_or(Lang::ENGLISH), first.region.flatten()), &mut needed);
+    }
+    want(locale(bib.elem.lang.unwrap_or(Lang::ENGLISH), bib.elem.region.flatten()), &mut needed);
+    let locales: Vec<citationberg::Locale> =
+        needed.iter().filter_map(hayagriva::archive::locale).collect();
 
     let mut driver = BibliographyDriver::new();
     let mut offset = bib
@@ -1062,7 +1085,7 @@ fn render<'a>(
             items,
             group.style.get(),
             Some(locale),
-            &LOCALES,
+            &locales,
             None,
         ));
     }
@@ -1079,7 +1102,7 @@ fn render<'a>(
                 vec![CitationItem::new(entry, None, None, true, None)],
                 bib_style.get(),
                 Some(locale.clone()),
-                &LOCALES,
+                &locales,
                 None,
             ));
         }
@@ -1088,7 +1111,7 @@ fn render<'a>(
     let rendered = driver.finish(BibliographyRequest {
         style: bib_style.get(),
         locale: Some(locale),
-        locale_files: &LOCALES,
+        locale_files: &locales,
     });
 
     if let Some(offset) = offset
