@@ -170,9 +170,19 @@ pub fn scan(path: &std::path::Path) -> impl Iterator<Item = (FontPath, FontInfo)
 fn with_db(
     f: impl FnOnce(&mut fontdb::Database),
 ) -> impl Iterator<Item = (FontPath, FontInfo)> {
+    use rayon::iter::{IntoParallelIterator, ParallelIterator};
+
     let mut db = fontdb::Database::new();
     f(&mut db);
-    db.faces()
+
+    // Collect the face locations first (cheap), then extract `FontInfo` for each
+    // in parallel. Parsing a face (and especially walking its cmap to compute
+    // coverage) dominates the scan and is independent per face, so this is a
+    // large speedup on systems with many fonts. `into_par_iter` over a `Vec` is
+    // order-preserving, so the resulting font book is identical to a sequential
+    // scan.
+    let faces: Vec<(fontdb::ID, u32, PathBuf)> = db
+        .faces()
         .filter_map(|face| {
             let path = match &face.source {
                 fontdb::Source::File(path) | fontdb::Source::SharedFile(path, _) => path,
@@ -180,14 +190,17 @@ fn with_db(
                 // shouldn't be any.
                 fontdb::Source::Binary(_) => return None,
             };
+            Some((face.id, face.index, path.clone()))
+        })
+        .collect();
 
+    faces
+        .into_par_iter()
+        .filter_map(|(id, index, path)| {
             let info = db
-                .with_face_data(face.id, FontInfo::new)
+                .with_face_data(id, FontInfo::new)
                 .expect("database must contain this font")?;
-
-            let path = FontPath { path: path.clone(), index: face.index };
-
-            Some((path, info))
+            Some((FontPath { path, index }, info))
         })
         .collect::<Vec<_>>()
         .into_iter()
