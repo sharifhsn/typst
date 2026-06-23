@@ -266,6 +266,73 @@ pub fn compile_once(
 
     let Warned { output, mut warnings } = compile_and_export(world, config);
 
+    // Env-gated warm-recompile benchmark (perf investigation). After the cold
+    // compile, replay `typst watch`'s recompile loop (`world.reset()` +
+    // `comemo::evict(10)` + recompile). TYPST_BENCH_WARM=N does N no-change
+    // recompiles (the incremental floor). TYPST_BENCH_WARM=edit:N edits one
+    // character of the main source each time (a realistic keystroke).
+    if let Ok(spec) = std::env::var("TYPST_BENCH_WARM") {
+        let (edit, n) = match spec.split_once(':') {
+            Some((mode, num)) => (mode == "edit", num.parse().unwrap_or(10)),
+            None => (false, spec.parse().unwrap_or(10)),
+        };
+        let main_path = match &config.input {
+            Input::Path(p) => Some(p.clone()),
+            Input::Stdin => None,
+        };
+        let original =
+            main_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+        let mut total = Vec::new();
+        let mut compile_ms = Vec::new();
+        let mut export_ms = Vec::new();
+        for i in 0..n {
+            if edit && let (Some(orig), Some(path)) = (&original, &main_path) {
+                let mid = orig.len() / 2;
+                let mut s = orig.clone();
+                if i % 2 == 0 { s.insert(mid, ' '); }
+                std::fs::write(path, &s).ok();
+            }
+            world.reset();
+            comemo::evict(10);
+            let t = std::time::Instant::now();
+            // Split compile vs export for paged formats to attribute the floor.
+            if matches!(
+                config.output_format,
+                OutputFormat::Pdf | OutputFormat::Png | OutputFormat::Svg
+            ) {
+                let tc = std::time::Instant::now();
+                let Warned { output, .. } = typst::compile::<PagedDocument>(world);
+                compile_ms.push(tc.elapsed().as_secs_f64() * 1e3);
+                if let Ok(doc) = output {
+                    let te = std::time::Instant::now();
+                    let _ = export_paged(&doc, config);
+                    export_ms.push(te.elapsed().as_secs_f64() * 1e3);
+                }
+            } else {
+                let _ = compile_and_export(world, config);
+            }
+            total.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        if let (Some(orig), Some(path)) = (&original, &main_path) {
+            std::fs::write(path, orig).ok();
+        }
+        let med = |mut v: Vec<f64>| {
+            if v.is_empty() {
+                return 0.0;
+            }
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        eprintln!(
+            "[warm{}] total {:.2}ms = compile {:.2}ms + export {:.2}ms (n={})",
+            if edit { ":edit" } else { "" },
+            med(total),
+            med(compile_ms),
+            med(export_ms),
+            n,
+        );
+    }
+
     // Add static warnings (for deprecated CLI flags and such).
     for warning in config.warnings.iter() {
         warnings.push(
