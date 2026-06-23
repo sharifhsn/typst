@@ -83,6 +83,9 @@ pub struct CompileConfig {
     /// The export cache for images, used for caching output files in `typst
     /// watch` sessions with images.
     pub export_cache: ExportCache,
+    /// Hash of the last PDF-exported `PagedDocument`, used to skip re-export in
+    /// `typst watch` sessions when the document is unchanged.
+    pub pdf_export_hash: RwLock<Option<u128>>,
     /// Server for `typst watch` to HTML.
     #[cfg(feature = "http-server")]
     pub server: Option<HttpServer>,
@@ -243,6 +246,7 @@ impl CompileConfig {
             diagnostic_format: args.process.diagnostic_format,
             open: args.open.clone(),
             export_cache: ExportCache::new(),
+            pdf_export_hash: RwLock::new(None),
             deps,
             deps_format,
             #[cfg(feature = "http-server")]
@@ -282,6 +286,9 @@ pub fn compile_once(
         };
         let original =
             main_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+        // Simulate `typst watch` so watch-only optimizations (e.g. the
+        // document-unchanged PDF export skip) are exercised.
+        config.watching = true;
         let mut total = Vec::new();
         let mut compile_ms = Vec::new();
         let mut export_ms = Vec::new();
@@ -442,8 +449,32 @@ fn export_paged(
     }
 }
 
+/// Whether the configured output already exists on disk (always `false` for
+/// stdout, which must be re-emitted every time).
+fn output_exists(output: &Output) -> bool {
+    match output {
+        Output::Path(path) => path.exists(),
+        Output::Stdout => false,
+    }
+}
+
 /// Export to a PDF.
 fn export_pdf(document: &PagedDocument, config: &CompileConfig) -> SourceResult<()> {
+    // When watching, skip re-serializing and rewriting the PDF if the document
+    // is unchanged since the last export (e.g. a save with no visible change, an
+    // edit to a comment, or a touched but irrelevant dependency). PDF export is
+    // the dominant cost of an incremental recompile, so this makes such no-op
+    // recompiles effectively free. Mirrors the per-page `ExportCache` used for
+    // PNG/SVG export.
+    if config.watching {
+        let hash = typst::utils::hash128(document);
+        let unchanged = *config.pdf_export_hash.read() == Some(hash);
+        if unchanged && output_exists(&config.output) {
+            return Ok(());
+        }
+        *config.pdf_export_hash.write() = Some(hash);
+    }
+
     let options = pdf_options(config);
     let buffer = typst_pdf::pdf(document, &options)?;
     config
