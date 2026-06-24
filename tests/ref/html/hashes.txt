@@ -1,5 +1,5 @@
 c450b9a1aefa047a2b9a521a68f7f2b5 basic-sup-sub
-a845db3f6f6d466d683136b703f44cf6 basic-table
+a1e39212491a90987115dc3001503079 basic-table
 7c963ec939cdb49eb712fb761554ecbd bibliography-basic
 3f625e61698549ccccf65b72a66b72e7 bibliography-csl-display
 74b33b507da27e15d265f3217c858ac6 bibliography-custom-title
@@ -38,8 +38,8 @@ ffa25d90e2baac1e02b03a60cae89720 block-html-block
 7ae64640fd751161f5897e1506c73bc3 cite-assignment-target
 661ff95a98d1254954d821d2146617ce cite-form
 252cb984e3a921ac9d717570371f4fa6 cite-group
-e87734ba4dba7fed32967be69484478c col-gutter-table
-e87734ba4dba7fed32967be69484478c col-row-gutter-table
+d867e6f958bb7007765fff7b510f3edf col-gutter-table
+d867e6f958bb7007765fff7b510f3edf col-row-gutter-table
 c3adb00220cf56685a91e1bd4d93f3b4 divider-html
 4131a1789df95f853768971f54e850a9 enum-par
 013e6642f1140f60b83d7ca64ca77c87 enum-start
@@ -89,7 +89,7 @@ af593393cbd2ecd673f66d3d81d639af issue-4188-lr-corner-brackets
 eaea8dbdff740aba6f875d2b1def88b5 issue-6090-math-overhang
 cffe60d6afdbe66447c7db8982203273 issue-6170-equation-stroke
 b1b17f3b81e381628200be8eee0a7e27 issue-7437-math-accent-text-presentation
-3277fec377f92a3ca4d6d78ad5bccfcc issue-7751-table-cell-show-rules
+6dde06de1098b720ca5b09546e7d77dd issue-7751-table-cell-show-rules
 8e6507eafdb9c00755087dc76cd14f88 issue-8261-string-as-ellipsis
 0686c3a510ddf969416d0931f1c0c760 issue-8261-string-as-empty
 51719643a3ad5c5a58e9a93141653d28 issue-8261-string-as-non-numeric
@@ -442,9 +442,9 @@ c80288e3a445f09afbd9844b16acaf26 mozilla-mathml-test-5
 1d9de9f730a93ec3a560a1991ad1cbe5 mozilla-mathml-test-7
 4085e9183394c806cab9ab9452f9d852 mozilla-mathml-test-8
 52e1ad1c3d7632a8f1e4e4a1abfc1949 mozilla-mathml-test-9
-1c10cabdf078e21840dec9d575164bc7 multi-header-inside-table
-a2f8476b6a959f51028a2531b16059e5 multi-header-table
-a2f8476b6a959f51028a2531b16059e5 multi-header-table-gutter
+cfce992b0b5f1a3333a98e176cdc944a multi-header-inside-table
+631cebb8f092db3a8affc6037ab996c8 multi-header-table
+631cebb8f092db3a8affc6037ab996c8 multi-header-table-gutter
 516b44f7125ed05b8b60b200b2198638 outline-figure-html
 ba29f08348366fb1fb788b35ba1883c7 outline-html
 de2024fd87b523ac07b7b94ec86c343a page-set-html
@@ -465,12 +465,12 @@ e9c863ebe3c177f34b94fcae961a4d72 quote-nesting-html
 8498ef968b5bdbb377e37da1fa323632 raw-html
 579a4e43087174d0a68087fb296afddd raw-html-inline-spaces
 e7396dd243445deea1123be773e8cc6e ref-basic
-e87734ba4dba7fed32967be69484478c row-gutter-table
+d867e6f958bb7007765fff7b510f3edf row-gutter-table
 a9fc169ae1d6a621514b3d8278c41f8c smallcaps-all
 69291c4864e3d188b14af93b73437b71 smartquote-inline-block
 1ac77c88f2c510e51c1e029a16c8148f smartquote-nesting-twice
-d789232c967871be7d74ee6a6c94cb6b table-wide-header-gutter-table
-d789232c967871be7d74ee6a6c94cb6b table-wide-header-table
+487890fede42cd4a1c5d9c987af0bd2c table-wide-header-gutter-table
+487890fede42cd4a1c5d9c987af0bd2c table-wide-header-table
 98389aa3da9a5778c3e5234f6c3d999c terms-par
 390da3f039d11cfcc4fdd011b19a9e9b text-lang
 42e35260d4454f917ebe2105c4102844 text-lang-region

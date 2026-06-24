@@ -670,6 +670,13 @@ fn show_cell(tag: HtmlTag, cell: &Cell, styles: StyleChain) -> Content {
     let cell = cell.body.clone();
     let Some(cell) = cell.to_packed::<TableCell>() else { return cell };
     let mut attrs = HtmlAttrs::new();
+    // Only header rows are rendered as `<th>`, so these are column headers.
+    // Declaring their scope lets assistive technology associate each header
+    // with its column, matching the accessibility information Typst already
+    // emits for tagged PDF.
+    if tag == tag::th {
+        attrs.push(attr::scope, "col");
+    }
     let span = |n: NonZeroUsize| (n != NonZeroUsize::MIN).then(|| n.to_string());
     if let Some(colspan) = span(cell.colspan.get(styles)) {
         attrs.push(attr::colspan, colspan);
