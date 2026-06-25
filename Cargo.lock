@@ -1485,6 +1485,7 @@ dependencies = [
 [[package]]
 name = "krilla"
 version = "0.8.2"
+source = "git+https://github.com/sharifhsn/krilla?branch=incr-export-experiment#70e7cdf5c46d656becc565a0b95230fef066ce59"
 dependencies = [
  "base64",
  "bumpalo",

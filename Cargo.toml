@@ -180,4 +180,4 @@ derived_hash_with_manual_eq = "allow"
 disallowed_methods = "warn"
 
 [patch.crates-io]
-krilla = { path = "../krilla/crates/krilla" }
+krilla = { git = "https://github.com/sharifhsn/krilla", branch = "incr-export-experiment" }
