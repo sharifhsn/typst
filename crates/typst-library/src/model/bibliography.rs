@@ -1028,8 +1028,21 @@ fn render<'a>(
     bib: &PreparedBibliography<'a>,
     offsets: &mut FxHashMap<Smart<&'a str>, usize>,
 ) -> hayagriva::Rendered {
-    static LOCALES: LazyLock<Vec<citationberg::Locale>> =
-        LazyLock::new(hayagriva::archive::locales);
+    // hayagriva's `archive::locales()` deserializes all ~64 bundled CSL locale
+    // files sequentially via CBOR, which dominates citation/bibliography cost on
+    // one-shot compiles (the document typically only needs one locale). The
+    // locales are independent, so deserialize them in parallel. `par_iter()`
+    // collects in order, so the result is identical to `archive::locales()`.
+    static LOCALES: LazyLock<Vec<citationberg::Locale>> = LazyLock::new(|| {
+        use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+        hayagriva::archive::LOCALES
+            .par_iter()
+            .map(|bytes| {
+                ciborium::de::from_reader::<citationberg::Locale, _>(*bytes)
+                    .expect("bundled CSL locale should deserialize")
+            })
+            .collect()
+    });
 
     let database = &bib.elem.sources.derived;
 
