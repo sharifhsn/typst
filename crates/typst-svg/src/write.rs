@@ -45,6 +45,28 @@ impl<'a> SvgElem<'a> {
         f(self);
         self
     }
+
+    /// Create a child element containing a single text node, then close it.
+    /// Used for `<title>` and `<desc>` accessibility metadata. Whitespace is
+    /// preserved so multi-space content stays intact.
+    pub fn text_elem(&mut self, name: &str, text: &str) -> &mut Self {
+        self.xml.start_element(name);
+        self.xml.set_preserve_whitespaces(true);
+        self.xml.write_text(text);
+        self.xml.set_preserve_whitespaces(false);
+        self.xml.end_element();
+        self
+    }
+
+    /// Write a raw text node into the currently-open element. Used for the
+    /// selectable `<tspan>` overlay. Whitespace is preserved so multi-space
+    /// runs stay searchable.
+    pub fn write_text(&mut self, text: &str) -> &mut Self {
+        self.xml.set_preserve_whitespaces(true);
+        self.xml.write_text(text);
+        self.xml.set_preserve_whitespaces(false);
+        self
+    }
 }
 
 impl Drop for SvgElem<'_> {

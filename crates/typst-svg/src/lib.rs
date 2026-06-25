@@ -34,7 +34,8 @@ pub fn svg(page: &Page, opts: &SvgOptions) -> String {
 
     let mut renderer = SVGRenderer::new();
     let mut xml = XmlWriter::new(xml_options(opts.pretty));
-    let mut svg = svg_header(&mut xml, size);
+    let mut svg = svg_header_with_meta(&mut xml, size, opts);
+    emit_accessibility_children(&mut svg, opts);
 
     let state = State::new(size);
     renderer.render_page(&mut svg, &state, ts, page);
@@ -136,7 +137,8 @@ pub fn svg_merged(document: &PagedDocument, opts: &SvgOptions, gap: Abs) -> Stri
 
     let mut renderer = SVGRenderer::new();
     let mut xml = XmlWriter::new(xml_options(opts.pretty));
-    let mut svg = svg_header(&mut xml, size);
+    let mut svg = svg_header_with_meta(&mut xml, size, opts);
+    emit_accessibility_children(&mut svg, opts);
 
     let mut y = Abs::zero();
     for page in document.pages() {
@@ -185,6 +187,13 @@ pub struct SvgOptions {
     pub render_bleed: bool,
     /// Whether to format the SVG in a human-readable way.
     pub pretty: bool,
+    /// Optional document title, emitted as a child `<title>` for accessibility.
+    pub title: Option<String>,
+    /// Optional document description, emitted as a child `<desc>`.
+    pub description: Option<String>,
+    /// Optional RFC-3066 language tag (e.g. "en", "en-US"), emitted as
+    /// `xml:lang`.
+    pub lang: Option<String>,
 }
 
 /// Renders one or multiple frames to an SVG file.
@@ -440,6 +449,40 @@ impl<'a> SVGRenderer<'a> {
 /// `viewBox` and `width` and `height` attributes.
 fn svg_header(xml: &mut XmlWriter, size: Size) -> SvgElem<'_> {
     svg_header_with_custom_attrs(xml, size, |_| {})
+}
+
+/// Like [`svg_header`] but also emits accessibility metadata (`role`,
+/// `xml:lang`) from the given [`SvgOptions`]. The `<title>`/`<desc>` children
+/// must be written separately via [`emit_accessibility_children`] *after* the
+/// header is fully built, because xmlwriter forbids setting an element's
+/// attributes once a child element has opened.
+fn svg_header_with_meta<'x>(
+    xml: &'x mut XmlWriter,
+    size: Size,
+    opts: &SvgOptions,
+) -> SvgElem<'x> {
+    let lang = opts.lang.clone();
+    svg_header_with_custom_attrs(xml, size, move |svg| {
+        // role first so it is stable/leading among custom attrs.
+        svg.attr("role", "img");
+        if let Some(lang) = &lang {
+            svg.attr("xml:lang", lang.as_str());
+        }
+    })
+}
+
+/// Emit the `<title>`/`<desc>` accessibility children for the root `<svg>`.
+///
+/// Must be called on a fully-built header (after all `<svg>` attributes are
+/// written) so that the title/desc children, which become the first children
+/// of `<svg>`, are correctly placed for assistive technology.
+fn emit_accessibility_children(svg: &mut SvgElem, opts: &SvgOptions) {
+    if let Some(title) = &opts.title {
+        svg.text_elem("title", title);
+    }
+    if let Some(desc) = &opts.description {
+        svg.text_elem("desc", desc);
+    }
 }
 
 /// Write the SVG header with additional attributes and standard attributes.

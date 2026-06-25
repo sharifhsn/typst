@@ -40,15 +40,70 @@ impl SVGRenderer<'_> {
 
         let mut x = Abs::pt(0.0);
         let mut y = Abs::pt(0.0);
+        // Positions + Unicode for the invisible selectable overlay. This
+        // allocation is pure metadata and does not touch path emission.
+        let mut overlay: Vec<(Abs, Abs, &str)> = Vec::with_capacity(text.glyphs.len());
         for glyph in &text.glyphs {
             let id = GlyphId(glyph.id);
             let x_offset = x + glyph.x_offset.at(text.size);
             let y_offset = y + glyph.y_offset.at(text.size);
 
+            // UNCHANGED: visible path/image glyph emission.
             self.render_glyph(svg, &state, text, id, x_offset, y_offset);
+
+            // Record the original Unicode for this glyph cluster. The range may
+            // span multiple bytes / a ligature; indexing `text.text` is safe
+            // because ranges fall on UTF-8 char boundaries (see item.rs).
+            let s = text.text.get(glyph.range()).unwrap_or("");
+            overlay.push((x_offset, y_offset, s));
 
             x += glyph.x_advance.at(text.size);
             y += glyph.y_advance.at(text.size);
+        }
+
+        // Invisible-but-selectable text overlay (additive; paints zero ink).
+        self.render_text_overlay(svg, text, &overlay);
+    }
+
+    /// Emit an invisible real-Unicode `<text>` layer so the rendered glyph
+    /// outlines become selectable, searchable, and screen-reader accessible.
+    /// The visible pixels remain solely the `<path>`/`<use>` glyph outlines —
+    /// this layer uses `fill: transparent` (NOT `display:none` /
+    /// `visibility:hidden`, which would remove it from selection/search/the
+    /// a11y tree).
+    fn render_text_overlay(
+        &mut self,
+        svg: &mut SvgElem,
+        text: &TextItem,
+        glyphs: &[(Abs, Abs, &str)],
+    ) {
+        if glyphs.iter().all(|(_, _, s)| s.is_empty()) {
+            return;
+        }
+
+        let mut t = svg.elem("text");
+        // Glyphs are never painted, so the family only loosely affects the
+        // (invisible) fallback layout, which the per-tspan x positions then pin
+        // to the painted glyphs.
+        t.attr("font-family", "sans-serif");
+        t.attr("font-size", text.size.to_pt());
+        // The invisibility mechanism: keeps the element in layout / hit-test /
+        // a11y tree while painting nothing.
+        t.attr("fill", "transparent");
+        t.attr("xml:space", "preserve");
+
+        for (gx, gy, s) in glyphs {
+            if s.is_empty() {
+                continue;
+            }
+            // The outer <g> applies scale(1, -1) (Y-flip). A <text> baseline
+            // placed at `y` in that flipped frame would sit mirrored, so negate
+            // y to land the invisible baseline on the visible glyph baseline. x
+            // is unaffected by the Y-flip.
+            let mut sp = t.elem("tspan");
+            sp.attr("x", gx.to_pt());
+            sp.attr("y", (-*gy).to_pt());
+            sp.write_text(s);
         }
     }
 

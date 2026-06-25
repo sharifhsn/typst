@@ -11,6 +11,7 @@ use typst::diag::{
 };
 use typst::foundations::{Datetime, Smart};
 use typst::layout::PageRanges;
+use typst::model::Document;
 use typst::syntax::Span;
 use typst_bundle::{Bundle, BundleOptions, VirtualFs};
 use typst_html::{HtmlDocument, HtmlOptions};
@@ -393,7 +394,7 @@ fn export_bundle(bundle: Bundle, config: &CompileConfig) -> SourceResult<Vec<Out
         html: html_options(config),
         pdf: pdf_options(config),
         png: png_options(config),
-        svg: svg_options(config),
+        svg: svg_options(config, None),
     };
 
     let fs = typst_bundle::export(&bundle, &options)?;
@@ -483,6 +484,11 @@ fn export_image(
         })
         .collect::<Vec<_>>();
 
+    // Build the SVG export options once; they carry document-level
+    // accessibility metadata (title/description/lang) and are shared across all
+    // pages. Cheap to clone-free share by reference into the per-page export.
+    let svg_options = svg_options(config, Some(document));
+
     if !can_handle_multiple && exported_pages.len() > 1 {
         let err = match config.output {
             Output::Stdout => "to stdout",
@@ -527,7 +533,7 @@ fn export_image(
                 Output::Stdout => Output::Stdout,
             };
 
-            export_image_page(config, page, &output, fmt)?;
+            export_image_page(config, page, &output, fmt, &svg_options)?;
             Ok(output)
         })
         .collect::<StrResult<Vec<Output>>>()
@@ -568,6 +574,7 @@ fn export_image_page(
     page: &Page,
     output: &Output,
     fmt: ImageExportFormat,
+    svg_options: &SvgOptions,
 ) -> StrResult<()> {
     match fmt {
         ImageExportFormat::Png => {
@@ -581,8 +588,7 @@ fn export_image_page(
                 .map_err(|err| eco_format!("failed to write PNG file ({err})"))?;
         }
         ImageExportFormat::Svg => {
-            let options = svg_options(config);
-            let svg = typst_svg::svg(page, &options);
+            let svg = typst_svg::svg(page, svg_options);
             output
                 .write(svg.as_bytes())
                 .map_err(|err| eco_format!("failed to write SVG file ({err})"))?;
@@ -625,8 +631,33 @@ fn pdf_options(config: &CompileConfig) -> PdfOptions {
 }
 
 /// Creates options for SVG export.
-fn svg_options(config: &CompileConfig) -> SvgOptions {
-    SvgOptions { render_bleed: false, pretty: config.pretty }
+///
+/// When a `document` is provided, its metadata (title/description/lang) is
+/// embedded for accessibility. The bundle path passes `None` because it has no
+/// `PagedDocument` in scope (and embeds inline frames, not a standalone doc).
+fn svg_options(config: &CompileConfig, document: Option<&PagedDocument>) -> SvgOptions {
+    let (title, description, lang) = match document {
+        Some(document) => {
+            let info = document.info();
+            let lang = match &info.locale {
+                Smart::Custom(locale) => Some(locale.rfc_3066().to_string()),
+                Smart::Auto => None,
+            };
+            (
+                info.title.as_ref().map(|t| t.to_string()),
+                info.description.as_ref().map(|d| d.to_string()),
+                lang,
+            )
+        }
+        None => (None, None, None),
+    };
+    SvgOptions {
+        render_bleed: false,
+        pretty: config.pretty,
+        title,
+        description,
+        lang,
+    }
 }
 
 /// Creates options for PNG export.
