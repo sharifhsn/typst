@@ -933,6 +933,7 @@ where
         engine,
         styles,
         span,
+        column_cursors: ColumnAutoCursors::default(),
     }
     .resolve(children)
 }
@@ -947,6 +948,33 @@ struct CellGridResolver<'a, 'b> {
     engine: &'a mut Engine<'b>,
     styles: StyleChain<'a>,
     span: Span,
+    /// Amortizes repeated `(Custom-x, Auto-y)` cell placements (cells that pin
+    /// a column but auto-place their row). See [`ColumnAutoCursors`].
+    column_cursors: ColumnAutoCursors,
+}
+
+/// Per-column "next candidate row" cursor for cells that fix their column but
+/// auto-place their row (`table.cell(x: ..)` without `y`).
+///
+/// Without it, each such cell rescans its column from the top
+/// ([`first_available_row`]), which is `O(rows)` per cell and thus `O(rows²)`
+/// for a column full of column-pinned cells. The cursor records, per column,
+/// the row of the last such placement, so the next placement in that column can
+/// resume from there instead of the top — making the total cost linear.
+///
+/// The cursor is a valid lower bound only within a single placement *regime*
+/// (a contiguous run of cells sharing the same `first_available_row`): a prior
+/// scan only proved the rows below its result occupied relative to that
+/// regime's start. When the regime changes (entering/leaving a header or
+/// footer), the cursors are reset, falling back to a scan from
+/// `first_available_row` (still correct, just not amortized across the
+/// boundary).
+#[derive(Default)]
+struct ColumnAutoCursors {
+    /// The `first_available_row` the cursors are valid for.
+    regime: usize,
+    /// Per-column row of the most recent `(Custom-x, Auto-y)` placement.
+    next_row: Vec<usize>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -1400,6 +1428,7 @@ impl CellGridResolver<'_, '_> {
                     footer.as_ref(),
                     resolved_cells,
                     local_auto_index,
+                    &mut self.column_cursors,
                     first_available_row,
                     columns,
                     row_group_data.is_some(),
@@ -2168,6 +2197,7 @@ fn resolve_cell_position(
     footer: Option<&(usize, Span, Footer)>,
     resolved_cells: &[Option<Entry>],
     auto_index: &mut usize,
+    column_cursors: &mut ColumnAutoCursors,
     first_available_row: usize,
     columns: usize,
     in_row_group: bool,
@@ -2247,20 +2277,45 @@ fn resolve_cell_position(
                 // row / the header or footer's first row (specified through
                 // 'first_available_row'). Otherwise, start searching at the
                 // first row.
-                let initial_index = cell_index(cell_x, first_available_row)?;
+                //
+                // To avoid rescanning the whole column from the top for every
+                // column-pinned cell (which is O(rows²) overall), resume from a
+                // per-column cursor recording the previous such placement. The
+                // cursor is only a valid lower bound within one regime (fixed
+                // 'first_available_row'), so reset it whenever that changes.
+                if column_cursors.regime != first_available_row {
+                    column_cursors.regime = first_available_row;
+                    column_cursors.next_row.clear();
+                }
+                let start_row = column_cursors
+                    .next_row
+                    .get(cell_x)
+                    .copied()
+                    .unwrap_or(first_available_row)
+                    .max(first_available_row);
+                let initial_index = cell_index(cell_x, start_row)?;
 
                 // Try each row until either we reach an absent position at the
                 // requested column ('Some(None)') or an out of bounds position
                 // ('None'), in which case we'd create a new row to place this
                 // cell in.
-                find_next_available_position(
+                let resolved = find_next_available_position(
                     header_rows,
                     footer,
                     resolved_cells,
                     columns,
                     initial_index,
                     true,
-                )
+                )?;
+
+                // Record where this column-pinned cell landed so the next one
+                // in the same column can resume from here.
+                if column_cursors.next_row.len() <= cell_x {
+                    column_cursors.next_row.resize(cell_x + 1, first_available_row);
+                }
+                column_cursors.next_row[cell_x] = resolved / columns;
+
+                Ok(resolved)
             }
         }
         // Cell has only chosen its row, not its column.
