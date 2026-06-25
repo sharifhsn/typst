@@ -181,5 +181,5 @@ derived_hash_with_manual_eq = "allow"
 disallowed_methods = "warn"
 
 [patch.crates-io]
-krilla = { path = "../krilla/crates/krilla" }
-comemo = { path = "../comemo" }
+krilla = { git = "https://github.com/sharifhsn/krilla", branch = "super-perf" }
+comemo = { git = "https://github.com/sharifhsn/comemo", branch = "perf/cache-contention" }
