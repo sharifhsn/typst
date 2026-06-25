@@ -441,6 +441,16 @@ fn verdict<'a>(
     elem: &'a Content,
     styles: StyleChain<'a>,
 ) -> Option<Verdict<'a>> {
+    // Fast path for spaces, the single most common element. A `SpaceElem` is a
+    // capability-free, `Unlabellable` singleton that is not exposed as an
+    // element function, so it can never carry a label or location, match a show
+    // rule (no `show space` is possible and no built-in rule targets it), or
+    // require preparation. The verdict is therefore always `None`, and we can
+    // skip the style chain walk for it entirely.
+    if elem.is::<SpaceElem>() {
+        return None;
+    }
+
     let prepared = elem.is_prepared();
     let mut map = Styles::new();
     let mut step = None;
