@@ -475,6 +475,46 @@ impl Array {
         /// The function to apply to each item.
         mapper: Func,
     ) -> SourceResult<Array> {
+        // Parallelize the mapper calls when there are enough items and each
+        // call is expensive enough to amortize the per-task fork overhead.
+        // A call's cost isn't known up front (and array length is a poor proxy
+        // — a cheap mapper over a huge array would lose), so we time the first
+        // call and only fork the rest if it was expensive. This is self-tuning
+        // and the result is identical regardless of the path taken: each call
+        // is pure, `Engine::parallelize` collects in order, and per-task sinks
+        // are merged deterministically.
+        const MIN_LEN: usize = 8;
+        const EXPENSIVE: std::time::Duration = std::time::Duration::from_micros(50);
+
+        if self.len() >= MIN_LEN {
+            let n = self.len();
+            let mut items = self.into_iter();
+            let first = items.next().unwrap();
+            let start = std::time::Instant::now();
+            let first = mapper.call(engine, context, [first])?;
+
+            if start.elapsed() >= EXPENSIVE {
+                // Expensive mapper: fork the remaining calls across threads.
+                let rest: Vec<Value> = items.collect();
+                let mut out = Vec::with_capacity(n);
+                out.push(first);
+                for result in engine.parallelize(rest, |engine, item| {
+                    mapper.call(engine, context, [item])
+                }) {
+                    out.push(result?);
+                }
+                return Ok(out.into_iter().collect());
+            }
+
+            // Cheap mapper: finish serially (no fork overhead).
+            let mut out = Vec::with_capacity(n);
+            out.push(first);
+            for item in items {
+                out.push(mapper.call(engine, context, [item])?);
+            }
+            return Ok(out.into_iter().collect());
+        }
+
         self.into_iter()
             .map(|item| mapper.call(engine, context, [item]))
             .collect()

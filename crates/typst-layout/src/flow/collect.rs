@@ -75,21 +75,28 @@ impl<'a> Collector<'a, '_, '_> {
 
     /// Perform collection for block-level children.
     fn run_block(mut self) -> SourceResult<Vec<Child<'a>>> {
+        // Phase 1: Sequential scan. Resolve cheap children immediately and
+        // defer paragraph line layout into `jobs`. We assign locators and
+        // thread `par_situation` here, up front, so that the parallel layout
+        // below is fully deterministic.
+        let mut plan = Vec::with_capacity(self.children.len());
+        let mut jobs = Vec::new();
+        let mut block_jobs = Vec::new();
         for &(child, styles) in self.children {
             if let Some(elem) = child.to_packed::<TagElem>() {
-                self.output.push(Child::Tag(&elem.tag));
+                plan.push(Planned::Child(Child::Tag(&elem.tag)));
             } else if let Some(elem) = child.to_packed::<VElem>() {
-                self.v(elem, styles);
+                self.v(elem, styles, &mut plan);
             } else if let Some(elem) = child.to_packed::<ParElem>() {
-                self.par(elem, styles)?;
+                self.par(elem, styles, &mut plan, &mut jobs);
             } else if let Some(elem) = child.to_packed::<BlockElem>() {
-                self.block(elem, styles);
+                self.block(elem, styles, &mut plan, &mut block_jobs);
             } else if let Some(elem) = child.to_packed::<PlaceElem>() {
-                self.place(elem, styles)?;
+                self.place(elem, styles, &mut plan)?;
             } else if child.is::<FlushElem>() {
-                self.output.push(Child::Flush);
+                plan.push(Planned::Child(Child::Flush));
             } else if let Some(elem) = child.to_packed::<ColbreakElem>() {
-                self.output.push(Child::Break(elem.weak.get(styles)));
+                plan.push(Planned::Child(Child::Break(elem.weak.get(styles))));
                 self.par_situation = ParSituation::First;
             } else if child.is::<PagebreakElem>() {
                 bail!(
@@ -102,6 +109,73 @@ impl<'a> Collector<'a, '_, '_> {
                     "{} was ignored during paged export",
                     child.func().name(),
                 ));
+            }
+        }
+
+        // Phase 2: Lay out the paragraphs. This is the only region-independent
+        // heavy work in flow collection, and the jobs are mutually independent
+        // (their locators were assigned up front), so we run them in parallel.
+        let base = self.base;
+        let expand = self.expand;
+        let layout = |engine: &mut Engine, job: ParJob<'a>| {
+            crate::inline::layout_par(
+                job.elem,
+                engine,
+                job.locator,
+                job.styles,
+                base,
+                expand,
+                job.situation,
+            )
+        };
+        let layouts: Vec<SourceResult<Fragment>> = if jobs.len() >= 2 {
+            self.engine.parallelize(jobs, layout).collect()
+        } else {
+            jobs.into_iter().map(|job| layout(self.engine, job)).collect()
+        };
+
+        // Identical blocks resolve to the same cached layout, so warming each
+        // distinct one once is enough; this avoids recomputing duplicates in
+        // parallel (which would waste work and contend on the cache) and keeps
+        // the speedup independent of the core count.
+        let mut seen = std::collections::HashSet::new();
+        block_jobs.retain(|job| {
+            seen.insert(typst_utils::hash128(&(job.elem, job.styles, job.region)))
+        });
+
+        // Warm the cache for unbreakable blocks in parallel. Their layout is
+        // region-independent (the distributor always lays them out at the base
+        // region), so warming lets the serial distribution phase hit these
+        // results instead of computing them one block at a time.
+        if block_jobs.len() >= 2 {
+            self.engine.prewarm(block_jobs, |engine, job: BlockJob<'a>| {
+                let _ = layout_single_impl(
+                    engine.world,
+                    engine.library,
+                    engine.introspector.into_raw(),
+                    engine.traced,
+                    TrackedMut::reborrow_mut(&mut engine.sink),
+                    engine.route.track(),
+                    job.elem,
+                    job.locator.track(),
+                    job.styles,
+                    job.region,
+                );
+            });
+        }
+
+        // Phase 3: Assemble the output in document order, expanding each
+        // paragraph's laid-out lines (and their surrounding spacing) in place.
+        let mut layouts = layouts.into_iter();
+        for planned in plan {
+            match planned {
+                Planned::Child(child) => self.output.push(child),
+                Planned::Par { leading, spacing, styles } => {
+                    let lines = layouts.next().unwrap()?.into_frames();
+                    self.output.push(Child::Rel(spacing.into(), 4));
+                    self.lines(lines, leading, styles);
+                    self.output.push(Child::Rel(spacing.into(), 4));
+                }
             }
         }
 
@@ -145,44 +219,44 @@ impl<'a> Collector<'a, '_, '_> {
     }
 
     /// Collect vertical spacing into a relative or fractional child.
-    fn v(&mut self, elem: &'a Packed<VElem>, styles: StyleChain<'a>) {
-        self.output.push(match elem.amount {
+    fn v(
+        &mut self,
+        elem: &'a Packed<VElem>,
+        styles: StyleChain<'a>,
+        plan: &mut Vec<Planned<'a>>,
+    ) {
+        plan.push(Planned::Child(match elem.amount {
             Spacing::Rel(rel) => {
                 Child::Rel(rel.resolve(styles), elem.weak.get(styles) as u8)
             }
             Spacing::Fr(fr) => Child::Fr(fr, elem.weak.get(styles) as u8),
-        });
+        }));
     }
 
-    /// Collect a paragraph into [`LineChild`]ren. This already performs line
-    /// layout since it is not dependent on the concrete regions.
+    /// Register a paragraph as a deferred [`ParJob`] for parallel line layout.
+    ///
+    /// Line layout itself is not dependent on the concrete regions, so it can
+    /// happen up front; we just defer it so that all of a flow's paragraphs can
+    /// be laid out in parallel (see [`Self::run_block`]).
     fn par(
         &mut self,
         elem: &'a Packed<ParElem>,
         styles: StyleChain<'a>,
-    ) -> SourceResult<()> {
-        let lines = crate::inline::layout_par(
+        plan: &mut Vec<Planned<'a>>,
+        jobs: &mut Vec<ParJob<'a>>,
+    ) {
+        jobs.push(ParJob {
             elem,
-            self.engine,
-            self.locator.next(&elem.span()),
             styles,
-            self.base,
-            self.expand,
-            self.par_situation,
-        )?
-        .into_frames();
-
-        let spacing = elem.spacing.resolve(styles);
-        let leading = elem.leading.resolve(styles);
-
-        self.output.push(Child::Rel(spacing.into(), 4));
-
-        self.lines(lines, leading, styles);
-
-        self.output.push(Child::Rel(spacing.into(), 4));
+            locator: self.locator.next(&elem.span()),
+            situation: self.par_situation,
+        });
+        plan.push(Planned::Par {
+            leading: elem.leading.resolve(styles),
+            spacing: elem.spacing.resolve(styles),
+            styles,
+        });
         self.par_situation = ParSituation::Consecutive;
-
-        Ok(())
     }
 
     /// Collect laid-out lines.
@@ -232,7 +306,13 @@ impl<'a> Collector<'a, '_, '_> {
 
     /// Collect a block into a [`SingleChild`] or [`MultiChild`] depending on
     /// whether it is breakable.
-    fn block(&mut self, elem: &'a Packed<BlockElem>, styles: StyleChain<'a>) {
+    fn block(
+        &mut self,
+        elem: &'a Packed<BlockElem>,
+        styles: StyleChain<'a>,
+        plan: &mut Vec<Planned<'a>>,
+        block_jobs: &mut Vec<BlockJob<'a>>,
+    ) {
         let locator = self.locator.next(&elem.span());
         let align = styles.resolve(AlignElem::alignment);
         let alone = self.children.len() == 1;
@@ -250,10 +330,22 @@ impl<'a> Collector<'a, '_, '_> {
             Smart::Custom(Spacing::Fr(fr)) => Child::Fr(fr, 2),
         };
 
-        self.output.push(spacing(elem.above.get(styles)));
+        plan.push(Planned::Child(spacing(elem.above.get(styles))));
 
         if !breakable || fr.is_some() {
-            self.output.push(Child::Single(self.boxed(SingleChild {
+            // An unbreakable block's layout is region-independent, so warm it
+            // in parallel (unless it's the only child, when there's nothing to
+            // parallelize against). The distributor lays unbreakable blocks out
+            // at the base region with vertical expansion only kept when alone.
+            if !alone {
+                block_jobs.push(BlockJob {
+                    elem,
+                    styles,
+                    locator: locator.relayout(),
+                    region: Region::new(self.base, Axes::new(self.expand, false)),
+                });
+            }
+            plan.push(Planned::Child(Child::Single(self.boxed(SingleChild {
                 align,
                 sticky,
                 alone,
@@ -262,9 +354,9 @@ impl<'a> Collector<'a, '_, '_> {
                 styles,
                 locator,
                 cell: CachedCell::new(),
-            })));
+            }))));
         } else {
-            self.output.push(Child::Multi(self.boxed(MultiChild {
+            plan.push(Planned::Child(Child::Multi(self.boxed(MultiChild {
                 align,
                 sticky,
                 alone,
@@ -272,10 +364,10 @@ impl<'a> Collector<'a, '_, '_> {
                 styles,
                 locator,
                 cell: CachedCell::new(),
-            })));
+            }))));
         };
 
-        self.output.push(spacing(elem.below.get(styles)));
+        plan.push(Planned::Child(spacing(elem.below.get(styles))));
         self.par_situation = ParSituation::Other;
     }
 
@@ -284,6 +376,7 @@ impl<'a> Collector<'a, '_, '_> {
         &mut self,
         elem: &'a Packed<PlaceElem>,
         styles: StyleChain<'a>,
+        plan: &mut Vec<Planned<'a>>,
     ) -> SourceResult<()> {
         let alignment = elem.alignment.get(styles);
         let align_x = alignment.map_or(FixedAlignment::Center, |align| {
@@ -317,7 +410,7 @@ impl<'a> Collector<'a, '_, '_> {
         let locator = self.locator.next(&elem.span());
         let clearance = elem.clearance.resolve(styles);
         let delta = Axes::new(elem.dx.get(styles), elem.dy.get(styles)).resolve(styles);
-        self.output.push(Child::Placed(self.boxed(PlacedChild {
+        plan.push(Planned::Child(Child::Placed(self.boxed(PlacedChild {
             align_x,
             align_y,
             scope,
@@ -329,7 +422,7 @@ impl<'a> Collector<'a, '_, '_> {
             locator,
             alignment,
             cell: CachedCell::new(),
-        })));
+        }))));
 
         Ok(())
     }
@@ -339,6 +432,38 @@ impl<'a> Collector<'a, '_, '_> {
     fn boxed<T>(&self, value: T) -> BumpBox<'a, T> {
         BumpBox::new_in(value, self.bump)
     }
+}
+
+/// An output piece planned during the sequential scan of
+/// [`Collector::run_block`], before paragraphs are laid out.
+///
+/// Everything except paragraphs is resolved into a final [`Child`] right away.
+/// Paragraphs become a [`Planned::Par`] placeholder whose lines are filled in
+/// from the parallel layout results, in order, during assembly.
+enum Planned<'a> {
+    /// An already-resolved child.
+    Child(Child<'a>),
+    /// A paragraph whose lines come from the next parallel layout result.
+    /// Carries what's needed to expand those frames into [`Child`]ren.
+    Par { leading: Abs, spacing: Abs, styles: StyleChain<'a> },
+}
+
+/// A deferred paragraph layout, run in parallel during [`Collector::run_block`].
+struct ParJob<'a> {
+    elem: &'a Packed<ParElem>,
+    styles: StyleChain<'a>,
+    locator: Locator<'a>,
+    situation: ParSituation,
+}
+
+/// An unbreakable block whose (region-independent) layout is warmed in parallel
+/// during [`Collector::run_block`]. The `region` matches what the distribution
+/// phase will request, so warming populates the cache it later reads from.
+struct BlockJob<'a> {
+    elem: &'a Packed<BlockElem>,
+    styles: StyleChain<'a>,
+    locator: Locator<'a>,
+    region: Region,
 }
 
 /// A prepared child in flow layout.

@@ -170,9 +170,19 @@ pub fn scan(path: &std::path::Path) -> impl Iterator<Item = (FontPath, FontInfo)
 fn with_db(
     f: impl FnOnce(&mut fontdb::Database),
 ) -> impl Iterator<Item = (FontPath, FontInfo)> {
+    use rayon::prelude::*;
+
     let mut db = fontdb::Database::new();
     f(&mut db);
-    db.faces()
+
+    // Collect the face descriptors first. Parsing a face's metadata
+    // (`FontInfo::new`, which reads the name and coverage tables) is by far the
+    // dominant cost of scanning and is independent per face, so we do it in
+    // parallel below. `with_face_data` only borrows the database immutably, so
+    // the faces can be parsed concurrently. The order of the results is
+    // preserved by `rayon`'s `collect`, keeping font selection deterministic.
+    let faces: Vec<(fontdb::ID, std::path::PathBuf, u32)> = db
+        .faces()
         .filter_map(|face| {
             let path = match &face.source {
                 fontdb::Source::File(path) | fontdb::Source::SharedFile(path, _) => path,
@@ -180,14 +190,17 @@ fn with_db(
                 // shouldn't be any.
                 fontdb::Source::Binary(_) => return None,
             };
+            Some((face.id, path.clone(), face.index))
+        })
+        .collect();
 
+    faces
+        .into_par_iter()
+        .filter_map(|(id, path, index)| {
             let info = db
-                .with_face_data(face.id, FontInfo::new)
+                .with_face_data(id, FontInfo::new)
                 .expect("database must contain this font")?;
-
-            let path = FontPath { path: path.clone(), index: face.index };
-
-            Some((path, info))
+            Some((FontPath { path, index }, info))
         })
         .collect::<Vec<_>>()
         .into_iter()
