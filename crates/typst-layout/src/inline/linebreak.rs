@@ -229,15 +229,75 @@ fn linebreak_optimized<'a>(
     p: &'a Preparation<'a>,
     width: Abs,
 ) -> Vec<Line<'a>> {
+    // Fast path: if the whole paragraph fits on a single line, there is exactly
+    // one optimal layout. The last line of a paragraph is never justified, so a
+    // single fitting line cannot be improved by breaking it (that would only add
+    // justified lines and break penalties). We can thus skip both Knuth-Plass
+    // passes. This is very common for headings, captions, list items, table
+    // cells, and short paragraphs.
+    if let Some(line) = linebreak_single(engine, p, width) {
+        return vec![line];
+    }
+
     let metrics = CostMetrics::compute(p);
+
+    // Determine the line break opportunities once. Both optimization passes
+    // below walk over the exact same breakpoints, and computing them involves
+    // running the ICU line segmenter and hyphenation, which is too expensive to
+    // do twice per paragraph.
+    let mut breaks = Vec::new();
+    breakpoints(p, |end, breakpoint| breaks.push((end, breakpoint)));
 
     // Determines the exact costs of a likely good layout through Knuth-Plass
     // with approximate metrics. We can use this cost as an upper bound to prune
     // the search space in our proper optimization pass below.
-    let upper_bound = linebreak_optimized_approximate(engine, p, width, &metrics);
+    let upper_bound =
+        linebreak_optimized_approximate(engine, p, width, &breaks, &metrics);
 
     // Using the upper bound, perform exact optimized linebreaking.
-    linebreak_optimized_bounded(engine, p, width, &metrics, upper_bound)
+    linebreak_optimized_bounded(engine, p, width, &breaks, &metrics, upper_bound)
+}
+
+/// Attempts to lay out the entire paragraph on a single line.
+///
+/// Returns `Some` only when the whole paragraph genuinely fits on one line and
+/// contains no interior mandatory break. In that case the layout is unambiguous
+/// and we can avoid the (expensive) two-pass optimization entirely.
+fn linebreak_single<'a>(
+    engine: &Engine,
+    p: &'a Preparation<'a>,
+    width: Abs,
+) -> Option<Line<'a>> {
+    // Cheap rejection: if the summed natural width already exceeds the available
+    // width, the paragraph cannot fit on a single line. Trailing whitespace is
+    // included here, so this never yields a false positive (the trimmed line can
+    // only be narrower). We accumulate with early exit so long, clearly
+    // multi-line paragraphs bail quickly.
+    let mut natural = Abs::zero();
+    for (_, item) in p.items.iter() {
+        natural += item.natural_width();
+        if !width.fits(natural) {
+            return None;
+        }
+    }
+
+    // A mandatory break (e.g. due to `\n`) before the end of the text forces
+    // multiple lines, so the single-line layout is not applicable.
+    let mut interior_break = false;
+    breakpoints(p, |end, breakpoint| {
+        if breakpoint == Breakpoint::Mandatory && end < p.text.len() {
+            interior_break = true;
+        }
+    });
+    if interior_break {
+        return None;
+    }
+
+    // Build the actual single line and confirm it really fits. The paragraph's
+    // final breakpoint is `Mandatory`, matching what the optimized passes use
+    // for a last line (which is never justified).
+    let single = line(engine, p, 0..p.text.len(), Breakpoint::Mandatory, None);
+    width.fits(single.width).then_some(single)
 }
 
 /// Performs line breaking in optimized Knuth-Plass style, but with an upper
@@ -247,6 +307,7 @@ fn linebreak_optimized_bounded<'a>(
     engine: &Engine,
     p: &'a Preparation<'a>,
     width: Abs,
+    breaks: &[(usize, Breakpoint)],
     metrics: &CostMetrics,
     upper_bound: Cost,
 ) -> Vec<Line<'a>> {
@@ -264,7 +325,7 @@ fn linebreak_optimized_bounded<'a>(
     let mut active = 0;
     let mut prev_end = 0;
 
-    breakpoints(p, |end, breakpoint| {
+    for &(end, breakpoint) in breaks {
         // Find the optimal predecessor.
         let mut best: Option<Entry> = None;
 
@@ -347,7 +408,7 @@ fn linebreak_optimized_bounded<'a>(
 
         table.extend(best);
         prev_end = end;
-    });
+    }
 
     // Retrace the best path.
     let mut lines = Vec::with_capacity(16);
@@ -359,7 +420,14 @@ fn linebreak_optimized_bounded<'a>(
         panic!("bounded inline layout is incomplete");
 
         #[cfg(not(debug_assertions))]
-        return linebreak_optimized_bounded(engine, p, width, metrics, Cost::INFINITY);
+        return linebreak_optimized_bounded(
+            engine,
+            p,
+            width,
+            breaks,
+            metrics,
+            Cost::INFINITY,
+        );
     }
 
     while idx != 0 {
@@ -385,6 +453,7 @@ fn linebreak_optimized_approximate(
     engine: &Engine,
     p: &Preparation,
     width: Abs,
+    breaks: &[(usize, Breakpoint)],
     metrics: &CostMetrics,
 ) -> Cost {
     // Determine the cumulative estimation metrics.
@@ -411,7 +480,7 @@ fn linebreak_optimized_approximate(
     let mut active = 0;
     let mut prev_end = 0;
 
-    breakpoints(p, |end, breakpoint| {
+    for &(end, breakpoint) in breaks {
         // Find the optimal predecessor.
         let mut best: Option<Entry> = None;
         for (pred_index, pred) in table.iter().enumerate().skip(active) {
@@ -486,7 +555,7 @@ fn linebreak_optimized_approximate(
 
         table.extend(best);
         prev_end = end;
-    });
+    }
 
     // Retrace the best path.
     let mut indices = Vec::with_capacity(16);
