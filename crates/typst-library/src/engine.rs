@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use comemo::{Track, Tracked, TrackedMut};
-use ecow::EcoVec;
+use ecow::{EcoString, EcoVec};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use rustc_hash::FxHashSet;
 use typst_syntax::{FileId, Span};
@@ -95,6 +95,7 @@ impl Engine<'_> {
                 sink.delayed,
                 sink.warnings,
                 sink.values,
+                sink.font_checks,
             );
         }
 
@@ -197,6 +198,13 @@ pub struct Sink {
     warnings_set: FxHashSet<u128>,
     /// A sequence of traced values for a span.
     values: EcoVec<(Value, Option<Styles>)>,
+    /// Deferred font-family availability checks: `(family, span)` pairs recorded
+    /// while evaluating `set text(font: ..)` rules. They are resolved against
+    /// the font book once at the end of compilation (see
+    /// `text::resolve_font_checks`) rather than eagerly, so that targets which
+    /// never lay out text themselves (HTML, where the browser does layout) don't
+    /// trigger a font-book scan just to validate names.
+    font_checks: EcoVec<(EcoString, Span)>,
 }
 
 impl Sink {
@@ -228,9 +236,20 @@ impl Sink {
         self.values
     }
 
+    /// Take the deferred font-family checks. See [`Sink::check_font`].
+    pub fn take_font_checks(&mut self) -> EcoVec<(EcoString, Span)> {
+        std::mem::take(&mut self.font_checks)
+    }
+
     /// Extend from another sink.
     pub fn extend_from_sink(&mut self, other: Sink) {
-        self.extend(other.introspections, other.delayed, other.warnings, other.values);
+        self.extend(
+            other.introspections,
+            other.delayed,
+            other.warnings,
+            other.values,
+            other.font_checks,
+        );
     }
 }
 
@@ -267,6 +286,17 @@ impl Sink {
         }
     }
 
+    /// Record a deferred font-family availability check.
+    ///
+    /// The check is resolved against the font book once at the end of
+    /// compilation by [`text::resolve_font_checks`](crate::text::resolve_font_checks),
+    /// emitting an "unknown font family" warning if the family is unavailable.
+    /// Deferring avoids forcing a (potentially expensive) font-book scan for
+    /// targets that never need fonts for layout.
+    pub fn check_font(&mut self, family: EcoString, span: Span) {
+        self.font_checks.push((family, span));
+    }
+
     /// Extend from parts of another sink.
     fn extend(
         &mut self,
@@ -274,6 +304,7 @@ impl Sink {
         delayed: EcoVec<SourceDiagnostic>,
         warnings: EcoVec<SourceDiagnostic>,
         values: EcoVec<(Value, Option<Styles>)>,
+        font_checks: EcoVec<(EcoString, Span)>,
     ) {
         self.introspections.extend(introspections);
         self.delayed.extend(delayed);
@@ -283,6 +314,7 @@ impl Sink {
         if let Some(remaining) = Self::MAX_VALUES.checked_sub(self.values.len()) {
             self.values.extend(values.into_iter().take(remaining));
         }
+        self.font_checks.extend(font_checks);
     }
 }
 
