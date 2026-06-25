@@ -48,8 +48,8 @@ pub(crate) fn handle_image(
         ImageKind::Raster(raster) => {
             // Optionally downsample an oversized raster to the configured DPI
             // cap. The downsampled image bakes in any EXIF rotation and is
-            // re-encoded as PNG, so it is drawn with an identity transform at the
-            // layout size (no further EXIF compensation needed).
+            // re-encoded (PNG, or JPEG for JPEG sources), so it is drawn with an
+            // identity transform at the layout size (no EXIF compensation).
             let downsampled = gc.options.image_dpi.and_then(|dpi| {
                 downsample_raster(raster, size, fc.state().transform(), dpi)
             });
@@ -251,17 +251,37 @@ fn downsample_raster(
     downsample_impl(raster.clone(), new_w, new_h)
 }
 
-/// Resizes a raster to `new_w`×`new_h` and re-encodes it as PNG. Memoized so a
-/// repeated (image, size) pair is resampled only once and the result stays
-/// deduplicated by krilla via its content hash.
+/// Quality used when re-encoding a downsampled JPEG. Photographic content
+/// downsampled to a display-resolution cap is visually unaffected at this level,
+/// while staying far smaller than a lossless re-encode.
+const DOWNSAMPLE_JPEG_QUALITY: u8 = 85;
+
+/// Resizes a raster to `new_w`×`new_h` and re-encodes it. JPEG sources are
+/// re-encoded as JPEG to keep their photographic (DCT) compression; every other
+/// format is re-encoded as PNG (lossless, suited to graphics, text, and
+/// screenshots). The downsampled image always bakes in any EXIF rotation and
+/// carries no orientation tag, so callers draw it with an identity transform.
+/// Memoized so a repeated (image, size) pair is resampled only once and the
+/// result stays deduplicated by krilla via its content hash.
 #[comemo::memoize]
 fn downsample_impl(raster: RasterImage, new_w: u32, new_h: u32) -> Option<RasterImage> {
     let resized = raster
         .dynamic()
         .resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
     let mut buf = Vec::new();
-    resized.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png).ok()?;
-    RasterImage::plain(Bytes::new(buf), ExchangeFormat::Png).ok()
+    let format = if let RasterFormat::Exchange(ExchangeFormat::Jpg) = raster.format() {
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+            &mut buf,
+            DOWNSAMPLE_JPEG_QUALITY,
+        );
+        // JPEG has no alpha channel; ensure an RGB8 buffer before encoding.
+        DynamicImage::ImageRgb8(resized.to_rgb8()).write_with_encoder(encoder).ok()?;
+        ExchangeFormat::Jpg
+    } else {
+        resized.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png).ok()?;
+        ExchangeFormat::Png
+    };
+    RasterImage::plain(Bytes::new(buf), format).ok()
 }
 
 #[comemo::memoize]
