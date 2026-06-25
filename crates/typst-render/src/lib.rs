@@ -47,6 +47,38 @@ pub fn render(page: &Page, opts: &RenderOptions) -> sk::Pixmap {
     canvas
 }
 
+/// Encode a rendered pixmap as a PNG, recording its physical resolution
+/// (`pHYs`) and sRGB color space (`sRGB`).
+///
+/// Unlike a plain encode, this lets the image place and print at the correct
+/// physical size and declares the color space, so consumers don't have to guess
+/// the DPI or gamma. `ppi` is the pixels-per-inch the pixmap was rendered at.
+pub fn encode_png(pixmap: sk::Pixmap, ppi: f64) -> Result<Vec<u8>, png::EncodingError> {
+    let (width, height) = (pixmap.width(), pixmap.height());
+    // `tiny-skia` stores premultiplied alpha; PNG expects straight alpha.
+    let data = pixmap.take_demultiplied();
+
+    let mut buf = Vec::new();
+    let mut encoder = png::Encoder::new(&mut buf, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    // Typst renders in sRGB; declare it so viewers color-manage correctly.
+    encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+    // Record the physical resolution. PNG measures it in pixels per metre, and
+    // one inch is 0.0254 m.
+    let ppm = (ppi / 0.0254).round().max(1.0) as u32;
+    encoder.set_pixel_dims(Some(png::PixelDimensions {
+        xppu: ppm,
+        yppu: ppm,
+        unit: png::Unit::Meter,
+    }));
+
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(&data)?;
+    writer.finish()?;
+    Ok(buf)
+}
+
 /// Export a document with potentially multiple pages into a single raster image.
 pub fn render_merged(
     document: &PagedDocument,

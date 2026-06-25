@@ -573,8 +573,7 @@ fn export_image_page(
         ImageExportFormat::Png => {
             let options = png_options(config);
             let pixmap = typst_render::render(page, &options);
-            let buf = pixmap
-                .encode_png()
+            let buf = typst_render::encode_png(pixmap, config.ppi)
                 .map_err(|err| eco_format!("failed to encode PNG file ({err})"))?;
             output
                 .write(&buf)

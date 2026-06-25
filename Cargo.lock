@@ -3467,6 +3467,7 @@ dependencies = [
  "image",
  "libm",
  "pixglyph",
+ "png",
  "resvg",
  "tiny-skia",
  "ttf-parser",
