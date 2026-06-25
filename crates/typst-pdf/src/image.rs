@@ -15,7 +15,7 @@ use typst_library::visualize::{
     ExchangeFormat, Image, ImageKind, ImageScaling, PdfImage, RasterFormat, RasterImage,
 };
 use typst_syntax::Span;
-use typst_utils::defer;
+use typst_utils::{defer, hash128};
 
 use crate::convert::{FrameContext, GlobalContext};
 use crate::tags;
@@ -79,11 +79,53 @@ pub(crate) fn handle_image(
         }
         ImageKind::Svg(svg) => {
             if let Some(size) = size.to_krilla() {
-                surface.draw_svg(
-                    svg.tree(),
-                    size,
-                    SvgSettings { embed_text: true, ..Default::default() },
-                );
+                // Convert each unique SVG to a reusable form XObject once (keyed
+                // by content hash), rendered at the SVG's native size. krilla then
+                // emits the XObject a single time and references it via `/Do` on
+                // every use, instead of re-converting the tree and re-emitting all
+                // of its drawing operations into the content stream each time.
+                let hash = hash128(svg);
+                if !gc.svg_graphics.contains_key(&hash) {
+                    let tree = svg.tree();
+                    if let Some(native) = krilla::geom::Size::from_wh(
+                        tree.size().width(),
+                        tree.size().height(),
+                    ) {
+                        let mut stream_builder = surface.stream_builder();
+                        let mut sub = stream_builder.surface();
+                        sub.draw_svg(
+                            tree,
+                            native,
+                            SvgSettings { embed_text: true, ..Default::default() },
+                        );
+                        sub.finish();
+                        let graphic =
+                            krilla::graphic::Graphic::new(stream_builder.finish(), false);
+                        gc.svg_graphics.insert(hash, graphic);
+                    }
+                }
+
+                match gc.svg_graphics.get(&hash) {
+                    Some(graphic) => {
+                        // Scale the native-size graphic to the requested size.
+                        let graphic = graphic.clone();
+                        let native = svg.tree().size();
+                        surface.push_transform(&krilla::geom::Transform::from_scale(
+                            size.width() / native.width(),
+                            size.height() / native.height(),
+                        ));
+                        surface.draw_graphic(graphic);
+                        surface.pop();
+                    }
+                    // Degenerate SVG size; fall back to drawing it inline.
+                    None => {
+                        surface.draw_svg(
+                            svg.tree(),
+                            size,
+                            SvgSettings { embed_text: true, ..Default::default() },
+                        );
+                    }
+                }
             }
         }
         ImageKind::Pdf(pdf) => {
