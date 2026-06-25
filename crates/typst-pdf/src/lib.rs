@@ -86,6 +86,11 @@ pub struct PdfOptions {
     pub tagged: bool,
     /// Whether to format the PDF in a human-readable way.
     pub pretty: bool,
+    /// If set, raster images are downsampled so that they contain no more than
+    /// this many pixels per inch at their rendered size, reducing the size of
+    /// the resulting PDF. Images that carry an ICC color profile are left
+    /// untouched to avoid altering color-managed content.
+    pub image_dpi: Option<u32>,
 }
 
 impl PdfOptions {
@@ -106,6 +111,7 @@ impl Default for PdfOptions {
             standards: PdfStandards::default(),
             tagged: true,
             pretty: false,
+            image_dpi: None,
         }
     }
 }

@@ -356,6 +356,12 @@ pub struct CompileArgs {
     #[arg(long = "ppi", default_value_t = 144.0)]
     pub ppi: f64,
 
+    /// Downsample raster images during PDF export so they contain at most this
+    /// many pixels per inch at their rendered size, reducing file size. Images
+    /// with an embedded color profile are left untouched.
+    #[arg(long = "pdf-image-dpi")]
+    pub pdf_image_dpi: Option<u32>,
+
     /// File path to which a Makefile with the current compilation's
     /// dependencies will be written.
     #[clap(long = "make-deps", value_name = "PATH", hide = true)]

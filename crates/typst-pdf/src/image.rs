@@ -1,14 +1,15 @@
 use std::hash::{Hash, Hasher};
+use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 
 use ecow::eco_format;
-use image::{DynamicImage, EncodableLayout, GenericImageView, Rgba};
+use image::{DynamicImage, EncodableLayout, GenericImageView, ImageFormat, Rgba};
 use krilla::image::{BitsPerComponent, CustomImage, ImageColorspace};
 use krilla::pdf::PdfDocument;
 use krilla::surface::Surface;
 use krilla_svg::{SurfaceExt, SvgSettings};
 use typst_library::diag::{At, SourceResult};
-use typst_library::foundations::Smart;
+use typst_library::foundations::{Bytes, Smart};
 use typst_library::layout::{Abs, Angle, Ratio, Size, Transform};
 use typst_library::visualize::{
     ExchangeFormat, Image, ImageKind, ImageScaling, PdfImage, RasterFormat, RasterImage,
@@ -45,11 +46,26 @@ pub(crate) fn handle_image(
 
     match image.kind() {
         ImageKind::Raster(raster) => {
-            let (exif_transform, new_size) = exif_transform(raster, size);
-            surface.push_transform(&exif_transform.to_krilla());
+            // Optionally downsample an oversized raster to the configured DPI
+            // cap. The downsampled image bakes in any EXIF rotation and is
+            // re-encoded as PNG, so it is drawn with an identity transform at the
+            // layout size (no further EXIF compensation needed).
+            let downsampled = gc.options.image_dpi.and_then(|dpi| {
+                downsample_raster(raster, size, fc.state().transform(), dpi)
+            });
+
+            let (transform, draw_size, raster) = match downsampled {
+                Some(ds) => (Transform::identity(), size, ds),
+                None => {
+                    let (transform, new_size) = exif_transform(raster, size);
+                    (transform, new_size, raster.clone())
+                }
+            };
+
+            surface.push_transform(&transform.to_krilla());
             let mut surface = defer(surface, |s| s.pop());
 
-            let image = convert_raster(raster.clone(), interpolate)
+            let image = convert_raster(raster, interpolate)
                 .map_err(|err| eco_format!("failed to process image ({err})"))
                 .at(span)?;
 
@@ -57,7 +73,7 @@ pub(crate) fn handle_image(
                 gc.image_to_spans.insert(image.clone(), span);
             }
 
-            if let Some(size) = new_size.to_krilla() {
+            if let Some(size) = draw_size.to_krilla() {
                 surface.draw_image(image, size);
             }
         }
@@ -185,6 +201,67 @@ impl CustomImage for PdfRasterImage {
             ImageColorspace::Luma
         }
     }
+}
+
+/// Downsamples a raster so it has no more than `dpi` pixels per inch at its
+/// rendered size. Returns `None` (leaving the image untouched) when it is
+/// already at or below the target resolution, carries an ICC color profile, or
+/// has a degenerate size.
+fn downsample_raster(
+    raster: &RasterImage,
+    size: Size,
+    transform: Transform,
+    dpi: u32,
+) -> Option<RasterImage> {
+    // Preserve color-managed images: re-encoding as PNG would drop the ICC
+    // profile and could shift colors.
+    if raster.icc().is_some() {
+        return None;
+    }
+
+    let (source_w, source_h) = (raster.width(), raster.height());
+    if source_w == 0 || source_h == 0 {
+        return None;
+    }
+
+    // The rendered size in inches, accounting for the active transform's scale
+    // (an image placed inside a scaled group renders larger or smaller than its
+    // layout box). 1pt = 1/72in.
+    let scale_x = (transform.sx.get().powi(2) + transform.ky.get().powi(2)).sqrt();
+    let scale_y = (transform.kx.get().powi(2) + transform.sy.get().powi(2)).sqrt();
+    let inches_w = size.x.to_pt() * scale_x / 72.0;
+    let inches_h = size.y.to_pt() * scale_y / 72.0;
+    if !(inches_w > 0.0 && inches_h > 0.0) {
+        return None;
+    }
+
+    // Target pixel dimensions, preserving the source aspect ratio.
+    let target_w = (inches_w * dpi as f64).ceil();
+    let target_h = (inches_h * dpi as f64).ceil();
+    let factor = (target_w / source_w as f64).min(target_h / source_h as f64);
+    if factor >= 1.0 {
+        return None;
+    }
+    let new_w = ((source_w as f64 * factor).round() as u32).max(1);
+    let new_h = ((source_h as f64 * factor).round() as u32).max(1);
+    if new_w >= source_w && new_h >= source_h {
+        return None;
+    }
+
+    downsample_impl(raster.clone(), new_w, new_h)
+}
+
+/// Resizes a raster to `new_w`×`new_h` and re-encodes it as PNG. Memoized so a
+/// repeated (image, size) pair is resampled only once and the result stays
+/// deduplicated by krilla via its content hash.
+#[comemo::memoize]
+fn downsample_impl(raster: RasterImage, new_w: u32, new_h: u32) -> Option<RasterImage> {
+    let resized = raster
+        .dynamic()
+        .resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
+    let mut buf = Vec::new();
+    resized.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png).ok()?;
+    RasterImage::plain(Bytes::new(buf), ExchangeFormat::Png).ok()
 }
 
 #[comemo::memoize]

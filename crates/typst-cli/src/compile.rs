@@ -80,6 +80,9 @@ pub struct CompileConfig {
     pub deps_format: DepsFormat,
     /// The PPI (pixels per inch) to use for PNG export.
     pub ppi: f64,
+    /// If set, downsample raster images during PDF export to at most this many
+    /// pixels per inch at their rendered size.
+    pub image_dpi: Option<u32>,
     /// The export cache for images, used for caching output files in `typst
     /// watch` sessions with images.
     pub export_cache: ExportCache,
@@ -240,6 +243,7 @@ impl CompileConfig {
                 })
                 .transpose()?,
             ppi: args.ppi,
+            image_dpi: args.pdf_image_dpi,
             diagnostic_format: args.process.diagnostic_format,
             open: args.open.clone(),
             export_cache: ExportCache::new(),
@@ -621,6 +625,7 @@ fn pdf_options(config: &CompileConfig) -> PdfOptions {
         standards: config.pdf_standards.clone(),
         tagged: config.tagged,
         pretty: config.pretty,
+        image_dpi: config.image_dpi,
     }
 }
 
