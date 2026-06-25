@@ -32,7 +32,7 @@ use typst_syntax::Span;
 use crate::PdfOptions;
 use crate::attach::attach_files;
 use crate::image::handle_image;
-use crate::link::{LinkAnnotation, handle_link};
+use crate::link::{LinkAnnotation, LinkAnnotationKind, handle_link};
 use crate::metadata::build_metadata;
 use crate::outline::build_outline;
 use crate::page::PageLabelExt;
@@ -50,7 +50,16 @@ pub fn convert(
     options: &PdfOptions,
     anchors: &[(Location, EcoString)],
     link_resolver: Option<Tracked<LateLinkResolver>>,
+    cache: Option<&crate::PageContentCache>,
 ) -> SourceResult<Vec<u8>> {
+    // Skip krilla's object-renumbering pass on the interactive watch path (where
+    // a page cache is supplied and byte-stable output isn't needed) for a faster
+    // recompile. One-shot exports keep the default monotonic numbering so their
+    // output stays byte-reproducible. Disabled for validated PDF (PDF/A, PDF/UA),
+    // where exact output matters. Can be forced via `TYPST_PDF_NO_RENUMBER`.
+    let no_renumber = (cache.is_some()
+        || std::env::var_os("TYPST_PDF_NO_RENUMBER").is_some())
+        && options.standards.config.validators().is_empty();
     let settings = SerializeSettings {
         compress_content_streams: !options.pretty,
         no_device_cs: true,
@@ -61,6 +70,7 @@ pub fn convert(
         enable_tagging: options.tagged,
         render_svg_glyph_fn: render_svg_glyph,
         pretty: options.pretty,
+        no_renumber,
     };
 
     let mut document = Document::new_with(settings);
@@ -72,7 +82,19 @@ pub fn convert(
         &page_index_converter,
     );
 
+    let timing = std::env::var_os("TYPST_PDF_TIMING").is_some();
+    let mut t = std::time::Instant::now();
+    macro_rules! lap {
+        ($name:literal) => {
+            if timing {
+                eprint!("{}={:.2}ms ", $name, t.elapsed().as_secs_f64() * 1e3);
+                t = std::time::Instant::now();
+            }
+        };
+    }
+
     let tags = tags::init(typst_document, options)?;
+    lap!("init");
 
     let mut gc = GlobalContext::new(
         typst_document,
@@ -83,18 +105,61 @@ pub fn convert(
         tags,
     );
 
-    convert_pages(&mut gc, &mut document)?;
+    convert_pages(&mut gc, &mut document, cache)?;
+    lap!("convert_pages");
     attach_files(&gc, &mut document)?;
     let (doc_lang, tree) = tags::resolve(&mut gc)?;
+    lap!("tags::resolve");
 
     document.set_outline(build_outline(&gc));
     document.set_metadata(build_metadata(&gc, doc_lang));
     document.set_tag_tree(tree);
 
-    finish(document, gc, options.standards.config)
+    let out = finish(document, gc, options.standards.config);
+    lap!("finish");
+    if timing {
+        eprintln!();
+    }
+    out
 }
 
-fn convert_pages(gc: &mut GlobalContext, document: &mut Document) -> SourceResult<()> {
+fn convert_pages(
+    gc: &mut GlobalContext,
+    document: &mut Document,
+    cache: Option<&crate::PageContentCache>,
+) -> SourceResult<()> {
+    // Untagged pages reuse by skipping the frame walk entirely; tagged pages
+    // reuse via a "draw-skip" walk that reproduces the structure-tree
+    // contribution (see the reuse branch below). Both are byte-identical.
+    //
+    // Reuse is disabled for VALIDATED PDF (PDF/A, PDF/UA): validation errors
+    // (e.g. not-def glyphs) are registered during the draw, which reuse skips,
+    // and the cache is populated before `finish` runs validation — so a reused
+    // page could hide a validation error on a later recompile. Validators are
+    // rare, so we simply fall back to a full draw for them.
+    let cache = cache.filter(|_| gc.options.standards.config.validators().is_empty());
+
+    // Incremental per-page content reuse. We reuse a page's content stream from
+    // the previous export when the page is unchanged (same `Page` hash) AND the
+    // global glyph-to-CID assignment state *entering* the page is unchanged (so
+    // the subset glyph IDs baked into the cached content are still valid). The
+    // latter is captured by krilla's glyph fingerprint, which lets us reuse a
+    // page even when an unrelated earlier page changed, as long as that change
+    // did not alter the font subset. On reuse we skip the page's frame walk
+    // entirely and instead *replay* its recorded registrations (glyph subset,
+    // cmap, resources), then inject the cached content stream — avoiding both the
+    // walk and content emission.
+    let mut old_cache: Vec<Option<crate::CachedPage>> = cache
+        .map(|c| {
+            std::mem::take(&mut *c.inner.write().unwrap())
+                .into_iter()
+                .map(Some)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut new_cache: Vec<crate::CachedPage> = Vec::new();
+    let mut exported = 0usize;
+
     for (i, typst_page) in gc.document.pages().iter().enumerate() {
         if gc.page_index_converter.pdf_page_index(i).is_none() {
             // Don't export this page.
@@ -144,13 +209,92 @@ fn convert_pages(gc: &mut GlobalContext, document: &mut Document) -> SourceResul
             settings = settings.with_page_label(label);
         }
 
+        // Decide whether this page's content can be reused from the cache.
+        let page_hash = typst_utils::hash128(typst_page);
+
         let mut page = document.start_page_with(settings);
+        // Glyph-CID state entering this page; reuse is only valid if it matches
+        // the cached run (so baked subset glyph IDs are still correct).
+        let before_fp = page.glyph_fingerprint();
+        let cached = old_cache.get(exported).and_then(|o| o.as_ref());
+        let reuse = cached.is_some_and(|c| {
+            c.page_hash == page_hash
+                && c.simple
+                && c.before_fp == before_fp
+                && c.registration.is_replayable()
+        });
+
+        if reuse {
+            let entry = old_cache[exported].take().unwrap();
+            if gc.options.tagged {
+                // Tagged reuse: re-run the tag machinery in "draw-skip" mode to
+                // reproduce this page's structure-tree contribution and
+                // `num_mcids` (the tag tree, MCIDs, cursor, ctx, struct-parents
+                // are correct by construction), but skip the expensive drawing.
+                // Then inject the cached content + replayed resources.
+                let mut surface = page.surface();
+                let page_idx = gc.page_index_converter.pdf_page_index(i);
+                let mut fc = FrameContext::new(
+                    page_idx,
+                    typst_page.frame.size() + typst_page.bleed.sum_by_axis(),
+                );
+                fc.draw_skip = true;
+                tags::page(gc, &mut surface, |gc, surface| {
+                    handle_frame(
+                        &mut fc,
+                        &typst_page.frame,
+                        typst_page.bleed,
+                        typst_page.fill_or_transparent(),
+                        surface,
+                        gc,
+                    )
+                })?;
+                surface.finish();
+                page.reuse_cached_tagged(
+                    &entry.registration,
+                    entry.content.clone(),
+                    entry.bbox,
+                );
+                let link_annotations = fc.link_annotations.into_values().flatten();
+                tags::add_link_annotations(gc, &mut page, link_annotations);
+            } else {
+                // Untagged reuse: skip the frame walk entirely; replay the
+                // recorded registrations (glyph subset, cmap, resources) to
+                // reproduce the global state and the page's resource dictionary,
+                // inject the cached content stream, and re-resolve the links.
+                page.reuse_cached(&entry.registration, entry.content.clone(), entry.bbox);
+                let links: Vec<LinkAnnotation> = entry
+                    .links
+                    .iter()
+                    .filter_map(|cl| {
+                        Some(LinkAnnotation {
+                            kind: LinkAnnotationKind::Artifact,
+                            alt: None,
+                            span: Span::detached(),
+                            rects: vec![cl.rect],
+                            target: crate::link::resolve_target(gc, &cl.dest)?,
+                        })
+                    })
+                    .collect();
+                tags::add_link_annotations(gc, &mut page, links);
+            }
+            new_cache.push(entry);
+            exported += 1;
+            continue;
+        }
+
+        // Cache miss (or caching disabled): full draw. Record the registrations
+        // so this page can be reused on a later recompile.
         let mut surface = page.surface();
         let page_idx = gc.page_index_converter.pdf_page_index(i);
         let mut fc = FrameContext::new(
             page_idx,
             typst_page.frame.size() + typst_page.bleed.sum_by_axis(),
         );
+
+        if cache.is_some() {
+            krilla::start_page_recording();
+        }
 
         tags::page(gc, &mut surface, |gc, surface| {
             handle_frame(
@@ -165,8 +309,26 @@ fn convert_pages(gc: &mut GlobalContext, document: &mut Document) -> SourceResul
 
         surface.finish();
 
+        if cache.is_some() {
+            let registration = krilla::take_page_recording().unwrap_or_default();
+            new_cache.push(crate::CachedPage {
+                page_hash,
+                before_fp,
+                content: page.content_stream().to_vec(),
+                bbox: page.content_bbox(),
+                simple: page.is_simple(),
+                registration: std::sync::Arc::new(registration),
+                links: std::sync::Arc::new(std::mem::take(&mut fc.cached_links)),
+            });
+        }
+
         let link_annotations = fc.link_annotations.into_values().flatten();
         tags::add_link_annotations(gc, &mut page, link_annotations);
+        exported += 1;
+    }
+
+    if let Some(c) = cache {
+        *c.inner.write().unwrap() = new_cache;
     }
 
     Ok(())
@@ -224,6 +386,12 @@ pub(crate) struct FrameContext {
     states: Vec<State>,
     /// The link annotations belonging to a Link tag.
     link_annotations: IndexMap<GroupId, SmallVec<[LinkAnnotation; 1]>, FxBuildHasher>,
+    /// Re-resolvable links recorded for incremental page reuse (untagged only).
+    pub(crate) cached_links: Vec<crate::link::CachedLink>,
+    /// When set, sub-handlers run all tag/link/group machinery but skip the
+    /// actual krilla drawing. Used to reproduce a tagged page's structure-tree
+    /// contribution (and `num_mcids`) on incremental reuse without redrawing.
+    pub(crate) draw_skip: bool,
 }
 
 impl FrameContext {
@@ -232,6 +400,8 @@ impl FrameContext {
             page_idx,
             states: vec![State::new(size)],
             link_annotations: IndexMap::default(),
+            cached_links: Vec::new(),
+            draw_skip: false,
         }
     }
 

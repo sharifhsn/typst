@@ -181,4 +181,5 @@ derived_hash_with_manual_eq = "allow"
 disallowed_methods = "warn"
 
 [patch.crates-io]
-krilla = { path = "/Users/sharif/Code/krilla/crates/krilla" }
+krilla = { path = "../krilla/crates/krilla" }
+comemo = { path = "../comemo" }

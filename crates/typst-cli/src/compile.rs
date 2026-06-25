@@ -86,6 +86,12 @@ pub struct CompileConfig {
     /// The export cache for images, used for caching output files in `typst
     /// watch` sessions with images.
     pub export_cache: ExportCache,
+    /// Hash of the last PDF-exported `PagedDocument`, used to skip re-export in
+    /// `typst watch` sessions when the document is unchanged.
+    pub pdf_export_hash: RwLock<Option<u128>>,
+    /// Per-page PDF content cache, used to reuse unchanged pages' content
+    /// streams when re-exporting in `typst watch` sessions.
+    pub pdf_draw_cache: typst_pdf::PageContentCache,
     /// Server for `typst watch` to HTML.
     #[cfg(feature = "http-server")]
     pub server: Option<HttpServer>,
@@ -247,6 +253,8 @@ impl CompileConfig {
             diagnostic_format: args.process.diagnostic_format,
             open: args.open.clone(),
             export_cache: ExportCache::new(),
+            pdf_export_hash: RwLock::new(None),
+            pdf_draw_cache: typst_pdf::PageContentCache::new(),
             deps,
             deps_format,
             #[cfg(feature = "http-server")]
@@ -269,6 +277,36 @@ pub fn compile_once(
     }
 
     let Warned { output, mut warnings } = compile_and_export(world, config);
+
+    // Env-gated export benchmark (dev only). `=N` measures full export; `=cached:N`
+    // the best-case incremental export (all pages reused, watch path on, doc-skip
+    // bypassed). Reports the median export time.
+    if let Ok(spec) = std::env::var("TYPST_BENCH_EXPORT") {
+        let (cached, n) = match spec.split_once(':') {
+            Some((mode, num)) => (mode == "cached", num.parse().unwrap_or(20)),
+            None => (false, spec.parse().unwrap_or(20)),
+        };
+        let was_watching = config.watching;
+        config.watching = cached;
+        if matches!(config.output_format, OutputFormat::Pdf | OutputFormat::Png | OutputFormat::Svg)
+        {
+            let Warned { output, .. } = typst::compile::<PagedDocument>(world);
+            if let Ok(doc) = output {
+                let mut ms = Vec::new();
+                for _ in 0..n {
+                    if cached {
+                        *config.pdf_export_hash.write() = None;
+                    }
+                    let te = std::time::Instant::now();
+                    let _ = export_paged(&doc, config);
+                    ms.push(te.elapsed().as_secs_f64() * 1e3);
+                }
+                ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                eprintln!("[export] median {:.2}ms (n={})", ms[ms.len() / 2], n);
+            }
+        }
+        config.watching = was_watching;
+    }
 
     // Add static warnings (for deprecated CLI flags and such).
     for warning in config.warnings.iter() {
@@ -379,10 +417,57 @@ fn export_paged(
     }
 }
 
+/// Whether the configured output already exists on disk (always `false` for
+/// stdout, which must be re-emitted every time).
+fn output_exists(output: &Output) -> bool {
+    match output {
+        Output::Path(path) => path.exists(),
+        Output::Stdout => false,
+    }
+}
+
 /// Export to a PDF.
 fn export_pdf(document: &PagedDocument, config: &CompileConfig) -> SourceResult<()> {
+    // When watching, skip re-serializing and rewriting the PDF if the document
+    // is unchanged since the last export (e.g. a save with no visible change, an
+    // edit to a comment, or a touched but irrelevant dependency). PDF export is
+    // the dominant cost of an incremental recompile, so this makes such no-op
+    // recompiles effectively free. Mirrors the per-page `ExportCache` used for
+    // PNG/SVG export.
+    if config.watching {
+        let hash = typst::utils::hash128(document);
+        let unchanged = *config.pdf_export_hash.read() == Some(hash);
+        if unchanged && output_exists(&config.output) {
+            return Ok(());
+        }
+        *config.pdf_export_hash.write() = Some(hash);
+    }
+
     let options = pdf_options(config);
-    let buffer = typst_pdf::pdf(document, &options)?;
+    // When watching, reuse unchanged pages' content streams from the previous
+    // export (the dominant cost is drawing each page). The watch path also skips
+    // object renumbering, so the result renders identically but is not byte-equal
+    // to a one-shot export.
+    let buffer = if config.watching {
+        typst_pdf::pdf_with_cache(document, &options, &config.pdf_draw_cache)?
+    } else {
+        typst_pdf::pdf(document, &options)?
+    };
+    // Dev-only: verify cache reuse produces the same output as a from-scratch
+    // export on the same (watch) path — a fresh empty cache reuses nothing but
+    // takes the identical no-renumber path, so the bytes must match.
+    if config.watching && std::env::var_os("TYPST_PDF_CACHE_CHECK").is_some() {
+        let fresh =
+            typst_pdf::pdf_with_cache(document, &options, &typst_pdf::PageContentCache::new())?;
+        eprintln!(
+            "[cache-check] {}",
+            if fresh == buffer {
+                format!("OK ({} bytes)", buffer.len())
+            } else {
+                format!("MISMATCH cached={} fresh={}", buffer.len(), fresh.len())
+            }
+        );
+    }
     config
         .output
         .write(&buffer)

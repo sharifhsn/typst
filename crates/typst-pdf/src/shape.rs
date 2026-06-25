@@ -22,6 +22,13 @@ pub(crate) fn handle_shape(
     let mut handle = tags::shape(gc, fc, surface, shape, artifact_type);
     let surface = handle.surface();
 
+    // Draw-skip reuse: the artifact tag (`tags::shape` above) has been opened
+    // (and is closed when `handle` drops); skip the actual path drawing — the
+    // content stream is injected from the cache.
+    if fc.draw_skip {
+        return Ok(());
+    }
+
     surface.set_location(span.into_raw());
     surface.push_transform(&fc.state().transform().to_krilla());
     let mut surface = defer(surface, |s| {

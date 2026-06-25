@@ -34,7 +34,28 @@ use typst_library::model::LateLinkResolver;
 /// Returns the raw bytes making up the PDF file.
 #[typst_macros::time(name = "pdf")]
 pub fn pdf(document: &PagedDocument, options: &PdfOptions) -> SourceResult<Vec<u8>> {
-    convert::convert(document, options, &[], None)
+    convert::convert(document, options, &[], None, None)
+}
+
+/// Export a document into a PDF file, reusing per-page content from `cache`
+/// where the page is unchanged from the previous export.
+///
+/// This speeds up incremental re-exports (e.g. `typst watch`): the dominant
+/// cost of PDF export is drawing each page's content stream, which is skipped
+/// for pages whose content is byte-identical to the previous export.
+///
+/// Because byte-stable output isn't needed on the interactive watch path, this
+/// also skips krilla's object-renumbering pass (see [`SerializeSettings::no_renumber`]).
+/// The result is therefore a valid PDF that *renders* identically to [`pdf`] but
+/// is not byte-identical to it (the object reference numbers differ). Use [`pdf`]
+/// for byte-reproducible one-shot exports.
+#[typst_macros::time(name = "pdf")]
+pub fn pdf_with_cache(
+    document: &PagedDocument,
+    options: &PdfOptions,
+    cache: &PageContentCache,
+) -> SourceResult<Vec<u8>> {
+    convert::convert(document, options, &[], None, Some(cache))
 }
 
 /// Export a document into a PDF file as part of a bundle.
@@ -50,7 +71,43 @@ pub fn pdf_in_bundle(
     anchors: &[(Location, EcoString)],
     link_resolver: Tracked<LateLinkResolver>,
 ) -> SourceResult<Vec<u8>> {
-    convert::convert(document, options, anchors, Some(link_resolver))
+    convert::convert(document, options, anchors, Some(link_resolver), None)
+}
+
+/// A cross-recompile cache of per-page PDF content streams, used by
+/// [`pdf_with_cache`] to avoid redrawing pages that are unchanged since the
+/// previous export. Owned by the caller and reused across compilations.
+#[derive(Default)]
+pub struct PageContentCache {
+    pub(crate) inner: std::sync::RwLock<Vec<CachedPage>>,
+}
+
+/// A single page's cached content stream and the state needed to validate reuse.
+pub(crate) struct CachedPage {
+    /// Hash of the `Page` (frame, fill, bleed, …) the content was drawn from.
+    pub(crate) page_hash: u128,
+    /// The global glyph-to-CID fingerprint *entering* this page. Reuse is only
+    /// valid when the current fingerprint matches, so the subset glyph IDs baked
+    /// into `content` are still correct.
+    pub(crate) before_fp: u128,
+    /// The raw (uncompressed) content-stream bytes.
+    pub(crate) content: Vec<u8>,
+    /// The content bounding box.
+    pub(crate) bbox: krilla::geom::Rect,
+    /// Whether the page is "simple" (no sub-streams) and thus safely reusable.
+    pub(crate) simple: bool,
+    /// The recorded registrations (glyph subset, cmap, resources) needed to
+    /// reproduce the page's global state on reuse without re-walking its frame.
+    pub(crate) registration: std::sync::Arc<krilla::PageRegistration>,
+    /// The page's links, re-resolved and re-added on reuse.
+    pub(crate) links: std::sync::Arc<Vec<crate::link::CachedLink>>,
+}
+
+impl PageContentCache {
+    /// Create an empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 /// Settings for PDF export.

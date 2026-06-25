@@ -27,20 +27,26 @@ pub(crate) enum LinkAnnotationKind {
     Artifact,
 }
 
-pub(crate) fn handle_link(
-    fc: &mut FrameContext,
+/// A page's link in a form that can be cached and re-added on incremental
+/// reuse. The target is *re-resolved* on reuse (not cached), so destinations
+/// stay correct even if pagination shifted; the rect is page-local and stable.
+pub(crate) struct CachedLink {
+    pub dest: Destination,
+    pub rect: kg::Rect,
+}
+
+/// Resolve a Typst link destination to a krilla annotation target. Returns
+/// `None` when the destination points to an excluded page.
+pub(crate) fn resolve_target(
     gc: &mut GlobalContext,
     dest: &Destination,
-    size: Size,
-) -> SourceResult<()> {
-    let target = match dest {
+) -> Option<Target> {
+    Some(match dest {
         Destination::Url(u) => {
             Target::Action(Action::Link(LinkAction::new(u.to_string())))
         }
         Destination::Position(p) => {
-            let Some(dest) = pos_to_xyz(&gc.page_index_converter, *p) else {
-                return Ok(());
-            };
+            let dest = pos_to_xyz(&gc.page_index_converter, *p)?;
             Target::Destination(krilla::destination::Destination::Xyz(dest))
         }
         Destination::Location(loc) => {
@@ -66,17 +72,30 @@ pub(crate) fn handle_link(
                     .introspector()
                     .position(*loc)
                     .unwrap_or(PagedPosition::ORIGIN);
-                let Some(dest) = pos_to_xyz(&gc.page_index_converter, pos) else {
-                    return Ok(());
-                };
+                let dest = pos_to_xyz(&gc.page_index_converter, pos)?;
                 Target::Destination(krilla::destination::Destination::Xyz(dest))
             }
         }
+    })
+}
+
+pub(crate) fn handle_link(
+    fc: &mut FrameContext,
+    gc: &mut GlobalContext,
+    dest: &Destination,
+    size: Size,
+) -> SourceResult<()> {
+    let Some(target) = resolve_target(gc, dest) else {
+        return Ok(());
     };
 
     let rect = bounding_box(fc, size);
 
     if tags::disabled(gc) {
+        // Record the (re-resolvable) link so this page can be reused
+        // incrementally without re-walking its frame.
+        fc.cached_links.push(CachedLink { dest: dest.clone(), rect });
+
         if gc.tags.in_tiling
             && let Some(accessibility) = gc.options.accessibility_validator()
         {

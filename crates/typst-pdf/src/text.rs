@@ -25,6 +25,14 @@ pub(crate) fn handle_text(
     let surface = handle.surface();
 
     let font = convert_font(gc, t.font.clone())?;
+
+    // Draw-skip reuse: the tag (`tags::text` above) has produced the
+    // marked-content id and tree leaf; skip the actual glyph drawing — the
+    // content stream is injected from the cache.
+    if fc.draw_skip {
+        return Ok(());
+    }
+
     let fill = paint::convert_fill(
         gc,
         &t.fill,

@@ -30,6 +30,17 @@ pub(crate) fn handle_image(
     surface: &mut Surface,
     span: Span,
 ) -> SourceResult<()> {
+    gc.image_spans.insert(span);
+
+    // Draw-skip reuse: run the tag (bbox + marked-content id + tree leaf), but
+    // skip the surface transform and the actual image drawing — the content
+    // stream is injected from the cache. (Image pages are not `is_simple`, so
+    // they don't actually get reused; this branch is defensive.)
+    if fc.draw_skip {
+        let _handle = tags::image(gc, fc, surface, image, size);
+        return Ok(());
+    }
+
     surface.push_transform(&fc.state().transform().to_krilla());
     surface.set_location(span.into_raw());
     let mut surface = defer(surface, |s| {
@@ -38,8 +49,6 @@ pub(crate) fn handle_image(
     });
 
     let interpolate = image.scaling() == Smart::Custom(ImageScaling::Smooth);
-
-    gc.image_spans.insert(span);
 
     let mut handle = tags::image(gc, fc, &mut surface, image, size);
     let surface = handle.surface();
