@@ -73,6 +73,8 @@ pub enum Target {
     /// The target for _bundle_ export. This export target can produce multiple
     /// [documents]($document) and [assets]($asset) from a single Typst project.
     Bundle,
+    /// The target that is used for DOCX (Microsoft Word) export.
+    Docx,
 }
 
 impl Target {

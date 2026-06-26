@@ -106,6 +106,7 @@ fn compile_impl<T: Output>(
         Target::Paged => {}
         Target::Html => warn_or_error_for_html(&library.features, sink)?,
         Target::Bundle => warn_or_error_for_bundle(&library.features, sink)?,
+        Target::Docx => {}
     }
 
     let base = StyleChain::new(&library.styles);
@@ -313,6 +314,7 @@ static ROUTINES: LazyLock<Routines> = LazyLock::new(|| Routines {
         let mut rules = NativeRuleMap::new();
         typst_layout::register(&mut rules);
         typst_html::register(&mut rules);
+        typst_docx::register(&mut rules);
         rules
     },
     eval_string: typst_eval::eval_string,

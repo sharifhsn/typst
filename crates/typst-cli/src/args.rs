@@ -594,6 +594,7 @@ pub enum OutputFormat {
     Svg,
     Html,
     Bundle,
+    Docx,
 }
 
 impl OutputFormat {

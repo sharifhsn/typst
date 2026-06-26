@@ -1009,7 +1009,7 @@ impl NativeRuleMap {
 
         let mut rules = Self { rules: IndexMap::default() };
 
-        for target in [Target::Paged, Target::Html, Target::Bundle] {
+        for target in [Target::Paged, Target::Html, Target::Bundle, Target::Docx] {
             // ContextElem is as special as SequenceElem and StyledElem and
             // could, in theory, also be special cased in realization.
             rules.register(target, crate::foundations::CONTEXT_RULE);
@@ -1026,7 +1026,7 @@ impl NativeRuleMap {
             rules.register(target, empty::<crate::model::PrefixInfo>());
         }
 
-        for target in [Target::Paged, Target::Html] {
+        for target in [Target::Paged, Target::Html, Target::Docx] {
             rules.register(target, crate::model::ASSET_UNSUPPORTED_RULE);
             rules.register(target, crate::model::DOCUMENT_UNSUPPORTED_RULE);
         }

@@ -633,7 +633,7 @@ fn visit_styled<'a>(
             match s.kind {
                 RealizationKind::Bundle => {}
                 RealizationKind::Document { .. } => match outer.get(TargetElem::target) {
-                    Target::Paged => {
+                    Target::Paged | Target::Docx => {
                         // When there are page styles, we "break free" from our show
                         // rule cage.
                         pagebreak = true;

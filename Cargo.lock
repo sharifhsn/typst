@@ -3063,6 +3063,7 @@ dependencies = [
  "comemo",
  "ecow",
  "rustc-hash",
+ "typst-docx",
  "typst-eval",
  "typst-html",
  "typst-layout",
@@ -3136,6 +3137,7 @@ dependencies = [
  "typst",
  "typst-bundle",
  "typst-dev-assets",
+ "typst-docx",
  "typst-eval",
  "typst-html",
  "typst-kit",
@@ -3191,6 +3193,24 @@ dependencies = [
  "unicode-segmentation",
  "unicode_names2",
  "unscanny",
+]
+
+[[package]]
+name = "typst-docx"
+version = "0.15.0"
+dependencies = [
+ "comemo",
+ "ecow",
+ "flate2",
+ "rustc-hash",
+ "time",
+ "typst-library",
+ "typst-macros",
+ "typst-svg",
+ "typst-syntax",
+ "typst-timing",
+ "typst-utils",
+ "zip",
 ]
 
 [[package]]

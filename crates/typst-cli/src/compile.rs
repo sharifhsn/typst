@@ -13,6 +13,7 @@ use typst::foundations::{Datetime, Smart};
 use typst::layout::PageRanges;
 use typst::syntax::Span;
 use typst_bundle::{Bundle, BundleOptions, VirtualFs};
+use typst_docx::{DocxDocument, DocxOptions};
 use typst_html::{HtmlDocument, HtmlOptions};
 use typst_kit::diagnostics::DiagnosticWorld;
 use typst_kit::timer::Timer;
@@ -116,6 +117,7 @@ impl CompileConfig {
                 Some(ext) if ext.eq_ignore_ascii_case("png") => OutputFormat::Png,
                 Some(ext) if ext.eq_ignore_ascii_case("svg") => OutputFormat::Svg,
                 Some(ext) if ext.eq_ignore_ascii_case("html") => OutputFormat::Html,
+                Some(ext) if ext.eq_ignore_ascii_case("docx") => OutputFormat::Docx,
                 _ => bail!(
                     "could not infer output format for path {}.\n\
                      consider providing the format manually with `--format/-f`",
@@ -136,6 +138,7 @@ impl CompileConfig {
                     OutputFormat::Png => "png",
                     OutputFormat::Svg => "svg",
                     OutputFormat::Html => "html",
+                    OutputFormat::Docx => "docx",
                     OutputFormat::Bundle => "",
                 },
             ))
@@ -337,7 +340,26 @@ fn compile_and_export(
             let result = output.and_then(|bundle| export_bundle(bundle, config));
             Warned { output: result, warnings }
         }
+        OutputFormat::Docx => {
+            let Warned { output, warnings } = typst::compile::<DocxDocument>(world);
+            let result = output.and_then(|document| export_docx(&document, config));
+            Warned {
+                output: result.map(|()| vec![config.output.clone()]),
+                warnings,
+            }
+        }
     }
+}
+
+/// Export to DOCX.
+fn export_docx(document: &DocxDocument, config: &CompileConfig) -> SourceResult<()> {
+    let options = DocxOptions { pretty: config.pretty };
+    let bytes = typst_docx::docx(document, &options)?;
+    config
+        .output
+        .write(&bytes)
+        .map_err(|err| eco_format!("failed to write DOCX file ({err})"))
+        .at(Span::detached())
 }
 
 /// Export to HTML.
@@ -371,7 +393,7 @@ fn export_paged(
         OutputFormat::Svg => {
             export_image(document, config, ImageExportFormat::Svg).at(Span::detached())
         }
-        OutputFormat::Html | OutputFormat::Bundle => unreachable!(),
+        OutputFormat::Html | OutputFormat::Bundle | OutputFormat::Docx => unreachable!(),
     }
 }
 
