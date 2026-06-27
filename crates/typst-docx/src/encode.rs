@@ -162,18 +162,32 @@ fn media_content_type(ext: &str) -> &'static str {
 // word/document.xml
 // ---------------------------------------------------------------------------
 
-fn build_document(document: &DocxDocument, pretty: bool) -> String {
-    let mut w = XmlWriter::new(pretty);
-    w.open(xml::W_DOCUMENT)
-        .attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+/// Declares the OOXML namespace prefixes on a part's root element.
+///
+/// Each part (`document.xml`, `header*.xml`, `footer*.xml`, `footnotes.xml`) is
+/// parsed standalone, so every prefix it uses must be declared on its OWN root.
+/// A drawing (`wp:`/`a:`/`pic:`) or math (`m:`) inside a header/footer/footnote
+/// therefore needs these here too — otherwise the prefix is undefined and strict
+/// consumers (Microsoft Word, LibreOffice) refuse to load the whole document.
+/// Declaring an unused namespace is harmless, so all parts get the full set.
+fn decl_ooxml_namespaces(w: &mut XmlWriter) {
+    w.attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
         .attr("xmlns:r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
         .attr("xmlns:m", "http://schemas.openxmlformats.org/officeDocument/2006/math")
-        .attr("xmlns:wp", "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing")
+        .attr(
+            "xmlns:wp",
+            "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+        )
         .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
         .attr("xmlns:pic", "http://schemas.openxmlformats.org/drawingml/2006/picture")
-        .attr("xmlns:mc", "http://schemas.openxmlformats.org/markup-compatibility/2006")
-        .attr("mc:Ignorable", "w14 wp14")
-        .start_children();
+        .attr("xmlns:mc", "http://schemas.openxmlformats.org/markup-compatibility/2006");
+}
+
+fn build_document(document: &DocxDocument, pretty: bool) -> String {
+    let mut w = XmlWriter::new(pretty);
+    w.open(xml::W_DOCUMENT);
+    decl_ooxml_namespaces(&mut w);
+    w.attr("mc:Ignorable", "w14 wp14").start_children();
 
     w.open(xml::W_BODY).start_children();
 
@@ -713,11 +727,9 @@ fn write_sectpr(w: &mut XmlWriter, sect: &SectPr) {
 fn build_hdrftr(part: &HdrFtrPart, pretty: bool) -> String {
     let root = if part.is_header { "w:hdr" } else { "w:ftr" };
     let mut w = XmlWriter::new(pretty);
-    w.open(root)
-        .attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
-        .attr("xmlns:r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
-        .attr("xmlns:m", "http://schemas.openxmlformats.org/officeDocument/2006/math")
-        .start_children();
+    w.open(root);
+    decl_ooxml_namespaces(&mut w);
+    w.start_children();
     let mut ends_with_para = false;
     for block in &part.blocks {
         ends_with_para = write_block(&mut w, block);
@@ -813,10 +825,9 @@ fn build_numbering(document: &DocxDocument, pretty: bool) -> String {
 
 fn build_footnotes(document: &DocxDocument, pretty: bool) -> String {
     let mut w = XmlWriter::new(pretty);
-    w.open("w:footnotes")
-        .attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
-        .attr("xmlns:r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
-        .start_children();
+    w.open("w:footnotes");
+    decl_ooxml_namespaces(&mut w);
+    w.start_children();
 
     // Separators.
     write_separator(&mut w, -1, "separator");
