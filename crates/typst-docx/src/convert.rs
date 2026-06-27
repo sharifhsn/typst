@@ -156,6 +156,12 @@ fn handle_block(
 ) -> SourceResult<()> {
     if let Some(elem) = child.to_packed::<TagElem>() {
         out.push(Block::Tag(elem.tag.clone()));
+    } else if child.is::<typst_library::layout::PagebreakElem>() {
+        // A page break maps to a `<w:br w:type="page"/>` in its own paragraph.
+        out.push(Block::Para(Para {
+            props: ParaProps::default(),
+            content: vec![ParaChild::Run(Run::PageBreak)],
+        }));
     } else if let Some(elem) = child.to_packed::<ParElem>() {
         let props = ctx.resolve_par_props(elem, styles);
         let content = ctx.inline_pchildren(&elem.body, styles, RunProps::default())?;

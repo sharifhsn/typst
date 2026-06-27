@@ -125,16 +125,20 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         let target = TargetElem::target.set(Target::Paged).wrap();
         let styles = styles.chain(&target);
 
-        // Lay the content out at its natural size.
+        // Lay the content out at its natural size. The fallback must degrade
+        // gracefully: if the content cannot be laid out in this context (e.g. a
+        // pagebreak with no page flow), drop it rather than failing the export.
         let region = Region::new(Size::splat(Abs::inf()), Axes::splat(false));
         let loc = self.locator.next(&span);
-        let frame = (self.engine.library.routines.layout_frame)(
+        let Ok(frame) = (self.engine.library.routines.layout_frame)(
             self.engine,
             content,
             loc,
             styles,
             region,
-        )?;
+        ) else {
+            return Ok(None);
+        };
 
         let size = frame.size();
         if !size.x.to_pt().is_finite()

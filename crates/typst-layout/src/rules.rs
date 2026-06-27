@@ -93,6 +93,15 @@ pub fn register(rules: &mut NativeRuleMap) {
     rules.register(Docx, HIGHLIGHT_RULE);
     rules.register(Docx, SMALLCAPS_RULE);
 
+    // Citations and bibliographies resolve through citeproc in these rules
+    // (building the `Works` that citations look up). Without them, citations
+    // cannot be located. The DOCX backend lowers the resulting formatted
+    // content like any other text/blocks.
+    rules.register(Docx, CITE_GROUP_RULE);
+    rules.register(Docx, BIBLIOGRAPHY_RULE);
+    rules.register(Docx, CSL_LIGHT_RULE);
+    rules.register(Docx, CSL_INDENT_RULE);
+
     // Layout.
     rules.register(Paged, ALIGN_RULE);
     rules.register(Paged, PAD_RULE);
