@@ -76,6 +76,14 @@ pub fn docx_document(
         deferred_tags,
     ) = {
         let mut ctx = DocxCtx::new(engine, &mut locator);
+        // Give rasterized content the real page content width (page minus L/R
+        // margins, converted from twips → pt) so width-relative content does not
+        // blow up under an infinite region. Guard against a degenerate width.
+        let content_twip = sect_geom.page_w - sect_geom.margin_left - sect_geom.margin_right;
+        if content_twip > 0 {
+            ctx.raster_width =
+                typst_library::layout::Abs::pt(content_twip as f64 / 20.0);
+        }
         let body = crate::convert::run(&mut ctx, &pairs)?;
         // Build the section properties + header/footer parts on the same ctx so
         // any inner media/rels join the document's tables.

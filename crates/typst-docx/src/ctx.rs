@@ -6,7 +6,7 @@ use typst_library::diag::{SourceResult, warning};
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Packed, StyleChain};
 use typst_library::introspection::{Locator, SplitLocator, Tag, TagElem};
-use typst_library::layout::{Frame, FrameItem, HElem};
+use typst_library::layout::{Abs, Frame, FrameItem, HElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{EmphElem, StrongElem};
 use typst_library::routines::{Arenas, FragmentKind, RealizationKind};
@@ -74,6 +74,15 @@ pub struct DocxCtx<'a, 'e> {
     /// an image remain present in the introspector.
     pub(crate) deferred_tags: Vec<Tag>,
 
+    /// The finite width to give content that we rasterize (see
+    /// [`Self::rasterize`]). Width-relative content (`layout(size => ..)`,
+    /// `width: 100%`, gradients sized to the container) must lay out against a
+    /// real page width: laying it out under an *infinite* width makes such a
+    /// closure produce pathologically wide output (observed: a single
+    /// `layout()` rendering a 2040pt-wide frame for ~100s). Set from the page
+    /// geometry in [`crate::document::docx_document`].
+    pub(crate) raster_width: Abs,
+
     /// Smart-quote state, threaded through inline runs.
     quoter: SmartQuoter,
     /// The last character emitted into a text run, for smart quoting.
@@ -103,6 +112,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             uses_math: false,
             bookmarks: BookmarkTable::default(),
             deferred_tags: Vec::new(),
+            // A sane finite default (~A4 text width); overridden from the real
+            // page geometry by `docx_document` before any conversion happens.
+            raster_width: Abs::pt(450.0),
             quoter: SmartQuoter::new(),
             last_char: None,
         }
@@ -140,10 +152,17 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         let target = TargetElem::target.set(Target::Paged).wrap();
         let styles = styles.chain(&target);
 
-        // Lay the content out at its natural size. The fallback must degrade
-        // gracefully: if the content cannot be laid out in this context (e.g. a
-        // pagebreak with no page flow), drop it rather than failing the export.
-        let region = Region::new(Size::splat(Abs::inf()), Axes::splat(false));
+        // Lay the content out against the page's content width (height stays
+        // unbounded). A *finite* width is essential: width-relative content
+        // (`layout(size => ..)`, `width: 100%`) laid out under an infinite width
+        // produces pathologically wide output. `Axes::splat(false)` keeps the
+        // region non-expanding, so fixed-size content still takes its natural
+        // size (and may exceed the width without being clipped). The fallback
+        // must degrade gracefully: if the content cannot be laid out in this
+        // context (e.g. a pagebreak with no page flow), drop it rather than
+        // failing the export.
+        let region =
+            Region::new(Size::new(self.raster_width, Abs::inf()), Axes::splat(false));
         let loc = self.locator.next(&span);
         let Ok(frame) = (self.engine.library.routines.layout_frame)(
             self.engine,
@@ -155,6 +174,21 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             return Ok(None);
         };
 
+        // Harvest introspection tags from the laid-out frame so that labels and
+        // references on elements inside the rasterized content stay resolvable
+        // (otherwise `@label` to something inside a drawn box fails to converge).
+        //
+        // This must happen *before* the size check below: content can lay out to
+        // a degenerate (zero) size precisely *because* an introspecting element
+        // inside it (a bibliography, a cite, a counter display) has not yet
+        // stabilized — on the first iteration it renders empty, collapsing the
+        // box. If we dropped such a frame without harvesting, its tags would
+        // never reach the introspector, the element would never stabilize, and
+        // the box would stay zero forever: a convergence deadlock. Harvesting the
+        // tags here lets the next iteration render the element with real content
+        // (and real size).
+        collect_frame_tags(&frame, &mut self.deferred_tags);
+
         let size = frame.size();
         if !size.x.to_pt().is_finite()
             || !size.y.to_pt().is_finite()
@@ -163,11 +197,6 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         {
             return Ok(None);
         }
-
-        // Harvest introspection tags from the laid-out frame so that labels and
-        // references on elements inside the rasterized content stay resolvable
-        // (otherwise `@label` to something inside a drawn box fails to converge).
-        collect_frame_tags(&frame, &mut self.deferred_tags);
 
         // Render to a pixmap at 2× for crispness, then PNG-encode.
         let page = typst_layout::Page {
@@ -182,8 +211,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             pixel_per_pt: 2.0.into(),
             ..Default::default()
         };
-        let pixmap = typst_render::render(&page, &options);
-        let Ok(png) = pixmap.encode_png() else { return Ok(None) };
+        // The rasterizer can panic on pathological sub-frames (e.g. a gradient or
+        // tiling that resolves to a zero-dimension pixmap: `tiny-skia` asserts
+        // "Canvas length must be != 0"). Such a panic must not abort the whole
+        // export — this is a best-effort fallback. Catch it and drop just this
+        // one image; the introspection tags were already harvested above, so
+        // convergence is unaffected.
+        let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            typst_render::render(&page, &options).encode_png()
+        }));
+        let Ok(Ok(png)) = rendered else { return Ok(None) };
 
         Ok(Some((self.add_image(&png, "png"), size)))
     }

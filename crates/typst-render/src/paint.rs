@@ -296,9 +296,13 @@ pub fn to_sk_color_u8(color: ProcessColor) -> sk::ColorU8 {
 
 pub fn render_tiling_frame(state: &State, tilings: &Tiling) -> sk::Pixmap {
     let size = tilings.size() + tilings.spacing();
+    // Clamp each dimension to at least one pixel: a tiling whose size rounds to
+    // zero would make `Pixmap::new` return `None` and the `unwrap` panic
+    // ("Canvas length must be != 0"). The top-level `render` applies the same
+    // `.max(1)` guard.
     let mut canvas = sk::Pixmap::new(
-        (size.x.to_f32() * state.pixel_per_pt).round() as u32,
-        (size.y.to_f32() * state.pixel_per_pt).round() as u32,
+        ((size.x.to_f32() * state.pixel_per_pt).round() as u32).max(1),
+        ((size.y.to_f32() * state.pixel_per_pt).round() as u32).max(1),
     )
     .unwrap();
 

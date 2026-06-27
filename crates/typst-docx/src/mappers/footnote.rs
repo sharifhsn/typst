@@ -142,7 +142,18 @@ fn resolve_body(
     // Reference footnote: locate the declaring footnote and read its body.
     // `declaration_location` already resolved the linking key; query that exact
     // location to fetch the declaring element and its content body.
-    let decl = elem.declaration_location(ctx.engine()).at(elem.span())?;
+    //
+    // The reference may be unresolvable during an early introspection pass (the
+    // declaring footnote's label is not yet in the introspector). Mirror the
+    // tolerance in `footnote()`: return `None` rather than hard-failing, so the
+    // pass completes and the introspector learns the label for the next
+    // iteration. Hard-failing here aborts the whole export before convergence —
+    // exactly the case of a shared footnote like `#footnote(<lbl>)` referencing
+    // a `#footnote(..) <lbl>` defined elsewhere (common in journal author
+    // blocks for co-first-author marks).
+    let Some(decl) = elem.declaration_location(ctx.engine()).ok() else {
+        return Ok(None);
+    };
     let selector = typst_library::foundations::Selector::Location(decl);
     let body = ctx
         .engine()
