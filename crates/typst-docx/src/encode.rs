@@ -619,6 +619,14 @@ fn write_run(w: &mut XmlWriter, run: &Run) {
             w.open(xml::W_FOOTNOTE_REF).attr("w:id", &id.to_string()).empty();
             w.close();
         }
+        Run::FootnoteRefMark => {
+            w.open(xml::W_R).start_children();
+            w.open(xml::W_RPR).start_children();
+            w.open(xml::W_RSTYLE).attr(xml::W_VAL, "FootnoteReference").empty();
+            w.close(); // rPr
+            w.open(xml::W_FOOTNOTE_REF_MARK).empty();
+            w.close(); // r
+        }
         Run::Drawing(drawing) => write_drawing(w, drawing),
         Run::OmmlInline(xml_str) => {
             w.raw(xml_str);

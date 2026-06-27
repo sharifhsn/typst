@@ -203,6 +203,9 @@ pub const W_HYPERLINK: &str = "w:hyperlink";
 pub const W_BOOKMARK_START: &str = "w:bookmarkStart";
 pub const W_BOOKMARK_END: &str = "w:bookmarkEnd";
 pub const W_FOOTNOTE_REF: &str = "w:footnoteReference";
+/// The in-body footnote auto-number placeholder (distinct from the in-text
+/// `w:footnoteReference`): Word renders the footnote's number where it appears.
+pub const W_FOOTNOTE_REF_MARK: &str = "w:footnoteRef";
 
 pub const M_OMATH: &str = "m:oMath";
 pub const M_OMATH_PARA: &str = "m:oMathPara";

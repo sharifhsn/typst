@@ -98,6 +98,10 @@ pub enum Run {
     PageBreak,
     Tab,
     FootnoteRef { props: RunProps, id: i32 },
+    /// The in-body footnote number mark (`<w:footnoteRef/>`, styled
+    /// `FootnoteReference`). Prepended to a footnote body's first paragraph so
+    /// Word/LibreOffice render the footnote's auto-number next to its text.
+    FootnoteRefMark,
     Drawing(Drawing),
     /// An inline equation `<m:oMath>` (serialized XML).
     OmmlInline(String),

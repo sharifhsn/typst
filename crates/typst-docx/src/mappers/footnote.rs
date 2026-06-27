@@ -23,7 +23,7 @@ use typst_library::introspection::QueryFirstIntrospection;
 use typst_library::model::FootnoteElem;
 
 use crate::ctx::DocxCtx;
-use crate::dom::{Block, Run, RunProps};
+use crate::dom::{Block, ParaChild, Run, RunProps};
 
 /// The conventional Word character-style id for the superscript footnote mark.
 /// It is defined in `styles_part.rs` and applied to BOTH the inline
@@ -108,22 +108,17 @@ fn body_blocks(
             }
     }
 
-    // INTEGRATION-NEEDED (`encode.rs::write_footnote` / IR): Word renders the
-    // footnote's auto-number via a leading `<w:r><w:rPr><w:rStyle
-    // w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r>` mark inside the
-    // FIRST body paragraph. The current IR cannot express the bare
-    // `<w:footnoteRef/>` element: `Run::FootnoteRef` serializes
-    // `<w:footnoteReference w:id>` (the *reference* mark for `document.xml`), and
-    // there is no `Run::FootnoteRefMark` / `Para`-prefix slot. The body therefore
-    // currently lacks the in-text number. To fix during integration, EITHER:
-    //   (a) add a `Run::FootnoteRefMark` (or `Run::Empty { props, name }`) IR
-    //       variant emitting `<w:footnoteRef/>`, and prepend it (styled
-    //       `FootnoteReference`) to the first paragraph here; OR
-    //   (b) have `encode.rs::write_footnote` inject that leading run when it
-    //       serializes each `Footnote` (cleanest: the encoder already owns the
-    //       `footnoteRef` knowledge for the separator footnotes).
-    // The footnote still links + renders without it; only the in-margin number
-    // glyph is missing, so this is non-blocking for a valid, openable file.
+    // Prepend the auto-number mark (`<w:footnoteRef/>`, styled
+    // `FootnoteReference`) to the FIRST body paragraph, followed by a tab, so
+    // Word/LibreOffice render the footnote's number next to its text — matching
+    // how Word itself writes footnote bodies. Without it the footnote links and
+    // its text shows, but the leading number glyph is missing.
+    if let Some(Block::Para(first)) =
+        blocks.iter_mut().find(|b| matches!(b, Block::Para(_)))
+    {
+        first.content.insert(0, ParaChild::Run(Run::Tab));
+        first.content.insert(0, ParaChild::Run(Run::FootnoteRefMark));
+    }
 
     Ok(blocks)
 }
