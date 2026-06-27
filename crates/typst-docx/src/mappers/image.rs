@@ -74,12 +74,13 @@ pub fn image(
 
     // Obtain embeddable bytes + the lowercase extension Word understands.
     let Some((bytes, ext)) = embeddable_bytes(&decoded) else {
-        // No native Word-embeddable representation and no rasterizer available
-        // yet (WebP / SVG / PDF). Warn and drop rather than corrupt the package.
-        ctx.warn_ignored(
-            "image (vector/WebP rasterization not yet available in DOCX export)",
-            span,
-        );
+        // Vector / WebP / PDF have no Word-embeddable raster form, so lay the
+        // image out and rasterize it to a PNG via the generic fallback.
+        let content = elem.clone().pack();
+        if let Some(run) = laid_out_fallback(&content, styles, ctx)? {
+            return Ok(run);
+        }
+        ctx.warn_ignored("image could not be rasterized for DOCX export", span);
         return Ok(Run::Text { props: RunProps::default(), text: "".into() });
     };
 

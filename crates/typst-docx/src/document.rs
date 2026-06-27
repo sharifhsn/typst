@@ -48,7 +48,7 @@ pub fn docx_document(
     let pairs: Vec<_> = children.to_vec();
 
     // Walk the native element tree into the typed IR.
-    let (body, footnotes, numbering, media, doc_rels, bookmarks, max_heading_level, uses_fields, uses_math) = {
+    let (body, footnotes, numbering, media, doc_rels, bookmarks, max_heading_level, uses_fields, uses_math, deferred_tags) = {
         let mut ctx = DocxCtx::new(engine, &mut locator);
         let body = crate::convert::run(&mut ctx, &pairs)?;
         (
@@ -61,6 +61,7 @@ pub fn docx_document(
             ctx.max_heading_level,
             ctx.uses_fields,
             ctx.uses_math,
+            std::mem::take(&mut ctx.deferred_tags),
         )
     };
 
@@ -70,6 +71,9 @@ pub fn docx_document(
     for fnote in &footnotes {
         collect_tags(&fnote.blocks, &mut tags);
     }
+    // Tags harvested from content we rasterized — so labels/refs inside a drawn
+    // figure or box still resolve.
+    tags.extend(deferred_tags);
 
     let mut introspector = DocxIntrospector::new(&tags);
     introspector.set_anchors(crate::bookmark::anchors(&bookmarks));

@@ -5,8 +5,8 @@ use rustc_hash::FxHashMap;
 use typst_library::diag::{SourceResult, warning};
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Packed, StyleChain};
-use typst_library::introspection::{Locator, SplitLocator, TagElem};
-use typst_library::layout::HElem;
+use typst_library::introspection::{Locator, SplitLocator, Tag, TagElem};
+use typst_library::layout::{Frame, FrameItem, HElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{EmphElem, StrongElem};
 use typst_library::routines::{Arenas, FragmentKind, RealizationKind};
@@ -61,6 +61,11 @@ pub struct DocxCtx<'a, 'e> {
 
     pub(crate) bookmarks: BookmarkTable,
 
+    /// Introspection tags harvested from rasterized content (see
+    /// [`Self::rasterize`]), so labels/refs inside an element that we rendered to
+    /// an image remain present in the introspector.
+    pub(crate) deferred_tags: Vec<Tag>,
+
     /// Smart-quote state, threaded through inline runs.
     quoter: SmartQuoter,
     /// The last character emitted into a text run, for smart quoting.
@@ -88,6 +93,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             uses_fields: false,
             uses_math: false,
             bookmarks: BookmarkTable::default(),
+            deferred_tags: Vec::new(),
             quoter: SmartQuoter::new(),
             last_char: None,
         }
@@ -148,6 +154,11 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         {
             return Ok(None);
         }
+
+        // Harvest introspection tags from the laid-out frame so that labels and
+        // references on elements inside the rasterized content stay resolvable
+        // (otherwise `@label` to something inside a drawn box fails to converge).
+        collect_frame_tags(&frame, &mut self.deferred_tags);
 
         // Render to a pixmap at 2× for crispness, then PNG-encode.
         let page = typst_layout::Page {
@@ -467,9 +478,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         out: &mut Vec<Run>,
     ) -> SourceResult<()> {
         if let Some(elem) = child.to_packed::<TagElem>() {
-            // Tags are introspection passthrough; record nothing in runs here —
-            // bookmarks/tags are handled at the block level. Ignore for runs.
-            let _ = elem;
+            // Run-only context (table cell / footnote / nested inline body): we
+            // can't position the tag among runs, but the introspector still needs
+            // it so labels and references inside resolve. Defer it.
+            self.deferred_tags.push(elem.tag.clone());
         } else if child.is::<SpaceElem>() {
             self.push_text(out, props.clone(), " ".into());
         } else if let Some(elem) = child.to_packed::<TextElem>() {
@@ -619,5 +631,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             content,
             styles,
         )
+    }
+}
+
+/// Recursively collects introspection tags from a laid-out frame.
+fn collect_frame_tags(frame: &Frame, out: &mut Vec<Tag>) {
+    for (_, item) in frame.items() {
+        match item {
+            FrameItem::Group(group) => collect_frame_tags(&group.frame, out),
+            FrameItem::Tag(tag) => out.push(tag.clone()),
+            _ => {}
+        }
     }
 }
