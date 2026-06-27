@@ -164,14 +164,40 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         let region =
             Region::new(Size::new(self.raster_width, Abs::inf()), Axes::splat(false));
         let loc = self.locator.next(&span);
-        let Ok(frame) = (self.engine.library.routines.layout_frame)(
-            self.engine,
-            content,
-            loc,
-            styles,
-            region,
-        ) else {
-            return Ok(None);
+
+        // Lay the content out through a sub-engine with a THROWAWAY sink, so any
+        // delayed errors the re-layout produces are discarded rather than
+        // promoted to fatal at the end of the introspection loop.
+        //
+        // The rasterization re-layout is a separate introspection universe: it
+        // re-realizes the content under `Paged` with its own pass, and packages
+        // that compute layout-coupled values during that pass (algo's `#i`
+        // indent-state assert, a margin-note that needs page properties, a cetz
+        // canvas whose size hasn't stabilized) raise errors there that never
+        // clear — because this universe, unlike the main document, has no way to
+        // feed those values back to itself. Those errors must not fail the whole
+        // export; the content still rasterizes to its best-effort visual. We keep
+        // the shared introspector (reads) and the tag harvest below intact, so
+        // labels/refs/bibliography convergence are unaffected — only this
+        // re-layout's own error reporting is isolated.
+        use comemo::Track;
+        let layout_frame = self.engine.library.routines.layout_frame;
+        let mut throwaway = typst_library::engine::Sink::new();
+        let frame = {
+            let mut sub = typst_library::engine::Engine {
+                world: self.engine.world,
+                library: self.engine.library,
+                introspector: typst_utils::Protected::from_raw(
+                    self.engine.introspector.into_raw(),
+                ),
+                traced: self.engine.traced,
+                sink: throwaway.track_mut(),
+                route: typst_library::engine::Route::extend(self.engine.route.track()),
+            };
+            match layout_frame(&mut sub, content, loc, styles, region) {
+                Ok(frame) => frame,
+                Err(_) => return Ok(None),
+            }
         };
 
         // Harvest introspection tags from the laid-out frame so that labels and
