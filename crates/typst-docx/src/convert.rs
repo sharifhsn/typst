@@ -59,13 +59,15 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
             // `ParElem` body thanks to the registered inline rules, so it never
             // splits a paragraph here.
             let from = blocks.len();
+            flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
+            pending_v = apply_pending_v(&mut blocks, from, pending_v);
             // Whether the block immediately preceding this paragraph is also a
             // paragraph. Typst's default `first-line-indent` (`all: false`)
             // indents a paragraph only when it directly follows another one;
-            // Word's `w:firstLine` has no such rule, so we apply it here.
+            // Word's `w:firstLine` has no such rule, so we apply it here. This is
+            // checked *after* the flush so `blocks.last()` is the just-emitted
+            // previous paragraph rather than the one before it.
             let prev_was_para = matches!(blocks.last(), Some(Block::Para(_)));
-            flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
-            pending_v = apply_pending_v(&mut blocks, from, pending_v);
             let mut props = ctx.resolve_par_props(par, *styles);
             if prev_was_para
                 && props.ind.as_ref().and_then(|i| i.first_line).is_none()
