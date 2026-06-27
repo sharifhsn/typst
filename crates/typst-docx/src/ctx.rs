@@ -251,6 +251,44 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         Ok(Some((self.add_image(&png, "png"), size)))
     }
 
+    /// Emits a hidden `SEQ \h` field (increment-without-display) for each
+    /// captioned figure harvested into `deferred_tags` at/after index `before`.
+    ///
+    /// Such figures live inside content we rasterized, so they never reached the
+    /// figure mapper and emitted no visible `SEQ` field — Word's caption counter
+    /// would under-count and the (introspector-baked) cross-reference numbers
+    /// would drift. The visible number is already baked into the rasterized
+    /// image; this just keeps Word's running count correct for the figures that
+    /// follow. Only captioned figures count, mirroring the figure mapper (which
+    /// emits the visible `SEQ` together with the caption).
+    fn emit_rasterized_figure_seqs(
+        &mut self,
+        before: usize,
+        styles: StyleChain,
+        out: &mut Vec<Run>,
+    ) {
+        use typst_library::model::FigureElem;
+        let names: Vec<EcoString> = self.deferred_tags[before..]
+            .iter()
+            .filter_map(|tag| match tag {
+                Tag::Start(c, _) => {
+                    let fig = c.to_packed::<FigureElem>()?;
+                    fig.caption.get_cloned(styles)?;
+                    Some(mappers::image::seq_name(fig, styles))
+                }
+                _ => None,
+            })
+            .collect();
+        for name in names {
+            out.push(Run::Field(crate::dom::Field {
+                instr: eco_format!(" SEQ {name} \\h "),
+                result: Vec::new(),
+                dirty: false,
+            }));
+            self.uses_fields = true;
+        }
+    }
+
     /// Emits a non-fatal "X was ignored during DOCX export" warning.
     pub fn warn_ignored(&mut self, what: &str, span: Span) {
         self.engine
@@ -752,13 +790,23 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // cannot emit a `<w:hyperlink>` wrapper, so lower the link body to
             // runs. Paragraph-level links go through `link_children` instead.
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
-        } else if let Some(run) = mappers::image::laid_out_fallback(child, styles, self)? {
+        } else {
             // No idiomatic representation (a drawn shape, an SVG/PDF image, an
             // externally-rendered figure, …): rasterize it and embed as an image
             // so the content survives instead of being dropped.
-            out.push(run);
-        } else {
-            self.warn_ignored(child.elem().name(), child.span());
+            let before = self.deferred_tags.len();
+            let run = mappers::image::laid_out_fallback(child, styles, self)?;
+            // A figure whose *container* we rasterized (e.g. a `wrap-content`
+            // figure) never reaches the figure mapper, so it emits no visible
+            // `SEQ` field — Word's caption counter would then under-count and
+            // drift from the introspector-baked cross-reference numbers. Emit a
+            // hidden `SEQ \h` (increment without display) for each such figure,
+            // keeping Word's numbering consistent with the references.
+            self.emit_rasterized_figure_seqs(before, styles, out);
+            match run {
+                Some(run) => out.push(run),
+                None => self.warn_ignored(child.elem().name(), child.span()),
+            }
         }
         Ok(())
     }

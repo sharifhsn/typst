@@ -362,7 +362,7 @@ fn caption_runs(
 
 /// Maps a figure's `kind` to a `SEQ` field name (a stable per-kind counter
 /// identifier). Matches the Word convention `Figure`/`Table`/`Listing`.
-fn seq_name(elem: &Packed<FigureElem>, styles: StyleChain) -> EcoString {
+pub(crate) fn seq_name(elem: &Packed<FigureElem>, styles: StyleChain) -> EcoString {
     use typst_library::foundations::NativeElement;
     use typst_library::model::TableElem;
     use typst_library::text::RawElem;
