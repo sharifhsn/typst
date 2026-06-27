@@ -93,6 +93,15 @@ pub fn register(rules: &mut NativeRuleMap) {
     rules.register(Docx, HIGHLIGHT_RULE);
     rules.register(Docx, SMALLCAPS_RULE);
 
+    // `@key` references are turned into citations (or cross-reference links) by
+    // the ref rule. Without it, a citation stays a raw `RefElem`, no `CiteGroup`
+    // is formed, and `Works` can never locate the citation. (Cross-references
+    // then lower to linked text rather than a `REF` field, which is fine — the
+    // `DirectLinkElem` they produce still becomes a navigable hyperlink.)
+    rules.register(Docx, REF_RULE);
+    rules.register(Docx, LINK_MARKER_RULE);
+    rules.register(Docx, DIRECT_LINK_RULE);
+
     // Citations and bibliographies resolve through citeproc in these rules
     // (building the `Works` that citations look up). Without them, citations
     // cannot be located. The DOCX backend lowers the resulting formatted

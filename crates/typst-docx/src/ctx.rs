@@ -434,7 +434,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
 
         let mut out: Vec<ParaChild> = Vec::new();
         for (child, child_styles) in pairs {
-            if let Some(elem) = child.to_packed::<LinkElem>() {
+            if let Some(elem) = child.to_packed::<TagElem>() {
+                // Preserve inline introspection tags. These are how the
+                // introspector learns about inline elements (citations,
+                // references, inline labels, …); dropping them makes e.g.
+                // a bibliography unable to find its citations, so they never
+                // resolve and the document never converges.
+                out.push(ParaChild::Tag(elem.tag.clone()));
+            } else if let Some(elem) = child.to_packed::<LinkElem>() {
                 out.extend(self.link_children(elem, child_styles, &props)?);
             } else if let Some(elem) = child.to_packed::<DirectLinkElem>() {
                 // Realized ref/footnote link wrapper: emit an internal hyperlink
