@@ -298,6 +298,8 @@ impl From<Target> for TestTarget {
             Target::Paged => TestTarget::Paged,
             Target::Html => TestTarget::Html,
             Target::Bundle => TestTarget::Bundle,
+            // DOCX is not exercised as a render target in the suite.
+            Target::Docx => unreachable!("docx is not a test target"),
         }
     }
 }

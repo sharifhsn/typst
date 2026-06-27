@@ -37,7 +37,7 @@ use typst_utils::{Get, Numeric};
 
 /// Register show rules for the [paged target](Target::Paged).
 pub fn register(rules: &mut NativeRuleMap) {
-    use Target::Paged;
+    use Target::{Docx, Paged};
 
     // Model.
     rules.register(Paged, STRONG_RULE);
@@ -76,6 +76,22 @@ pub fn register(rules: &mut NativeRuleMap) {
     rules.register(Paged, SMALLCAPS_RULE);
     rules.register(Paged, RAW_RULE);
     rules.register(Paged, RAW_LINE_RULE);
+
+    // Inline formatting normalizes into text styles (`delta`, `emph`,
+    // `shift_settings`, `deco`, `smallcaps`), which the DOCX backend reads back
+    // when building runs. Registering the same rules for the DOCX target keeps
+    // this content inline during realization (so paragraphs aren't split and the
+    // surrounding spaces survive) instead of leaving raw `StrongElem`s etc. that
+    // would interrupt paragraph grouping.
+    rules.register(Docx, STRONG_RULE);
+    rules.register(Docx, EMPH_RULE);
+    rules.register(Docx, SUB_RULE);
+    rules.register(Docx, SUPER_RULE);
+    rules.register(Docx, UNDERLINE_RULE);
+    rules.register(Docx, OVERLINE_RULE);
+    rules.register(Docx, STRIKE_RULE);
+    rules.register(Docx, HIGHLIGHT_RULE);
+    rules.register(Docx, SMALLCAPS_RULE);
 
     // Layout.
     rules.register(Paged, ALIGN_RULE);

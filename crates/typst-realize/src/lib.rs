@@ -29,8 +29,8 @@ use typst_library::layout::{
 };
 use typst_library::math::{EquationElem, Mathy};
 use typst_library::model::{
-    CiteElem, CiteGroup, DocumentElem, EnumElem, ListElem, ListItemLike, ListLike,
-    ParElem, ParbreakElem, TermsElem,
+    CiteElem, CiteGroup, DocumentElem, EnumElem, FootnoteElem, LinkElem, ListElem,
+    ListItemLike, ListLike, ParElem, ParbreakElem, RefElem, TermsElem,
 };
 use typst_library::routines::{Arenas, FragmentKind, Pair, RealizationKind};
 use typst_library::text::{LinebreakElem, SmartQuoteElem, SpaceElem, TextElem};
@@ -1054,6 +1054,14 @@ static PAR: GroupingRule = GroupingRule {
             || elem == SmartQuoteElem::ELEM
             || elem == InlineElem::ELEM
             || elem == BoxElem::ELEM
+            // These are inline elements that, in the paged and HTML targets, are
+            // turned into inline content by their show rules before grouping
+            // runs. The DOCX target keeps them native (for idiomatic output), so
+            // they reach grouping raw; treat them as inline so they stay within
+            // their paragraph (and the spaces around them are not trimmed).
+            || elem == LinkElem::ELEM
+            || elem == RefElem::ELEM
+            || elem == FootnoteElem::ELEM
         {
             GroupingEffect::Trigger
         } else if elem == SpaceElem::ELEM {

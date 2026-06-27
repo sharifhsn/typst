@@ -249,15 +249,44 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             p.font = Some(first.as_str().into());
         }
 
-        // Weight → bold heuristic.
-        let weight = styles.get(TextElem::weight).to_number();
+        // Weight → bold (base weight plus the `strong` delta).
+        let weight =
+            styles.get(TextElem::weight).to_number() as i64 + styles.get(TextElem::delta).0;
         if weight >= 600 {
             p.bold = true;
         }
 
-        // Style → italic.
+        // Italic, from the font style or an `emph` toggle.
         if styles.get(TextElem::style) != typst_library::text::FontStyle::Normal {
             p.italic = true;
+        }
+        if styles.get(TextElem::emph).0 {
+            p.italic = !p.italic;
+        }
+
+        // Super-/subscript, from `sub`/`super`.
+        if let Some(shift) = styles.get_ref(TextElem::shift_settings) {
+            p.vert_align = Some(match shift.kind {
+                typst_library::text::ScriptKind::Sub => VertAlign::Sub,
+                typst_library::text::ScriptKind::Super => VertAlign::Super,
+            });
+        }
+
+        // Decorations, from `underline`/`strike`/`highlight`.
+        for deco in styles.get_cloned(TextElem::deco) {
+            match &deco.line {
+                typst_library::text::DecoLine::Underline { .. } => p.underline = true,
+                typst_library::text::DecoLine::Strikethrough { .. } => p.strike = true,
+                typst_library::text::DecoLine::Highlight { .. } => {
+                    p.shd_fill = Some([0xFF, 0xFF, 0x00]);
+                }
+                _ => {}
+            }
+        }
+
+        // Small capitals.
+        if styles.get(TextElem::smallcaps).is_some() {
+            p.smallcaps = true;
         }
 
         // Language tag.
