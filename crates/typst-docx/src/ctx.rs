@@ -105,6 +105,65 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         self.locator.next(&span)
     }
 
+    /// Lays out arbitrary content and rasterizes it to a PNG, embedding it as a
+    /// media part. Returns the media relationship id and the content's size, or
+    /// `None` if the content lays out to nothing. This is the universal fallback
+    /// for content that has no idiomatic OOXML representation (drawn shapes, SVG
+    /// images, externally-rendered figures, …).
+    pub fn rasterize(
+        &mut self,
+        content: &Content,
+        styles: StyleChain,
+        span: Span,
+    ) -> SourceResult<Option<(EcoString, typst_library::layout::Size)>> {
+        use typst_library::foundations::{Smart, Target, TargetElem};
+        use typst_library::layout::{Abs, Axes, Region, Sides, Size};
+
+        // Lay out under the paged target: layout rules (shapes, images, …) are
+        // only registered for `Target::Paged`, so the content would otherwise be
+        // dropped during its own layout.
+        let target = TargetElem::target.set(Target::Paged).wrap();
+        let styles = styles.chain(&target);
+
+        // Lay the content out at its natural size.
+        let region = Region::new(Size::splat(Abs::inf()), Axes::splat(false));
+        let loc = self.locator.next(&span);
+        let frame = (self.engine.library.routines.layout_frame)(
+            self.engine,
+            content,
+            loc,
+            styles,
+            region,
+        )?;
+
+        let size = frame.size();
+        if !size.x.to_pt().is_finite()
+            || !size.y.to_pt().is_finite()
+            || size.x <= Abs::zero()
+            || size.y <= Abs::zero()
+        {
+            return Ok(None);
+        }
+
+        // Render to a pixmap at 2× for crispness, then PNG-encode.
+        let page = typst_layout::Page {
+            frame,
+            bleed: Sides::splat(Abs::zero()),
+            fill: Smart::Custom(None),
+            numbering: None,
+            supplement: Content::empty(),
+            number: 1,
+        };
+        let options = typst_render::RenderOptions {
+            pixel_per_pt: 2.0.into(),
+            ..Default::default()
+        };
+        let pixmap = typst_render::render(&page, &options);
+        let Ok(png) = pixmap.encode_png() else { return Ok(None) };
+
+        Ok(Some((self.add_image(&png, "png"), size)))
+    }
+
     /// Emits a non-fatal "X was ignored during DOCX export" warning.
     pub fn warn_ignored(&mut self, what: &str, span: Span) {
         self.engine
@@ -486,6 +545,11 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // cannot emit a `<w:hyperlink>` wrapper, so lower the link body to
             // runs. Paragraph-level links go through `link_children` instead.
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
+        } else if let Some(run) = mappers::image::laid_out_fallback(child, styles, self)? {
+            // No idiomatic representation (a drawn shape, an SVG/PDF image, an
+            // externally-rendered figure, …): rasterize it and embed as an image
+            // so the content survives instead of being dropped.
+            out.push(run);
         } else {
             self.warn_ignored(child.elem().name(), child.span());
         }

@@ -197,17 +197,26 @@ pub fn figure(
 ///    `docpr_id`, and build the `Drawing` exactly as [`image`] does, using the
 ///    frame's point size for the extents.
 ///
-/// Until then this returns `None`; callers should fall back to `warn_ignored`.
-#[allow(unused_variables)]
+/// Returns `None` only if the content lays out to nothing; callers then fall
+/// back to `warn_ignored`.
 pub fn laid_out_fallback(
     content: &Content,
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
-    // INTEGRATION-NEEDED: see the doc comment — needs `typst-render` +
-    // `Cargo.toml` dependency edits that are out of scope for the mapper phase.
-    let _ = (content, styles, ctx);
-    Ok(None)
+    let Some((rel, size)) = ctx.rasterize(content, styles, content.span())? else {
+        return Ok(None);
+    };
+    let docpr_id = ctx.next_drawing_id();
+    let name: EcoString = ecow::eco_format!("Picture {docpr_id}");
+    Ok(Some(Run::Drawing(Drawing {
+        rel,
+        w_emu: crate::props::abs_to_emu(size.x),
+        h_emu: crate::props::abs_to_emu(size.y),
+        alt: None,
+        docpr_id,
+        name,
+    })))
 }
 
 // ---------------------------------------------------------------------------
