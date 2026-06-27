@@ -4,7 +4,7 @@
 use typst_library::layout::Abs;
 use typst_library::visualize::Color;
 
-use crate::dom::{Indent, Jc, ParaProps, RunProps, Spacing, VertAlign};
+use crate::dom::{Indent, Jc, ParaBorders, ParaProps, RunProps, Spacing, VertAlign};
 use crate::xml::{self, XmlWriter};
 
 // ---------------------------------------------------------------------------
@@ -14,6 +14,11 @@ use crate::xml::{self, XmlWriter};
 /// Points → half-points (the unit of `w:sz`).
 pub fn pt_to_half_pt(pt: f64) -> u32 {
     (pt * 2.0).round().max(0.0) as u32
+}
+
+/// Points → eighths of a point (the unit of a border's `w:sz`).
+pub fn pt_to_eighth_pt(pt: f64) -> u32 {
+    (pt * 8.0).round().max(0.0) as u32
 }
 
 /// An absolute length → twips (twentieths of a point), the `w:pgSz`/`w:ind` unit.
@@ -93,12 +98,20 @@ impl RunProps {
         if let Some(tracking) = self.tracking {
             w.open(xml::W_SPACING).attr(xml::W_VAL, &tracking.to_string()).empty();
         }
-        // 9. sz / szCs
+        // 9. position (baseline shift, signed half-points)
+        if let Some(pos) = self.position_half_pt {
+            w.open("w:position").attr(xml::W_VAL, &pos.to_string()).empty();
+        }
+        // 10. sz / szCs
         if let Some(sz) = self.size_half_pt {
             w.open(xml::W_SZ).attr(xml::W_VAL, &sz.to_string()).empty();
             w.open(xml::W_SZCS).attr(xml::W_VAL, &sz.to_string()).empty();
         }
-        // 10. shd
+        // 11. u (canonical pos 27, before shd at 30)
+        if self.underline {
+            w.open(xml::W_U).attr(xml::W_VAL, "single").empty();
+        }
+        // 12. shd
         if let Some(fill) = self.shd_fill {
             w.open(xml::W_SHD)
                 .attr(xml::W_VAL, "clear")
@@ -106,11 +119,7 @@ impl RunProps {
                 .attr("w:fill", &hex(fill))
                 .empty();
         }
-        // 11. u
-        if self.underline {
-            w.open(xml::W_U).attr(xml::W_VAL, "single").empty();
-        }
-        // 12. vertAlign
+        // 13. vertAlign
         if let Some(va) = self.vert_align {
             let val = match va {
                 VertAlign::Super => "superscript",
@@ -118,7 +127,14 @@ impl RunProps {
             };
             w.open(xml::W_VERTALIGN).attr(xml::W_VAL, val).empty();
         }
-        // 13. lang
+        // 14. rtl / cs (run reading order + complex-script formatting)
+        if self.rtl {
+            w.leaf("w:rtl");
+        }
+        if self.cs {
+            w.leaf("w:cs");
+        }
+        // 15. lang
         if let Some(lang) = &self.lang {
             w.open(xml::W_LANG).attr(xml::W_VAL, lang).empty();
         }
@@ -136,12 +152,17 @@ impl ParaProps {
     pub fn is_empty(&self) -> bool {
         self.style.is_none()
             && !self.keep_next
+            && !self.keep_lines
             && self.num.is_none()
+            && !self.bidi
             && self.spacing.is_none()
             && self.ind.is_none()
+            && !self.contextual_spacing
             && self.jc.is_none()
             && self.outline_lvl.is_none()
             && self.tabs.is_empty()
+            && self.shd_fill.is_none()
+            && self.pbdr.is_none()
     }
 
     /// Writes `<w:pPr>...</w:pPr>` in canonical order. Emits nothing if empty.
@@ -159,14 +180,22 @@ impl ParaProps {
         if self.keep_next {
             w.leaf("w:keepNext");
         }
-        // 3. numPr
+        // 3. keepLines
+        if self.keep_lines {
+            w.leaf("w:keepLines");
+        }
+        // 4. numPr
         if let Some((num_id, ilvl)) = self.num {
             w.open("w:numPr").start_children();
             w.open("w:ilvl").attr(xml::W_VAL, &ilvl.to_string()).empty();
             w.open("w:numId").attr(xml::W_VAL, &num_id.to_string()).empty();
             w.close();
         }
-        // 4. tabs
+        // 5. bidi (paragraph base reading order)
+        if self.bidi {
+            w.leaf("w:bidi");
+        }
+        // 6. tabs
         if !self.tabs.is_empty() {
             w.open("w:tabs").start_children();
             for tab in &self.tabs {
@@ -188,15 +217,31 @@ impl ParaProps {
             }
             w.close();
         }
-        // 5. spacing
+        // 7. pBdr (paragraph borders, before shd)
+        if let Some(b) = &self.pbdr {
+            write_pbdr(w, b);
+        }
+        // 8. shd (paragraph shading)
+        if let Some(fill) = self.shd_fill {
+            w.open(xml::W_SHD)
+                .attr(xml::W_VAL, "clear")
+                .attr("w:color", "auto")
+                .attr("w:fill", &hex(fill))
+                .empty();
+        }
+        // 9. spacing
         if let Some(sp) = &self.spacing {
             write_spacing(w, sp);
         }
-        // 6. ind
+        // 10. ind
         if let Some(ind) = &self.ind {
             write_indent(w, ind);
         }
-        // 7. jc
+        // 11. contextualSpacing
+        if self.contextual_spacing {
+            w.leaf("w:contextualSpacing");
+        }
+        // 12. jc
         if let Some(jc) = self.jc {
             let val = match jc {
                 Jc::Start => "start",
@@ -206,13 +251,34 @@ impl ParaProps {
             };
             w.open("w:jc").attr(xml::W_VAL, val).empty();
         }
-        // 8. outlineLvl
+        // 13. outlineLvl
         if let Some(lvl) = self.outline_lvl {
             w.open("w:outlineLvl").attr(xml::W_VAL, &lvl.to_string()).empty();
         }
 
         w.close();
     }
+}
+
+/// Writes `<w:pBdr>` with the canonical side order (top, left, bottom, right).
+fn write_pbdr(w: &mut XmlWriter, b: &ParaBorders) {
+    w.open("w:pBdr").start_children();
+    for (name, side) in [
+        ("w:top", &b.top),
+        ("w:left", &b.left),
+        ("w:bottom", &b.bottom),
+        ("w:right", &b.right),
+    ] {
+        if let Some(border) = side {
+            w.open(name)
+                .attr(xml::W_VAL, border.style)
+                .attr("w:sz", &border.sz.to_string())
+                .attr("w:space", &border.space.to_string())
+                .attr("w:color", &hex(border.color))
+                .empty();
+        }
+    }
+    w.close();
 }
 
 fn write_spacing(w: &mut XmlWriter, sp: &Spacing) {
@@ -225,7 +291,14 @@ fn write_spacing(w: &mut XmlWriter, sp: &Spacing) {
     }
     if let Some(line) = sp.line {
         w.attr("w:line", &line.to_string());
-        w.attr("w:lineRule", if sp.line_rule_auto { "auto" } else { "exact" });
+        let rule = if sp.line_rule_auto {
+            "auto"
+        } else if sp.line_rule_at_least {
+            "atLeast"
+        } else {
+            "exact"
+        };
+        w.attr("w:lineRule", rule);
     }
     w.empty();
 }

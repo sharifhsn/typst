@@ -6,8 +6,9 @@ use typst_library::foundations::Smart;
 use typst_library::model::DocumentInfo;
 
 use crate::dom::{
-    Block, Border, Cell, CellBorders, Drawing, DocxDocument, Field, Footnote, Para,
-    ParaChild, Row, Run, SectPr, Tbl, VAlign, VMerge,
+    Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, Drawing, DocxDocument,
+    Field, Footnote, HdrFtrPart, Para, ParaChild, Row, Run, SectPr, SectType, Tbl, VAlign,
+    VMerge,
 };
 use crate::package::{Package, RelMode, Rels};
 use crate::styles_part;
@@ -51,6 +52,10 @@ const CT_CORE: &str =
     "application/vnd.openxmlformats-package.core-properties+xml";
 const CT_EXTENDED: &str =
     "application/vnd.openxmlformats-officedocument.extended-properties+xml";
+const CT_HEADER: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml";
+const CT_FOOTER: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml";
 
 /// Serializes a DOCX document into the OPC zip bytes.
 #[typst_macros::time(name = "docx encode")]
@@ -86,6 +91,20 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
         let footnotes_xml = build_footnotes(document, pretty);
         package.add_xml("word/footnotes.xml", CT_FOOTNOTES, footnotes_xml);
         doc_rels.add(REL_FOOTNOTES, "footnotes.xml", RelMode::Internal);
+    }
+
+    // -- header/footer parts --
+    // The relationships were already registered in `doc_rels` during section
+    // resolution (document.rs), so the `r:id` on each headerReference/
+    // footerReference matches the Relationship here. We only emit the part file
+    // + its content-type Override.
+    for part in &document.header_parts {
+        let xml = build_hdrftr(part, pretty);
+        package.add_xml(&format!("word/{}", part.part_name), CT_HEADER, xml);
+    }
+    for part in &document.footer_parts {
+        let xml = build_hdrftr(part, pretty);
+        package.add_xml(&format!("word/{}", part.part_name), CT_FOOTER, xml);
     }
 
     // -- media parts --
@@ -357,10 +376,22 @@ fn write_border_side(w: &mut XmlWriter, name: &'static str, border: &Option<Bord
     }
 }
 
-/// Serializes an inline `w:drawing` (DrawingML inline picture).
+/// Serializes a `w:drawing` — an inline (`<wp:inline>`) or floating
+/// (`<wp:anchor>`) DrawingML picture, sharing the same `a:graphic`/`pic:pic`
+/// payload.
 fn write_drawing(w: &mut XmlWriter, d: &Drawing) {
     w.open(xml::W_R).start_children();
     w.open("w:drawing").start_children();
+    match &d.anchor {
+        None => write_inline_envelope(w, d),
+        Some(a) => write_anchor_envelope(w, d, a),
+    }
+    w.close(); // w:drawing
+    w.close(); // w:r
+}
+
+/// Emits the `<wp:inline>` envelope (the original inline image body).
+fn write_inline_envelope(w: &mut XmlWriter, d: &Drawing) {
     w.open("wp:inline")
         .attr("distT", "0")
         .attr("distB", "0")
@@ -390,6 +421,85 @@ fn write_drawing(w: &mut XmlWriter, d: &Drawing) {
         .attr("noChangeAspect", "1")
         .empty();
     w.close(); // wp:cNvGraphicFramePr
+    write_pic_payload(w, d);
+    w.close(); // wp:inline
+}
+
+/// Emits the `<wp:anchor>` envelope (a floating image), wrapping the same
+/// `a:graphic`/`pic:pic` payload as the inline form. The five required
+/// booleans/uint (`simplePos`/`relativeHeight`/`behindDoc`/`locked`/
+/// `layoutInCell`/`allowOverlap`) MUST all be present or Word repairs the file.
+fn write_anchor_envelope(w: &mut XmlWriter, d: &Drawing, a: &Anchor) {
+    w.open("wp:anchor")
+        .attr("distT", &a.dist[0].to_string())
+        .attr("distB", &a.dist[1].to_string())
+        .attr("distL", &a.dist[2].to_string())
+        .attr("distR", &a.dist[3].to_string())
+        .attr("simplePos", "0")
+        .attr("relativeHeight", &a.z.to_string())
+        .attr("behindDoc", "0")
+        .attr("locked", "0")
+        .attr("layoutInCell", "1")
+        .attr("allowOverlap", "1")
+        .start_children();
+    // Required even when simplePos="0".
+    w.open("wp:simplePos").attr("x", "0").attr("y", "0").empty();
+    write_anchor_pos(w, "wp:positionH", &a.pos_h);
+    write_anchor_pos(w, "wp:positionV", &a.pos_v);
+    w.open("wp:extent")
+        .attr("cx", &d.w_emu.to_string())
+        .attr("cy", &d.h_emu.to_string())
+        .empty();
+    w.open("wp:effectExtent")
+        .attr("l", "0")
+        .attr("t", "0")
+        .attr("r", "0")
+        .attr("b", "0")
+        .empty();
+    match a.wrap {
+        AnchorWrap::TopAndBottom => w.leaf("wp:wrapTopAndBottom"),
+        AnchorWrap::Square(text) => {
+            w.open("wp:wrapSquare").attr("wrapText", text).empty();
+        }
+        AnchorWrap::None => w.leaf("wp:wrapNone"),
+    }
+    w.open("wp:docPr")
+        .attr("id", &d.docpr_id.to_string())
+        .attr("name", &d.name);
+    if let Some(alt) = &d.alt {
+        w.attr("descr", alt);
+    }
+    w.empty();
+    w.open("wp:cNvGraphicFramePr").start_children();
+    w.open("a:graphicFrameLocks")
+        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
+        .attr("noChangeAspect", "1")
+        .empty();
+    w.close(); // wp:cNvGraphicFramePr
+    write_pic_payload(w, d);
+    w.close(); // wp:anchor
+}
+
+/// Emits one `<wp:positionH>` / `<wp:positionV>` carrying exactly one of
+/// `<wp:align>` / `<wp:posOffset>`.
+fn write_anchor_pos(w: &mut XmlWriter, name: &'static str, pos: &AnchorPos) {
+    w.open(name).attr("relativeFrom", pos.rel_from).start_children();
+    if let Some(align) = pos.align {
+        w.open("wp:align").start_children();
+        w.text(align);
+        w.close();
+    } else {
+        let off = pos.offset.unwrap_or(0);
+        w.open("wp:posOffset").start_children();
+        w.text(&off.to_string());
+        w.close();
+    }
+    w.close(); // wp:positionH/V
+}
+
+/// Emits the shared `<a:graphic>`/`<pic:pic>` payload (identical for inline and
+/// anchored drawings).
+fn write_pic_payload(w: &mut XmlWriter, d: &Drawing) {
     w.open("a:graphic")
         .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
         .start_children();
@@ -431,9 +541,6 @@ fn write_drawing(w: &mut XmlWriter, d: &Drawing) {
     w.close(); // pic:pic
     w.close(); // a:graphicData
     w.close(); // a:graphic
-    w.close(); // wp:inline
-    w.close(); // w:drawing
-    w.close(); // w:r
 }
 
 fn write_para_child(w: &mut XmlWriter, child: &ParaChild) {
@@ -537,6 +644,31 @@ fn write_field(w: &mut XmlWriter, field: &Field) {
 
 fn write_sectpr(w: &mut XmlWriter, sect: &SectPr) {
     w.open(xml::W_SECTPR).start_children();
+
+    // CT_SectPr child order is strict: headerReference/footerReference precede
+    // everything, then (type) → pgSz → pgMar → pgNumType → cols → titlePg.
+    for h in &sect.headers {
+        w.open("w:headerReference")
+            .attr("w:type", h.kind)
+            .attr("r:id", &h.rel)
+            .empty();
+    }
+    for f in &sect.footers {
+        w.open("w:footerReference")
+            .attr("w:type", f.kind)
+            .attr("r:id", &f.rel)
+            .empty();
+    }
+    if let Some(t) = sect.sect_type {
+        let v = match t {
+            SectType::NextPage => "nextPage",
+            SectType::EvenPage => "evenPage",
+            SectType::OddPage => "oddPage",
+            SectType::Continuous => "continuous",
+        };
+        w.open("w:type").attr("w:val", v).empty();
+    }
+
     let pg = w.open("w:pgSz")
         .attr("w:w", &sect.page_w.to_string())
         .attr("w:h", &sect.page_h.to_string());
@@ -551,14 +683,50 @@ fn write_sectpr(w: &mut XmlWriter, sect: &SectPr) {
         .attr("w:left", &sect.margin_left.to_string())
         .attr("w:header", &sect.header.to_string())
         .attr("w:footer", &sect.footer.to_string())
-        .attr("w:gutter", "0")
+        .attr("w:gutter", &sect.gutter.to_string())
         .empty();
+    if let Some(pn) = &sect.pg_num {
+        w.open("w:pgNumType").attr("w:fmt", pn.fmt);
+        if let Some(s) = pn.start {
+            w.attr("w:start", &s.to_string());
+        }
+        w.empty();
+    }
     if sect.columns > 1 {
-        w.open("w:cols").attr("w:num", &sect.columns.to_string()).empty();
+        w.open("w:cols")
+            .attr("w:num", &sect.columns.to_string())
+            .attr("w:space", &sect.col_space.to_string())
+            .attr("w:equalWidth", "1")
+            .empty();
     } else {
-        w.open("w:cols").attr("w:space", "720").empty();
+        w.open("w:cols").attr("w:space", &sect.col_space.to_string()).empty();
+    }
+    if sect.title_pg {
+        w.leaf("w:titlePg");
     }
     w.close();
+}
+
+/// Serializes a header (`w:hdr`) or footer (`w:ftr`) part. Never emits an empty
+/// root: a trailing empty `<w:p/>` is appended if the content doesn't end in a
+/// paragraph (a bare `w:hdr`/`w:ftr` is non-conformant in some Word builds).
+fn build_hdrftr(part: &HdrFtrPart, pretty: bool) -> String {
+    let root = if part.is_header { "w:hdr" } else { "w:ftr" };
+    let mut w = XmlWriter::new(pretty);
+    w.open(root)
+        .attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+        .attr("xmlns:r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
+        .attr("xmlns:m", "http://schemas.openxmlformats.org/officeDocument/2006/math")
+        .start_children();
+    let mut ends_with_para = false;
+    for block in &part.blocks {
+        ends_with_para = write_block(&mut w, block);
+    }
+    if !ends_with_para {
+        w.leaf(xml::W_P);
+    }
+    w.close();
+    w.finish()
 }
 
 // ---------------------------------------------------------------------------

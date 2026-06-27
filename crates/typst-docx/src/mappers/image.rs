@@ -37,8 +37,8 @@
 use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Content, Packed, Smart, StyleChain};
-use typst_library::layout::{Abs, OuterVAlignment, Sizing};
-use typst_library::model::FigureElem;
+use typst_library::layout::{Abs, OuterVAlignment, Sizing, VAlignment};
+use typst_library::model::{FigureElem, FigureKind};
 use typst_library::text::TextElem;
 use typst_library::visualize::{
     ExchangeFormat, Image, ImageElem, ImageKind, RasterFormat,
@@ -46,8 +46,12 @@ use typst_library::visualize::{
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, Drawing, Jc, Para, ParaChild, ParaProps, Run, RunProps,
+    Anchor, AnchorPos, AnchorWrap, Block, Drawing, Field, Jc, Para, ParaChild, ParaProps,
+    Run, RunProps,
 };
+
+/// English Metric Units per point, as an `i64` factor for whole-point offsets.
+const EMU_PER_PT_I: i64 = 12700;
 
 /// English Metric Units per point (914400 EMU/inch ÷ 72 pt/inch).
 const EMU_PER_PT: f64 = 12700.0;
@@ -98,7 +102,7 @@ pub fn image(
     // Alt text → `descr` for accessibility.
     let alt = elem.alt.get_cloned(styles);
 
-    Ok(Run::Drawing(Drawing { rel, w_emu, h_emu, alt, docpr_id, name }))
+    Ok(Run::Drawing(Drawing { rel, w_emu, h_emu, alt, docpr_id, name, anchor: None }))
 }
 
 /// Lowers a [`FigureElem`] into its body blocks plus a caption paragraph.
@@ -127,14 +131,13 @@ pub fn figure(
     // them to the first and last emitted paragraphs.
     let bookmark = elem.location().map(|loc| ctx.add_bookmark(loc));
 
-    // Realize the caption (supplement + number + separator + body) into a
-    // `Caption`-styled paragraph, if the figure has one.
+    // G9: build the caption with a `SEQ` field for the number (so Word
+    // auto-renumbers) instead of a baked-in static counter value.
     let caption = elem.caption.get_cloned(styles);
     let (position, caption_blocks) = match &caption {
         Some(cap) => {
             let position = cap.position.get(styles);
-            let realized = cap.realize(ctx.engine(), styles)?;
-            let runs = ctx.inline_runs(&realized, styles, RunProps::default())?;
+            let runs = caption_runs(elem, cap, styles, ctx)?;
             let mut props = ParaProps::default();
             props.style = Some(CAPTION_STYLE.into());
             let para = Para {
@@ -146,25 +149,33 @@ pub fn figure(
         None => (OuterVAlignment::Bottom, Vec::new()),
     };
 
-    // Lower the figure body. Figures are centered by their show-set rule; mirror
-    // that by centering each top-level paragraph the body produces.
-    let mut body_blocks = ctx.blocks(&elem.body, styles)?;
-    for block in &mut body_blocks {
-        if let Block::Para(para) = block
-            && para.props.jc.is_none()
-        {
-            para.props.jc = Some(Jc::Center);
+    // G8: a placed figure (`placement: top|bottom|auto`) floats via `<wp:anchor>`
+    // instead of flowing inline. The caption stays in flow (Word convention).
+    let placement = elem.placement.get(styles);
+    let mut body_blocks = if let Some(place) = placement {
+        float_figure_body(elem, place, styles, ctx)?
+    } else {
+        // In-flow body. Figures are centered by their show-set rule; mirror that
+        // by centering each top-level paragraph the body produces.
+        let mut body_blocks = ctx.blocks(&elem.body, styles)?;
+        for block in &mut body_blocks {
+            if let Block::Para(para) = block
+                && para.props.jc.is_none()
+            {
+                para.props.jc = Some(Jc::Center);
+            }
         }
-    }
+        body_blocks
+    };
 
     // Assemble in caption-position order.
     match position {
         OuterVAlignment::Top => {
             blocks.extend(caption_blocks);
-            blocks.extend(body_blocks);
+            blocks.append(&mut body_blocks);
         }
         OuterVAlignment::Bottom => {
-            blocks.extend(body_blocks);
+            blocks.append(&mut body_blocks);
             blocks.extend(caption_blocks);
         }
     }
@@ -177,6 +188,280 @@ pub fn figure(
     }
 
     Ok(blocks)
+}
+
+/// Lowers a top-level `#place(..)` into a floating drawing (G8).
+///
+/// The placed body is lowered to a single `Drawing` (image body → the inline
+/// `pic:pic` payload; otherwise the rasterized PNG fallback), then wrapped in a
+/// `<wp:anchor>` whose position follows the place alignment + `dx`/`dy` offsets:
+///
+/// - an axis with an absolute `dx`/`dy` → `<wp:posOffset>` in EMU;
+/// - otherwise the alignment component → `<wp:align>` (pure-`%` offsets, which
+///   have no fixed value without layout, fall back to the alignment);
+/// - `float: true` → wrap top-and-bottom; `float: false` → `wrapNone` (overlap).
+///
+/// Returns `None` if the body lays out to nothing (the caller then skips it).
+pub fn place(
+    elem: &Packed<typst_library::layout::PlaceElem>,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Option<Block>> {
+    use typst_library::layout::HAlignment;
+
+    let Some(mut drawing) = place_body_drawing(&elem.body, styles, ctx)? else {
+        return Ok(None);
+    };
+
+    let font_size = styles.resolve(TextElem::size);
+    let align = elem.alignment.get(styles);
+    let float = elem.float.get(styles);
+
+    // Resolve dx/dy: a nonzero absolute (non-`%`) component → EMU offset;
+    // pure-`%` (or zero) → fall back to alignment.
+    let dx = elem.dx.get(styles);
+    let dy = elem.dy.get(styles);
+    let dx_abs = if dx.rel.is_zero() { dx.abs.at(font_size) } else { Abs::zero() };
+    let dy_abs = if dy.rel.is_zero() { dy.abs.at(font_size) } else { Abs::zero() };
+    let dx_emu = (dx_abs != Abs::zero()).then(|| crate::props::abs_to_emu(dx_abs));
+    let dy_emu = (dy_abs != Abs::zero()).then(|| crate::props::abs_to_emu(dy_abs));
+
+    // The alignment component, if any (Smart::Auto → none).
+    let h_comp = match align {
+        Smart::Custom(a) => a.x(),
+        Smart::Auto => None,
+    };
+    let v_comp = match align {
+        Smart::Custom(a) => a.y(),
+        Smart::Auto => None,
+    };
+
+    // Horizontal: offset wins, else alignment component, else default left.
+    let h_align: &'static str = match h_comp {
+        Some(HAlignment::Center) => "center",
+        Some(HAlignment::Right | HAlignment::End) => "right",
+        _ => "left",
+    };
+    let pos_h = match dx_emu {
+        Some(off) => AnchorPos { rel_from: "margin", align: None, offset: Some(off) },
+        None => AnchorPos { rel_from: "margin", align: Some(h_align), offset: None },
+    };
+
+    // Vertical: offset wins, else alignment component, else default top.
+    let v_align: &'static str = match v_comp {
+        Some(VAlignment::Bottom) => "bottom",
+        Some(VAlignment::Horizon) => "center",
+        _ => "top",
+    };
+    let pos_v = match dy_emu {
+        Some(off) => AnchorPos { rel_from: "margin", align: None, offset: Some(off) },
+        None => AnchorPos { rel_from: "margin", align: Some(v_align), offset: None },
+    };
+
+    let wrap = if float { AnchorWrap::TopAndBottom } else { AnchorWrap::None };
+    drawing.anchor = Some(Anchor {
+        z: ctx.next_z(),
+        pos_h,
+        pos_v,
+        wrap,
+        dist: [0, 0, 0, 0],
+    });
+
+    Ok(Some(Block::Para(Para {
+        props: ParaProps::default(),
+        content: vec![ParaChild::Run(Run::Drawing(drawing))],
+    })))
+}
+
+/// Lowers a `#place` body to a single `Drawing` (image payload or a rasterized
+/// fallback). Returns `None` if it lays out to nothing.
+fn place_body_drawing(
+    body: &Content,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Option<Drawing>> {
+    // Lower the body like any block and pull out its first standalone drawing
+    // (covers a bare image, a centered figure-less image, etc.).
+    let mut blocks = ctx.blocks(body, styles)?;
+    if let Some(drawing) = take_first_drawing(&mut blocks) {
+        return Ok(Some(drawing));
+    }
+    // No native image inside: rasterize the whole placed body to a PNG.
+    match laid_out_fallback(body, styles, ctx)? {
+        Some(Run::Drawing(drawing)) => Ok(Some(drawing)),
+        _ => Ok(None),
+    }
+}
+
+/// Builds the caption runs with a `SEQ` field carrying the number (G9).
+///
+/// When the figure is numbered, the caption is reconstructed as
+/// `supplement` + `{ SEQ Kind \* ARABIC }` + `separator` + `body`, where the
+/// SEQ field caches the realized number as its result so the caption reads
+/// correctly before Word recomputes fields. The `SEQ` name follows the figure
+/// `kind` (image→`Figure`, table→`Table`, raw→`Listing`, else the name) so
+/// distinct kinds keep independent counters. Unnumbered captions fall back to
+/// the plain realized text.
+fn caption_runs(
+    elem: &Packed<FigureElem>,
+    cap: &Packed<typst_library::model::FigureCaption>,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Vec<Run>> {
+    // Only emit SEQ for actually-numbered figures; otherwise plain realized text
+    // (byte-identical to the previous behaviour for unnumbered captions).
+    let numbered = elem.numbering.get_ref(styles).is_some();
+    if !numbered {
+        let realized = cap.realize(ctx.engine(), styles)?;
+        return ctx.inline_runs(&realized, styles, RunProps::default());
+    }
+
+    let mut runs: Vec<Run> = Vec::new();
+
+    // Supplement (e.g. "Figure") + the non-breaking space the realizer inserts.
+    if let Some(Some(supplement)) = cap.supplement.clone()
+        && !supplement.is_empty()
+    {
+        let mut sup = supplement;
+        sup += TextElem::packed('\u{a0}');
+        runs.extend(ctx.inline_runs(&sup, styles, RunProps::default())?);
+    }
+
+    // The realized number, used as the SEQ field's cached result so the caption
+    // is readable before Word updates fields.
+    let number_runs = match (cap.counter.clone(), cap.numbering.clone(), cap.figure_location.clone())
+    {
+        (Some(Some(counter)), Some(Some(numbering)), Some(Some(location))) => {
+            let number =
+                counter.display_at(ctx.engine(), location, styles, &numbering, cap.span())?;
+            ctx.inline_runs(&number, styles, RunProps::default())?
+        }
+        _ => Vec::new(),
+    };
+
+    // The SEQ complex field. Word recomputes the number on open / field update.
+    let seq = seq_name(elem, styles);
+    runs.push(Run::Field(Field {
+        instr: ecow::eco_format!(" SEQ {seq} \\* ARABIC "),
+        result: number_runs,
+        dirty: false,
+    }));
+    ctx.mark_field();
+
+    // Separator (e.g. ": "). Synthesized into the `separator` field by
+    // `FigureCaption`'s `Synthesize` impl, so read it off the chain.
+    if let Smart::Custom(sep) = cap.separator.get_cloned(styles) {
+        runs.extend(ctx.inline_runs(&sep, styles, RunProps::default())?);
+    }
+
+    // Caption body.
+    runs.extend(ctx.inline_runs(&cap.body, styles, RunProps::default())?);
+
+    Ok(runs)
+}
+
+/// Maps a figure's `kind` to a `SEQ` field name (a stable per-kind counter
+/// identifier). Matches the Word convention `Figure`/`Table`/`Listing`.
+fn seq_name(elem: &Packed<FigureElem>, styles: StyleChain) -> EcoString {
+    use typst_library::foundations::NativeElement;
+    use typst_library::model::TableElem;
+    use typst_library::text::RawElem;
+    match elem.kind.get_ref(styles) {
+        Smart::Custom(FigureKind::Elem(func)) => {
+            if *func == TableElem::ELEM {
+                "Table".into()
+            } else if *func == RawElem::ELEM {
+                "Listing".into()
+            } else {
+                "Figure".into()
+            }
+        }
+        Smart::Custom(FigureKind::Name(name)) => {
+            // Use the custom name verbatim as the counter id (sanitized of
+            // spaces, which would break the field-code token).
+            name.replace(" ", "_").into()
+        }
+        Smart::Auto => "Figure".into(),
+    }
+}
+
+/// Lowers a figure body to a single floating drawing (G8).
+///
+/// The body is lowered like any block, then the first picture it produces is
+/// turned into a floating anchor (image body → the inline `pic:pic`; otherwise
+/// the rasterized PNG fallback). `placement` chooses the vertical alignment
+/// (`Auto`/`Top` → top, `Bottom` → bottom); horizontal is centered. The float
+/// wraps text top-and-bottom (Word's figure convention). If the body produces
+/// no drawing (e.g. a table figure), it falls back to the in-flow centered
+/// paragraphs unchanged.
+fn float_figure_body(
+    elem: &Packed<FigureElem>,
+    placement: Smart<VAlignment>,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Vec<Block>> {
+    let mut body_blocks = ctx.blocks(&elem.body, styles)?;
+
+    // Find the first standalone drawing run in the lowered body.
+    let drawing = take_first_drawing(&mut body_blocks);
+    let Some(mut drawing) = drawing else {
+        // Non-image body (table, multi-paragraph): keep it in flow, centered.
+        for block in &mut body_blocks {
+            if let Block::Para(para) = block
+                && para.props.jc.is_none()
+            {
+                para.props.jc = Some(Jc::Center);
+            }
+        }
+        return Ok(body_blocks);
+    };
+
+    let v_align = match placement {
+        Smart::Custom(VAlignment::Bottom) => "bottom",
+        // Auto / Top / Horizon → top.
+        _ => "top",
+    };
+    let dist = EMU_PER_PT_I * 9; // ~9pt clearance around the float.
+    drawing.anchor = Some(Anchor {
+        z: ctx.next_z(),
+        pos_h: AnchorPos { rel_from: "margin", align: Some("center"), offset: None },
+        pos_v: AnchorPos { rel_from: "margin", align: Some(v_align), offset: None },
+        wrap: AnchorWrap::TopAndBottom,
+        dist: [0, 0, dist, dist],
+    });
+
+    // The anchored drawing lives in its own paragraph; any other body blocks
+    // (rare for a figure) stay after it.
+    let mut out = Vec::with_capacity(body_blocks.len() + 1);
+    out.push(Block::Para(Para {
+        props: ParaProps::default(),
+        content: vec![ParaChild::Run(Run::Drawing(drawing))],
+    }));
+    out.append(&mut body_blocks);
+    Ok(out)
+}
+
+/// Removes and returns the first `Run::Drawing` found in `blocks`, leaving any
+/// sibling content (e.g. introspection tags) in place so it isn't lost. If the
+/// host paragraph is left empty after extraction, it is dropped. Returns `None`
+/// if no drawing exists (the body has no native image — e.g. a table figure).
+fn take_first_drawing(blocks: &mut Vec<Block>) -> Option<Drawing> {
+    for block in blocks.iter_mut() {
+        if let Block::Para(para) = block {
+            // Find the index of the (first) drawing child in this paragraph.
+            let pos = para
+                .content
+                .iter()
+                .position(|c| matches!(c, ParaChild::Run(Run::Drawing(_))));
+            if let Some(pos) = pos {
+                let child = para.content.remove(pos);
+                if let ParaChild::Run(Run::Drawing(d)) = child {
+                    return Some(d);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Renders an arbitrary laid-out element to a PNG and embeds it as an inline
@@ -217,6 +502,7 @@ pub fn laid_out_fallback(
         alt: None,
         docpr_id,
         name,
+        anchor: None,
     })))
 }
 

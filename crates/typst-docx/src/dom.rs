@@ -27,6 +27,10 @@ pub struct DocxDocument {
     pub(crate) uses_fields: bool,
     pub(crate) uses_math: bool,
     pub(crate) introspector: Arc<DocxIntrospector>,
+    /// Header parts (`word/headerN.xml`) referenced by the section(s).
+    pub(crate) header_parts: Vec<HdrFtrPart>,
+    /// Footer parts (`word/footerN.xml`) referenced by the section(s).
+    pub(crate) footer_parts: Vec<HdrFtrPart>,
 }
 
 impl DocxDocument {
@@ -110,11 +114,21 @@ pub struct RunProps {
     pub smallcaps: bool,
     pub strike: bool,
     pub color: Option<[u8; 3]>,
+    /// Character spacing / tracking in signed twips (`<w:spacing w:val=…>` in
+    /// `rPr`). `text(tracking:)`. Default none.
     pub tracking: Option<i32>,
+    /// Baseline shift in signed half-points (`<w:position>`). Positive = raised.
+    /// `text(baseline:)` (downward-positive) is negated. Default none.
+    pub position_half_pt: Option<i32>,
     pub size_half_pt: Option<u32>,
     pub shd_fill: Option<[u8; 3]>,
     pub underline: bool,
     pub vert_align: Option<VertAlign>,
+    /// `<w:rtl/>` (run reading order is RTL). `text(dir: rtl)`. Default false.
+    pub rtl: bool,
+    /// `<w:cs/>` (use complex-script formatting for this run). Pairs with `rtl`.
+    /// Default false.
+    pub cs: bool,
     pub lang: Option<EcoString>,
 }
 
@@ -125,19 +139,61 @@ pub enum VertAlign {
 }
 
 /// Paragraph formatting → `<w:pPr>`.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq)]
 pub struct ParaProps {
     pub style: Option<EcoString>,
     pub keep_next: bool,
+    /// `<w:keepLines/>` (keep all lines on one page). Default false.
+    pub keep_lines: bool,
     pub num: Option<(u32, u8)>,
+    /// `<w:bidi/>` (paragraph base reading order is RTL). Default false.
+    pub bidi: bool,
     pub spacing: Option<Spacing>,
     pub ind: Option<Indent>,
+    /// `<w:contextualSpacing/>` (suppress before/after between like paragraphs).
+    /// Default false.
+    pub contextual_spacing: bool,
     pub jc: Option<Jc>,
     pub outline_lvl: Option<u8>,
     pub tabs: Vec<TabStop>,
+    /// `<w:shd w:fill=…>` paragraph shading (`block(fill:)`). Default none.
+    pub shd_fill: Option<[u8; 3]>,
+    /// `<w:pBdr>` paragraph borders (`block(stroke:)`). Default none.
+    pub pbdr: Option<ParaBorders>,
 }
 
-#[derive(Copy, Clone)]
+/// The four sides of a paragraph border (`<w:pBdr>`).
+#[derive(Default, Clone, PartialEq)]
+pub struct ParaBorders {
+    pub top: Option<ParaBorder>,
+    pub left: Option<ParaBorder>,
+    pub bottom: Option<ParaBorder>,
+    pub right: Option<ParaBorder>,
+}
+
+impl ParaBorders {
+    /// Whether all four sides are absent.
+    pub fn is_empty(&self) -> bool {
+        self.top.is_none()
+            && self.left.is_none()
+            && self.bottom.is_none()
+            && self.right.is_none()
+    }
+}
+
+/// One side of a paragraph border (`CT_Border`).
+#[derive(Copy, Clone, PartialEq)]
+pub struct ParaBorder {
+    /// `w:val`: "single" | "dashed" | "dotted".
+    pub style: &'static str,
+    /// `w:sz` in eighths of a point.
+    pub sz: u32,
+    /// `w:space` in points (0..=31).
+    pub space: u32,
+    pub color: [u8; 3],
+}
+
+#[derive(Copy, Clone, PartialEq)]
 pub enum Jc {
     Start,
     End,
@@ -145,15 +201,19 @@ pub enum Jc {
     Both,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq)]
 pub struct Spacing {
     pub before: Option<i32>,
     pub after: Option<i32>,
     pub line: Option<i32>,
+    /// `w:lineRule="auto"` (line value is 240ths of a line). Mutually exclusive
+    /// with `line_rule_at_least`; both false → `"exact"`.
     pub line_rule_auto: bool,
+    /// `w:lineRule="atLeast"` (line value is a twip minimum). Default false.
+    pub line_rule_at_least: bool,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq)]
 pub struct Indent {
     pub left: Option<i32>,
     pub right: Option<i32>,
@@ -161,21 +221,21 @@ pub struct Indent {
     pub hanging: Option<i32>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct TabStop {
     pub val: TabAlign,
     pub leader: Option<TabLeader>,
     pub pos: i32,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum TabAlign {
     Start,
     End,
     Center,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum TabLeader {
     Dot,
     Hyphen,
@@ -189,7 +249,7 @@ pub struct Field {
     pub dirty: bool,
 }
 
-/// An inline image.
+/// An image. Inline (`anchor: None`) or floating (`anchor: Some`).
 pub struct Drawing {
     pub rel: EcoString,
     pub w_emu: i64,
@@ -197,6 +257,45 @@ pub struct Drawing {
     pub alt: Option<EcoString>,
     pub docpr_id: u32,
     pub name: EcoString,
+    /// `None` = inline (`<wp:inline>`); `Some` = floating (`<wp:anchor>`).
+    /// Defaults to `None` so every existing inline image is byte-identical.
+    pub anchor: Option<Anchor>,
+}
+
+/// Floating-image placement (`<wp:anchor>`): positionH/V + wrap.
+pub struct Anchor {
+    /// `relativeHeight` z-order (monotonic per drawing).
+    pub z: u32,
+    /// Horizontal position: `relativeFrom` + (align XOR offset).
+    pub pos_h: AnchorPos,
+    /// Vertical position: `relativeFrom` + (align XOR offset).
+    pub pos_v: AnchorPos,
+    pub wrap: AnchorWrap,
+    /// `distT`/`distB`/`distL`/`distR` in EMU.
+    pub dist: [i64; 4],
+}
+
+/// One axis of an anchor position (`<wp:positionH>` / `<wp:positionV>`).
+pub struct AnchorPos {
+    /// `relativeFrom`, e.g. "margin" | "page" (axis-specific; caller picks a
+    /// valid value for the axis).
+    pub rel_from: &'static str,
+    /// `<wp:align>` value ("left|center|right" for H, "top|bottom|center" for
+    /// V). Exactly one of `align` / `offset` is `Some`.
+    pub align: Option<&'static str>,
+    /// `<wp:posOffset>` in EMU. Exactly one of `align` / `offset` is `Some`.
+    pub offset: Option<i64>,
+}
+
+/// The wrap mode for a floating drawing.
+#[derive(Copy, Clone)]
+pub enum AnchorWrap {
+    /// `<wp:wrapTopAndBottom/>` — text flows above and below.
+    TopAndBottom,
+    /// `<wp:wrapSquare wrapText=…/>` — text wraps around the box.
+    Square(&'static str),
+    /// `<wp:wrapNone/>` — drawing floats over the text (overlap allowed).
+    None,
 }
 
 /// A table.
@@ -277,11 +376,64 @@ pub struct SectPr {
     pub header: i32,
     pub footer: i32,
     pub columns: u32,
+    /// Binding allowance in twips (`w:pgMar/@w:gutter`). Default 0.
+    pub gutter: i32,
+    /// Equal-width column gutter in twips (Word `w:cols/@w:space`). Default 720.
+    pub col_space: i32,
+    /// Page-number glyph format + start, if `set page(numbering:)` is active.
+    pub pg_num: Option<PgNumType>,
+    /// `w:type` (only for non-final sections / `pagebreak(to:)`); None = default `nextPage`.
+    pub sect_type: Option<SectType>,
+    /// Header references (r:id + type). Emitted BEFORE pgSz.
+    pub headers: Vec<HdrFtrRef>,
+    /// Footer references (r:id + type). Emitted after headers, BEFORE pgSz.
+    pub footers: Vec<HdrFtrRef>,
+    /// `<w:titlePg/>` (distinct first page). Default false.
+    pub title_pg: bool,
+}
+
+/// Page-number format + start for `<w:pgNumType>`.
+#[derive(Clone)]
+pub struct PgNumType {
+    /// `w:fmt` value: "decimal" | "lowerRoman" | "upperRoman" | "lowerLetter" |
+    /// "upperLetter" | "decimalZero".
+    pub fmt: &'static str,
+    /// `w:start`, from `counter(page).update(n)`; None = omit.
+    pub start: Option<i64>,
+}
+
+/// `<w:type>` value on a non-final section.
+#[derive(Copy, Clone)]
+pub enum SectType {
+    NextPage,
+    EvenPage,
+    OddPage,
+    Continuous,
+}
+
+/// A header/footer reference inside `<w:sectPr>`.
+#[derive(Clone)]
+pub struct HdrFtrRef {
+    /// `w:type`: "default" | "first" | "even".
+    pub kind: &'static str,
+    /// Matching relationship id in document.xml.rels.
+    pub rel: EcoString,
+}
+
+/// A header/footer part (`word/headerN.xml` / `word/footerN.xml`).
+pub struct HdrFtrPart {
+    /// File name e.g. "header1.xml" (relative to word/).
+    pub part_name: EcoString,
+    /// true = header (root `w:hdr`, header content-type), false = footer (`w:ftr`).
+    pub is_header: bool,
+    pub blocks: Vec<Block>,
 }
 
 impl Default for SectPr {
     fn default() -> Self {
-        // US Letter, 1-inch margins (in twips: 1 inch = 1440).
+        // US Letter, 1-inch margins (in twips: 1 inch = 1440). The driver
+        // overwrites this with the resolved page setup; it remains a sane
+        // fallback for callers that build a `SectPr` directly.
         Self {
             page_w: 12240,
             page_h: 15840,
@@ -293,6 +445,13 @@ impl Default for SectPr {
             header: 720,
             footer: 720,
             columns: 1,
+            gutter: 0,
+            col_space: 720,
+            pg_num: None,
+            sect_type: None,
+            headers: Vec::new(),
+            footers: Vec::new(),
+            title_pg: false,
         }
     }
 }

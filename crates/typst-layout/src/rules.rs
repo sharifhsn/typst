@@ -93,6 +93,20 @@ pub fn register(rules: &mut NativeRuleMap) {
     rules.register(Docx, HIGHLIGHT_RULE);
     rules.register(Docx, SMALLCAPS_RULE);
 
+    // Raw/code blocks normalize (via their target-independent show-set) into a
+    // `BlockElem` of highlighted monospace `TextElem` runs separated by
+    // `LinebreakElem`s — which the DOCX backend lowers to monospace `w:r` runs
+    // (the mono font + per-token colors flow through `resolve_text_props`).
+    // Without these, a `RawElem` survives realization and falls through to the
+    // rasterization fallback (G2).
+    rules.register(Docx, RAW_RULE);
+    rules.register(Docx, RAW_LINE_RULE);
+
+    // `#align(..)[body]` normalizes into a `set align` on the body so the DOCX
+    // backend can read the alignment off the style chain (→ `w:jc`) instead of
+    // seeing a raw `AlignElem` that would interrupt paragraph grouping.
+    rules.register(Docx, ALIGN_RULE);
+
     // `@key` references are turned into citations (or cross-reference links) by
     // the ref rule. Without it, a citation stays a raw `RefElem`, no `CiteGroup`
     // is formed, and `Works` can never locate the citation. (Cross-references

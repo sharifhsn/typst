@@ -35,6 +35,12 @@ pub const REL_IMAGE: &str =
 /// The relationship-type URI for an external hyperlink.
 pub const REL_HYPERLINK: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
+/// The relationship-type URI for a header part.
+pub const REL_HEADER: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header";
+/// The relationship-type URI for a footer part.
+pub const REL_FOOTER: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer";
 
 /// The mutable package state accumulated during the post-realize walk.
 pub struct DocxCtx<'a, 'e> {
@@ -55,6 +61,8 @@ pub struct DocxCtx<'a, 'e> {
     pub(crate) doc_rels: Rels,
     next_bookmark_id: u32,
     next_docpr_id: u32,
+    /// Monotonic `relativeHeight` z-order for floating drawings (`<wp:anchor>`).
+    next_z: u32,
     pub(crate) max_heading_level: u8,
     pub(crate) uses_fields: bool,
     pub(crate) uses_math: bool,
@@ -89,6 +97,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             doc_rels: Rels::new(),
             next_bookmark_id: 1,
             next_docpr_id: 1,
+            next_z: 1,
             max_heading_level: 0,
             uses_fields: false,
             uses_math: false,
@@ -229,6 +238,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         id
     }
 
+    /// Allocates a monotonic `relativeHeight` z-order (>= 1) for a floating
+    /// drawing (`<wp:anchor>`), so stacked floats don't share a z-index.
+    pub fn next_z(&mut self) -> u32 {
+        let z = self.next_z;
+        self.next_z += 1;
+        z
+    }
+
     /// Registers (or reuses) a numbering shape; returns the `numId`.
     pub fn register_list(&mut self, spec: ListSpec) -> u32 {
         if !spec.restart_at_1
@@ -284,6 +301,18 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     /// Allocates (or reuses) an external hyperlink relationship; returns the rId.
     pub fn add_external_rel(&mut self, url: &str) -> EcoString {
         self.doc_rels.add(REL_HYPERLINK, url, RelMode::External)
+    }
+
+    /// Registers a header part relationship (`Target` relative to `word/`);
+    /// returns the rId for the matching `<w:headerReference>`.
+    pub fn add_header_rel(&mut self, target: &str) -> EcoString {
+        self.doc_rels.add(REL_HEADER, target, RelMode::Internal)
+    }
+
+    /// Registers a footer part relationship (`Target` relative to `word/`);
+    /// returns the rId for the matching `<w:footerReference>`.
+    pub fn add_footer_rel(&mut self, target: &str) -> EcoString {
+        self.doc_rels.add(REL_FOOTER, target, RelMode::Internal)
     }
 
     /// Marks that a complex field was emitted.
@@ -363,6 +392,29 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             p.smallcaps = true;
         }
 
+        // G7 character spacing / tracking → run-level `w:spacing` (signed twips).
+        // `tracking` resolves to an `Abs` (an `Em` relative to the font size).
+        let tracking = styles.resolve(TextElem::tracking);
+        if tracking != typst_library::layout::Abs::zero() {
+            p.tracking = Some(props::abs_to_twip(tracking));
+        }
+
+        // G7b baseline shift → `w:position` (signed half-points). Typst's
+        // `baseline` is downward-positive while `w:position` is upward-positive,
+        // so negate.
+        let baseline = styles.resolve(TextElem::baseline);
+        if baseline != typst_library::layout::Abs::zero() {
+            p.position_half_pt = Some((-baseline.to_pt() * 2.0).round() as i32);
+        }
+
+        // G6 run reading order. A run whose resolved direction is RTL gets
+        // `w:rtl` (right-to-left glyph order) plus `w:cs` (so the complex-script
+        // properties — `bCs`/`iCs`/`szCs`/`rFonts@cs` — actually apply).
+        if !styles.resolve(TextElem::dir).is_positive() {
+            p.rtl = true;
+            p.cs = true;
+        }
+
         // Language tag.
         let lang = styles.get(TextElem::lang);
         p.lang = Some(lang.as_str().into());
@@ -385,12 +437,81 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         _elem: &Packed<typst_library::model::ParElem>,
         styles: StyleChain,
     ) -> ParaProps {
+        use typst_library::foundations::Resolve;
+        use typst_library::layout::{AlignElem, Em, FixedAlignment};
+        use typst_library::model::ParElem;
+        use typst_library::text::TextElem;
+
         let mut p = ParaProps::default();
-        // Justification.
-        if styles.get(typst_library::model::ParElem::justify) {
+
+        // G3 alignment. Justification (`w:jc="both"`) wins over horizontal
+        // alignment; a left/start paragraph stays `None` for byte-identity with
+        // the previously emitted output.
+        if styles.get(ParElem::justify) {
             p.jc = Some(crate::dom::Jc::Both);
+        } else {
+            match styles.resolve(AlignElem::alignment).x {
+                FixedAlignment::Center => p.jc = Some(crate::dom::Jc::Center),
+                FixedAlignment::End => p.jc = Some(crate::dom::Jc::End),
+                FixedAlignment::Start => {}
+            }
         }
+
+        // G6 paragraph base reading order (the run-level `w:rtl` is Slice C).
+        if !styles.resolve(TextElem::dir).is_positive() {
+            p.bidi = true;
+        }
+
+        let font_size = styles.resolve(TextElem::size);
+
+        // G4 leading → `w:line` at-least, only when it differs from the engine
+        // default of 0.65em (emitting it on every paragraph would change all
+        // existing fixtures). A faithful at-least line height is the resolved
+        // leading plus the font size.
+        let leading = styles.resolve(ParElem::leading);
+        let default_leading = Em::new(0.65).at(font_size);
+        if (leading - default_leading).to_pt().abs() > 1e-3 {
+            let line = props::abs_to_twip(leading + font_size);
+            p.spacing.get_or_insert_with(Default::default).line = Some(line);
+            // at-least (not exact, not auto-multiple): never clip a tall line.
+            if let Some(sp) = &mut p.spacing {
+                sp.line_rule_auto = false;
+                sp.line_rule_at_least = true;
+            }
+        }
+
+        // G4 first-line indent (apply on every paragraph when `all` is set; the
+        // first-paragraph-only case is handled by the convert.rs loop).
+        let fli = styles.get(ParElem::first_line_indent);
+        let fli_amount = props::abs_to_twip(fli.amount().resolve(styles));
+        if fli.all() && fli_amount != 0 {
+            p.ind.get_or_insert_with(Default::default).first_line = Some(fli_amount);
+        }
+
+        // G4 hanging indent.
+        let hang = props::abs_to_twip(styles.resolve(ParElem::hanging_indent));
+        if hang != 0 {
+            p.ind.get_or_insert_with(Default::default).hanging = Some(hang);
+        }
+
         p
+    }
+
+    /// The first-line indent (twips) to apply to a paragraph that *follows*
+    /// another paragraph, when `first-line-indent` is set with `all: false`
+    /// (the default). Word's `w:firstLine` has no "skip the first paragraph"
+    /// semantics, so the convert loop applies this only to consecutive
+    /// paragraphs; the `all: true` case is handled inline in
+    /// [`Self::resolve_par_props`]. Returns `None` when there is nothing to add.
+    pub fn consecutive_first_line_indent(&self, styles: StyleChain) -> Option<i32> {
+        use typst_library::foundations::Resolve;
+        use typst_library::model::ParElem;
+        let fli = styles.get(ParElem::first_line_indent);
+        if fli.all() {
+            return None;
+        }
+        let amount = props::abs_to_twip(fli.amount().resolve(styles));
+        (amount != 0).then_some(amount)
     }
 
     // -- Inline flow --------------------------------------------------------
