@@ -668,7 +668,41 @@ fn write_shape_payload(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec) {
     }
 
     w.close(); // wps:spPr
-    w.open("wps:bodyPr").empty();
+
+    match &shape.txbx {
+        // A text box: real editable paragraphs framed by the shape.
+        Some(tb) => {
+            w.open("wps:txbx").start_children();
+            w.open("w:txbxContent").start_children();
+            let mut ends_with_para = false;
+            for block in &tb.blocks {
+                ends_with_para = write_block(w, block);
+            }
+            // `w:txbxContent` (like the document body) must end with a paragraph;
+            // this also gives an empty text box its one required paragraph.
+            if !ends_with_para {
+                w.leaf(xml::W_P);
+            }
+            w.close(); // w:txbxContent
+            w.close(); // wps:txbx
+            // Reproduce the box inset as the text-frame insets, and auto-fit the
+            // frame to the text so Word can re-flow it when edited.
+            w.open("wps:bodyPr")
+                .attr("wrap", "square")
+                .attr("lIns", &tb.ins[0].to_string())
+                .attr("tIns", &tb.ins[1].to_string())
+                .attr("rIns", &tb.ins[2].to_string())
+                .attr("bIns", &tb.ins[3].to_string())
+                .attr("anchor", "t")
+                .start_children();
+            w.leaf("a:spAutoFit");
+            w.close(); // wps:bodyPr
+        }
+        None => {
+            w.open("wps:bodyPr").empty();
+        }
+    }
+
     w.close(); // wps:wsp
     w.close(); // a:graphicData
     w.close(); // a:graphic

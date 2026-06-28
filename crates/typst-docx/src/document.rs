@@ -596,7 +596,7 @@ fn page_number_para(style: &str, jc: Option<crate::dom::Jc>) -> Block {
 }
 
 /// Recursively collects introspection tags from the IR.
-fn collect_tags(blocks: &[Block], out: &mut Vec<Tag>) {
+pub(crate) fn collect_tags(blocks: &[Block], out: &mut Vec<Tag>) {
     for block in blocks {
         match block {
             Block::Tag(tag) => out.push(tag.clone()),

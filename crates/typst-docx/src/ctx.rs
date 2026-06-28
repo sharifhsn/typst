@@ -145,6 +145,56 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         self.locator.next(&span)
     }
 
+    /// Lays `content` out to a single frame for export: under the `Paged` target
+    /// (so layout rules — shapes, images, … — fire instead of being dropped),
+    /// against the page's content width (height unbounded), through a sub-engine
+    /// with a THROWAWAY sink.
+    ///
+    /// A *finite* width is essential: width-relative content (`layout(size =>
+    /// ..)`, `width: 100%`) laid out under an infinite width produces
+    /// pathologically wide output. `Axes::splat(false)` keeps the region
+    /// non-expanding, so fixed-size content takes its natural size.
+    ///
+    /// The throwaway sink isolates this re-layout's *delayed errors*: it
+    /// re-realizes the content under `Paged` with its own pass, and packages that
+    /// compute layout-coupled values during it (algo's `#i` indent-state assert,
+    /// a margin-note needing page properties, a cetz canvas whose size hasn't
+    /// stabilized) raise errors that never clear here — this universe, unlike the
+    /// main document, can't feed those values back to itself. They must not fail
+    /// the whole export; the shared introspector (reads) is untouched, so
+    /// labels/refs/bibliography convergence is unaffected. Returns `None` if the
+    /// content cannot be laid out in this context (e.g. a pagebreak with no page
+    /// flow). Does not harvest tags or render — callers decide what to do.
+    fn layout_export_frame(
+        &mut self,
+        content: &Content,
+        styles: StyleChain,
+        span: Span,
+    ) -> SourceResult<Option<typst_library::layout::Frame>> {
+        use comemo::Track;
+        use typst_library::foundations::{Target, TargetElem};
+        use typst_library::layout::{Abs, Axes, Region, Size};
+
+        let target = TargetElem::target.set(Target::Paged).wrap();
+        let styles = styles.chain(&target);
+        let region =
+            Region::new(Size::new(self.raster_width, Abs::inf()), Axes::splat(false));
+        let loc = self.locator.next(&span);
+        let layout_frame = self.engine.library.routines.layout_frame;
+        let mut throwaway = typst_library::engine::Sink::new();
+        let mut sub = typst_library::engine::Engine {
+            world: self.engine.world,
+            library: self.engine.library,
+            introspector: typst_utils::Protected::from_raw(
+                self.engine.introspector.into_raw(),
+            ),
+            traced: self.engine.traced,
+            sink: throwaway.track_mut(),
+            route: typst_library::engine::Route::extend(self.engine.route.track()),
+        };
+        Ok(layout_frame(&mut sub, content, loc, styles, region).ok())
+    }
+
     /// Lays out arbitrary content and rasterizes it to a PNG, embedding it as a
     /// media part. Returns the media relationship id and the content's size, or
     /// `None` if the content lays out to nothing. This is the universal fallback
@@ -156,61 +206,11 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
         span: Span,
     ) -> SourceResult<Option<(EcoString, typst_library::layout::Size)>> {
-        use typst_library::foundations::{Smart, Target, TargetElem};
-        use typst_library::layout::{Abs, Axes, Region, Sides, Size};
+        use typst_library::foundations::Smart;
+        use typst_library::layout::{Abs, Sides};
 
-        // Lay out under the paged target: layout rules (shapes, images, …) are
-        // only registered for `Target::Paged`, so the content would otherwise be
-        // dropped during its own layout.
-        let target = TargetElem::target.set(Target::Paged).wrap();
-        let styles = styles.chain(&target);
-
-        // Lay the content out against the page's content width (height stays
-        // unbounded). A *finite* width is essential: width-relative content
-        // (`layout(size => ..)`, `width: 100%`) laid out under an infinite width
-        // produces pathologically wide output. `Axes::splat(false)` keeps the
-        // region non-expanding, so fixed-size content still takes its natural
-        // size (and may exceed the width without being clipped). The fallback
-        // must degrade gracefully: if the content cannot be laid out in this
-        // context (e.g. a pagebreak with no page flow), drop it rather than
-        // failing the export.
-        let region =
-            Region::new(Size::new(self.raster_width, Abs::inf()), Axes::splat(false));
-        let loc = self.locator.next(&span);
-
-        // Lay the content out through a sub-engine with a THROWAWAY sink, so any
-        // delayed errors the re-layout produces are discarded rather than
-        // promoted to fatal at the end of the introspection loop.
-        //
-        // The rasterization re-layout is a separate introspection universe: it
-        // re-realizes the content under `Paged` with its own pass, and packages
-        // that compute layout-coupled values during that pass (algo's `#i`
-        // indent-state assert, a margin-note that needs page properties, a cetz
-        // canvas whose size hasn't stabilized) raise errors there that never
-        // clear — because this universe, unlike the main document, has no way to
-        // feed those values back to itself. Those errors must not fail the whole
-        // export; the content still rasterizes to its best-effort visual. We keep
-        // the shared introspector (reads) and the tag harvest below intact, so
-        // labels/refs/bibliography convergence are unaffected — only this
-        // re-layout's own error reporting is isolated.
-        use comemo::Track;
-        let layout_frame = self.engine.library.routines.layout_frame;
-        let mut throwaway = typst_library::engine::Sink::new();
-        let frame = {
-            let mut sub = typst_library::engine::Engine {
-                world: self.engine.world,
-                library: self.engine.library,
-                introspector: typst_utils::Protected::from_raw(
-                    self.engine.introspector.into_raw(),
-                ),
-                traced: self.engine.traced,
-                sink: throwaway.track_mut(),
-                route: typst_library::engine::Route::extend(self.engine.route.track()),
-            };
-            match layout_frame(&mut sub, content, loc, styles, region) {
-                Ok(frame) => frame,
-                Err(_) => return Ok(None),
-            }
+        let Some(frame) = self.layout_export_frame(content, styles, span)? else {
+            return Ok(None);
         };
 
         // Harvest introspection tags from the laid-out frame so that labels and
@@ -229,11 +229,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         collect_frame_tags(&frame, &mut self.deferred_tags);
 
         let size = frame.size();
-        if !size.x.to_pt().is_finite()
-            || !size.y.to_pt().is_finite()
-            || size.x <= Abs::zero()
-            || size.y <= Abs::zero()
-        {
+        if !usable_size(size) {
             return Ok(None);
         }
 
@@ -262,6 +258,23 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         let Ok(Ok(png)) = rendered else { return Ok(None) };
 
         Ok(Some((self.add_image(&png, "png"), size)))
+    }
+
+    /// Lays content out and returns its outer size, without rasterizing or
+    /// harvesting tags. Used to size a text box whose text is extracted (and so
+    /// re-introspected) separately, so the frame's own tags would double-count.
+    /// Returns `None` if the content lays out to nothing usable.
+    pub fn measure(
+        &mut self,
+        content: &Content,
+        styles: StyleChain,
+        span: Span,
+    ) -> SourceResult<Option<typst_library::layout::Size>> {
+        let Some(frame) = self.layout_export_frame(content, styles, span)? else {
+            return Ok(None);
+        };
+        let size = frame.size();
+        Ok(usable_size(size).then_some(size))
     }
 
     /// Emits a hidden `SEQ \h` field (increment-without-display) for each
@@ -828,6 +841,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         } else if let Some(elem) = child.to_packed::<LinkMarker>() {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<typst_library::layout::BoxElem>() {
+            // A styled `#box(fill|stroke)[text]` becomes a Word *text box* — a
+            // framed shape holding the box's real, editable text — rather than a
+            // flat rasterized image. Falls through to rasterize/extract when the
+            // box is not a text-box candidate.
+            if let Some(run) = mappers::shape::text_box(child, styles, self)? {
+                out.push(run);
+                return Ok(());
+            }
             match elem.body.get_cloned(styles) {
                 // An empty `#box` (`#box(width: 1em)` spacer): nothing to render.
                 None => {}
@@ -947,6 +968,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             styles,
         )
     }
+}
+
+/// Whether a laid-out size is finite and strictly positive on both axes (Word
+/// rejects zero/degenerate drawing extents).
+fn usable_size(size: typst_library::layout::Size) -> bool {
+    use typst_library::layout::Abs;
+    size.x.to_pt().is_finite()
+        && size.y.to_pt().is_finite()
+        && size.x > Abs::zero()
+        && size.y > Abs::zero()
 }
 
 /// Derives a Word underline style + colour from a resolved line stroke.

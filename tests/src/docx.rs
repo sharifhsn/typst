@@ -298,6 +298,27 @@ fn decorative_shape_becomes_a_vector_drawing() {
 }
 
 #[test]
+fn styled_box_becomes_a_text_box_with_real_text() {
+    // A `#box(fill|stroke)[text]` becomes a Word text box (`wps:txbx`) holding
+    // real, editable paragraphs — not a flattened raster image.
+    let p = parts(
+        "#box(fill: luma(230), stroke: 1pt + blue, inset: 6pt, radius: 3pt)\
+         [A framed callout with #link(\"https://typst.app\")[a link].]",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("wps:txbx"), "the styled box becomes a text box");
+    assert!(doc.contains("w:txbxContent"), "with editable text-box content");
+    assert!(
+        doc.contains("A framed callout"),
+        "the box's text is preserved as real runs"
+    );
+    assert!(doc.contains("w:hyperlink"), "and inner links survive");
+    assert!(doc.contains("prst=\"roundRect\""), "the radius gives a rounded frame");
+    assert!(!p.keys().any(|k| k.starts_with("word/media/")), "and nothing is rasterized");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn polygon_becomes_a_custom_geometry_shape() {
     let p = parts("#polygon((0pt, 0pt), (2cm, 0pt), (1cm, 1cm), fill: green)");
     let doc = &p["word/document.xml"];

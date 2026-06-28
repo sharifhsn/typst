@@ -346,6 +346,18 @@ pub struct ShapeSpec {
     /// Solid fill colour, or `None` for no fill.
     pub fill: Option<[u8; 3]>,
     pub stroke: Option<ShapeStroke>,
+    /// Real editable text framed by the shape (`wps:txbx`). `Some` turns the
+    /// shape into a Word *text box* (a `#box(fill|stroke)[text]`); `None` is a
+    /// bare decorative shape. Default `None`.
+    pub txbx: Option<TextBox>,
+}
+
+/// The text-box content of a shape (`wps:txbx` → `w:txbxContent`): real
+/// paragraphs the consumer can edit, with the box's inset reproduced as the
+/// text-frame insets `[left, top, right, bottom]` in EMU.
+pub struct TextBox {
+    pub ins: [i64; 4],
+    pub blocks: Vec<Block>,
 }
 
 /// A shape's geometry. Coordinates for [`ShapeGeom::Path`] are in EMU within the
