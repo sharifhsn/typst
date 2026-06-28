@@ -821,6 +821,13 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<LinkMarker>() {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
+        } else if let Some(elem) = child.to_packed::<typst_library::layout::BoxElem>()
+            && elem.body.get_cloned(styles).is_none()
+        {
+            // An empty `#box` (`#box(width: 1em)` spacer): nothing to render, so
+            // skip it silently rather than warning. A box *with* a body falls
+            // through to the rasterization fallback (it may carry a frame, fill,
+            // or block content — e.g. labeled equations — that must survive).
         } else if let Some(elem) = child.to_packed::<LinkElem>() {
             // In a run-only context (nested formatting, table/footnote bodies) we
             // cannot emit a `<w:hyperlink>` wrapper, so lower the link body to

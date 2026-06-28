@@ -349,7 +349,6 @@ fn handle_block(
             deg < 1.0 || deg > 179.0
         }
     {
-        use typst_library::foundations::Resolve;
         use typst_library::visualize::Paint;
         // A horizontal rule → an empty paragraph with a bottom border (Word's
         // horizontal-rule idiom), instead of being dropped.
@@ -379,6 +378,10 @@ fn handle_block(
             },
             content: Vec::new(),
         }));
+    } else if child.is::<typst_library::layout::FlushElem>()
+        || child.is::<typst_library::layout::ColbreakElem>()
+    {
+        // Float-flush / column-break markers: no DOCX representation, no content.
     } else if let Some(elem) = child.to_packed::<typst_library::layout::PlaceElem>() {
         // Top-level `#place(..)` → a floating drawing (G8). The body is lowered
         // to an image (native or rasterized) wrapped in a `<wp:anchor>`.
