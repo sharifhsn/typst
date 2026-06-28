@@ -89,5 +89,26 @@ pub fn heading(
         content.push(ParaChild::BookmarkEnd { id });
     }
 
+    // Record this heading (with the bookmark it actually emitted) so a table of
+    // contents can list it later. Honour `outlined` — a heading excluded from
+    // the outline must not appear in the TOC.
+    if elem.outlined.get(styles) {
+        let mut text = String::new();
+        if let Some(numbers) = &elem.numbers
+            && !numbers.is_empty()
+        {
+            text.push_str(numbers);
+            text.push(' ');
+        }
+        text.push_str(&elem.body.plain_text());
+        if !text.is_empty() {
+            ctx.toc_headings.push(crate::dom::TocHeading {
+                level,
+                anchor: bookmark.map(|(_, name)| name),
+                text: text.into(),
+            });
+        }
+    }
+
     Ok(vec![Block::Para(Para { props, content })])
 }

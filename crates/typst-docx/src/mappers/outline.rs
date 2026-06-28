@@ -23,7 +23,10 @@ use typst_library::diag::SourceResult;
 use typst_library::model::{HeadingElem, OutlineElem};
 
 use crate::ctx::DocxCtx;
-use crate::dom::{Block, Field, Para, ParaChild, ParaProps, Run, RunProps};
+use crate::dom::{
+    Block, Field, Para, ParaChild, ParaProps, Run, RunProps, TabAlign, TabLeader, TabStop, Toc,
+    TocHeading,
+};
 
 /// The default outline depth used for the `\o "1-N"` switch when the outline
 /// does not constrain `depth`. Word's "Automatic Table" uses `1-3`; we match it.
@@ -65,26 +68,101 @@ pub fn outline(
         }
     }
 
-    // 2. The TOC field paragraph.
+    // 2. The TOC field. Its entries are baked in as the cached result so the
+    // table of contents shows without a manual field update — but the actual
+    // entry paragraphs are filled in a post-conversion pass ([`fill_tocs`]),
+    // once every heading's real bookmark exists. A heading TOC carries the depth
+    // to populate from; a list-of-figures/tables (`\c`) keeps the placeholder.
+    // The field stays `dirty` so Word still refreshes page numbers when it can.
     let instr = toc_instruction(elem, styles);
     ctx.mark_field();
 
-    // Cached result: an italic placeholder telling Word the field needs an
-    // update. Word replaces this with the real, page-numbered entries on open
-    // (because of `w:dirty` + `settings.xml`'s `<w:updateFields/>`).
-    let placeholder = Run::Text {
+    let depth = toc_category(elem, styles)
+        .is_none()
+        .then(|| toc_depth(elem, styles));
+    // Right-tab position (page content width, in twips) for the dot leader.
+    let tab_pos = (ctx.raster_width.to_pt() * 20.0) as i32;
+
+    // Shown only when no entries are baked (a list of figures, or a document
+    // with no headings): an italic "update me" placeholder.
+    let fallback = vec![Run::Text {
         props: RunProps { italic: true, ..RunProps::default() },
         text: "Right-click to update the table of contents.".into(),
-    };
+    }];
 
-    let field = Field { instr, result: vec![placeholder], dirty: true };
-
-    blocks.push(Block::Para(Para {
-        props: ParaProps::default(),
-        content: vec![ParaChild::Run(Run::Field(field))],
+    blocks.push(Block::Toc(Toc {
+        instr,
+        dirty: true,
+        depth,
+        tab_pos,
+        entries: Vec::new(),
+        fallback,
     }));
 
     Ok(blocks)
+}
+
+/// Populates every heading [`Toc`] in the body from the headings recorded during
+/// conversion (now that each one's real bookmark is known). Called once the
+/// whole body — across all sections — has been converted.
+pub(crate) fn fill_tocs(blocks: &mut [Block], headings: &[TocHeading]) {
+    for block in blocks.iter_mut() {
+        if let Block::Toc(toc) = block
+            && let Some(depth) = toc.depth
+        {
+            toc.entries = headings
+                .iter()
+                .filter(|h| h.level <= depth)
+                .map(|h| entry_para(h, toc.tab_pos))
+                .collect();
+        }
+    }
+}
+
+/// Builds one `TOC{level}` entry paragraph: the heading text as a hyperlink to
+/// its bookmark (when it has one), a right tab with a dot leader, and a
+/// `PAGEREF` field whose page number the consumer fills in.
+fn entry_para(h: &TocHeading, tab_pos: i32) -> Para {
+    let text_run = Run::Text { props: RunProps::default(), text: h.text.clone() };
+    let mut content = Vec::new();
+    match &h.anchor {
+        Some(name) => content.push(ParaChild::Hyperlink {
+            rel: None,
+            anchor: Some(name.clone()),
+            runs: vec![text_run],
+        }),
+        None => content.push(ParaChild::Run(text_run)),
+    }
+    content.push(ParaChild::Run(Run::Tab));
+    if let Some(name) = &h.anchor {
+        content.push(ParaChild::Run(Run::Field(Field {
+            instr: eco_format!(" PAGEREF {name} \\h "),
+            result: Vec::new(),
+            dirty: false,
+        })));
+    }
+    Para {
+        props: ParaProps {
+            style: Some(eco_format!("TOC{}", h.level.min(9))),
+            tabs: vec![TabStop {
+                val: TabAlign::End,
+                leader: Some(TabLeader::Dot),
+                pos: tab_pos,
+            }],
+            ..ParaProps::default()
+        },
+        content,
+    }
+}
+
+/// The TOC depth (`\o "1-N"`): the outline's `depth`, or Word's default of 3,
+/// clamped to the valid OOXML outline range.
+fn toc_depth(elem: &Packed<OutlineElem>, styles: StyleChain) -> usize {
+    elem.depth
+        .get(styles)
+        .map(|d| d.get())
+        .unwrap_or(DEFAULT_TOC_DEPTH)
+        .clamp(1, 9)
 }
 
 /// Builds the `instrText` for the TOC field (with the conventional leading and
@@ -105,13 +183,7 @@ fn toc_instruction(elem: &Packed<OutlineElem>, styles: StyleChain) -> EcoString 
         //   \u        use the applied paragraph outline level
         // This is exactly what Word's "Automatic Table" inserts. (`§1.3`.)
         None => {
-            let depth = elem
-                .depth
-                .get(styles)
-                .map(|d| d.get())
-                .unwrap_or(DEFAULT_TOC_DEPTH)
-                // OOXML outline levels run 1..=9.
-                .clamp(1, 9);
+            let depth = toc_depth(elem, styles);
             eco_format!(" TOC \\o \"1-{depth}\" \\h \\z \\u ")
         }
     }

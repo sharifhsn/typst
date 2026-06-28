@@ -21,7 +21,7 @@ use typst_syntax::Span;
 
 use crate::dom::{
     BookmarkTable, Block, Footnote, ListSpec, MediaPart, NumberingTable,
-    ParaProps, Run, RunProps, VertAlign,
+    ParaProps, Run, RunProps, TocHeading, VertAlign,
 };
 use crate::package::{RelMode, Rels};
 use crate::mappers;
@@ -76,6 +76,10 @@ pub struct DocxCtx<'a, 'e> {
     /// an image remain present in the introspector.
     pub(crate) deferred_tags: Vec<Tag>,
 
+    /// Headings recorded in document order as they are converted, used to
+    /// populate any table of contents once each heading's real bookmark exists.
+    pub(crate) toc_headings: Vec<TocHeading>,
+
     /// The finite width to give content that we rasterize (see
     /// [`Self::rasterize`]). Width-relative content (`layout(size => ..)`,
     /// `width: 100%`, gradients sized to the container) must lay out against a
@@ -115,6 +119,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             uses_math: false,
             bookmarks: BookmarkTable::default(),
             deferred_tags: Vec::new(),
+            toc_headings: Vec::new(),
             // A sane finite default (~A4 text width); overridden from the real
             // page geometry by `docx_document` before any conversion happens.
             raster_width: Abs::pt(450.0),

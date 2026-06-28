@@ -158,6 +158,34 @@ fn nary_operator_nests_its_operand() {
 }
 
 #[test]
+fn outline_bakes_entries_with_resolvable_bookmarks() {
+    // A heading table of contents bakes its entries (so it shows without a
+    // manual field update), and every entry's PAGEREF must target a real
+    // bookmark — a dangling one renders as "Error! Bookmark not defined".
+    let p = parts("#outline()\n\n= Alpha\n\n== Beta\n\n= Gamma");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("w:val=\"TOC1\""), "a heading TOC bakes TOC1 entries");
+    assert!(doc.contains("w:val=\"TOC2\""), "nested headings bake TOC2 entries");
+
+    let bookmarks: Vec<&str> = doc
+        .match_indices("w:name=\"")
+        .map(|(i, _)| {
+            let rest = &doc[i + 8..];
+            &rest[..rest.find('"').unwrap()]
+        })
+        .collect();
+    for (i, _) in doc.match_indices("PAGEREF ") {
+        let rest = &doc[i + 8..];
+        let name = &rest[..rest.find(' ').unwrap()];
+        assert!(
+            bookmarks.contains(&name),
+            "PAGEREF target {name} has no matching bookmark (dangling)"
+        );
+    }
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn footnote_has_in_text_reference_and_body_mark() {
     let p = parts("A claim.#footnote[The supporting note.]");
     assert!(p.contains_key("word/footnotes.xml"), "footnotes part should exist");

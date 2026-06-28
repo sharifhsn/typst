@@ -65,7 +65,7 @@ pub fn docx_document(
 
     // Walk the native element tree into the typed IR.
     let (
-        body,
+        mut body,
         sect,
         header_parts,
         footer_parts,
@@ -78,6 +78,7 @@ pub fn docx_document(
         uses_fields,
         uses_math,
         deferred_tags,
+        toc_headings,
     ) = {
         // Isolate the conversion walk's error sink. Lowering already-realized
         // content (figure/table/grid cells, …) can surface *delayed* errors for
@@ -163,6 +164,7 @@ pub fn docx_document(
             ctx.uses_fields,
             ctx.uses_math,
             std::mem::take(&mut ctx.deferred_tags),
+            std::mem::take(&mut ctx.toc_headings),
         )
         };
         // Forward conversion warnings to the real sink (delayed errors stay
@@ -172,6 +174,10 @@ pub fn docx_document(
         }
         converted
     };
+
+    // Now that every heading's real bookmark is known, populate the table(s) of
+    // contents in document order — across all sections.
+    crate::mappers::outline::fill_tocs(&mut body, &toc_headings);
 
     // Collect introspection tags from the IR for the introspector.
     let mut tags = Vec::new();
@@ -572,6 +578,15 @@ fn collect_tags(blocks: &[Block], out: &mut Vec<Tag>) {
                 for row in &tbl.rows {
                     for cell in &row.cells {
                         collect_tags(&cell.blocks, out);
+                    }
+                }
+            }
+            Block::Toc(toc) => {
+                for para in &toc.entries {
+                    for child in &para.content {
+                        if let ParaChild::Tag(tag) = child {
+                            out.push(tag.clone());
+                        }
                     }
                 }
             }

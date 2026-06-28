@@ -67,10 +67,40 @@ impl Output for DocxDocument {
 pub enum Block {
     Para(Para),
     Table(Tbl),
+    /// A table of contents: a `TOC` complex field whose cached result is a set
+    /// of baked entry paragraphs (so it shows without a manual field update).
+    Toc(Toc),
     /// A non-final section break carrying its own `SectPr`.
     SectionBreak(SectPr),
     /// Introspection tag passthrough for the introspector + bookmarks.
     Tag(Tag),
+}
+
+/// A table-of-contents complex field. The field's `begin`/`instrText`/`separate`
+/// wrap the first `entry` and its `end` closes the last, so the baked entries
+/// render as the field's cached result. When `entries` is empty the `fallback`
+/// runs are shown inside a single-paragraph field instead.
+pub struct Toc {
+    pub instr: EcoString,
+    pub dirty: bool,
+    /// Heading depth (`\o "1-N"`) to populate from after the body is converted,
+    /// or `None` for a list of figures/tables (kept as the `fallback`).
+    pub depth: Option<usize>,
+    /// Right tab position (twips) for the dot leader + page number.
+    pub tab_pos: i32,
+    /// Baked entries, filled in a post-conversion pass from the headings that
+    /// were actually emitted (so the bookmarks they target always exist).
+    pub entries: Vec<Para>,
+    pub fallback: Vec<Run>,
+}
+
+/// A heading recorded during conversion, used to populate the table of contents
+/// once every heading's real bookmark is known.
+pub struct TocHeading {
+    pub level: usize,
+    /// The heading's bookmark name, when it emitted one (else a plain entry).
+    pub anchor: Option<EcoString>,
+    pub text: EcoString,
 }
 
 /// A paragraph.

@@ -7,7 +7,7 @@ use typst_library::model::DocumentInfo;
 
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, Drawing, DocxDocument,
-    Field, Footnote, HdrFtrPart, Para, ParaChild, Row, Run, SectPr, SectType, Tbl, VAlign,
+    Field, Footnote, HdrFtrPart, Para, ParaChild, Row, Run, SectPr, SectType, Tbl, Toc, VAlign,
     VMerge,
 };
 use crate::package::{Package, RelMode, Rels};
@@ -221,6 +221,10 @@ fn write_block(w: &mut XmlWriter, block: &Block) -> bool {
             // paragraph" so the body terminator inserts one if this is the last
             // block.
             false
+        }
+        Block::Toc(toc) => {
+            write_toc(w, toc);
+            true
         }
         Block::SectionBreak(sect) => {
             // A non-final section ends with a paragraph whose `pPr` carries the
@@ -674,6 +678,64 @@ fn write_field(w: &mut XmlWriter, field: &Field) {
     w.open(xml::W_R).start_children();
     w.open("w:fldChar").attr("w:fldCharType", "end").empty();
     w.close();
+}
+
+/// Serializes a table of contents. With baked entries the `TOC` field spans
+/// several paragraphs: `begin`/`instrText`/`separate` lead the first entry and
+/// `end` closes the last, so the entries are the field's cached result and show
+/// without a manual update. With no entries, falls back to a single-paragraph
+/// field holding the placeholder runs.
+fn write_toc(w: &mut XmlWriter, toc: &Toc) {
+    // Emits the field `begin` + instruction + `separate` run sequence.
+    let write_begin = |w: &mut XmlWriter| {
+        w.open(xml::W_R).start_children();
+        let fld = w.open("w:fldChar").attr("w:fldCharType", "begin");
+        if toc.dirty {
+            fld.attr("w:dirty", "true");
+        }
+        w.empty();
+        w.close();
+        w.open(xml::W_R).start_children();
+        w.open("w:instrText").attr("xml:space", "preserve").start_children();
+        w.text(&toc.instr);
+        w.close();
+        w.close();
+        w.open(xml::W_R).start_children();
+        w.open("w:fldChar").attr("w:fldCharType", "separate").empty();
+        w.close();
+    };
+    let write_end = |w: &mut XmlWriter| {
+        w.open(xml::W_R).start_children();
+        w.open("w:fldChar").attr("w:fldCharType", "end").empty();
+        w.close();
+    };
+
+    if toc.entries.is_empty() {
+        w.open(xml::W_P).start_children();
+        write_begin(w);
+        for run in &toc.fallback {
+            write_run(w, run);
+        }
+        write_end(w);
+        w.close();
+        return;
+    }
+
+    let last = toc.entries.len() - 1;
+    for (i, para) in toc.entries.iter().enumerate() {
+        w.open(xml::W_P).start_children();
+        para.props.write_ppr(w);
+        if i == 0 {
+            write_begin(w);
+        }
+        for child in &para.content {
+            write_para_child(w, child);
+        }
+        if i == last {
+            write_end(w);
+        }
+        w.close(); // w:p
+    }
 }
 
 fn write_sectpr(w: &mut XmlWriter, sect: &SectPr) {
