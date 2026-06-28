@@ -237,6 +237,23 @@ fn outline_falls_back_to_introspected_headings() {
 }
 
 #[test]
+fn term_list_merges_term_and_definition() {
+    // Typst renders "**term** definition" inline with a hanging indent, not the
+    // term on its own line.
+    let p = parts("/ Term: the definition of it.");
+    let doc = &p["word/document.xml"];
+    let para = doc
+        .split("<w:p>")
+        .find(|p| p.contains("Term"))
+        .expect("a paragraph with the term");
+    let para = &para[..para.find("</w:p>").unwrap()];
+    assert!(para.contains("<w:b/>"), "the term is bold");
+    assert!(para.contains("the definition of it"), "the definition shares the paragraph");
+    assert!(para.contains("w:hanging"), "the entry uses a hanging indent");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn block_quote_keeps_attribution_and_indent() {
     let p = parts(
         "#quote(block: true, attribution: [Albert Einstein])[Imagination matters.]",

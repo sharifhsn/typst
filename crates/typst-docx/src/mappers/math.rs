@@ -230,8 +230,15 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
                 self.text_run(" ", false);
                 return Ok(());
             }
-            // Introspection tags carry no rendered output in OMML.
-            MathItem::Tag(_) => return Ok(()),
+            // Introspection tags carry no rendered output in OMML, but must
+            // still reach the introspector so labels/refs *inside* the equation
+            // resolve — e.g. a per-line label `#<eqa>`. Defer them (the
+            // run-only-context channel), exactly as the inline handler does for
+            // tags it cannot position among runs.
+            MathItem::Tag(tag) => {
+                self.ctx.deferred_tags.push(tag.clone());
+                return Ok(());
+            }
         };
 
         self.emit_kind(comp)
@@ -263,11 +270,11 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
             MathKind::Table(table) => self.emit_table(table),
             MathKind::Multiline(multi) => self.emit_multiline(multi),
 
-            // Degrade gracefully: render the inner base, boxed/struck, and warn.
-            MathKind::Cancel(item) => {
-                self.warn(comp, "cancel");
-                self.emit_borderbox(&item.base, item.cross)
-            }
+            // `cancel(..)` → `m:borderBox` with a diagonal strike — the standard
+            // OMML representation (Word renders it; some viewers ignore the
+            // strike but still show the base). This is a faithful mapping, not a
+            // degradation, so it does not warn.
+            MathKind::Cancel(item) => self.emit_borderbox(&item.base, item.cross),
             MathKind::Box(_) => {
                 // Inline boxed content inside math: not expressible as native
                 // OMML without laying it out. Drop with a warning rather than

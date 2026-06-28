@@ -310,34 +310,52 @@ pub fn terms(
     let term_left = crate::props::abs_to_twip(indent);
     let body_left = term_left + crate::props::abs_to_twip(hanging);
 
+    let hanging = (body_left - term_left).max(0);
     let mut out = Vec::new();
     for item in &elem.children {
-        // Bold term paragraph.
         let term_props = RunProps { bold: true, ..RunProps::default() };
         let term_runs = ctx.inline_runs(&item.term, styles, term_props)?;
-        let mut term_para_props = ParaProps::default();
-        if term_left != 0 {
-            term_para_props.ind = Some(Indent {
-                left: Some(term_left),
+        // Description: re-realized as full blocks (it may contain paragraphs,
+        // nested lists, etc.).
+        let mut desc = ctx.blocks(&item.description, styles)?;
+
+        if let Some(Block::Para(first)) = desc.first_mut() {
+            // Merge the bold term onto the first description line with a hanging
+            // indent, matching Typst's "**term** description" rendering (the term
+            // leads, a tab jumps to the hanging stop, the description follows and
+            // wraps aligned under itself). Continuation paragraphs align there too.
+            let mut content: Vec<ParaChild> =
+                term_runs.into_iter().map(ParaChild::Run).collect();
+            content.push(ParaChild::Run(Run::Tab));
+            content.append(&mut first.content);
+            first.content = content;
+            first.props.ind = Some(Indent {
+                left: Some(body_left),
                 right: None,
                 first_line: None,
-                hanging: None,
+                hanging: Some(hanging),
             });
+            apply_left_indent(&mut desc[1..], body_left);
+            out.append(&mut desc);
+        } else {
+            // No paragraph to merge onto (empty or block-only description): keep
+            // the term on its own line, then the description indented below.
+            let mut term_para_props = ParaProps::default();
+            if term_left != 0 {
+                term_para_props.ind = Some(Indent {
+                    left: Some(term_left),
+                    right: None,
+                    first_line: None,
+                    hanging: None,
+                });
+            }
+            out.push(Block::Para(Para {
+                props: term_para_props,
+                content: term_runs.into_iter().map(ParaChild::Run).collect(),
+            }));
+            apply_left_indent(&mut desc, body_left);
+            out.extend(desc);
         }
-        out.push(Block::Para(Para {
-            props: term_para_props,
-            content: term_runs.into_iter().map(ParaChild::Run).collect(),
-        }));
-
-        // Description: re-realized as full blocks (it may contain paragraphs,
-        // nested lists, etc.), with each paragraph left-indented under the term.
-        let mut desc = ctx.blocks(&item.description, styles)?;
-        apply_left_indent(&mut desc, body_left);
-        if desc.is_empty() {
-            // Ensure a non-empty body so the structure is preserved.
-            desc.push(Block::Para(crate::convert::empty_para()));
-        }
-        out.extend(desc);
     }
     Ok(out)
 }
