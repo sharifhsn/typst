@@ -237,6 +237,42 @@ fn outline_falls_back_to_introspected_headings() {
 }
 
 #[test]
+fn block_quote_keeps_attribution_and_indent() {
+    let p = parts(
+        "#quote(block: true, attribution: [Albert Einstein])[Imagination matters.]",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("Albert Einstein"), "the attribution must not be dropped");
+    assert!(doc.contains("w:ind"), "a block quote is indented");
+    assert!(doc.contains("w:jc w:val=\"end\""), "the attribution is right-aligned");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn fractional_h_pushes_to_the_right_margin() {
+    // `#h(1fr)` is the "Left … Right" push-apart idiom: a tab plus a
+    // right-aligned tab stop, rather than being dropped.
+    let p = parts("Left #h(1fr) Right");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<w:tab/>"), "the fractional space becomes a tab");
+    assert!(
+        doc.contains("w:val=\"end\""),
+        "the paragraph gains a right-aligned tab stop"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn horizontal_line_becomes_a_rule() {
+    // `#line(length: 100%)` (a divider) → a bottom-bordered paragraph, not dropped.
+    let p = parts("Above\n\n#line(length: 100%)\n\nBelow");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("w:pBdr"), "a horizontal line becomes a paragraph border");
+    assert!(doc.contains("w:bottom"), "the rule is a bottom border");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn footnote_has_in_text_reference_and_body_mark() {
     let p = parts("A claim.#footnote[The supporting note.]");
     assert!(p.contains_key("word/footnotes.xml"), "footnotes part should exist");

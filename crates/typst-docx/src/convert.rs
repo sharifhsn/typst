@@ -128,6 +128,27 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
     let from = blocks.len();
     flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
     apply_pending_v(&mut blocks, from, pending_v);
+
+    // A paragraph using a fractional `#h(1fr)` (a fill-tab) gets a right-aligned
+    // tab stop at the content width, so the tab pushes the following content to
+    // the right margin (the "Left … Right" header idiom) instead of stopping at
+    // the next default tab stop.
+    let content_twips = (ctx.raster_width.to_pt() * 20.0) as i32;
+    if content_twips > 0 {
+        use crate::dom::{TabAlign, TabStop};
+        for block in &mut blocks {
+            if let Block::Para(para) = block
+                && para.content.iter().any(|c| matches!(c, ParaChild::Run(Run::FillTab)))
+                && !para.props.tabs.iter().any(|t| matches!(t.val, TabAlign::End))
+            {
+                para.props.tabs.push(TabStop {
+                    val: TabAlign::End,
+                    leader: None,
+                    pos: content_twips,
+                });
+            }
+        }
+    }
     Ok(blocks)
 }
 
@@ -280,12 +301,83 @@ fn handle_block(
         // Figure: caption + body + cross-reference bookmark.
         out.extend(mappers::image::figure(elem, styles, ctx)?);
     } else if let Some(elem) = child.to_packed::<QuoteElem>() {
+        use typst_library::foundations::Resolve;
+        let block = elem.block.get(styles);
+        // Block quotes are padded 1em left and right (Typst's show-set default).
+        let indent = block.then(|| {
+            let em = crate::props::abs_to_twip(
+                typst_library::layout::Em::new(1.0).resolve(styles),
+            );
+            crate::dom::Indent { left: Some(em), right: Some(em), ..Default::default() }
+        });
+
         let runs = ctx.inline_runs(&elem.body, styles, RunProps::default())?;
-        let mut props = crate::dom::ParaProps::default();
-        props.style = Some("Quote".into());
         out.push(Block::Para(Para {
-            props,
+            props: crate::dom::ParaProps {
+                style: Some("Quote".into()),
+                ind: indent.clone(),
+                ..Default::default()
+            },
             content: runs.into_iter().map(ParaChild::Run).collect(),
+        }));
+
+        // The attribution ("— author", or a prose citation) renders below a
+        // block quote, right-aligned (Typst's default). Was previously dropped.
+        if block
+            && let Some(attribution) = elem.attribution.get_cloned(styles)
+        {
+            let realized = attribution.realize(elem.span());
+            let attr_runs = ctx.inline_runs(&realized, styles, RunProps::default())?;
+            if !attr_runs.is_empty() {
+                out.push(Block::Para(Para {
+                    props: crate::dom::ParaProps {
+                        style: Some("Quote".into()),
+                        ind: indent,
+                        jc: Some(crate::dom::Jc::End),
+                        ..Default::default()
+                    },
+                    content: attr_runs.into_iter().map(ParaChild::Run).collect(),
+                }));
+            }
+        }
+    } else if let Some(elem) = child.to_packed::<typst_library::visualize::LineElem>()
+        && elem.end.get_ref(styles).is_none()
+        && {
+            // Horizontal `#line(length: ..)` (the common divider). Non-horizontal
+            // or endpoint-defined lines fall through to the rasterization path.
+            let deg = elem.angle.get(styles).to_deg().rem_euclid(180.0);
+            deg < 1.0 || deg > 179.0
+        }
+    {
+        use typst_library::foundations::Resolve;
+        use typst_library::visualize::Paint;
+        // A horizontal rule → an empty paragraph with a bottom border (Word's
+        // horizontal-rule idiom), instead of being dropped.
+        let fx = elem.stroke.resolve(styles).unwrap_or_default();
+        let color = match &fx.paint {
+            Paint::Solid(c) => crate::props::color_to_hex(c),
+            _ => [0, 0, 0],
+        };
+        let style = match &fx.dash {
+            Some(pattern) if is_dotted(pattern) => "dotted",
+            Some(_) => "dashed",
+            None => "single",
+        };
+        let border = crate::dom::ParaBorder {
+            style,
+            sz: crate::props::pt_to_eighth_pt(fx.thickness.to_pt()),
+            space: 4,
+            color,
+        };
+        out.push(Block::Para(Para {
+            props: crate::dom::ParaProps {
+                pbdr: Some(crate::dom::ParaBorders {
+                    bottom: Some(border),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            content: Vec::new(),
         }));
     } else if let Some(elem) = child.to_packed::<typst_library::layout::PlaceElem>() {
         // Top-level `#place(..)` → a floating drawing (G8). The body is lowered

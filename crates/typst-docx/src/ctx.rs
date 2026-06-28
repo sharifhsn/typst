@@ -734,10 +734,22 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             let text = self.apply_case(styles, &elem.text);
             let rp = self.resolve_text_props(styles, props.clone());
             self.push_text(out, rp, text);
-        } else if let Some(elem) = child.to_packed::<HElem>()
-            && elem.amount.is_zero()
-        {
-            // Zero-width spacing: skip.
+        } else if let Some(elem) = child.to_packed::<HElem>() {
+            use typst_library::foundations::Resolve;
+            use typst_library::layout::Spacing;
+            // Horizontal spacing. Word has no exact inline-advance primitive, so
+            // approximate rather than drop it: fractional `#h(1fr)` (the
+            // push-apart idiom) → a tab; a fixed `#h(..)` → proportional spaces;
+            // zero → nothing.
+            if elem.amount.is_zero() {
+                // skip
+            } else if elem.amount.is_fractional() {
+                out.push(Run::FillTab);
+            } else if let Spacing::Rel(rel) = elem.amount {
+                let pt = rel.abs.resolve(styles).to_pt();
+                let n = ((pt / 3.5).round() as i64).clamp(1, 40) as usize;
+                self.push_text(out, props.clone(), " ".repeat(n).into());
+            }
         } else if child.is::<LinebreakElem>() {
             out.push(Run::Break);
             self.last_char = None;

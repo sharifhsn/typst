@@ -140,6 +140,10 @@ pub enum Run {
     Break,
     PageBreak,
     Tab,
+    /// A tab from a fractional `#h(1fr)` (the push-apart idiom). Encoded as a
+    /// tab, but its paragraph gains a right-aligned tab stop at the content width
+    /// so it pushes the following content to the right margin.
+    FillTab,
     FootnoteRef { props: RunProps, id: i32 },
     /// The in-body footnote number mark (`<w:footnoteRef/>`, styled
     /// `FootnoteReference`). Prepended to a footnote body's first paragraph so
