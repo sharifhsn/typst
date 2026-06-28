@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, StyleChain};
@@ -96,14 +95,10 @@ pub fn docx_document(
         // pagebreaks etc. are preserved exactly); a multi-section document
         // converts each section's content separately and joins them with
         // `Block::SectionBreak`s carrying the earlier sections' `sectPr`.
-        let mut header_parts = Vec::new();
-        let mut footer_parts = Vec::new();
-        let (body, sect) = if sections.len() <= 1 {
+        let (body, sect, header_parts, footer_parts) = if sections.len() <= 1 {
             let body = crate::convert::run(&mut ctx, &pairs)?;
             let (sect, h, f) = build_section(&mut ctx, &first_geom, styles)?;
-            header_parts = h;
-            footer_parts = f;
-            (body, sect)
+            (body, sect, h, f)
         } else {
             // Build the header/footer parts ONCE, from the first section (which
             // the single-section path already proves lowers cleanly), and share
@@ -112,9 +107,8 @@ pub fn docx_document(
             // `here().page-numbering()` returning `none`) — a *delayed* error
             // that would be promoted to fatal. Each section still gets its own
             // page geometry; only the header/footer content is shared.
-            let (first_sect, h, f) = build_section(&mut ctx, &first_geom, styles)?;
-            header_parts = h;
-            footer_parts = f;
+            let (first_sect, header_parts, footer_parts) =
+                build_section(&mut ctx, &first_geom, styles)?;
 
             let mut body = Vec::new();
             let mut final_sect = None;
@@ -132,7 +126,7 @@ pub fn docx_document(
                     body.push(Block::SectionBreak(s));
                 }
             }
-            (body, final_sect.expect("at least one section"))
+            (body, final_sect.expect("at least one section"), header_parts, footer_parts)
         };
         (
             body,
