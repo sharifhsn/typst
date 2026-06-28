@@ -5,15 +5,15 @@ use std::sync::Arc;
 
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
-use typst_library::foundations::{Content, StyleChain};
-use typst_library::introspection::{Locator, Tag};
-use typst_library::model::DocumentInfo;
+use typst_library::foundations::{Content, NativeElement, Selector, StyleChain};
+use typst_library::introspection::{Introspector, Locator, Tag};
+use typst_library::model::{DocumentInfo, HeadingElem};
 use typst_library::routines::{Arenas, RealizationKind};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
     Block, DocxDocument, Field, HdrFtrPart, HdrFtrRef, Para, ParaChild, ParaProps,
-    PgNumType, Run, RunProps, SectPr,
+    PgNumType, Run, RunProps, SectPr, TocHeading,
 };
 use crate::introspect::DocxIntrospector;
 use crate::props;
@@ -175,9 +175,39 @@ pub fn docx_document(
         converted
     };
 
+    // Fallback heading list, for documents whose headings are show-ruled or
+    // rasterized and so never reach the heading mapper (nothing recorded): query
+    // the introspector, which still holds every heading. These entries have no
+    // bookmark to link to, so they are plain text (but the titles still show).
+    let toc_fallback: Vec<TocHeading> = if toc_headings.is_empty() {
+        let introspector = *engine.introspector.access(
+            "list headings for a table of contents whose headings were not natively converted",
+        );
+        introspector
+            .query(&Selector::Elem(HeadingElem::ELEM, None))
+            .iter()
+            .filter_map(|c| c.to_packed::<HeadingElem>())
+            .filter(|h| h.outlined.get(styles))
+            .filter_map(|h| {
+                let level = h.resolve_level(styles).get();
+                let mut text = String::new();
+                if let Some(numbers) = &h.numbers
+                    && !numbers.is_empty()
+                {
+                    text.push_str(numbers);
+                    text.push(' ');
+                }
+                text.push_str(&h.body.plain_text());
+                (!text.is_empty()).then(|| TocHeading { level, anchor: None, text: text.into() })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // Now that every heading's real bookmark is known, populate the table(s) of
     // contents in document order — across all sections.
-    crate::mappers::outline::fill_tocs(&mut body, &toc_headings);
+    crate::mappers::outline::fill_tocs(&mut body, &toc_headings, &toc_fallback);
 
     // Collect introspection tags from the IR for the introspector.
     let mut tags = Vec::new();

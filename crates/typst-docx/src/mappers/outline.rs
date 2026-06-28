@@ -102,15 +102,23 @@ pub fn outline(
     Ok(blocks)
 }
 
-/// Populates every heading [`Toc`] in the body from the headings recorded during
-/// conversion (now that each one's real bookmark is known). Called once the
-/// whole body — across all sections — has been converted.
-pub(crate) fn fill_tocs(blocks: &mut [Block], headings: &[TocHeading]) {
+/// Populates every heading [`Toc`] in the body. Primary source is `recorded` —
+/// the headings emitted during conversion, each carrying its real bookmark.
+/// When nothing was recorded (the document's headings are show-ruled or
+/// rasterized and never reached the heading mapper), falls back to `fallback`
+/// (introspector-queried headings, plain text — no bookmark to link to). Called
+/// once the whole body, across all sections, has been converted.
+pub(crate) fn fill_tocs(
+    blocks: &mut [Block],
+    recorded: &[TocHeading],
+    fallback: &[TocHeading],
+) {
+    let source = if recorded.is_empty() { fallback } else { recorded };
     for block in blocks.iter_mut() {
         if let Block::Toc(toc) = block
             && let Some(depth) = toc.depth
         {
-            toc.entries = headings
+            toc.entries = source
                 .iter()
                 .filter(|h| h.level <= depth)
                 .map(|h| entry_para(h, toc.tab_pos))

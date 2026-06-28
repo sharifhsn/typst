@@ -186,6 +186,23 @@ fn outline_bakes_entries_with_resolvable_bookmarks() {
 }
 
 #[test]
+fn outline_falls_back_to_introspected_headings() {
+    // When headings are show-ruled away there is no native heading paragraph and
+    // nothing is recorded, but the introspector still holds them — the TOC
+    // populates from there (plain text, since there is no bookmark to target).
+    let p = parts("#show heading: it => block(it.body)\n#outline()\n\n= Alpha\n\n= Beta");
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("w:val=\"TOC1\""),
+        "the TOC populates from introspected headings"
+    );
+    assert!(doc.contains("Alpha"), "the heading title appears in the TOC");
+    // No bookmark to target, so no PAGEREF and nothing to dangle.
+    assert!(!doc.contains("PAGEREF"), "fallback entries carry no PAGEREF");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn footnote_has_in_text_reference_and_body_mark() {
     let p = parts("A claim.#footnote[The supporting note.]");
     assert!(p.contains_key("word/footnotes.xml"), "footnotes part should exist");
