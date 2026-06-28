@@ -248,6 +248,60 @@ fn is_inline(child: &Content) -> bool {
         || child.is::<ImageElem>()
 }
 
+/// Whether a container's body (a `#box`/`#pad`/… body) can be lowered to native
+/// DOCX (extracted as real text/OMML) rather than rasterized to an image.
+///
+/// This is the central rasterize-vs-extract decision. Extraction is *strictly
+/// better* (selectable text, smaller, reflows) and safe for almost everything —
+/// because an element's introspection `Location` is assigned at *realize* time,
+/// so cross-references to headings, figures, and ordinary labels inside an
+/// extracted body still resolve. The one exception is introspection that only
+/// exists after *layout*: a label placed *inside* an equation (a per-line
+/// equation label `#<eqa>`), whose anchor is positioned per visual line by the
+/// line breaker. Native OMML conversion never lays the equation out, so that
+/// anchor is never produced and a reference to it would fail — such a body must
+/// be rasterized (layout then runs, and the frame-tag harvest recovers it).
+///
+/// To extend this decision for a future layout-only-introspection case, add a
+/// detector here; every container handler routes through this one function.
+pub(crate) fn body_extractable(body: &Content) -> bool {
+    use std::ops::ControlFlow;
+    body.traverse(&mut |element: Content| {
+        if let Some(eq) = element.to_packed::<EquationElem>()
+            && equation_has_inner_label(&eq.body)
+        {
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    })
+    .is_continue()
+}
+
+/// Whether an equation body carries a label *inside* it (a per-line label),
+/// whose location only exists once the equation is laid out per visual line.
+///
+/// Such a label appears two ways: an ordinary `.label()` on an inner element, or
+/// — because `<…>` is ambiguous in math — the `#<label>` form, which math parses
+/// into a `raw` element whose source text is `<…>`.
+fn equation_has_inner_label(eq_body: &Content) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::text::{RawContent, RawElem};
+    eq_body
+        .traverse(&mut |element: Content| {
+            let is_label = element.label().is_some()
+                || element.to_packed::<RawElem>().is_some_and(|r| {
+                    matches!(&r.text, RawContent::Text(s)
+                        if s.len() > 2 && s.starts_with('<') && s.ends_with('>'))
+                });
+            if is_label {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .is_break()
+}
+
 /// Dispatches one realized native block element.
 fn handle_block(
     ctx: &mut DocxCtx,
@@ -378,6 +432,30 @@ fn handle_block(
             },
             content: Vec::new(),
         }));
+    } else if let Some(elem) = child.to_packed::<typst_library::layout::PadElem>()
+        && body_extractable(&elem.body)
+    {
+        // Keep `#pad(..)[body]` as real text, mapping horizontal padding to
+        // paragraph indentation (vertical padding has no inline equivalent). A
+        // body that is NOT extractable (it contains a per-line-labeled equation,
+        // whose anchors only exist after layout) is not matched here and falls
+        // through to the rasterization fallback, which preserves those anchors.
+        use typst_library::foundations::Resolve;
+        let left = crate::props::abs_to_twip(elem.left.get(styles).abs.resolve(styles));
+        let right = crate::props::abs_to_twip(elem.right.get(styles).abs.resolve(styles));
+        let mut blocks = ctx.blocks(&elem.body, styles)?;
+        for b in &mut blocks {
+            if let Block::Para(para) = b {
+                let ind = para.props.ind.get_or_insert_with(Default::default);
+                if left != 0 {
+                    ind.left = Some(ind.left.unwrap_or(0) + left);
+                }
+                if right != 0 {
+                    ind.right = Some(ind.right.unwrap_or(0) + right);
+                }
+            }
+        }
+        out.extend(blocks);
     } else if child.is::<typst_library::layout::FlushElem>()
         || child.is::<typst_library::layout::ColbreakElem>()
     {

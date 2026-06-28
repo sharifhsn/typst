@@ -237,6 +237,19 @@ fn outline_falls_back_to_introspected_headings() {
 }
 
 #[test]
+fn pad_extracts_its_text_as_real_runs() {
+    // The rasterize-vs-extract decision: a plain `#pad` body has no
+    // layout-produced introspection, so it is extracted as real, indented text
+    // rather than rasterized to an image.
+    let p = parts("#pad(left: 2em)[A padded paragraph of real text.]");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("A padded paragraph of real text"), "the text is extracted");
+    assert!(doc.contains("w:ind"), "the padding becomes a paragraph indent");
+    assert!(!doc.contains("a:blip"), "and it is not a rasterized image");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn decorative_shape_becomes_a_vector_drawing() {
     // A `#rect`/`#circle`/… with an explicit size and no body maps to a vector
     // DrawingML shape (`wps:wsp`), not a rasterized image.
