@@ -52,12 +52,17 @@ pub fn docx_document(
 
     let pairs: Vec<_> = children.to_vec();
 
-    // Resolve the active page setup (G1). Single-section MVP: the whole document
-    // is one section, resolved over all `pairs` with the document-root chain as
-    // the section-initial styles (mirrors `typst-layout/src/pages/run.rs`). This
-    // read needs no engine, so it happens before the `DocxCtx` body walk; the
-    // header/footer *content* is lowered later on the same `ctx`.
-    let sect_geom = resolve_geometry(&pairs, styles);
+    // Resolve the page setup (G1): split the document into geometry sections
+    // (mirrors `typst-layout/src/pages/run.rs`). Most documents are one section;
+    // a mid-document `set page(..)` change (e.g. a landscape appendix) yields
+    // several. This read needs no engine, so it happens before the `DocxCtx`
+    // body walk; header/footer *content* is lowered later on the same `ctx`.
+    let sections = resolve_sections(&pairs, styles);
+    // The width fed to rasterized content comes from the first section.
+    let first_geom = sections
+        .first()
+        .map(|(g, _)| g.clone())
+        .unwrap_or_else(|| run_geometry(&[], styles));
 
     // Walk the native element tree into the typed IR.
     let (
@@ -79,16 +84,56 @@ pub fn docx_document(
         // Give rasterized content the real page content width (page minus L/R
         // margins, converted from twips → pt) so width-relative content does not
         // blow up under an infinite region. Guard against a degenerate width.
-        let content_twip = sect_geom.page_w - sect_geom.margin_left - sect_geom.margin_right;
+        let content_twip =
+            first_geom.page_w - first_geom.margin_left - first_geom.margin_right;
         if content_twip > 0 {
             ctx.raster_width =
                 typst_library::layout::Abs::pt(content_twip as f64 / 20.0);
         }
-        let body = crate::convert::run(&mut ctx, &pairs)?;
-        // Build the section properties + header/footer parts on the same ctx so
-        // any inner media/rels join the document's tables.
-        let (sect, header_parts, footer_parts) =
-            build_section(&mut ctx, &sect_geom, styles)?;
+
+        // Build the body and the (final) section properties. A single-section
+        // document converts all `pairs` at once (unchanged behaviour, so leading
+        // pagebreaks etc. are preserved exactly); a multi-section document
+        // converts each section's content separately and joins them with
+        // `Block::SectionBreak`s carrying the earlier sections' `sectPr`.
+        let mut header_parts = Vec::new();
+        let mut footer_parts = Vec::new();
+        let (body, sect) = if sections.len() <= 1 {
+            let body = crate::convert::run(&mut ctx, &pairs)?;
+            let (sect, h, f) = build_section(&mut ctx, &first_geom, styles)?;
+            header_parts = h;
+            footer_parts = f;
+            (body, sect)
+        } else {
+            // Build the header/footer parts ONCE, from the first section (which
+            // the single-section path already proves lowers cleanly), and share
+            // their references across every section. Per-section headers would
+            // re-lower content that may query page state we don't have (e.g.
+            // `here().page-numbering()` returning `none`) — a *delayed* error
+            // that would be promoted to fatal. Each section still gets its own
+            // page geometry; only the header/footer content is shared.
+            let (first_sect, h, f) = build_section(&mut ctx, &first_geom, styles)?;
+            header_parts = h;
+            footer_parts = f;
+
+            let mut body = Vec::new();
+            let mut final_sect = None;
+            let last = sections.len() - 1;
+            for (idx, (geom, range)) in sections.iter().enumerate() {
+                let mut blocks = crate::convert::run(&mut ctx, &pairs[range.clone()])?;
+                body.append(&mut blocks);
+                let mut s = sectpr_geometry(geom);
+                s.headers = first_sect.headers.clone();
+                s.footers = first_sect.footers.clone();
+                s.pg_num = first_sect.pg_num.clone();
+                if idx == last {
+                    final_sect = Some(s);
+                } else {
+                    body.push(Block::SectionBreak(s));
+                }
+            }
+            (body, final_sect.expect("at least one section"))
+        };
         (
             body,
             sect,
@@ -141,6 +186,7 @@ pub fn docx_document(
 /// classification and the header/footer content lowering need the engine/ctx,
 /// so they are deferred to [`build_section`]; this struct carries everything
 /// they need.
+#[derive(Clone)]
 struct SectGeom {
     page_w: i32,
     page_h: i32,
@@ -169,40 +215,81 @@ struct SectGeom {
     footer_suppressed: bool,
 }
 
-/// Resolves the active page geometry for the single-section MVP, mirroring
-/// `typst-layout/src/pages/run.rs`. Engine-free.
-fn resolve_geometry(
+/// Splits the document into page-geometry sections, mirroring
+/// `typst-layout/src/pages/run.rs`. Each entry is a section's geometry and the
+/// range of `pairs` whose content belongs to it (consecutive page runs with the
+/// same geometry are merged — their internal pagebreaks stay as `<w:br>`; a
+/// geometry change starts a new section, and the boundary pagebreaks between
+/// them are consumed by the section break). Engine-free.
+fn resolve_sections(
     pairs: &[(&Content, StyleChain)],
     initial: StyleChain,
-) -> SectGeom {
+) -> Vec<(SectGeom, std::ops::Range<usize>)> {
+    use typst_library::layout::PagebreakElem;
+
+    let mut sections: Vec<(SectGeom, std::ops::Range<usize>)> = Vec::new();
+    let mut initial = initial;
+    let mut i = 0;
+    while i < pairs.len() {
+        // Skip pagebreaks, folding non-boundary (`set page`) ones into the
+        // section-initial chain. Boundary pagebreaks carry pre-rule styles, so
+        // they must NOT be folded.
+        while i < pairs.len() {
+            if let Some(pb) = pairs[i].0.to_packed::<PagebreakElem>() {
+                if !pb.boundary.get(pairs[i].1) {
+                    initial = pairs[i].1;
+                }
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if i >= pairs.len() {
+            break;
+        }
+        // Take the run of non-pagebreak content.
+        let start = i;
+        while i < pairs.len() && !pairs[i].0.is::<PagebreakElem>() {
+            i += 1;
+        }
+        let geom = run_geometry(&pairs[start..i], initial);
+        // Merge into the previous section if the geometry is unchanged; the
+        // pagebreaks between them then fall inside the merged range (→ `<w:br>`).
+        if let Some(last) = sections.last_mut()
+            && same_geometry(&last.0, &geom)
+        {
+            last.1.end = i;
+            continue;
+        }
+        sections.push((geom, start..i));
+    }
+    sections
+}
+
+/// Whether two sections share the same page geometry (size, orientation,
+/// margins, columns) — the properties a `<w:sectPr>` page break is needed for.
+fn same_geometry(a: &SectGeom, b: &SectGeom) -> bool {
+    a.page_w == b.page_w
+        && a.page_h == b.page_h
+        && a.landscape == b.landscape
+        && a.margin_top == b.margin_top
+        && a.margin_bottom == b.margin_bottom
+        && a.margin_left == b.margin_left
+        && a.margin_right == b.margin_right
+        && a.columns == b.columns
+        && a.col_space == b.col_space
+        && a.gutter == b.gutter
+}
+
+/// Resolves one page run's geometry from its group of content pairs.
+fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGeom {
     use typst_library::foundations::{Resolve, Smart, Styles};
     use typst_library::layout::{
-        Abs, FixAlignment, FixedAlignment, Length, OuterVAlignment, PageElem, PagebreakElem,
-        Paper, Rel, Sides, Size,
+        Abs, FixAlignment, FixedAlignment, Length, OuterVAlignment, PageElem, Paper, Rel,
+        Sides, Size,
     };
     use typst_library::text::TextElem;
     use typst_utils::Numeric;
-
-    // A `set page(...)` rule injects a leading weak (non-boundary) `PagebreakElem`
-    // whose styles carry the page set rules. Mirror `pages::collect`: advance the
-    // section-initial chain across any leading non-boundary pagebreaks, then take
-    // the first run of non-pagebreak content as this (single) section's group.
-    // (Trailing `set page` scope-boundary pagebreaks carry the *pre*-rule styles,
-    // so we must NOT fold them in.)
-    let mut initial = initial;
-    let mut rest = pairs;
-    while let Some(&(elem, styles)) = rest.first() {
-        if let Some(pb) = elem.to_packed::<PagebreakElem>() {
-            if !pb.boundary.get(styles) {
-                initial = styles;
-            }
-            rest = &rest[1..];
-        } else {
-            break;
-        }
-    }
-    let group_end = rest.iter().take_while(|(c, _)| !c.is::<PagebreakElem>()).count();
-    let group = &rest[..group_end];
 
     // Fold the section group's liftable set-rules into the section-initial chain.
     let sect_styles = Styles::root(group, initial);
@@ -312,12 +399,11 @@ fn clamp_band(band: i32, margin: i32) -> i32 {
 /// Builds the resolved `SectPr` and any header/footer parts. Runs on the body
 /// `DocxCtx` so header/footer media and relationships join the document's
 /// tables.
-fn build_section(
-    ctx: &mut DocxCtx,
-    geom: &SectGeom,
-    styles: StyleChain,
-) -> SourceResult<(SectPr, Vec<HdrFtrPart>, Vec<HdrFtrPart>)> {
-    let mut sect = SectPr {
+/// A geometry-only `sectPr` (page size/margins/columns, no headers/footers or
+/// page numbering). Used as the section starting point and as a graceful
+/// fallback when a section's header/footer content cannot be lowered.
+fn sectpr_geometry(geom: &SectGeom) -> SectPr {
+    SectPr {
         page_w: geom.page_w,
         page_h: geom.page_h,
         landscape: geom.landscape,
@@ -335,7 +421,15 @@ fn build_section(
         headers: Vec::new(),
         footers: Vec::new(),
         title_pg: false,
-    };
+    }
+}
+
+fn build_section(
+    ctx: &mut DocxCtx,
+    geom: &SectGeom,
+    styles: StyleChain,
+) -> SourceResult<(SectPr, Vec<HdrFtrPart>, Vec<HdrFtrPart>)> {
+    let mut sect = sectpr_geometry(geom);
 
     let mut header_parts = Vec::new();
     let mut footer_parts = Vec::new();
@@ -348,7 +442,7 @@ fn build_section(
     // -- Explicit header content -------------------------------------------
     if let Some(content) = &geom.header {
         let blocks = ctx.blocks(content, styles)?;
-        let part_name: EcoString = "header1.xml".into();
+        let part_name = ctx.next_hdrftr_name(true);
         let rel = ctx.add_header_rel(&part_name);
         sect.headers.push(HdrFtrRef { kind: "default", rel });
         header_parts.push(HdrFtrPart { part_name, is_header: true, blocks });
@@ -357,7 +451,7 @@ fn build_section(
     // -- Explicit footer content -------------------------------------------
     if let Some(content) = &geom.footer {
         let blocks = ctx.blocks(content, styles)?;
-        let part_name: EcoString = "footer1.xml".into();
+        let part_name = ctx.next_hdrftr_name(false);
         let rel = ctx.add_footer_rel(&part_name);
         sect.footers.push(HdrFtrRef { kind: "default", rel });
         footer_parts.push(HdrFtrPart { part_name, is_header: false, blocks });
@@ -366,7 +460,7 @@ fn build_section(
     // -- Synthetic page-number band (numbering set, band left as `auto`) ----
     if geom.numbering.is_some() {
         if geom.number_in_header && geom.header.is_none() && !geom.header_suppressed {
-            let part_name: EcoString = "header1.xml".into();
+            let part_name = ctx.next_hdrftr_name(true);
             let rel = ctx.add_header_rel(&part_name);
             sect.headers.push(HdrFtrRef { kind: "default", rel });
             header_parts.push(HdrFtrPart {
@@ -379,7 +473,7 @@ fn build_section(
             && geom.footer.is_none()
             && !geom.footer_suppressed
         {
-            let part_name: EcoString = "footer1.xml".into();
+            let part_name = ctx.next_hdrftr_name(false);
             let rel = ctx.add_footer_rel(&part_name);
             sect.footers.push(HdrFtrRef { kind: "default", rel });
             footer_parts.push(HdrFtrPart {

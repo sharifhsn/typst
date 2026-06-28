@@ -222,7 +222,19 @@ fn write_block(w: &mut XmlWriter, block: &Block) -> bool {
             // block.
             false
         }
-        Block::SectionBreak(_sect) => false,
+        Block::SectionBreak(sect) => {
+            // A non-final section ends with a paragraph whose `pPr` carries the
+            // ending section's `sectPr` (the final section's `sectPr` lives at
+            // body level). This both delimits the section and applies its page
+            // geometry to all preceding content; the default `nextPage` type
+            // also performs the page transition.
+            w.open(xml::W_P).start_children();
+            w.open(xml::W_PPR).start_children();
+            write_sectpr(w, sect);
+            w.close(); // pPr
+            w.close(); // p
+            true
+        }
         Block::Tag(_) => false,
     }
 }

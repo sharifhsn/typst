@@ -188,6 +188,27 @@ fn image_in_header_declares_drawing_namespaces() {
 }
 
 #[test]
+fn page_geometry_change_emits_a_section_break() {
+    // A mid-document orientation change must produce a second section: the
+    // landscape `sectPr` lives in a paragraph's `pPr`, the final portrait one
+    // at body level.
+    let p = parts(
+        "Portrait body.\n\n#set page(flipped: true)\n\nLandscape body.",
+    );
+    let doc = &p["word/document.xml"];
+    assert_eq!(
+        doc.matches("<w:sectPr>").count(),
+        2,
+        "an orientation change should yield two sections"
+    );
+    assert!(
+        doc.contains("w:orient=\"landscape\""),
+        "the flipped section should be landscape"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn rasterized_container_keeps_figure_count() {
     // A figure whose container is rasterized (here a `box`, which has no native
     // OOXML form) must still increment Word's figure counter via a hidden

@@ -61,6 +61,8 @@ pub struct DocxCtx<'a, 'e> {
     pub(crate) doc_rels: Rels,
     next_bookmark_id: u32,
     next_docpr_id: u32,
+    /// Monotonic id for unique header/footer part names across sections.
+    next_hdrftr_id: u32,
     /// Monotonic `relativeHeight` z-order for floating drawings (`<wp:anchor>`).
     next_z: u32,
     pub(crate) max_heading_level: u8,
@@ -106,6 +108,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             doc_rels: Rels::new(),
             next_bookmark_id: 1,
             next_docpr_id: 1,
+            next_hdrftr_id: 1,
             next_z: 1,
             max_heading_level: 0,
             uses_fields: false,
@@ -337,6 +340,17 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         let id = self.next_docpr_id;
         self.next_docpr_id += 1;
         id
+    }
+
+    /// Allocates a unique header/footer part name (`header{N}.xml` /
+    /// `footer{N}.xml`). A document with several sections produces several
+    /// header/footer parts, which must not share a name or the OPC package gets
+    /// a duplicate zip entry.
+    pub fn next_hdrftr_name(&mut self, is_header: bool) -> EcoString {
+        let n = self.next_hdrftr_id;
+        self.next_hdrftr_id += 1;
+        let kind = if is_header { "header" } else { "footer" };
+        eco_format!("{kind}{n}.xml")
     }
 
     /// Allocates a monotonic `relativeHeight` z-order (>= 1) for a floating
