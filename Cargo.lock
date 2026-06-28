@@ -3215,6 +3215,7 @@ dependencies = [
  "typst-syntax",
  "typst-timing",
  "typst-utils",
+ "unicode-math-class",
  "zip",
 ]
 

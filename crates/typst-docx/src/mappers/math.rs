@@ -45,6 +45,8 @@ use typst_library::math::ir::{
 };
 use typst_library::routines::Arenas;
 
+use unicode_math_class::MathClass;
+
 use crate::ctx::DocxCtx;
 use crate::dom::{Block, Para, ParaChild, ParaProps, Run, RunProps, TabAlign, TabStop};
 
@@ -181,8 +183,38 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
     /// Emits a sequence of items (the children of an `m:e`/`m:num`/…) by
     /// flattening groups and dispatching each leaf.
     fn emit_row(&mut self, item: &MathItem) -> SourceResult<()> {
-        for sub in item.as_slice() {
-            self.emit_item(sub)?;
+        self.emit_items(item.as_slice())
+    }
+
+    /// Emits a run of items, but when an n-ary operator (∑ ∫ ∏ …) is reached,
+    /// the items that follow it up to the next relation (`=`, `<`, …) or the end
+    /// of the run become its integrand/summand and go *inside* the `m:nary`'s
+    /// `m:e`. Typst juxtaposes the operator and its operand as siblings; OOXML
+    /// expects the operand nested, so without this the operand renders outside a
+    /// spurious empty box.
+    fn emit_items(&mut self, items: &[MathItem]) -> SourceResult<()> {
+        let mut i = 0;
+        while i < items.len() {
+            if let MathItem::Component(comp) = &items[i]
+                && let MathKind::Scripts(scripts) = &comp.kind
+                && let Some(chr) = nary_operator_char(&scripts.base)
+                && scripts.top_left.is_none()
+                && scripts.bottom_left.is_none()
+            {
+                let upper = scripts.top.as_ref().or(scripts.top_right.as_ref());
+                let lower = scripts.bottom.as_ref().or(scripts.bottom_right.as_ref());
+                let lim = scripts.top.is_some() || scripts.bottom.is_some();
+                // The operand runs until the next relation or the end of the run.
+                let mut j = i + 1;
+                while j < items.len() && !is_relation(&items[j]) {
+                    j += 1;
+                }
+                self.emit_nary(chr, lower, upper, lim, &items[i + 1..j])?;
+                i = j;
+            } else {
+                self.emit_item(&items[i])?;
+                i += 1;
+            }
         }
         Ok(())
     }
@@ -211,10 +243,7 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
         match &comp.kind {
             MathKind::Group(group) => {
                 // A group is a transparent horizontal run of items.
-                for sub in &group.items {
-                    self.emit_item(sub)?;
-                }
-                Ok(())
+                self.emit_items(&group.items)
             }
             MathKind::Glyph(glyph) => self.emit_glyph(glyph),
             MathKind::Number(num) => self.emit_number(num),
@@ -379,7 +408,9 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
             let upper = scripts.top.as_ref().or(scripts.top_right.as_ref());
             let lower = scripts.bottom.as_ref().or(scripts.bottom_right.as_ref());
             let lim_under_over = scripts.top.is_some() || scripts.bottom.is_some();
-            return self.emit_nary(chr, lower, upper, lim_under_over);
+            // Reached outside a row context (e.g. a wrapped sub-expression): no
+            // following operand is available, so the `m:e` stays empty.
+            return self.emit_nary(chr, lower, upper, lim_under_over, &[]);
         }
 
         // Otherwise: ordinary scripts. Apply post/pre-scripts to the base, then
@@ -483,17 +514,16 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
         Ok(())
     }
 
-    /// Emits an n-ary operator (`m:nary`) with the given operator char and
-    /// optional lower/upper limits, choosing the limit location. The operand
-    /// being summed/integrated follows as a sibling in the surrounding row, so
-    /// `m:e` is emitted empty (valid OOXML; Word places the operand to the
-    /// right of the operator).
+    /// Emits an n-ary operator (`m:nary`) with the given operator char, optional
+    /// lower/upper limits, and the `integrand` items that go inside `m:e` (the
+    /// summand/integrand). An empty `integrand` yields an empty `m:e`.
     fn emit_nary(
         &mut self,
         chr: char,
         lower: Option<&MathItem>,
         upper: Option<&MathItem>,
         lim_under_over: bool,
+        integrand: &[MathItem],
     ) -> SourceResult<()> {
         self.buf.open("m:nary").children();
         self.buf.open("m:naryPr").children();
@@ -520,7 +550,13 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
             Some(item) => self.wrap("m:sup", item)?,
             None => self.buf.open("m:sup").empty(),
         }
-        self.buf.open("m:e").empty();
+        if integrand.is_empty() {
+            self.buf.open("m:e").empty();
+        } else {
+            self.buf.open("m:e").children();
+            self.emit_items(integrand)?;
+            self.buf.close(); // m:e
+        }
         self.buf.close(); // m:nary
         Ok(())
     }
@@ -768,6 +804,12 @@ fn is_upright_letter(c: char) -> bool {
 /// …), returns its character. Detection is purely from the codepoint, which is
 /// also exactly what OMML needs for `m:chr` — so this avoids any dependency on
 /// `unicode-math-class`.
+/// Whether an item is a relation (`=`, `<`, `≤`, `→`, …) — the boundary that
+/// ends an n-ary operator's operand (`∫ f dx` stops before `= …`).
+fn is_relation(item: &MathItem) -> bool {
+    matches!(item, MathItem::Component(c) if c.props.class == Some(MathClass::Relation))
+}
+
 fn nary_operator_char(item: &MathItem) -> Option<char> {
     let comp = match item {
         MathItem::Component(comp) => comp,

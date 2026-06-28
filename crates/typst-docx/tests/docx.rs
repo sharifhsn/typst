@@ -144,6 +144,20 @@ fn math_maps_to_omml() {
 }
 
 #[test]
+fn nary_operator_nests_its_operand() {
+    // The integrand must sit inside the n-ary's `m:e`, not after an empty one
+    // (an empty `<m:e/>` renders as a spurious box).
+    let p = parts("$ integral_0^1 x dif x = 1 $");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("m:nary"), "an integral should be an n-ary operator");
+    assert!(
+        !doc.contains("<m:e/></m:nary>"),
+        "the n-ary `m:e` must hold the operand, not be empty"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn footnote_has_in_text_reference_and_body_mark() {
     let p = parts("A claim.#footnote[The supporting note.]");
     assert!(p.contains_key("word/footnotes.xml"), "footnotes part should exist");
