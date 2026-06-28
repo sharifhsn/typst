@@ -29,10 +29,5 @@ zip = { workspace = true }
 flate2 = { workspace = true }
 time = { workspace = true }
 
-[dev-dependencies]
-typst = { workspace = true }
-typst-assets = { workspace = true, features = ["fonts"] }
-roxmltree = { workspace = true }
-
 [lints]
 workspace = true

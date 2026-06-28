@@ -3202,11 +3202,8 @@ dependencies = [
  "comemo",
  "ecow",
  "flate2",
- "roxmltree 0.21.1",
  "rustc-hash",
  "time",
- "typst",
- "typst-assets",
  "typst-layout",
  "typst-library",
  "typst-macros",
@@ -3576,6 +3573,7 @@ dependencies = [
  "typst-assets",
  "typst-bundle",
  "typst-dev-assets",
+ "typst-docx",
  "typst-eval",
  "typst-html",
  "typst-kit",
@@ -3588,6 +3586,7 @@ dependencies = [
  "typst-utils",
  "unscanny",
  "walkdir",
+ "zip",
 ]
 
 [[package]]

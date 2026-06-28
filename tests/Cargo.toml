@@ -11,11 +11,19 @@ name = "tests"
 path = "src/tests.rs"
 harness = false
 
+# Structural tests for the DOCX exporter (standard libtest harness). Lives here,
+# rather than in `crates/typst-docx`, so `typst-docx` need not dev-depend on the
+# `typst` facade (which depends back on it).
+[[test]]
+name = "docx"
+path = "src/docx.rs"
+
 [dependencies]
 typst = { workspace = true }
 typst-assets = { workspace = true, features = ["fonts"] }
 typst-bundle = { workspace = true }
 typst-dev-assets = { workspace = true }
+typst-docx = { workspace = true }
 typst-eval = { workspace = true }
 typst-html = { workspace = true }
 typst-kit = { workspace = true, features = ["datetime"] }
@@ -50,6 +58,7 @@ time = { workspace = true }
 tiny-skia = { workspace = true }
 unscanny = { workspace = true }
 walkdir = { workspace = true }
+zip = { workspace = true }
 
 [lints]
 workspace = true
