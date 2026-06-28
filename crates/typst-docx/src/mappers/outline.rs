@@ -25,7 +25,7 @@ use typst_library::model::{HeadingElem, OutlineElem};
 use crate::ctx::DocxCtx;
 use crate::dom::{
     Block, Field, Para, ParaChild, ParaProps, Run, RunProps, TabAlign, TabLeader, TabStop, Toc,
-    TocHeading,
+    TocFigure, TocHeading,
 };
 
 /// The default outline depth used for the `\o "1-N"` switch when the outline
@@ -71,20 +71,19 @@ pub fn outline(
     // 2. The TOC field. Its entries are baked in as the cached result so the
     // table of contents shows without a manual field update — but the actual
     // entry paragraphs are filled in a post-conversion pass ([`fill_tocs`]),
-    // once every heading's real bookmark exists. A heading TOC carries the depth
-    // to populate from; a list-of-figures/tables (`\c`) keeps the placeholder.
-    // The field stays `dirty` so Word still refreshes page numbers when it can.
+    // once every heading/figure's real bookmark exists. A heading TOC carries the
+    // depth to populate from; a list-of-figures/tables carries its caption
+    // category. The field stays `dirty` so Word refreshes page numbers when able.
     let instr = toc_instruction(elem, styles);
     ctx.mark_field();
 
-    let depth = toc_category(elem, styles)
-        .is_none()
-        .then(|| toc_depth(elem, styles));
+    let caption_category = toc_category(elem, styles);
+    let depth = caption_category.is_none().then(|| toc_depth(elem, styles));
     // Right-tab position (page content width, in twips) for the dot leader.
     let tab_pos = (ctx.raster_width.to_pt() * 20.0) as i32;
 
-    // Shown only when no entries are baked (a list of figures, or a document
-    // with no headings): an italic "update me" placeholder.
+    // Shown only when no entries are baked (a list whose figures had no captions,
+    // or a document with no headings): an italic "update me" placeholder.
     let fallback = vec![Run::Text {
         props: RunProps { italic: true, ..RunProps::default() },
         text: "Right-click to update the table of contents.".into(),
@@ -94,6 +93,7 @@ pub fn outline(
         instr,
         dirty: true,
         depth,
+        caption_category,
         tab_pos,
         entries: Vec::new(),
         fallback,
@@ -102,38 +102,49 @@ pub fn outline(
     Ok(blocks)
 }
 
-/// Populates every heading [`Toc`] in the body. Primary source is `recorded` —
-/// the headings emitted during conversion, each carrying its real bookmark.
-/// When nothing was recorded (the document's headings are show-ruled or
-/// rasterized and never reached the heading mapper), falls back to `fallback`
-/// (introspector-queried headings, plain text — no bookmark to link to). Called
-/// once the whole body, across all sections, has been converted.
+/// Populates every [`Toc`] in the body. A heading TOC fills from `recorded` (the
+/// headings emitted during conversion, each carrying its real bookmark), or —
+/// when nothing was recorded (headings show-ruled / rasterized) — from
+/// `fallback` (introspector-queried, plain text). A list of figures/tables fills
+/// from `figures` of its caption category. Called once the whole body, across
+/// all sections, has been converted.
 pub(crate) fn fill_tocs(
     blocks: &mut [Block],
     recorded: &[TocHeading],
     fallback: &[TocHeading],
+    figures: &[TocFigure],
 ) {
-    let source = if recorded.is_empty() { fallback } else { recorded };
+    let headings = if recorded.is_empty() { fallback } else { recorded };
     for block in blocks.iter_mut() {
-        if let Block::Toc(toc) = block
-            && let Some(depth) = toc.depth
-        {
-            toc.entries = source
+        let Block::Toc(toc) = block else { continue };
+        if let Some(depth) = toc.depth {
+            toc.entries = headings
                 .iter()
                 .filter(|h| h.level <= depth)
-                .map(|h| entry_para(h, toc.tab_pos))
+                .map(|h| entry_para(h.level, &h.anchor, &h.text, toc.tab_pos))
+                .collect();
+        } else if let Some(category) = &toc.caption_category {
+            toc.entries = figures
+                .iter()
+                .filter(|f| &f.category == category)
+                .map(|f| entry_para(1, &f.anchor, &f.text, toc.tab_pos))
                 .collect();
         }
     }
 }
 
-/// Builds one `TOC{level}` entry paragraph: the heading text as a hyperlink to
-/// its bookmark (when it has one), a right tab with a dot leader, and a
-/// `PAGEREF` field whose page number the consumer fills in.
-fn entry_para(h: &TocHeading, tab_pos: i32) -> Para {
-    let text_run = Run::Text { props: RunProps::default(), text: h.text.clone() };
+/// Builds one `TOC{level}` entry paragraph: the text as a hyperlink to its
+/// bookmark (when it has one), a right tab with a dot leader, and a `PAGEREF`
+/// field whose page number the consumer fills in.
+fn entry_para(
+    level: usize,
+    anchor: &Option<EcoString>,
+    text: &EcoString,
+    tab_pos: i32,
+) -> Para {
+    let text_run = Run::Text { props: RunProps::default(), text: text.clone() };
     let mut content = Vec::new();
-    match &h.anchor {
+    match anchor {
         Some(name) => content.push(ParaChild::Hyperlink {
             rel: None,
             anchor: Some(name.clone()),
@@ -142,7 +153,7 @@ fn entry_para(h: &TocHeading, tab_pos: i32) -> Para {
         None => content.push(ParaChild::Run(text_run)),
     }
     content.push(ParaChild::Run(Run::Tab));
-    if let Some(name) = &h.anchor {
+    if let Some(name) = anchor {
         content.push(ParaChild::Run(Run::Field(Field {
             instr: eco_format!(" PAGEREF {name} \\h "),
             result: Vec::new(),
@@ -151,7 +162,7 @@ fn entry_para(h: &TocHeading, tab_pos: i32) -> Para {
     }
     Para {
         props: ParaProps {
-            style: Some(eco_format!("TOC{}", h.level.min(9))),
+            style: Some(eco_format!("TOC{}", level.min(9))),
             tabs: vec![TabStop {
                 val: TabAlign::End,
                 leader: Some(TabLeader::Dot),

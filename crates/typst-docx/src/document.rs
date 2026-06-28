@@ -79,6 +79,7 @@ pub fn docx_document(
         uses_math,
         deferred_tags,
         toc_headings,
+        toc_figures,
     ) = {
         // Isolate the conversion walk's error sink. Lowering already-realized
         // content (figure/table/grid cells, …) can surface *delayed* errors for
@@ -165,6 +166,7 @@ pub fn docx_document(
             ctx.uses_math,
             std::mem::take(&mut ctx.deferred_tags),
             std::mem::take(&mut ctx.toc_headings),
+            std::mem::take(&mut ctx.toc_figures),
         )
         };
         // Forward conversion warnings to the real sink (delayed errors stay
@@ -205,9 +207,10 @@ pub fn docx_document(
         Vec::new()
     };
 
-    // Now that every heading's real bookmark is known, populate the table(s) of
-    // contents in document order — across all sections.
-    crate::mappers::outline::fill_tocs(&mut body, &toc_headings, &toc_fallback);
+    // Now that every heading/figure's real bookmark is known, populate the
+    // table(s) of contents and list(s) of figures in document order, across all
+    // sections.
+    crate::mappers::outline::fill_tocs(&mut body, &toc_headings, &toc_fallback, &toc_figures);
 
     // Collect introspection tags from the IR for the introspector.
     let mut tags = Vec::new();

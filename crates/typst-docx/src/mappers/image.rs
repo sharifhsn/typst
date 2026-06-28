@@ -149,6 +149,23 @@ pub fn figure(
         None => (OuterVAlignment::Bottom, Vec::new()),
     };
 
+    // Record a numbered captioned figure so a list of figures/tables can list it
+    // later (Word's `\c` field draws from SEQ-captioned figures of a category).
+    // The text is the realized caption ("Figure 1: …"); the bookmark, when the
+    // figure has one, makes the entry a live link.
+    if let Some(cap) = &caption
+        && elem.numbering.get_ref(styles).is_some()
+    {
+        let text = cap.realize(ctx.engine(), styles)?.plain_text();
+        if !text.is_empty() {
+            ctx.toc_figures.push(crate::dom::TocFigure {
+                category: seq_name(elem, styles),
+                anchor: bookmark.as_ref().map(|(_, name)| name.clone()),
+                text,
+            });
+        }
+    }
+
     // G8: a placed figure (`placement: top|bottom|auto`) floats via `<wp:anchor>`
     // instead of flowing inline. The caption stays in flow (Word convention).
     let placement = elem.placement.get(styles);

@@ -186,6 +186,23 @@ fn outline_bakes_entries_with_resolvable_bookmarks() {
 }
 
 #[test]
+fn list_of_figures_bakes_caption_entries() {
+    // `outline(target: figure.where(kind: image))` becomes a list of figures
+    // that bakes one entry per captioned figure (matched by category), so it
+    // shows without a field update.
+    let p = parts(
+        "#outline(target: figure.where(kind: image))\n\n\
+         #figure(rect(), caption: [First picture]) <a>\n\n\
+         #figure(rect(), caption: [Second picture]) <b>",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("w:val=\"TOC1\""), "the list of figures bakes entries");
+    assert!(doc.contains("First picture"), "the caption text appears in the list");
+    assert!(doc.contains("Second picture"), "every captioned figure is listed");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn outline_falls_back_to_introspected_headings() {
     // When headings are show-ruled away there is no native heading paragraph and
     // nothing is recorded, but the introspector still holds them — the TOC

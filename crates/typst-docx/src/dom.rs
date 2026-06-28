@@ -83,13 +83,16 @@ pub enum Block {
 pub struct Toc {
     pub instr: EcoString,
     pub dirty: bool,
-    /// Heading depth (`\o "1-N"`) to populate from after the body is converted,
-    /// or `None` for a list of figures/tables (kept as the `fallback`).
+    /// Heading depth (`\o "1-N"`) to populate from after the body is converted.
+    /// `Some` marks a heading table of contents.
     pub depth: Option<usize>,
+    /// Caption category (`\c "Figure"` / `"Table"` / …) to populate from. `Some`
+    /// marks a list of figures/tables.
+    pub caption_category: Option<EcoString>,
     /// Right tab position (twips) for the dot leader + page number.
     pub tab_pos: i32,
-    /// Baked entries, filled in a post-conversion pass from the headings that
-    /// were actually emitted (so the bookmarks they target always exist).
+    /// Baked entries, filled in a post-conversion pass from the headings/figures
+    /// that were actually emitted (so the bookmarks they target always exist).
     pub entries: Vec<Para>,
     pub fallback: Vec<Run>,
 }
@@ -99,6 +102,16 @@ pub struct Toc {
 pub struct TocHeading {
     pub level: usize,
     /// The heading's bookmark name, when it emitted one (else a plain entry).
+    pub anchor: Option<EcoString>,
+    pub text: EcoString,
+}
+
+/// A captioned figure/table recorded during conversion, used to populate a list
+/// of figures/tables once every figure's real bookmark is known.
+pub struct TocFigure {
+    /// The caption category (`Figure`/`Table`/…), matched against a `\c` switch.
+    pub category: EcoString,
+    /// The figure's bookmark name, when it emitted one (else a plain entry).
     pub anchor: Option<EcoString>,
     pub text: EcoString,
 }
