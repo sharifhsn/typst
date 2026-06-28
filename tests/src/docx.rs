@@ -347,6 +347,29 @@ fn styled_box_becomes_a_text_box_with_real_text() {
 }
 
 #[test]
+fn rect_with_text_becomes_a_text_box() {
+    // A `#rect`/`#square` carrying content (a callout) is a text box too — not a
+    // bodyless decorative shape and not a raster.
+    let p = parts("#rect(fill: aqua, inset: 6pt)[A boxed callout note.]");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("wps:txbx"), "a rect with text is a text box");
+    assert!(doc.contains("A boxed callout note"), "its text is real and editable");
+    assert!(!p.keys().any(|k| k.starts_with("word/media/")), "and nothing is rasterized");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn bodyless_rect_stays_a_vector_shape() {
+    // A `#rect` with no body is still a bare decorative vector shape, not a
+    // (empty) text box.
+    let p = parts("#rect(width: 2cm, height: 1cm, fill: blue)");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("wps:wsp"), "a bodyless rect is a vector shape");
+    assert!(!doc.contains("wps:txbx"), "with no text-box content");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn polygon_becomes_a_custom_geometry_shape() {
     let p = parts("#polygon((0pt, 0pt), (2cm, 0pt), (1cm, 1cm), fill: green)");
     let doc = &p["word/document.xml"];

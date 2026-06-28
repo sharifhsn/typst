@@ -840,15 +840,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<LinkMarker>() {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
+        } else if let Some(run) = mappers::shape::text_box(child, styles, self)? {
+            // A framed container with text — `#box(fill|stroke)[..]`, `#rect[..]`,
+            // `#square[..]` — becomes a Word *text box* holding the real, editable
+            // text rather than a flat rasterized image.
+            out.push(run);
         } else if let Some(elem) = child.to_packed::<typst_library::layout::BoxElem>() {
-            // A styled `#box(fill|stroke)[text]` becomes a Word *text box* — a
-            // framed shape holding the box's real, editable text — rather than a
-            // flat rasterized image. Falls through to rasterize/extract when the
-            // box is not a text-box candidate.
-            if let Some(run) = mappers::shape::text_box(child, styles, self)? {
-                out.push(run);
-                return Ok(());
-            }
+            // A non-text-box `#box` (no visible frame, or a body that must
+            // rasterize): keep the existing rasterize/extract handling.
             match elem.body.get_cloned(styles) {
                 // An empty `#box` (`#box(width: 1em)` spacer): nothing to render.
                 None => {}

@@ -8,7 +8,7 @@
 //! rasterizes it so the visual is still preserved.
 
 use typst_library::diag::SourceResult;
-use typst_library::foundations::{Content, Packed, Resolve, Smart, StyleChain};
+use typst_library::foundations::{Content, Resolve, Smart, StyleChain};
 use typst_library::layout::{Abs, BoxElem, Length, Rel, Sides, Sizing};
 use typst_library::visualize::{
     CircleElem, EllipseElem, Paint, PolygonElem, RectElem, SquareElem, Stroke,
@@ -47,51 +47,49 @@ pub fn shape(
 
 use ecow::EcoString;
 
-/// Maps a styled `#box(fill|stroke)[text]` to a Word *text box* — a `wps:wsp`
-/// shape whose `wps:txbx` holds the box's real, editable text — instead of
-/// rasterizing it to a flat image. Returns `None` when the box is not a text-box
-/// candidate (no fill/stroke, an unrepresentable gradient fill, a body with
-/// layout-only introspection, or a body that lays out to nothing), so the caller
-/// falls through to its normal rasterize/extract handling.
+/// Maps a framed container with a body — a styled `#box(fill|stroke)[text]`, or
+/// a `#rect`/`#square` carrying content — to a Word *text box*: a `wps:wsp` shape
+/// whose `wps:txbx` holds the real, editable text, instead of rasterizing it to a
+/// flat image. Returns `None` when the container is not a text-box candidate (no
+/// visible frame, an unrepresentable gradient fill, a body with layout-only
+/// introspection, or a body that lays out to nothing), so the caller falls
+/// through to its normal rasterize/extract handling.
 ///
-/// The shape's extent is the box's laid-out size (`ctx.measure`); the box inset
-/// becomes the text-frame insets; the fill/stroke/rounded-corners become the
-/// shape's `spPr`. The text is extracted via [`DocxCtx::blocks`] and its
-/// introspection tags are forwarded so cross-references inside the box resolve.
+/// The shape's extent is the laid-out size (`ctx.measure`); the inset becomes the
+/// text-frame insets; the fill/stroke/rounded-corners become the shape's `spPr`.
+/// The text is extracted via [`DocxCtx::blocks`] and its introspection tags are
+/// forwarded so cross-references inside the box resolve.
 pub fn text_box(
     child: &Content,
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
-    let Some(elem) = child.to_packed::<BoxElem>() else {
+    let Some(framed) = framed_container(child, styles) else {
         return Ok(None);
     };
-    let Some(body) = elem.body.get_cloned(styles) else {
-        return Ok(None);
-    };
+    let Framed { body, fill_paint, stroke, rounded, inset } = framed;
 
-    // Only a *styled* box (a visible frame) becomes a text box; a plain inline
-    // box keeps its existing handling.
-    let stroke_sides = elem.stroke.get_cloned(styles);
-    let fill_paint = elem.fill.get_ref(styles);
-    if fill_paint.is_none() && !has_stroke(&stroke_sides) {
-        return Ok(None);
-    }
     // A gradient/tiling fill has no solid-colour text-box form: keep rasterizing
     // it so the visual survives.
     let fill = match fill_paint {
-        Some(Paint::Solid(c)) => Some(color_to_hex(c)),
+        Some(Paint::Solid(c)) => Some(color_to_hex(&c)),
         Some(_) => return Ok(None),
         None => None,
     };
+    // Need a visible frame: a fill or a (representable) stroke. A bare inline box
+    // has neither and keeps its existing handling; a `#rect`/`#square` always has
+    // at least the default border.
+    if fill.is_none() && stroke.is_none() {
+        return Ok(None);
+    }
     // Layout-only introspection (a per-line equation label) cannot survive native
-    // extraction; such a box must rasterize.
+    // extraction; such a body must rasterize.
     if !crate::convert::body_extractable(&body) {
         return Ok(None);
     }
 
-    // Size the frame from the laid-out box; bail to rasterization if it lays out
-    // to nothing usable.
+    // Size the frame from the laid-out container; bail to rasterization if it lays
+    // out to nothing usable.
     let Some(size) = ctx.measure(child, styles, child.span())? else {
         return Ok(None);
     };
@@ -106,13 +104,8 @@ pub fn text_box(
     let blocks = ctx.blocks(&body, styles)?;
     crate::document::collect_tags(&blocks, &mut ctx.deferred_tags);
 
-    let stroke = box_stroke(&stroke_sides, styles);
-    let geom = if rounded(elem, styles) {
-        ShapeGeom::RoundRect
-    } else {
-        ShapeGeom::Rect
-    };
-    let ins = box_insets(elem, styles, size);
+    let geom = if rounded { ShapeGeom::RoundRect } else { ShapeGeom::Rect };
+    let ins = resolve_insets(&inset, styles, size);
 
     let docpr_id = ctx.next_drawing_id();
     let name = ecow::eco_format!("Text Box {docpr_id}");
@@ -133,16 +126,72 @@ pub fn text_box(
     })))
 }
 
-/// Whether any side of a box stroke is an explicit visible stroke.
-fn has_stroke(sides: &Sides<Option<Option<Stroke>>>) -> bool {
-    [&sides.top, &sides.right, &sides.bottom, &sides.left]
-        .iter()
-        .any(|s| matches!(s, Some(Some(_))))
+/// The frame properties a `#box`/`#rect`/`#square` with a body contributes to a
+/// text box (the `stroke` already resolved to a uniform [`ShapeStroke`]).
+struct Framed {
+    body: Content,
+    fill_paint: Option<Paint>,
+    stroke: Option<ShapeStroke>,
+    rounded: bool,
+    inset: Sides<Option<Rel<Length>>>,
 }
 
-/// Reduces a box's per-side stroke to one uniform [`ShapeStroke`] (the first
-/// present side), or `None` for no/unrepresentable stroke.
-fn box_stroke(
+/// Extracts the common [`Framed`] view from a `#box`/`#rect`/`#square` that has a
+/// body, or `None` for any other element (or a bodyless one).
+fn framed_container(child: &Content, styles: StyleChain) -> Option<Framed> {
+    if let Some(e) = child.to_packed::<BoxElem>() {
+        let body = e.body.get_cloned(styles)?;
+        // A box's stroke has no implicit default: only an explicit side counts.
+        let stroke = sides_stroke_first(&e.stroke.get_cloned(styles), styles);
+        Some(Framed {
+            body,
+            fill_paint: e.fill.get_cloned(styles),
+            stroke,
+            rounded: any_radius(&e.radius.get_cloned(styles)),
+            inset: e.inset.get_cloned(styles),
+        })
+    } else if let Some(e) = child.to_packed::<RectElem>() {
+        let body = e.body.get_cloned(styles)?;
+        let fill = e.fill.get_cloned(styles);
+        Some(Framed {
+            stroke: shape_stroke(e.stroke.get_cloned(styles), &fill, styles),
+            body,
+            fill_paint: fill,
+            rounded: any_radius(&e.radius.get_cloned(styles)),
+            inset: e.inset.get_cloned(styles),
+        })
+    } else if let Some(e) = child.to_packed::<SquareElem>() {
+        let body = e.body.get_cloned(styles)?;
+        let fill = e.fill.get_cloned(styles);
+        Some(Framed {
+            stroke: shape_stroke(e.stroke.get_cloned(styles), &fill, styles),
+            body,
+            fill_paint: fill,
+            rounded: any_radius(&e.radius.get_cloned(styles)),
+            inset: e.inset.get_cloned(styles),
+        })
+    } else {
+        None
+    }
+}
+
+/// A `#rect`/`#square` stroke (`Smart` per-side): `Auto` is the Typst default (a
+/// 1pt black outline when unfilled, else none); an explicit set uses its first
+/// present side.
+fn shape_stroke(
+    stroke: Smart<Sides<Option<Option<Stroke>>>>,
+    fill: &Option<Paint>,
+    styles: StyleChain,
+) -> Option<ShapeStroke> {
+    match stroke {
+        Smart::Auto => default_stroke(fill),
+        Smart::Custom(sides) => sides_stroke_first(&sides, styles),
+    }
+}
+
+/// Reduces a per-side stroke to one uniform [`ShapeStroke`] (the first present
+/// side), or `None` for no/unrepresentable stroke.
+fn sides_stroke_first(
     sides: &Sides<Option<Option<Stroke>>>,
     styles: StyleChain,
 ) -> Option<ShapeStroke> {
@@ -154,22 +203,20 @@ fn box_stroke(
     None
 }
 
-/// Whether a box has any rounded corner (→ a `roundRect` frame).
-fn rounded(elem: &Packed<BoxElem>, styles: StyleChain) -> bool {
-    let radius = elem.radius.get_cloned(styles);
+/// Whether any corner has a nonzero radius (→ a `roundRect` frame).
+fn any_radius(radius: &typst_library::layout::Corners<Option<Rel<Length>>>) -> bool {
     [radius.top_left, radius.top_right, radius.bottom_left, radius.bottom_right]
         .into_iter()
         .any(|c| c.is_some_and(|r| !r.is_zero()))
 }
 
-/// Resolves a box's inset to text-frame insets `[left, top, right, bottom]` in
-/// EMU (percentages relative to the laid-out box size).
-fn box_insets(
-    elem: &Packed<BoxElem>,
+/// Resolves a container's inset to text-frame insets `[left, top, right, bottom]`
+/// in EMU (percentages relative to the laid-out size).
+fn resolve_insets(
+    inset: &Sides<Option<Rel<Length>>>,
     styles: StyleChain,
     size: typst_library::layout::Size,
 ) -> [i64; 4] {
-    let inset = elem.inset.get_cloned(styles);
     let resolve = |opt: Option<Rel<Length>>, base: Abs| -> i64 {
         opt.map(|r| abs_to_emu(r.resolve(styles).relative_to(base))).unwrap_or(0)
     };
