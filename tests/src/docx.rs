@@ -186,6 +186,34 @@ fn outline_bakes_entries_with_resolvable_bookmarks() {
 }
 
 #[test]
+fn heading_outline_is_a_toc_content_control() {
+    // A heading table of contents is wrapped in a Word "Table of Contents"
+    // content control (`w:sdt`/`docPartObj`) — the idiomatic, gallery-aware form.
+    let p = parts("#outline()\n\n= Alpha\n\n= Beta");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<w:sdt>"), "the TOC is wrapped in a content control");
+    assert!(
+        doc.contains("w:val=\"Table of Contents\""),
+        "with the Table of Contents docPart gallery"
+    );
+    assert!(doc.contains("<w:sdtContent>"), "and its entries live in sdtContent");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn core_properties_carry_author_and_revision() {
+    let p = parts(
+        "#set document(title: \"T\", author: \"Ada Lovelace\")\n#outline()\n\n= H",
+    );
+    let core = &p["docProps/core.xml"];
+    assert!(core.contains("<dc:title>T</dc:title>"), "title is recorded");
+    assert!(core.contains("Ada Lovelace"), "author is the creator");
+    assert!(core.contains("cp:lastModifiedBy"), "and the last-modified-by");
+    assert!(core.contains("<cp:revision>1</cp:revision>"), "with a revision number");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn inline_equation_stays_in_its_paragraph() {
     // Typst splits a paragraph containing an inline equation into
     // `[par, equation, par]`; the exporter must rejoin them, or the equation

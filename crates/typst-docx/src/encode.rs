@@ -815,12 +815,36 @@ fn write_field(w: &mut XmlWriter, field: &Field) {
     w.close();
 }
 
-/// Serializes a table of contents. With baked entries the `TOC` field spans
-/// several paragraphs: `begin`/`instrText`/`separate` lead the first entry and
-/// `end` closes the last, so the entries are the field's cached result and show
-/// without a manual update. With no entries, falls back to a single-paragraph
-/// field holding the placeholder runs.
+/// Serializes a table of contents. A heading TOC is wrapped in a Word "Table of
+/// Contents" content control (`w:sdt`/`docPartObj`) — the idiomatic form that
+/// gives it the gallery identity and the "Update Table" affordance; a list of
+/// figures/tables stays a bare field (Word does not wrap those). The field
+/// itself spans the baked entry paragraphs (or a single placeholder paragraph
+/// when empty), so the entries show without a manual update.
 fn write_toc(w: &mut XmlWriter, toc: &Toc) {
+    let as_content_control = toc.depth.is_some();
+    if as_content_control {
+        w.open("w:sdt").start_children();
+        w.open("w:sdtPr").start_children();
+        w.open("w:docPartObj").start_children();
+        w.open("w:docPartGallery").attr(xml::W_VAL, "Table of Contents").empty();
+        w.leaf("w:docPartUnique");
+        w.close(); // w:docPartObj
+        w.close(); // w:sdtPr
+        w.open("w:sdtContent").start_children();
+    }
+
+    write_toc_body(w, toc);
+
+    if as_content_control {
+        w.close(); // w:sdtContent
+        w.close(); // w:sdt
+    }
+}
+
+/// Emits the TOC field's paragraphs (the field code + baked entries, or a
+/// single-paragraph placeholder when there are none).
+fn write_toc_body(w: &mut XmlWriter, toc: &Toc) {
     // Emits the field `begin` + instruction + `separate` run sequence.
     let write_begin = |w: &mut XmlWriter| {
         w.open(xml::W_R).start_children();
@@ -1101,7 +1125,11 @@ fn build_core(info: &DocumentInfo, pretty: bool) -> String {
         w.elem_text("dc:title", title);
     }
     if !info.author.is_empty() {
-        w.elem_text("dc:creator", &info.author.join("; "));
+        let authors = info.author.join("; ");
+        w.elem_text("dc:creator", &authors);
+        // Word also stores who last touched the document; with no editing
+        // history the author is the best answer.
+        w.elem_text("cp:lastModifiedBy", &authors);
     }
     if let Some(desc) = &info.description {
         w.elem_text("dc:description", desc);
@@ -1109,6 +1137,8 @@ fn build_core(info: &DocumentInfo, pretty: bool) -> String {
     if !info.keywords.is_empty() {
         w.elem_text("cp:keywords", &info.keywords.join(", "));
     }
+    // A freshly generated document is revision 1.
+    w.elem_text("cp:revision", "1");
     if let Smart::Custom(Some(date)) = &info.date
         && let Some(s) = w3cdtf(date) {
             w.open("dcterms:created")
