@@ -240,6 +240,11 @@ fn handle_block(
         out.extend(mappers::list::terms(elem, styles, ctx)?);
     } else if let Some(elem) = child.to_packed::<TableElem>() {
         out.extend(mappers::table::table(elem, styles, ctx)?);
+    } else if let Some(elem) = child.to_packed::<typst_library::layout::GridElem>() {
+        // A layout grid (CV sidebar, multi-column block, …) lowers to a w:tbl
+        // like a table, keeping its content as editable text rather than being
+        // rasterized or dropped.
+        out.extend(mappers::table::grid(elem, styles, ctx)?);
     } else if let Some(elem) = child.to_packed::<OutlineElem>() {
         out.extend(mappers::outline::outline(elem, styles, ctx)?);
     } else if let Some(elem) = child.to_packed::<EquationElem>() {

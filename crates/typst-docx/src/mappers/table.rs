@@ -19,6 +19,7 @@ use typst_library::diag::SourceResult;
 use typst_library::foundations::{Packed, Smart, StyleChain};
 use typst_library::layout::resolve::{Cell as ResolvedCell, CellGrid, Entry};
 use typst_library::layout::{Abs, Alignment, Sizing, VAlignment};
+use typst_library::layout::{GridCell, GridElem};
 use typst_library::model::{TableCell, TableElem};
 use typst_library::visualize::{Color, Paint, Stroke};
 
@@ -44,8 +45,32 @@ pub fn table(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Vec<Block>> {
-    let grid = elem.grid.as_ref().unwrap();
+    cellgrid(elem.grid.as_ref().unwrap(), styles, ctx)
+}
 
+/// A layout grid (`#grid`) resolves to the same [`CellGrid`] as a table, so it
+/// lowers to a `w:tbl` too — preserving its content as editable text instead of
+/// rasterizing it (or, for a full-page layout grid like a CV sidebar/main split,
+/// dropping it entirely). A grid's cells carry no stroke, so no cell borders are
+/// emitted; the result reads as a borderless multi-column layout.
+pub fn grid(
+    elem: &Packed<GridElem>,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Vec<Block>> {
+    let Some(grid) = elem.grid.as_ref() else {
+        return Ok(Vec::new());
+    };
+    cellgrid(grid, styles, ctx)
+}
+
+/// Lowers a resolved [`CellGrid`] (shared by `#table` and `#grid`) into a
+/// `w:tbl`.
+fn cellgrid(
+    grid: &CellGrid,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Vec<Block>> {
     let ncols = grid.non_gutter_column_count();
     if ncols == 0 || grid.entries.is_empty() {
         return Ok(Vec::new());
@@ -215,6 +240,7 @@ fn cell_blocks(
         .body
         .to_packed::<TableCell>()
         .map(|tc| tc.body.clone())
+        .or_else(|| cell.body.to_packed::<GridCell>().map(|gc| gc.body.clone()))
         .unwrap_or_else(|| cell.body.clone());
 
     let mut blocks = ctx.blocks(&content, styles)?;
