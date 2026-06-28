@@ -359,6 +359,34 @@ fn rect_with_text_becomes_a_text_box() {
 }
 
 #[test]
+fn block_level_callout_flows_as_a_shaded_paragraph() {
+    // A block-level framed container with flowing content (a multi-paragraph
+    // callout, a code listing) maps to shaded + bordered paragraphs that break
+    // across pages — NOT a text box (which would clip if taller than a page).
+    let p = parts(
+        "#rect(fill: luma(230), stroke: 1pt + blue, inset: 8pt)[\
+         First callout paragraph.\n\nSecond callout paragraph.]",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(!doc.contains("wps:txbx"), "a flowing block callout is not a text box");
+    assert!(doc.contains("<w:pBdr>"), "it carries paragraph borders");
+    assert!(doc.contains("<w:shd "), "and paragraph shading");
+    assert!(doc.contains("keepNext"), "multi-paragraph box is held together");
+    assert!(doc.contains("First callout") && doc.contains("Second callout"), "text flows");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn short_block_rect_stays_a_text_box() {
+    // A short single-line framed container keeps the sized text-box look.
+    let p = parts("#rect(fill: yellow, inset: 4pt)[Short label]");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("wps:txbx"), "a short framed label is a sized text box");
+    assert!(doc.contains("Short label"), "with its text");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn bodyless_rect_stays_a_vector_shape() {
     // A `#rect` with no body is still a bare decorative vector shape, not a
     // (empty) text box.

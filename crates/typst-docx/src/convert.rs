@@ -468,6 +468,12 @@ fn handle_block(
         }
     } else if let Some(elem) = child.to_packed::<typst_library::layout::BlockElem>() {
         handle_block_box(ctx, elem, styles, out)?;
+    } else if is_framed_container(child) && handle_block_framed(ctx, child, styles, out)? {
+        // A block-level framed container (`#rect`/`#box`/`#square` standing as its
+        // own block) with flowing content → shaded + bordered paragraphs that
+        // break across pages, mirroring `#block`. Short / single-line content
+        // returns `false` and falls through to the inline text-box path below
+        // (a sized text box reads better for a badge/label than a full-width box).
     } else {
         // Fall back: treat anything else as inline content in a paragraph.
         let runs = ctx.inline_runs(child, styles, RunProps::default())?;
@@ -553,6 +559,40 @@ fn handle_block_box(
         _ => None,
     };
 
+    stamp_box_decorations(
+        &mut inner,
+        shd_fill,
+        &pbdr,
+        Insets { left: ind_left, right: ind_right, top: inset_top, bottom: inset_bottom },
+        above,
+        below,
+    );
+
+    out.extend(inner);
+    Ok(())
+}
+
+/// Resolved box insets in twips (each `None` when zero/absent).
+#[derive(Default)]
+struct Insets {
+    left: Option<i32>,
+    right: Option<i32>,
+    top: Option<i32>,
+    bottom: Option<i32>,
+}
+
+/// Stamps a box's shading, borders, insets and (optional) above/below spacing
+/// onto its content paragraphs. Identical shading/borders on every paragraph
+/// makes adjacent paragraphs inside one box render as a single visual box in
+/// Word; `keep_lines`/`keep_next` hold a multi-paragraph box together.
+fn stamp_box_decorations(
+    inner: &mut [Block],
+    shd_fill: Option<[u8; 3]>,
+    pbdr: &Option<crate::dom::ParaBorders>,
+    insets: Insets,
+    above: Option<i32>,
+    below: Option<i32>,
+) {
     let has_box = shd_fill.is_some() || pbdr.is_some();
     let last = inner.len().saturating_sub(1);
     let para_count = inner.iter().filter(|b| matches!(b, Block::Para(_))).count();
@@ -563,12 +603,10 @@ fn handle_block_box(
         let Block::Para(para) = block else { continue };
         let p = &mut para.props;
 
-        // Stamp identical shading/borders on every paragraph so adjacent
-        // paragraphs inside one box render as a single visual box in Word.
         if let Some(f) = shd_fill {
             p.shd_fill.get_or_insert(f);
         }
-        if let Some(b) = &pbdr {
+        if let Some(b) = pbdr {
             if p.pbdr.is_none() {
                 p.pbdr = Some(b.clone());
             }
@@ -581,12 +619,12 @@ fn handle_block_box(
         }
 
         // Horizontal inset → indent.
-        if ind_left.is_some() || ind_right.is_some() {
+        if insets.left.is_some() || insets.right.is_some() {
             let ind = p.ind.get_or_insert_with(Default::default);
-            if let Some(l) = ind_left {
+            if let Some(l) = insets.left {
                 ind.left.get_or_insert(l);
             }
-            if let Some(r) = ind_right {
+            if let Some(r) = insets.right {
                 ind.right.get_or_insert(r);
             }
         }
@@ -595,12 +633,8 @@ fn handle_block_box(
         // before/after spacing.
         let is_first = seen_para == 0;
         let is_last = seen_para == para_count.saturating_sub(1);
-        let before = if is_first {
-            sum_opt(above, inset_top)
-        } else {
-            None
-        };
-        let after = if is_last { sum_opt(below, inset_bottom) } else { None };
+        let before = if is_first { sum_opt(above, insets.top) } else { None };
+        let after = if is_last { sum_opt(below, insets.bottom) } else { None };
         if before.is_some() || after.is_some() {
             let sp = p.spacing.get_or_insert_with(Default::default);
             if let Some(b) = before {
@@ -612,9 +646,140 @@ fn handle_block_box(
         }
         seen_para += 1;
     }
+}
 
+/// Whether a native element is a framed container (`#box`/`#rect`/`#square`) that
+/// might carry a body — the candidates for the block-level shaded-paragraph or
+/// the inline text-box treatment.
+fn is_framed_container(child: &Content) -> bool {
+    use typst_library::layout::BoxElem;
+    use typst_library::visualize::{RectElem, SquareElem};
+    child.is::<BoxElem>() || child.is::<RectElem>() || child.is::<SquareElem>()
+}
+
+/// Maps a BLOCK-LEVEL framed container with *flowing* content to shaded +
+/// bordered paragraphs (which break across pages), reusing the `#block`
+/// decoration path. Returns `Ok(false)` — leaving the element for the inline
+/// text-box path — when the container is better as a sized text box: a
+/// gradient/tiling fill, no visible frame, or content that is just a single
+/// inline line (a short label/badge).
+fn handle_block_framed(
+    ctx: &mut DocxCtx,
+    child: &Content,
+    styles: typst_library::foundations::StyleChain,
+    out: &mut Vec<Block>,
+) -> SourceResult<bool> {
+    use typst_library::visualize::Paint;
+
+    let Some((body, fill, stroke_sides, inset)) = block_framed_parts(child, styles) else {
+        return Ok(false);
+    };
+    // A gradient/tiling fill has no flat-shading form: keep it for the text-box /
+    // rasterize path so the visual survives.
+    if matches!(&fill, Some(p) if !matches!(p, Paint::Solid(_))) {
+        return Ok(false);
+    }
+    // Layout-only introspection must rasterize; not a candidate for extraction.
+    if !body_extractable(&body) {
+        return Ok(false);
+    }
+
+    // Only flowing/block content benefits from a paragraph representation; a
+    // single inline line stays a (sized) text box.
+    let mut inner = ctx.blocks(&body, styles)?;
+    if !is_flowing(&inner) {
+        return Ok(false);
+    }
+
+    let shd_fill = match &fill {
+        Some(Paint::Solid(c)) => Some(crate::props::color_to_hex(c)),
+        _ => None,
+    };
+    let pbdr = block_borders(&stroke_sides, styles);
+    // No visible frame → not a callout; let the inline path handle it.
+    if shd_fill.is_none() && pbdr.is_none() {
+        return Ok(false);
+    }
+
+    // Forward the content's introspection tags (cites/refs/labels inside the
+    // callout must reach the introspector).
+    crate::document::collect_tags(&inner, &mut ctx.deferred_tags);
+
+    let insets = Insets {
+        left: inset.left.and_then(|r| nonzero_twip(r, styles)),
+        right: inset.right.and_then(|r| nonzero_twip(r, styles)),
+        top: inset.top.and_then(|r| nonzero_twip(r, styles)),
+        bottom: inset.bottom.and_then(|r| nonzero_twip(r, styles)),
+    };
+    stamp_box_decorations(&mut inner, shd_fill, &pbdr, insets, None, None);
     out.extend(inner);
-    Ok(())
+    Ok(true)
+}
+
+/// Extracts `(body, fill, stroke-sides, inset)` from a framed container, or
+/// `None` for a bodyless one. A `#rect`/`#square` carries a `Smart` per-side
+/// stroke that defaults to a 1pt outline when unfilled; that default is
+/// materialized here so the border path sees a concrete stroke.
+#[allow(clippy::type_complexity)]
+fn block_framed_parts(
+    child: &Content,
+    styles: typst_library::foundations::StyleChain,
+) -> Option<(
+    Content,
+    Option<typst_library::visualize::Paint>,
+    typst_library::layout::Sides<Option<Option<typst_library::visualize::Stroke>>>,
+    typst_library::layout::Sides<Option<typst_library::layout::Rel<typst_library::layout::Length>>>,
+)> {
+    use typst_library::layout::BoxElem;
+    use typst_library::visualize::{RectElem, SquareElem};
+
+    if let Some(e) = child.to_packed::<BoxElem>() {
+        let body = e.body.get_cloned(styles)?;
+        Some((body, e.fill.get_cloned(styles), e.stroke.get_cloned(styles), e.inset.get_cloned(styles)))
+    } else if let Some(e) = child.to_packed::<RectElem>() {
+        let body = e.body.get_cloned(styles)?;
+        let fill = e.fill.get_cloned(styles);
+        let stroke = shape_stroke_sides(e.stroke.get_cloned(styles), &fill);
+        Some((body, fill, stroke, e.inset.get_cloned(styles)))
+    } else if let Some(e) = child.to_packed::<SquareElem>() {
+        let body = e.body.get_cloned(styles)?;
+        let fill = e.fill.get_cloned(styles);
+        let stroke = shape_stroke_sides(e.stroke.get_cloned(styles), &fill);
+        Some((body, fill, stroke, e.inset.get_cloned(styles)))
+    } else {
+        None
+    }
+}
+
+/// Resolves a `#rect`/`#square`'s `Smart` stroke: `Auto` becomes the Typst
+/// default — a 1pt outline on every side when unfilled, no border when filled.
+fn shape_stroke_sides(
+    stroke: typst_library::foundations::Smart<
+        typst_library::layout::Sides<Option<Option<typst_library::visualize::Stroke>>>,
+    >,
+    fill: &Option<typst_library::visualize::Paint>,
+) -> typst_library::layout::Sides<Option<Option<typst_library::visualize::Stroke>>> {
+    use typst_library::foundations::Smart;
+    use typst_library::layout::Sides;
+    match stroke {
+        Smart::Custom(sides) => sides,
+        Smart::Auto if fill.is_some() => Sides::splat(None),
+        Smart::Auto => Sides::splat(Some(Some(typst_library::visualize::Stroke::default()))),
+    }
+}
+
+/// Whether extracted content should *flow* (break across pages) — true for
+/// multi-block content, a table, or a paragraph holding explicit line breaks (a
+/// raw code block). A single breakless paragraph (a short label) is not flowing.
+fn is_flowing(blocks: &[Block]) -> bool {
+    match blocks {
+        [] => false,
+        [Block::Para(p)] => p
+            .content
+            .iter()
+            .any(|c| matches!(c, ParaChild::Run(Run::Break | Run::PageBreak))),
+        _ => true,
+    }
 }
 
 /// Sums two optional twip values, returning `None` only when both are absent.
