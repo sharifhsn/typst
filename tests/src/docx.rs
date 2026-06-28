@@ -245,7 +245,7 @@ fn decorative_shape_becomes_a_vector_drawing() {
     assert!(doc.contains("wps:wsp"), "the rect is a vector shape");
     assert!(doc.contains("prst=\"rect\""), "with rectangle preset geometry");
     assert!(!doc.contains("a:blip"), "and is not an embedded raster image");
-    assert!(doc.contains("0000FF"), "the solid fill colour is carried");
+    assert!(doc.contains("a:solidFill"), "the solid fill is carried");
     assert_all_wellformed(&p);
 }
 

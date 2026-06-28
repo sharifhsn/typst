@@ -835,7 +835,13 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                     // safe; we discard any partial tag harvest first to be sure.
                     let mark = self.deferred_tags.len();
                     match mappers::image::laid_out_fallback(child, styles, self)? {
-                        Some(run) => out.push(run),
+                        Some(run) => {
+                            // Keep Word's figure counter consistent with any
+                            // captioned figure the box rasterized (a hidden
+                            // `SEQ … \h`), as the generic fallback does.
+                            self.emit_rasterized_figure_seqs(mark, styles, out);
+                            out.push(run);
+                        }
                         None => {
                             self.deferred_tags.truncate(mark);
                             out.extend(self.inline_runs(&body, styles, props.clone())?);
