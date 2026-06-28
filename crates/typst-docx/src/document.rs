@@ -79,16 +79,38 @@ pub fn docx_document(
         uses_math,
         deferred_tags,
     ) = {
-        let mut ctx = DocxCtx::new(engine, &mut locator);
-        // Give rasterized content the real page content width (page minus L/R
-        // margins, converted from twips → pt) so width-relative content does not
-        // blow up under an infinite region. Guard against a degenerate width.
-        let content_twip =
-            first_geom.page_w - first_geom.margin_left - first_geom.margin_right;
-        if content_twip > 0 {
-            ctx.raster_width =
-                typst_library::layout::Abs::pt(content_twip as f64 / 20.0);
-        }
+        // Isolate the conversion walk's error sink. Lowering already-realized
+        // content (figure/table/grid cells, …) can surface *delayed* errors for
+        // values that only resolve during layout — e.g. a date `display(auto)`
+        // or a page-number query — which the main realize never hit. Those must
+        // not fail a best-effort export (same reasoning as the rasterize
+        // re-layout isolation). The shared introspector and its convergence
+        // constraint are kept, so refs/cites/bibliography still resolve; only
+        // this walk's own delayed-error reporting is discarded. Warnings are
+        // forwarded to the real sink.
+        let mut conv_sink = typst_library::engine::Sink::new();
+        let converted = {
+            use comemo::Track;
+            let mut sub = typst_library::engine::Engine {
+                world: engine.world,
+                library: engine.library,
+                introspector: typst_utils::Protected::from_raw(
+                    engine.introspector.into_raw(),
+                ),
+                traced: engine.traced,
+                sink: conv_sink.track_mut(),
+                route: typst_library::engine::Route::extend(engine.route.track()),
+            };
+            let mut ctx = DocxCtx::new(&mut sub, &mut locator);
+            // Give rasterized content the real page content width (page minus L/R
+            // margins, converted from twips → pt) so width-relative content does
+            // not blow up under an infinite region. Guard a degenerate width.
+            let content_twip =
+                first_geom.page_w - first_geom.margin_left - first_geom.margin_right;
+            if content_twip > 0 {
+                ctx.raster_width =
+                    typst_library::layout::Abs::pt(content_twip as f64 / 20.0);
+            }
 
         // Build the body and the (final) section properties. A single-section
         // document converts all `pairs` at once (unchanged behaviour, so leading
@@ -143,6 +165,13 @@ pub fn docx_document(
             ctx.uses_math,
             std::mem::take(&mut ctx.deferred_tags),
         )
+        };
+        // Forward conversion warnings to the real sink (delayed errors stay
+        // isolated in `conv_sink` and are dropped).
+        for w in conv_sink.warnings() {
+            engine.sink.warn(w);
+        }
+        converted
     };
 
     // Collect introspection tags from the IR for the introspector.
