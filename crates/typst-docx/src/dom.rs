@@ -173,7 +173,11 @@ pub struct RunProps {
     pub position_half_pt: Option<i32>,
     pub size_half_pt: Option<u32>,
     pub shd_fill: Option<[u8; 3]>,
-    pub underline: bool,
+    /// `<w:u>` underline, when present. `text(underline:)` / `#underline`. The
+    /// style (`w:val`) and colour are derived from the line's stroke (dash
+    /// pattern → dotted/dash/dotDash, paint → `w:color`); a plain underline is
+    /// `single` with no colour (byte-identical to the original `bool`).
+    pub underline: Option<Underline>,
     /// `<w:vanish/>` — hidden text (`#hide`). Default false.
     pub vanish: bool,
     pub vert_align: Option<VertAlign>,
@@ -189,6 +193,23 @@ pub struct RunProps {
 pub enum VertAlign {
     Super,
     Sub,
+}
+
+/// A `<w:u>` underline: a Word line style plus an optional explicit colour.
+#[derive(Clone, PartialEq)]
+pub struct Underline {
+    /// `w:val`: "single" | "double" | "thick" | "dotted" | "dash" | "dotDash".
+    pub val: &'static str,
+    /// `w:color` (`RRGGBB`), when the line carries a paint of its own; `None`
+    /// makes the underline follow the run's text colour ("auto").
+    pub color: Option<[u8; 3]>,
+}
+
+impl Underline {
+    /// A plain single underline with no colour of its own.
+    pub fn single() -> Self {
+        Self { val: "single", color: None }
+    }
 }
 
 /// Paragraph formatting → `<w:pPr>`.

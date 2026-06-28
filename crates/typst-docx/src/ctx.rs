@@ -21,7 +21,7 @@ use typst_syntax::Span;
 
 use crate::dom::{
     BookmarkTable, Block, Footnote, ListSpec, MediaPart, NumberingTable,
-    ParaProps, Run, RunProps, TocFigure, TocHeading, VertAlign,
+    ParaProps, Run, RunProps, TocFigure, TocHeading, Underline, VertAlign,
 };
 use crate::package::{RelMode, Rels};
 use crate::mappers;
@@ -503,7 +503,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         // Decorations, from `underline`/`strike`/`highlight`.
         for deco in styles.get_cloned(TextElem::deco) {
             match &deco.line {
-                typst_library::text::DecoLine::Underline { .. } => p.underline = true,
+                typst_library::text::DecoLine::Underline { stroke, .. } => {
+                    p.underline = Some(underline_from_stroke(stroke));
+                }
                 typst_library::text::DecoLine::Strikethrough { .. } => p.strike = true,
                 typst_library::text::DecoLine::Highlight { .. } => {
                     p.shd_fill = Some([0xFF, 0xFF, 0x00]);
@@ -786,7 +788,11 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<UnderlineElem>() {
             let mut p = props.clone();
-            p.underline = true;
+            use typst_library::foundations::{Resolve, Smart};
+            p.underline = Some(match elem.stroke.get_cloned(styles) {
+                Smart::Custom(stroke) => underline_from_stroke(&stroke.resolve(styles)),
+                Smart::Auto => Underline::single(),
+            });
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<StrikeElem>() {
             let mut p = props.clone();
@@ -940,6 +946,54 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             content,
             styles,
         )
+    }
+}
+
+/// Derives a Word underline style + colour from a resolved line stroke.
+///
+/// The dash pattern maps to `w:val` (a dotted/dashed/dot-dashed line); a paint
+/// distinct from `auto` maps to `w:color`. An `auto` stroke (the common case)
+/// yields a plain single underline with no colour — byte-identical to the
+/// original boolean underline.
+fn underline_from_stroke(stroke: &typst_library::visualize::Stroke<Abs>) -> Underline {
+    use typst_library::foundations::Smart;
+    use typst_library::visualize::Paint;
+
+    let val = match &stroke.dash {
+        Smart::Custom(Some(pattern)) => classify_dash(&pattern.array),
+        _ => "single",
+    };
+    let color = match &stroke.paint {
+        Smart::Custom(Paint::Solid(c)) => Some(props::color_to_hex(c)),
+        _ => None,
+    };
+    Underline { val, color }
+}
+
+/// Classifies a resolved dash array's "on" segments (the even indices; the odd
+/// ones are gaps) into the nearest Word underline style. The named Typst dash
+/// presets use a line-width "dot" for dotted lines and explicit lengths for
+/// dashes, so a dot-only pattern is `dotted`, a length-only one is `dash`, and a
+/// mix (dash-dotted) is `dotDash`.
+fn classify_dash(
+    array: &[typst_library::visualize::DashLength<Abs>],
+) -> &'static str {
+    use typst_library::visualize::DashLength;
+    if array.is_empty() {
+        return "single";
+    }
+    let mut has_dot = false;
+    let mut has_dash = false;
+    for on in array.iter().step_by(2) {
+        match on {
+            DashLength::LineWidth => has_dot = true,
+            DashLength::Length(_) => has_dash = true,
+        }
+    }
+    match (has_dot, has_dash) {
+        (true, true) => "dotDash",
+        (true, false) => "dotted",
+        _ => "dash",
     }
 }
 

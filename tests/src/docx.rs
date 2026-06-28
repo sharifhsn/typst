@@ -248,6 +248,30 @@ fn hide_becomes_hidden_text() {
 }
 
 #[test]
+fn styled_underline_carries_dash_and_color() {
+    // A plain underline stays a single, uncolored line; a styled one carries the
+    // dash pattern as `w:val` and the paint as `w:color`.
+    let p = parts(
+        "#underline[plain] \
+         #underline(stroke: red)[red] \
+         #underline(stroke: (dash: \"dotted\"))[dotted] \
+         #underline(stroke: (paint: blue, dash: \"dashed\"))[dash]",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<w:u w:val=\"single\"/>"), "a plain underline stays single");
+    assert!(
+        doc.contains("<w:u w:val=\"single\" w:color=\"FF4136\"/>"),
+        "a colored underline carries its paint as w:color"
+    );
+    assert!(doc.contains("<w:u w:val=\"dotted\"/>"), "a dotted dash maps to dotted");
+    assert!(
+        doc.contains("<w:u w:val=\"dash\" w:color=\"0074D9\"/>"),
+        "a dashed blue underline carries both val and color"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn pad_extracts_its_text_as_real_runs() {
     // The rasterize-vs-extract decision: a plain `#pad` body has no
     // layout-produced introspection, so it is extracted as real, indented text

@@ -108,8 +108,12 @@ impl RunProps {
             w.open(xml::W_SZCS).attr(xml::W_VAL, &sz.to_string()).empty();
         }
         // 11. u (canonical pos 27, before shd at 30)
-        if self.underline {
-            w.open(xml::W_U).attr(xml::W_VAL, "single").empty();
+        if let Some(u) = &self.underline {
+            w.open(xml::W_U).attr(xml::W_VAL, u.val);
+            if let Some(c) = u.color {
+                w.attr("w:color", &hex(c));
+            }
+            w.empty();
         }
         // 11b. vanish — hidden text (`#hide`).
         if self.vanish {
