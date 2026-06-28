@@ -40,47 +40,53 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
     // `before` of the next paragraph produced (G4c). A trailing `#v()` thus
     // collapses to nothing, matching Typst's own behaviour.
     let mut pending_v: i32 = 0;
+    // Whether the last paragraph-bearing child was a `ParElem` (vs. inline
+    // content). Used to tell two adjacent paragraphs apart from one paragraph
+    // that Typst split into `[par, inline-equation, par]`.
+    let mut last_was_par = false;
 
     for (child, styles) in children {
         if child.is::<ParbreakElem>() {
             let from = blocks.len();
             flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
             pending_v = apply_pending_v(&mut blocks, from, pending_v);
+            last_was_par = false;
             continue;
         }
         if let Some(par) = child.to_packed::<ParElem>() {
-            // Each `ParElem` is one paragraph. `ParbreakElem`s are consumed
-            // during realization (they never reach us), so consecutive
-            // paragraphs arrive as back-to-back `ParElem`s with no separator —
-            // we must flush between them rather than coalesce, otherwise every
-            // paragraph in the document would merge into one `<w:p>` (and the
-            // per-paragraph `w:jc`/spacing of all but the first would be lost).
-            // Inline formatting (strong/emph/…) stays *within* a single
-            // `ParElem` body thanks to the registered inline rules, so it never
-            // splits a paragraph here.
-            let from = blocks.len();
-            flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
-            pending_v = apply_pending_v(&mut blocks, from, pending_v);
-            // Whether the block immediately preceding this paragraph is also a
-            // paragraph. Typst's default `first-line-indent` (`all: false`)
-            // indents a paragraph only when it directly follows another one;
-            // Word's `w:firstLine` has no such rule, so we apply it here. This is
-            // checked *after* the flush so `blocks.last()` is the just-emitted
-            // previous paragraph rather than the one before it.
-            let prev_was_para = matches!(blocks.last(), Some(Block::Para(_)));
-            let mut props = ctx.resolve_par_props(par, *styles);
-            if prev_was_para
-                && props.ind.as_ref().and_then(|i| i.first_line).is_none()
-                && let Some(amount) = ctx.consecutive_first_line_indent(*styles)
-            {
-                props.ind.get_or_insert_with(Default::default).first_line = Some(amount);
+            // Consecutive `ParElem`s are separate paragraphs and must be flushed
+            // apart (`ParbreakElem`s are consumed during realization), otherwise
+            // the whole document would merge into one `<w:p>` and per-paragraph
+            // `w:jc`/spacing would be lost. BUT Typst splits a single paragraph
+            // that contains an inline equation into `[par, equation, par]`; that
+            // trailing `par` must *continue* the equation's paragraph, not start
+            // a new one. It continues when the previous content was inline (not
+            // another `par`) and there is buffered content to join.
+            let continues = !last_was_par && have_pending;
+            if !continues {
+                let from = blocks.len();
+                flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
+                pending_v = apply_pending_v(&mut blocks, from, pending_v);
+                // Typst's default `first-line-indent` (`all: false`) indents a
+                // paragraph only when it directly follows another; Word's
+                // `w:firstLine` has no such rule, so apply it here. Checked
+                // *after* the flush so `blocks.last()` is the previous paragraph.
+                let prev_was_para = matches!(blocks.last(), Some(Block::Para(_)));
+                let mut props = ctx.resolve_par_props(par, *styles);
+                if prev_was_para
+                    && props.ind.as_ref().and_then(|i| i.first_line).is_none()
+                    && let Some(amount) = ctx.consecutive_first_line_indent(*styles)
+                {
+                    props.ind.get_or_insert_with(Default::default).first_line = Some(amount);
+                }
+                pending_props = Some(props);
             }
-            pending_props = Some(props);
             inline_children(ctx, &par.body, *styles, &mut pending)?;
             have_pending = true;
+            last_was_par = true;
         } else if let Some(elem) = child.to_packed::<TagElem>() {
             // Introspection tag: record as a block-level tag (kept for the
-            // introspector). Does not break the current paragraph.
+            // introspector). Transparent — does not change paragraph structure.
             if !have_pending {
                 blocks.push(Block::Tag(elem.tag.clone()));
             } else {
@@ -97,14 +103,26 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
                 let twips = crate::props::abs_to_twip(rel.abs.resolve(*styles));
                 pending_v = (pending_v + twips).max(0);
             }
+            last_was_par = false;
+        } else if let Some(eq) = child.to_packed::<EquationElem>()
+            && !eq.block.get(*styles)
+        {
+            // An *inline* equation must stay in the current paragraph — otherwise
+            // it flushes the surrounding text and breaks the sentence onto
+            // separate lines. (Block equations fall through to `handle_block`.)
+            push_inline(ctx, child, *styles, &mut pending)?;
+            have_pending = true;
+            last_was_par = false;
         } else if is_inline(child) {
             push_inline(ctx, child, *styles, &mut pending)?;
             have_pending = true;
+            last_was_par = false;
         } else {
             let from = blocks.len();
             flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
             handle_block(ctx, child, *styles, &mut blocks)?;
             pending_v = apply_pending_v(&mut blocks, from, pending_v);
+            last_was_par = false;
         }
     }
     let from = blocks.len();

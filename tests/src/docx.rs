@@ -186,6 +186,23 @@ fn outline_bakes_entries_with_resolvable_bookmarks() {
 }
 
 #[test]
+fn inline_equation_stays_in_its_paragraph() {
+    // Typst splits a paragraph containing an inline equation into
+    // `[par, equation, par]`; the exporter must rejoin them, or the equation
+    // (and the text after it) breaks onto separate lines.
+    let p = parts("Before the equation $x^2 + y^2$ and text after it.");
+    let doc = &p["word/document.xml"];
+    let para = doc
+        .split("<w:p>")
+        .find(|p| p.contains("Before the equation"))
+        .expect("a paragraph with the text");
+    let para = &para[..para.find("</w:p>").unwrap()];
+    assert!(para.contains("m:oMath"), "the inline equation shares the text's paragraph");
+    assert!(para.contains("text after it"), "text after the equation stays in the paragraph");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn list_of_figures_bakes_caption_entries() {
     // `outline(target: figure.where(kind: image))` becomes a list of figures
     // that bakes one entry per captioned figure (matched by category), so it
