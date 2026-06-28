@@ -821,13 +821,28 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<LinkMarker>() {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
-        } else if let Some(elem) = child.to_packed::<typst_library::layout::BoxElem>()
-            && elem.body.get_cloned(styles).is_none()
-        {
-            // An empty `#box` (`#box(width: 1em)` spacer): nothing to render, so
-            // skip it silently rather than warning. A box *with* a body falls
-            // through to the rasterization fallback (it may carry a frame, fill,
-            // or block content — e.g. labeled equations — that must survive).
+        } else if let Some(elem) = child.to_packed::<typst_library::layout::BoxElem>() {
+            match elem.body.get_cloned(styles) {
+                // An empty `#box` (`#box(width: 1em)` spacer): nothing to render.
+                None => {}
+                Some(body) => {
+                    // Rasterize the box (this keeps a styled box's visual and, for
+                    // a box that lays out real content, its labels via the frame
+                    // tag harvest). If it lays out to *nothing* — a degenerate box
+                    // whose rasterization would otherwise be dropped — extract its
+                    // text so the content survives. Such a box has no laid-out
+                    // content and hence no labels to orphan, so plain extraction is
+                    // safe; we discard any partial tag harvest first to be sure.
+                    let mark = self.deferred_tags.len();
+                    match mappers::image::laid_out_fallback(child, styles, self)? {
+                        Some(run) => out.push(run),
+                        None => {
+                            self.deferred_tags.truncate(mark);
+                            out.extend(self.inline_runs(&body, styles, props.clone())?);
+                        }
+                    }
+                }
+            }
         } else if let Some(elem) = child.to_packed::<LinkElem>() {
             // In a run-only context (nested formatting, table/footnote bodies) we
             // cannot emit a `<w:hyperlink>` wrapper, so lower the link body to
