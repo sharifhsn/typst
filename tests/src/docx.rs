@@ -377,6 +377,30 @@ fn block_level_callout_flows_as_a_shaded_paragraph() {
 }
 
 #[test]
+fn footnote_in_a_box_never_lands_in_a_text_box() {
+    // Word forbids a footnote inside a text box (`wps:txbx`) — the file fails to
+    // open. A footnote-bearing framed container must stay in the main story: an
+    // inline box extracts frameless, a block callout flows as a shaded paragraph.
+    // Either way there must be NO text box, and the footnote body must be emitted.
+    let inline = parts("Tail #box(fill: aqua)[note#footnote[the note]] end.");
+    assert!(
+        !inline["word/document.xml"].contains("wps:txbx"),
+        "an inline box with a footnote must not become a text box"
+    );
+    assert!(inline.contains_key("word/footnotes.xml"), "and the footnote body is emitted");
+    assert_all_wellformed(&inline);
+
+    let block = parts("#rect(fill: green, inset: 6pt)[Callout with a #footnote[fn] here.]");
+    assert!(
+        !block["word/document.xml"].contains("wps:txbx"),
+        "a block callout with a footnote flows as a shaded paragraph, not a text box"
+    );
+    assert!(block["word/document.xml"].contains("<w:shd "), "with shading preserved");
+    assert!(block.contains_key("word/footnotes.xml"), "and the footnote body is emitted");
+    assert_all_wellformed(&block);
+}
+
+#[test]
 fn short_block_rect_stays_a_text_box() {
     // A short single-line framed container keeps the sized text-box look.
     let p = parts("#rect(fill: yellow, inset: 4pt)[Short label]");

@@ -277,6 +277,24 @@ pub(crate) fn body_extractable(body: &Content) -> bool {
     .is_continue()
 }
 
+/// Whether a body contains a footnote (or endnote). Word forbids footnotes
+/// inside a text box (`wps:txbx`) — a file with one fails to open — so a framed
+/// container whose body has a footnote must NOT become a text box; it is routed
+/// to the flowing main-story representation (a shaded paragraph) or, inline,
+/// extracted frameless, so the footnote stays in a legal position.
+pub(crate) fn body_has_footnote(body: &Content) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::model::FootnoteElem;
+    body.traverse(&mut |element: Content| {
+        if element.is::<FootnoteElem>() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
+}
+
 /// Whether an equation body carries a label *inside* it (a per-line label),
 /// whose location only exists once the equation is laid out per visual line.
 ///
@@ -685,9 +703,11 @@ fn handle_block_framed(
     }
 
     // Only flowing/block content benefits from a paragraph representation; a
-    // single inline line stays a (sized) text box.
+    // single inline line stays a (sized) text box — UNLESS the body has a
+    // footnote, which is illegal inside a text box, so it must take the
+    // main-story paragraph path here to keep both the frame and the footnote.
     let mut inner = ctx.blocks(&body, styles)?;
-    if !is_flowing(&inner) {
+    if !is_flowing(&inner) && !body_has_footnote(&body) {
         return Ok(false);
     }
 

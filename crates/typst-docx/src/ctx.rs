@@ -840,6 +840,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<LinkMarker>() {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
+        } else if let Some(body) = mappers::shape::framed_body(child, styles)
+            && crate::convert::body_has_footnote(&body)
+            && crate::convert::body_extractable(&body)
+        {
+            // A footnote is illegal inside a Word text box, so an inline framed
+            // container whose body has a footnote is extracted frameless — the
+            // text + footnote stay in the main story (the box outline is dropped,
+            // which Word has no inline equivalent for once the footnote rules it
+            // out of a text box).
+            out.extend(self.inline_runs(&body, styles, props.clone())?);
         } else if let Some(run) = mappers::shape::text_box(child, styles, self)? {
             // A framed container with text — `#box(fill|stroke)[..]`, `#rect[..]`,
             // `#square[..]` — becomes a Word *text box* holding the real, editable

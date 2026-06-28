@@ -87,6 +87,12 @@ pub fn text_box(
     if !crate::convert::body_extractable(&body) {
         return Ok(None);
     }
+    // A footnote is illegal inside a Word text box (the file fails to open), so a
+    // footnote-bearing body is not a text-box candidate; the caller keeps it in
+    // the main story instead (a shaded paragraph, or frameless inline extraction).
+    if crate::convert::body_has_footnote(&body) {
+        return Ok(None);
+    }
 
     // Size the frame from the laid-out container; bail to rasterization if it lays
     // out to nothing usable.
@@ -124,6 +130,23 @@ pub fn text_box(
             txbx: Some(TextBox { ins, blocks }),
         }),
     })))
+}
+
+/// The body of a `#box`/`#rect`/`#square`, or `None` for any other element (or a
+/// bodyless one). Used to decide framed-container handling without resolving the
+/// full frame.
+pub fn framed_body(child: &Content, styles: StyleChain) -> Option<Content> {
+    use typst_library::layout::BoxElem;
+    use typst_library::visualize::{RectElem, SquareElem};
+    if let Some(e) = child.to_packed::<BoxElem>() {
+        e.body.get_cloned(styles)
+    } else if let Some(e) = child.to_packed::<RectElem>() {
+        e.body.get_cloned(styles)
+    } else if let Some(e) = child.to_packed::<SquareElem>() {
+        e.body.get_cloned(styles)
+    } else {
+        None
+    }
 }
 
 /// The frame properties a `#box`/`#rect`/`#square` with a body contributes to a
