@@ -122,26 +122,25 @@ pub fn docx_document(
             let (sect, h, f) = build_section(&mut ctx, &first_geom, styles)?;
             (body, sect, h, f)
         } else {
-            // Build the header/footer parts ONCE, from the first section (which
-            // the single-section path already proves lowers cleanly), and share
-            // their references across every section. Per-section headers would
-            // re-lower content that may query page state we don't have (e.g.
-            // `here().page-numbering()` returning `none`) — a *delayed* error
-            // that would be promoted to fatal. Each section still gets its own
-            // page geometry; only the header/footer content is shared.
-            let (first_sect, header_parts, footer_parts) =
-                build_section(&mut ctx, &first_geom, styles)?;
-
+            // Each section builds its OWN header/footer parts (a landscape
+            // appendix may carry a different running head). Per-section header
+            // content can re-lower code that queries page state we don't have
+            // (`here().page-numbering()` → `none`) — but that is now a *delayed*
+            // error absorbed by the conversion-sink isolation above, so it no
+            // longer fails the export. A hard error still falls back to a
+            // geometry-only sectPr for that section.
+            let mut header_parts = Vec::new();
+            let mut footer_parts = Vec::new();
             let mut body = Vec::new();
             let mut final_sect = None;
             let last = sections.len() - 1;
             for (idx, (geom, range)) in sections.iter().enumerate() {
                 let mut blocks = crate::convert::run(&mut ctx, &pairs[range.clone()])?;
                 body.append(&mut blocks);
-                let mut s = sectpr_geometry(geom);
-                s.headers = first_sect.headers.clone();
-                s.footers = first_sect.footers.clone();
-                s.pg_num = first_sect.pg_num.clone();
+                let (s, mut h, mut f) = build_section(&mut ctx, geom, styles)
+                    .unwrap_or_else(|_| (sectpr_geometry(geom), Vec::new(), Vec::new()));
+                header_parts.append(&mut h);
+                footer_parts.append(&mut f);
                 if idx == last {
                     final_sect = Some(s);
                 } else {
