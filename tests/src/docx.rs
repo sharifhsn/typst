@@ -237,6 +237,28 @@ fn outline_falls_back_to_introspected_headings() {
 }
 
 #[test]
+fn decorative_shape_becomes_a_vector_drawing() {
+    // A `#rect`/`#circle`/… with an explicit size and no body maps to a vector
+    // DrawingML shape (`wps:wsp`), not a rasterized image.
+    let p = parts("#rect(width: 2cm, height: 1cm, fill: blue, stroke: 1pt + red)");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("wps:wsp"), "the rect is a vector shape");
+    assert!(doc.contains("prst=\"rect\""), "with rectangle preset geometry");
+    assert!(!doc.contains("a:blip"), "and is not an embedded raster image");
+    assert!(doc.contains("0000FF"), "the solid fill colour is carried");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn polygon_becomes_a_custom_geometry_shape() {
+    let p = parts("#polygon((0pt, 0pt), (2cm, 0pt), (1cm, 1cm), fill: green)");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("a:custGeom"), "a polygon uses a custom path geometry");
+    assert!(doc.contains("a:close"), "the polygon path is closed");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn term_list_merges_term_and_definition() {
     // Typst renders "**term** definition" inline with a hanging indent, not the
     // term on its own line.

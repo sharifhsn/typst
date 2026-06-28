@@ -311,6 +311,33 @@ pub struct Drawing {
     /// `None` = inline (`<wp:inline>`); `Some` = floating (`<wp:anchor>`).
     /// Defaults to `None` so every existing inline image is byte-identical.
     pub anchor: Option<Anchor>,
+    /// `None` = a raster picture (`pic:pic`, uses `rel`); `Some` = a vector
+    /// DrawingML shape (`wps:wsp`, ignores `rel`).
+    pub shape: Option<ShapeSpec>,
+}
+
+/// A vector DrawingML shape (a `#rect`/`#circle`/`#polygon`/… mapped to a Word
+/// `wps:wsp` instead of a rasterized image).
+pub struct ShapeSpec {
+    pub geom: ShapeGeom,
+    /// Solid fill colour, or `None` for no fill.
+    pub fill: Option<[u8; 3]>,
+    pub stroke: Option<ShapeStroke>,
+}
+
+/// A shape's geometry. Coordinates for [`ShapeGeom::Path`] are in EMU within the
+/// shape's bounding box.
+pub enum ShapeGeom {
+    Rect,
+    RoundRect,
+    Ellipse,
+    /// A path: the points, and whether it is closed (a polygon) or open (a line).
+    Path { points: Vec<(i64, i64)>, closed: bool },
+}
+
+pub struct ShapeStroke {
+    pub color: [u8; 3],
+    pub w_emu: i64,
 }
 
 /// Floating-image placement (`<wp:anchor>`): positionH/V + wrap.

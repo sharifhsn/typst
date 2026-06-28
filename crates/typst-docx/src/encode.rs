@@ -7,8 +7,8 @@ use typst_library::model::DocumentInfo;
 
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, Drawing, DocxDocument,
-    Field, Footnote, HdrFtrPart, Para, ParaChild, Row, Run, SectPr, SectType, Tbl, Toc, VAlign,
-    VMerge,
+    Field, Footnote, HdrFtrPart, Para, ParaChild, Row, Run, SectPr, SectType, ShapeGeom,
+    ShapeSpec, Tbl, Toc, VAlign, VMerge,
 };
 use crate::package::{Package, RelMode, Rels};
 use crate::styles_part;
@@ -530,6 +530,10 @@ fn write_anchor_pos(w: &mut XmlWriter, name: &'static str, pos: &AnchorPos) {
 /// Emits the shared `<a:graphic>`/`<pic:pic>` payload (identical for inline and
 /// anchored drawings).
 fn write_pic_payload(w: &mut XmlWriter, d: &Drawing) {
+    if let Some(shape) = &d.shape {
+        write_shape_payload(w, d, shape);
+        return;
+    }
     w.open("a:graphic")
         .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
         .start_children();
@@ -569,6 +573,103 @@ fn write_pic_payload(w: &mut XmlWriter, d: &Drawing) {
     w.close(); // a:prstGeom
     w.close(); // pic:spPr
     w.close(); // pic:pic
+    w.close(); // a:graphicData
+    w.close(); // a:graphic
+}
+
+/// Emits a vector DrawingML shape (`wps:wsp`) payload in place of `pic:pic`.
+fn write_shape_payload(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec) {
+    const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    const WPS: &str =
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
+    let hex = |c: [u8; 3]| format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
+
+    w.open("a:graphic").attr("xmlns:a", A).start_children();
+    w.open("a:graphicData").attr("uri", WPS).start_children();
+    w.open("wps:wsp").attr("xmlns:wps", WPS).start_children();
+    w.open("wps:cNvSpPr").empty();
+    w.open("wps:spPr").start_children();
+
+    w.open("a:xfrm").start_children();
+    w.open("a:off").attr("x", "0").attr("y", "0").empty();
+    w.open("a:ext")
+        .attr("cx", &d.w_emu.to_string())
+        .attr("cy", &d.h_emu.to_string())
+        .empty();
+    w.close(); // a:xfrm
+
+    match &shape.geom {
+        ShapeGeom::Rect | ShapeGeom::RoundRect | ShapeGeom::Ellipse => {
+            let prst = match shape.geom {
+                ShapeGeom::RoundRect => "roundRect",
+                ShapeGeom::Ellipse => "ellipse",
+                _ => "rect",
+            };
+            w.open("a:prstGeom").attr("prst", prst).start_children();
+            w.open("a:avLst").empty();
+            w.close();
+        }
+        ShapeGeom::Path { points, closed } => {
+            let (cx, cy) = (d.w_emu.to_string(), d.h_emu.to_string());
+            w.open("a:custGeom").start_children();
+            for empty in ["a:avLst", "a:gdLst", "a:ahLst", "a:cxnLst"] {
+                w.open(empty).empty();
+            }
+            w.open("a:rect")
+                .attr("l", "0")
+                .attr("t", "0")
+                .attr("r", &cx)
+                .attr("b", &cy)
+                .empty();
+            w.open("a:pathLst").start_children();
+            w.open("a:path").attr("w", &cx).attr("h", &cy).start_children();
+            if let Some((x0, y0)) = points.first() {
+                w.open("a:moveTo").start_children();
+                w.open("a:pt").attr("x", &x0.to_string()).attr("y", &y0.to_string()).empty();
+                w.close();
+                for (x, y) in &points[1..] {
+                    w.open("a:lnTo").start_children();
+                    w.open("a:pt").attr("x", &x.to_string()).attr("y", &y.to_string()).empty();
+                    w.close();
+                }
+                if *closed {
+                    w.open("a:close").empty();
+                }
+            }
+            w.close(); // a:path
+            w.close(); // a:pathLst
+            w.close(); // a:custGeom
+        }
+    }
+
+    match shape.fill {
+        Some(c) => {
+            w.open("a:solidFill").start_children();
+            w.open("a:srgbClr").attr("val", &hex(c)).empty();
+            w.close();
+        }
+        None => {
+            w.open("a:noFill").empty();
+        }
+    }
+    match &shape.stroke {
+        Some(s) => {
+            w.open("a:ln").attr("w", &s.w_emu.to_string()).start_children();
+            w.open("a:solidFill").start_children();
+            w.open("a:srgbClr").attr("val", &hex(s.color)).empty();
+            w.close();
+            w.close(); // a:ln
+        }
+        None => {
+            w.open("a:ln").start_children();
+            w.open("a:noFill").empty();
+            w.close();
+        }
+    }
+
+    w.close(); // wps:spPr
+    w.open("wps:bodyPr").empty();
+    w.close(); // wps:wsp
     w.close(); // a:graphicData
     w.close(); // a:graphic
 }

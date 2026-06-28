@@ -606,11 +606,3 @@ fn is_dotted(
 ) -> bool {
     matches!(pattern.array.first(), Some(len) if len.to_pt() <= 1.0)
 }
-
-/// Ensures a paragraph is non-empty (used where Word requires content).
-pub fn empty_para() -> Para {
-    Para { props: Default::default(), content: vec![ParaChild::Run(Run::Text {
-        props: RunProps::default(),
-        text: "".into(),
-    })] }
-}

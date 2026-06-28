@@ -848,6 +848,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // cannot emit a `<w:hyperlink>` wrapper, so lower the link body to
             // runs. Paragraph-level links go through `link_children` instead.
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
+        } else if let Some(run) = mappers::shape::shape(child, styles, self)? {
+            // A decorative vector shape (`#rect`/`#circle`/`#polygon`/…) maps to a
+            // DrawingML `wps:wsp` shape instead of a rasterized image.
+            out.push(run);
         } else {
             // No idiomatic representation (a drawn shape, an SVG/PDF image, an
             // externally-rendered figure, …): rasterize it and embed as an image

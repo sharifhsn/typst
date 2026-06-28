@@ -9,4 +9,5 @@ pub mod list;
 pub mod math;
 pub mod outline;
 pub mod reference;
+pub mod shape;
 pub mod table;
