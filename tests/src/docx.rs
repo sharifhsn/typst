@@ -237,6 +237,17 @@ fn outline_falls_back_to_introspected_headings() {
 }
 
 #[test]
+fn hide_becomes_hidden_text() {
+    // `#hide` content → `<w:vanish/>`: invisible in the page but present in the
+    // document (searchable / screen-reader-readable), rather than dropped.
+    let p = parts("Shown #hide[a secret] and more.");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("w:vanish"), "#hide content becomes hidden text");
+    assert!(doc.contains("a secret"), "the hidden text is preserved");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn pad_extracts_its_text_as_real_runs() {
     // The rasterize-vs-extract decision: a plain `#pad` body has no
     // layout-produced introspection, so it is extracted as real, indented text

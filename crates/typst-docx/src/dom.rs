@@ -174,6 +174,8 @@ pub struct RunProps {
     pub size_half_pt: Option<u32>,
     pub shd_fill: Option<[u8; 3]>,
     pub underline: bool,
+    /// `<w:vanish/>` — hidden text (`#hide`). Default false.
+    pub vanish: bool,
     pub vert_align: Option<VertAlign>,
     /// `<w:rtl/>` (run reading order is RTL). `text(dir: rtl)`. Default false.
     pub rtl: bool,

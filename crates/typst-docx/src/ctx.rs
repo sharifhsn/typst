@@ -849,6 +849,15 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                     }
                 }
             }
+        } else if let Some(elem) = child.to_packed::<typst_library::layout::HideElem>() {
+            // `#hide[..]` → hidden text (`<w:vanish/>`): invisible but present
+            // (searchable, screen-reader-readable), instead of dropped. Extract
+            // when the body has no layout-bound introspection; otherwise drop it
+            // (it is invisible anyway, so rasterizing would be pointless).
+            if crate::convert::body_extractable(&elem.body) {
+                let hidden = RunProps { vanish: true, ..props.clone() };
+                out.extend(self.inline_runs(&elem.body, styles, hidden)?);
+            }
         } else if let Some(elem) = child.to_packed::<LinkElem>() {
             // In a run-only context (nested formatting, table/footnote bodies) we
             // cannot emit a `<w:hyperlink>` wrapper, so lower the link body to

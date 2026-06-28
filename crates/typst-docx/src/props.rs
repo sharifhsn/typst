@@ -111,6 +111,10 @@ impl RunProps {
         if self.underline {
             w.open(xml::W_U).attr(xml::W_VAL, "single").empty();
         }
+        // 11b. vanish — hidden text (`#hide`).
+        if self.vanish {
+            w.open("w:vanish").empty();
+        }
         // 12. shd
         if let Some(fill) = self.shd_fill {
             w.open(xml::W_SHD)
