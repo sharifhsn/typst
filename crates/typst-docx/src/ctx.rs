@@ -721,6 +721,27 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 let (_id, name) = self.add_bookmark(elem.loc);
                 let runs = self.inline_runs(&elem.body, child_styles, props.clone())?;
                 out.push(ParaChild::Hyperlink { rel: None, anchor: Some(name), runs });
+            } else if let Some((fbody, fill, bdr)) =
+                mappers::shape::inline_frame(child, child_styles)
+                && (fill.is_some() || bdr.is_some())
+                && crate::convert::body_extractable(&fbody)
+            {
+                // An inline framed container (`#box(fill|stroke)[..]`) at the
+                // paragraph-child level: recurse through `inline_pchildren` (not
+                // `inline_runs`) so a link inside keeps its `<w:hyperlink>` wrapper.
+                // The box's shading + border is threaded onto every run — including
+                // the link's — and adjacent identical run borders merge into one
+                // visual box. (The run-level `handle_inline` path can only emit
+                // runs, so it still flattens links there; that path is only hit in
+                // nested run-only contexts where a hyperlink can't appear anyway.)
+                let mut p = props.clone();
+                if let Some(f) = fill {
+                    p.shd_fill.get_or_insert(f);
+                }
+                if let Some(b) = bdr {
+                    p.bdr.get_or_insert(b);
+                }
+                out.extend(self.inline_pchildren(&fbody, child_styles, p)?);
             } else {
                 let mut runs = Vec::new();
                 self.handle_inline(child, child_styles, &props, &mut runs)?;

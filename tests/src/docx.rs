@@ -333,14 +333,20 @@ fn inline_styled_box_becomes_boxed_inline_text() {
     // displaced empty frame), so it must not be used here.
     let p = parts(
         "Tail #box(fill: luma(230), stroke: 1pt + blue, inset: 6pt)\
-         [a framed callout] end.",
+         [a framed #link(\"https://typst.app\")[link]] end.",
     );
     let doc = &p["word/document.xml"];
     assert!(doc.contains("<w:bdr"), "the box stroke becomes a run border");
     assert!(doc.contains("<w:shd "), "the box fill becomes run shading");
-    assert!(doc.contains("a framed callout"), "the text is real and inline");
+    assert!(doc.contains("a framed"), "the text is real and inline");
     assert!(!doc.contains("wps:txbx"), "and NOT an ill-flowing inline text box");
     assert!(!p.keys().any(|k| k.starts_with("word/media/")), "nor a raster");
+    // A link inside the inline box stays clickable, with the box styling on its
+    // run (the <w:hyperlink> wrapper survives at the paragraph-child level).
+    assert!(doc.contains("<w:hyperlink"), "a link inside the box stays clickable");
+    let hl = &doc[doc.find("<w:hyperlink").unwrap()..];
+    let hl = &hl[..hl.find("</w:hyperlink>").unwrap()];
+    assert!(hl.contains("<w:bdr") && hl.contains("<w:shd "), "with the box's shading + border");
     assert_all_wellformed(&p);
 }
 
