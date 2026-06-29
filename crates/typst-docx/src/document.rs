@@ -114,6 +114,10 @@ pub fn docx_document(
                 ctx.raster_width =
                     typst_library::layout::Abs::pt(content_twip as f64 / 20.0);
             }
+            if first_geom.page_h > 0 {
+                ctx.raster_height =
+                    typst_library::layout::Abs::pt(first_geom.page_h as f64 / 20.0);
+            }
 
         // Build the body and the (final) section properties. A single-section
         // document converts all `pairs` at once (unchanged behaviour, so leading

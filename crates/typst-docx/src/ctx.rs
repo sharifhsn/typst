@@ -102,6 +102,14 @@ pub struct DocxCtx<'a, 'e> {
     /// geometry in [`crate::document::docx_document`].
     pub(crate) raster_width: Abs,
 
+    /// The finite page height, used only as a *retry* bound when rasterizing
+    /// content that does not lay out under an infinite-height region — page-
+    /// relative content such as a `place(bottom, ..)` cover, a slide, or a
+    /// full-page background image, which resolves against the page height and
+    /// otherwise collapses or runs to infinity. Normal content lays out under
+    /// the infinite region first and never hits this. Set from the page geometry.
+    pub(crate) raster_height: Abs,
+
     /// Smart-quote state, threaded through inline runs.
     quoter: SmartQuoter,
     /// The last character emitted into a text run, for smart quoting.
@@ -152,6 +160,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // A sane finite default (~A4 text width); overridden from the real
             // page geometry by `docx_document` before any conversion happens.
             raster_width: Abs::pt(450.0),
+            raster_height: Abs::pt(842.0),
             quoter: SmartQuoter::new(),
             last_char: None,
             in_footnote: false,
@@ -196,15 +205,15 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         content: &Content,
         styles: StyleChain,
         span: Span,
+        height: typst_library::layout::Abs,
     ) -> SourceResult<Option<typst_library::layout::Frame>> {
         use comemo::Track;
         use typst_library::foundations::{Target, TargetElem};
-        use typst_library::layout::{Abs, Axes, Region, Size};
+        use typst_library::layout::{Axes, Region, Size};
 
         let target = TargetElem::target.set(Target::Paged).wrap();
         let styles = styles.chain(&target);
-        let region =
-            Region::new(Size::new(self.raster_width, Abs::inf()), Axes::splat(false));
+        let region = Region::new(Size::new(self.raster_width, height), Axes::splat(false));
         let loc = self.locator.next(&span);
         let layout_frame = self.engine.library.routines.layout_frame;
 
@@ -263,9 +272,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         use typst_library::foundations::Smart;
         use typst_library::layout::{Abs, Sides};
 
-        let Some(frame) = self.layout_export_frame(content, styles, span)? else {
-            return Ok(None);
-        };
+        // First lay out in an infinite-height region (so a tall figure is captured
+        // whole, not page-clipped).
+        let inf_frame = self.layout_export_frame(content, styles, span, Abs::inf())?;
 
         // Harvest introspection tags from the laid-out frame so that labels and
         // references on elements inside the rasterized content stay resolvable
@@ -277,15 +286,27 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         // stabilized — on the first iteration it renders empty, collapsing the
         // box. If we dropped such a frame without harvesting, its tags would
         // never reach the introspector, the element would never stabilize, and
-        // the box would stay zero forever: a convergence deadlock. Harvesting the
-        // tags here lets the next iteration render the element with real content
-        // (and real size).
-        collect_frame_tags(&frame, &mut self.deferred_tags);
-
-        let size = frame.size();
-        if !usable_size(size) {
-            return Ok(None);
+        // the box would stay zero forever: a convergence deadlock. We harvest from
+        // the infinite frame (it always holds the laid-out content, even when its
+        // *size* is infinite); the page-height retry below is render-only, so tags
+        // are collected exactly once.
+        if let Some(f) = &inf_frame {
+            collect_frame_tags(f, &mut self.deferred_tags);
         }
+
+        // Use the infinite frame when it has a usable size. Otherwise — page-
+        // relative content such as a `place(bottom, ..)` cover, a slide, or a
+        // full-page background collapses or runs to infinity under an unbounded
+        // height — retry bounded by the real page height, which lets such content
+        // resolve and rasterize instead of being dropped.
+        let frame = match inf_frame {
+            Some(frame) if usable_size(frame.size()) => frame,
+            _ => match self.layout_export_frame(content, styles, span, self.raster_height)? {
+                Some(frame) if usable_size(frame.size()) => frame,
+                _ => return Ok(None),
+            },
+        };
+        let size = frame.size();
 
         // Render to a pixmap at 2× for crispness, then PNG-encode.
         let page = typst_layout::Page {
@@ -324,7 +345,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
         span: Span,
     ) -> SourceResult<Option<typst_library::layout::Size>> {
-        let Some(frame) = self.layout_export_frame(content, styles, span)? else {
+        use typst_library::layout::Abs;
+        let Some(frame) = self.layout_export_frame(content, styles, span, Abs::inf())? else {
             return Ok(None);
         };
         let size = frame.size();
