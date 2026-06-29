@@ -4,7 +4,7 @@ use smallvec::smallvec;
 use typst_library::diag::{At, SourceResult, bail};
 use typst_library::foundations::{
     Content, Context, NativeElement, NativeRuleMap, Packed, Resolve, ShowFn, Smart,
-    StyleChain, Synthesize, Target, dict,
+    StyleChain, Synthesize, Target, TargetElem, dict,
 };
 use typst_library::introspection::{Counter, Locator, LocatorLink};
 use typst_library::layout::{
@@ -550,7 +550,18 @@ const BIBLIOGRAPHY_RULE: ShowFn<BibliographyElem> = |elem, engine, styles| {
     let works = Works::generate(engine, elem.span())?;
     let bibliography = works.bibliography(loc, span)?;
 
-    if bibliography.entries.iter().any(|entry| entry.prefix.is_some()) {
+    // The Pandoc target has no native two-column grid node and rasterizes any
+    // grid wholesale — which would turn the reference list into one opaque image
+    // and, fatally, drop the per-entry backlink anchors that in-text citations
+    // resolve to (`ref-<location>`), leaving every cite Link dangling. So for
+    // Pandoc we always take the linear-block path (even for numbered styles whose
+    // `prefix` would normally build a grid), prepending the `[1]` marker inline
+    // and locating each entry's body with its backlink. This keeps the reference
+    // list selectable text and the cite anchors live. `Works::generate` above is
+    // unchanged, so citation lookup / convergence is unaffected.
+    let pandoc = styles.get(TargetElem::target) == Target::Pandoc;
+
+    if !pandoc && bibliography.entries.iter().any(|entry| entry.prefix.is_some()) {
         let row_gutter = styles.get(ParElem::spacing);
 
         let mut cells = vec![];
@@ -583,8 +594,20 @@ const BIBLIOGRAPHY_RULE: ShowFn<BibliographyElem> = |elem, engine, styles| {
     } else {
         let mut body = vec![];
         for entry in &bibliography.entries {
-            let realized =
-                PdfMarkerTag::BibEntry(entry.body.clone().located(entry.backlink));
+            // For Pandoc, a numbered/prefixed style (`[1]`, `[Smith 2020]`)
+            // lands here too (the grid path is skipped above). Prepend the
+            // prefix marker inline so the reference reads `[1] Author, …`. The
+            // whole entry is wrapped in a single `BibEntry` located with the
+            // backlink so the converter can read the anchor off it.
+            let inner = match entry.prefix.clone() {
+                Some(prefix) => {
+                    PdfMarkerTag::ListItemLabel(prefix)
+                        + HElem::new(Em::new(0.65).into()).pack()
+                        + entry.body.clone()
+                }
+                None => entry.body.clone(),
+            };
+            let realized = PdfMarkerTag::BibEntry(inner.located(entry.backlink));
             let block = if bibliography.hanging_indent {
                 let body = HElem::new((-INDENT).into()).pack() + realized;
                 let inset = Sides::default()

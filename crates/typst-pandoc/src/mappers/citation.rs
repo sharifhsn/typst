@@ -25,27 +25,106 @@
 //!   gives the best of both: valid+readable output today, and re-resolvable
 //!   citations for consumers that run citeproc.
 //!
-//! ARCHITECTURE NOTE (why this mapper is mostly latent today): the Pandoc target
-//! registers `REF_RULE` + `CITE_GROUP_RULE` in `typst-layout/src/rules.rs`, so a
-//! `RefElem` cite is realized into a `CiteGroup` and rendered by hayagriva
-//! *before* it reaches this mapper — what actually arrives at `handle_inline` is
-//! the already-formatted citation text (and a `DirectLinkElem`→`LinkElem` for
-//! cross-refs). To route the *raw* `RefElem` here (and thereby emit structured
-//! `Cite`), the integrator must NOT register `REF_RULE`/`CITE_GROUP_RULE` for
-//! `Target::Pandoc` (handle them natively here, as DOCX does for the ref/field
-//! split). This mapper is written to be correct either way: when it *is* reached
-//! with a raw `RefElem`, it produces the structured `Cite` + fallback; the
-//! fallback is built by realizing the ref ourselves (mirroring DOCX), so it stays
-//! valid even under the current (rules-registered) configuration where the arm is
-//! seldom hit. See the return notes / `synth-bib-notes.md` for the `.bib` story.
+//! ARCHITECTURE NOTE (the direction actually shipped — SELF-CONTAINED). The
+//! Pandoc target KEEPS `REF_RULE` + `CITE_GROUP_RULE` + `BIBLIOGRAPHY_RULE`
+//! registered in `typst-layout/src/rules.rs`. They are load-bearing for
+//! convergence: `Works::generate` (inside `BIBLIOGRAPHY_RULE`) builds the table
+//! every in-text citation looks up — un-registering them deadlocks the
+//! introspection loop ("citation could not be located"). As a consequence a cite
+//! is realized into formatted hayagriva text (with a `DirectLinkElem`→`LinkElem`
+//! to the bib entry's well-known backlink `Location`) *before* it reaches this
+//! mapper, so the raw-`RefElem` arm below ([`reference`]) is seldom hit for bib
+//! cites — the in-text cite is just linked text that the generic walk already
+//! emits as a `Link` to `#ref-<hash(location)>`.
+//!
+//! The two original defects were both downstream of the BIBLIOGRAPHY: it
+//! rendered to a `GridElem`/layouter block with no Pandoc node, so the whole
+//! reference list fell to the rasterize fallback — one opaque `Image`. That (a)
+//! made the references un-selectable and (b) destroyed the per-entry backlink
+//! anchors, so every in-text cite `Link` dangled. The fix, entirely on the
+//! rendered-bib side, is [`marker_tag`] (below): it lowers the bibliography's
+//! `PdfMarkerTag` structure to anchored, selectable `Div`/`Para` blocks — each
+//! `BibEntry` carrying its backlink as `id = ref-<hash>` so the cite Links
+//! resolve. `BIBLIOGRAPHY_RULE` is additionally tweaked for `Target::Pandoc` to
+//! always take the linear-block path (never the rasterizing grid) so numbered
+//! styles work too. A final global pass ([`crate::convert::run`]'s
+//! `prune_dangling_links`) demotes any internal link with no matching anchor to
+//! bare text — the belt-and-suspenders guarantee that no cite ever dangles
+//! (notably the bib entry's `[1]`-marker back-link to the un-anchored cite site).
+//!
+//! STRUCTURED `Cite` + synthesized `.bib` (the target goal) is NOT shipped — see
+//! `finish-cite.md`: the pinned hayagriva 0.10.1 exposes no BibLaTeX/CSL-JSON
+//! serializer (only a hayagriva-YAML writer pandoc rejects), and emitting
+//! structured `Cite` nodes needs a cite-key↔`Location` map that is private to
+//! `typst-library`. The [`reference`] arm below already builds a structured
+//! `Inline::Cite` with a baked fallback should a raw `RefElem` ever reach it, so
+//! the structured path is half-wired and forward-compatible.
 
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Packed, StyleChain};
 use typst_library::introspection::Location;
 use typst_library::model::{CitationForm, RefElem, RefForm};
+use typst_library::pdf::{PdfMarkerTag, PdfMarkerTagKind};
 
-use crate::ast::{empty_attr, Citation, CitationMode, Inline};
+use crate::ast::{empty_attr, id_attr, Attr, Block, Citation, CitationMode, Inline};
 use crate::ctx::PandocCtx;
+
+/// Lowers a [`PdfMarkerTag`] — the structural marker that wraps bibliography,
+/// list, and term content during realization — into Pandoc blocks.
+///
+/// The convergence-critical case is the bibliography. `BIBLIOGRAPHY_RULE`
+/// (registered for `Target::Pandoc`, see `typst-layout/src/rules.rs`) renders the
+/// reference list *eagerly* via citeproc — that is what builds the `Works` table
+/// in-text citations look up, so it cannot be un-registered without deadlocking
+/// convergence. The rule wraps the list in `Bibliography(_)` and each entry in a
+/// `BibEntry` whose body is `located(entry.backlink)` — the very `Location` an
+/// in-text cite `Link` points at (`#ref-<hash(location)>`). The generic walk has
+/// no idea what a `PdfMarkerTag` is, so without this mapper it falls through to
+/// the rasterize fallback: the whole reference list becomes one opaque `Image`,
+/// the backlink anchors vanish, and every cite Link dangles. Here we instead:
+///
+/// - `Bibliography(_)` → a `Div` with `id = "refs"` + class `references` (the
+///   pandoc-citeproc convention, so `--citeproc` slots a regenerated list in the
+///   same place) wrapping the recursively-converted entries — selectable text.
+/// - `BibEntry` → the entry body converted to blocks, with the backlink
+///   `Location` lowered to `id = ref-<hash>` (via [`PandocCtx::anchor_id`]) on the
+///   block, so the matching in-text cite `Link` resolves to a real anchor.
+/// - `ListItemLabel` (the `[1]` marker on a numbered style) and any other marker
+///   → the body converted transparently (the marker reads as plain text).
+pub fn marker_tag(
+    elem: &Packed<PdfMarkerTag>,
+    styles: StyleChain,
+    ctx: &mut PandocCtx,
+) -> SourceResult<Vec<Block>> {
+    match &elem.kind {
+        PdfMarkerTagKind::Bibliography(_) => {
+            let inner = crate::convert::blocks(ctx, &elem.body, styles)?;
+            // The pandoc-citeproc reference-list container: a `Div` with id
+            // `refs` and class `references`. Readable without citeproc (it holds
+            // the rendered entries); with `--citeproc` pandoc regenerates the
+            // list into this same div.
+            let attr: Attr =
+                ("refs".to_string(), vec!["references".to_string()], Vec::new());
+            Ok(vec![Block::Div(attr, inner)])
+        }
+        PdfMarkerTagKind::BibEntry => {
+            let inner = crate::convert::blocks(ctx, &elem.body, styles)?;
+            // The backlink `Location` lives on the entry body. `anchor_id` yields
+            // the exact `ref-<hash>` form the in-text cite Links target, so we use
+            // it verbatim as the entry's `id` — making the anchor resolve.
+            match elem.body.location() {
+                Some(loc) => {
+                    let id = ctx.anchor_id(loc).to_string();
+                    Ok(vec![Block::Div(id_attr(id), inner)])
+                }
+                // No backlink (shouldn't happen for a real entry): emit as-is.
+                None => Ok(inner),
+            }
+        }
+        // Any other marker (list/term labels & bodies): transparent passthrough.
+        _ => crate::convert::blocks(ctx, &elem.body, styles),
+    }
+}
 
 /// Lowers a [`RefElem`] into inline nodes.
 pub fn reference(

@@ -22,6 +22,7 @@ use typst_library::text::{
     SpaceElem, StrikeElem, SubElem, SuperElem, TextElem, UnderlineElem,
 };
 use typst_library::model::FootnoteElem;
+use typst_library::pdf::PdfMarkerTag;
 use typst_library::visualize::ImageElem;
 use typst_library::routines::{Arenas, FragmentKind, Pair, RealizationKind};
 
@@ -31,7 +32,232 @@ use crate::mappers;
 
 /// Lowers the top-level realized children into the document body blocks.
 pub fn run(ctx: &mut PandocCtx, children: &[Pair]) -> SourceResult<Vec<Block>> {
-    convert_children(ctx, children)
+    let mut blocks = convert_children(ctx, children)?;
+    prune_dangling_links(&mut blocks);
+    Ok(blocks)
+}
+
+/// Removes the `Link` wrapper from any internal (`#anchor`) link whose target
+/// anchor does not exist anywhere in the document, replacing the `Link` with its
+/// bare body inlines (the text is always kept; only the dead jump is dropped).
+///
+/// This is the single invariant that guarantees **no internal link ever
+/// dangles** — load-bearing for citations. Typst emits some `Destination::
+/// Location` jumps that have no representable anchor in the Pandoc AST:
+/// - a bibliography entry's `[1]` prefix back-links to the *citation site*
+///   (`links_to_citations`), but an in-text citation is plain realized text with
+///   no anchor of its own;
+/// - a `#link(<lbl>)` / `@ref` to a target that rasterized away (its anchor lives
+///   only inside the image) or to a page-positioned location.
+///
+/// Rather than special-casing each producer, we resolve the id namespace once,
+/// globally, after the whole tree is built — exactly the set a reader would see —
+/// and demote every internal link that points outside it. External (`http(s)://`,
+/// `mailto:`, …) links and resolved internal links are untouched.
+fn prune_dangling_links(blocks: &mut [Block]) {
+    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for b in blocks.iter() {
+        collect_ids_block(b, &mut ids);
+    }
+    for b in blocks.iter_mut() {
+        prune_block(b, &ids);
+    }
+}
+
+/// Collects every `Attr` identifier reachable in a block (the anchor namespace).
+fn collect_ids_block(block: &Block, ids: &mut std::collections::HashSet<String>) {
+    let push = |attr: &crate::ast::Attr, ids: &mut std::collections::HashSet<String>| {
+        if !attr.0.is_empty() {
+            ids.insert(attr.0.clone());
+        }
+    };
+    match block {
+        Block::Plain(inl) | Block::Para(inl) => {
+            for i in inl {
+                collect_ids_inline(i, ids);
+            }
+        }
+        Block::Header(_, attr, inl) => {
+            push(attr, ids);
+            for i in inl {
+                collect_ids_inline(i, ids);
+            }
+        }
+        Block::Div(attr, bs) => {
+            push(attr, ids);
+            for b in bs {
+                collect_ids_block(b, ids);
+            }
+        }
+        Block::CodeBlock(attr, _) => push(attr, ids),
+        Block::BlockQuote(bs) => {
+            for b in bs {
+                collect_ids_block(b, ids);
+            }
+        }
+        Block::BulletList(items) | Block::OrderedList(_, items) => {
+            for item in items {
+                for b in item {
+                    collect_ids_block(b, ids);
+                }
+            }
+        }
+        Block::DefinitionList(items) => {
+            for (term, defs) in items {
+                for i in term {
+                    collect_ids_inline(i, ids);
+                }
+                for def in defs {
+                    for b in def {
+                        collect_ids_block(b, ids);
+                    }
+                }
+            }
+        }
+        Block::Figure(attr, cap, bs) => {
+            push(attr, ids);
+            for b in &cap.1 {
+                collect_ids_block(b, ids);
+            }
+            for b in bs {
+                collect_ids_block(b, ids);
+            }
+        }
+        Block::Table(attr, ..) => push(attr, ids),
+        Block::HorizontalRule | Block::RawBlock(..) => {}
+    }
+}
+
+/// Collects identifiers carried inline (spans/code/images, plus nested bodies).
+fn collect_ids_inline(inline: &Inline, ids: &mut std::collections::HashSet<String>) {
+    let push = |attr: &crate::ast::Attr, ids: &mut std::collections::HashSet<String>| {
+        if !attr.0.is_empty() {
+            ids.insert(attr.0.clone());
+        }
+    };
+    match inline {
+        Inline::Emph(v)
+        | Inline::Strong(v)
+        | Inline::Underline(v)
+        | Inline::Strikeout(v)
+        | Inline::Superscript(v)
+        | Inline::Subscript(v)
+        | Inline::SmallCaps(v)
+        | Inline::Quoted(_, v) => {
+            for i in v {
+                collect_ids_inline(i, ids);
+            }
+        }
+        Inline::Span(attr, v) => {
+            push(attr, ids);
+            for i in v {
+                collect_ids_inline(i, ids);
+            }
+        }
+        Inline::Code(attr, _) | Inline::Image(attr, ..) => push(attr, ids),
+        Inline::Link(attr, v, _) => {
+            push(attr, ids);
+            for i in v {
+                collect_ids_inline(i, ids);
+            }
+        }
+        Inline::Cite(_, v) => {
+            for i in v {
+                collect_ids_inline(i, ids);
+            }
+        }
+        Inline::Note(bs) => {
+            for b in bs {
+                collect_ids_block(b, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Demotes dangling internal links to bare inlines, recursively, within a block.
+fn prune_block(block: &mut Block, ids: &std::collections::HashSet<String>) {
+    match block {
+        Block::Plain(inl) | Block::Para(inl) => prune_inlines(inl, ids),
+        Block::Header(_, _, inl) => prune_inlines(inl, ids),
+        Block::Div(_, bs) | Block::BlockQuote(bs) => {
+            for b in bs {
+                prune_block(b, ids);
+            }
+        }
+        Block::BulletList(items) | Block::OrderedList(_, items) => {
+            for item in items {
+                for b in item {
+                    prune_block(b, ids);
+                }
+            }
+        }
+        Block::DefinitionList(items) => {
+            for (term, defs) in items {
+                prune_inlines(term, ids);
+                for def in defs {
+                    for b in def {
+                        prune_block(b, ids);
+                    }
+                }
+            }
+        }
+        Block::Figure(_, cap, bs) => {
+            for b in &mut cap.1 {
+                prune_block(b, ids);
+            }
+            for b in bs {
+                prune_block(b, ids);
+            }
+        }
+        Block::CodeBlock(..)
+        | Block::RawBlock(..)
+        | Block::HorizontalRule
+        | Block::Table(..) => {}
+    }
+}
+
+/// Demotes dangling internal links within an inline list, in place.
+fn prune_inlines(inlines: &mut Vec<Inline>, ids: &std::collections::HashSet<String>) {
+    let mut out: Vec<Inline> = Vec::with_capacity(inlines.len());
+    for mut node in inlines.drain(..) {
+        prune_inline(&mut node, ids);
+        match node {
+            // An internal `#anchor` link with no matching anchor: drop the dead
+            // jump, keep the body text.
+            Inline::Link(_, body, (url, _))
+                if url.starts_with('#') && !ids.contains(&url[1..]) =>
+            {
+                out.extend(body);
+            }
+            other => out.push(other),
+        }
+    }
+    *inlines = out;
+    coalesce_inlines(inlines);
+}
+
+/// Recurses into an inline node's children, pruning dangling links.
+fn prune_inline(inline: &mut Inline, ids: &std::collections::HashSet<String>) {
+    match inline {
+        Inline::Emph(v)
+        | Inline::Strong(v)
+        | Inline::Underline(v)
+        | Inline::Strikeout(v)
+        | Inline::Superscript(v)
+        | Inline::Subscript(v)
+        | Inline::SmallCaps(v)
+        | Inline::Quoted(_, v)
+        | Inline::Span(_, v)
+        | Inline::Link(_, v, _)
+        | Inline::Cite(_, v) => prune_inlines(v, ids),
+        Inline::Note(bs) => {
+            for b in bs {
+                prune_block(b, ids);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Lowers a slice of realized native pairs into blocks.
@@ -535,6 +761,14 @@ fn handle_block(
 ) -> SourceResult<()> {
     if let Some(elem) = child.to_packed::<TagElem>() {
         ctx.deferred_tags.push(elem.tag.clone());
+    } else if let Some(elem) = child.to_packed::<PdfMarkerTag>() {
+        // Bibliography / list / term structural markers. The bibliography ones
+        // (`Bibliography`/`BibEntry`) are load-bearing for citations: a `BibEntry`
+        // carries the backlink `Location` that in-text cite Links anchor to, so we
+        // lower it to a real, anchored, selectable block rather than letting the
+        // whole reference list rasterize to one image (which would leave every
+        // cite dangling). See `mappers/citation.rs`.
+        out.extend(mappers::citation::marker_tag(elem, styles, ctx)?);
     } else if child.is::<typst_library::layout::PagebreakElem>() {
         // No page model: drop.
     } else if let Some(elem) = child.to_packed::<ParElem>() {
@@ -617,8 +851,8 @@ fn handle_block(
 
 #[cfg(test)]
 mod tests {
-    use super::coalesce_inlines;
-    use crate::ast::{empty_attr, Inline};
+    use super::{coalesce_inlines, prune_dangling_links};
+    use crate::ast::{empty_attr, id_attr, Block, Inline};
 
     /// Adjacent `Link`s with the same `Attr` + `Target` merge their bodies into
     /// one `Link` (a realized `@ref` is emitted as several per-run links to one
@@ -669,5 +903,51 @@ mod tests {
             Inline::Str(s) => assert_eq!(s, "foobar"),
             _ => panic!("expected joined Str"),
         }
+    }
+
+    /// An internal `#anchor` link that resolves to a real anchor (a `BibEntry`
+    /// `Div` with that id) is preserved; one pointing nowhere is demoted to its
+    /// bare body text. This is the no-dangling-cites invariant.
+    #[test]
+    fn prunes_only_dangling_internal_links() {
+        let live = ("#ref-live".to_string(), String::new());
+        let dead = ("#ref-dead".to_string(), String::new());
+        let ext = ("https://example.com".to_string(), String::new());
+        let mut blocks = vec![
+            Block::Para(vec![
+                // resolves → the bib entry Div below
+                Inline::Link(empty_attr(), vec![Inline::Str("[1]".into())], live),
+                // dangles → must become bare "[2]"
+                Inline::Link(empty_attr(), vec![Inline::Str("[2]".into())], dead),
+                // external → untouched
+                Inline::Link(empty_attr(), vec![Inline::Str("site".into())], ext),
+            ]),
+            // The anchor the live link targets.
+            Block::Div(id_attr("ref-live"), vec![Block::Para(vec![Inline::Str(
+                "Author, Title.".into(),
+            )])]),
+        ];
+        prune_dangling_links(&mut blocks);
+        let Block::Para(inl) = &blocks[0] else { panic!() };
+        // live link kept, external link kept, dead link demoted to a Str.
+        let links: Vec<_> = inl
+            .iter()
+            .filter_map(|i| match i {
+                Inline::Link(_, _, (u, _)) => Some(u.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(links.contains(&"#ref-live".to_string()), "live anchor kept");
+        assert!(links.contains(&"https://example.com".to_string()), "external kept");
+        assert!(!links.iter().any(|u| u == "#ref-dead"), "dangling link removed");
+        // The demoted link's text survives somewhere in the paragraph.
+        let text: String = inl
+            .iter()
+            .filter_map(|i| match i {
+                Inline::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("[2]"), "demoted link keeps its text");
     }
 }
