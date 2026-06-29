@@ -3069,6 +3069,7 @@ dependencies = [
  "typst-layout",
  "typst-library",
  "typst-macros",
+ "typst-pandoc",
  "typst-realize",
  "typst-syntax",
  "typst-timing",
@@ -3143,6 +3144,7 @@ dependencies = [
  "typst-kit",
  "typst-layout",
  "typst-macros",
+ "typst-pandoc",
  "typst-pdf",
  "typst-render",
  "typst-svg",
@@ -3437,6 +3439,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "typst-pandoc"
+version = "0.15.0"
+dependencies = [
+ "comemo",
+ "ecow",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "typst-layout",
+ "typst-library",
+ "typst-macros",
+ "typst-render",
+ "typst-syntax",
+ "typst-timing",
+ "typst-utils",
+ "unicode-math-class",
+]
+
+[[package]]
 name = "typst-pdf"
 version = "0.15.0"
 dependencies = [
@@ -3563,6 +3584,7 @@ dependencies = [
  "regex",
  "roxmltree 0.21.1",
  "rustc-hash",
+ "serde_json",
  "serde_yaml",
  "similar",
  "smallvec",
@@ -3579,6 +3601,7 @@ dependencies = [
  "typst-kit",
  "typst-layout",
  "typst-library",
+ "typst-pandoc",
  "typst-pdf",
  "typst-render",
  "typst-svg",

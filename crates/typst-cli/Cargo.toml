@@ -21,6 +21,7 @@ doc = false
 typst = { workspace = true }
 typst-bundle = { workspace = true }
 typst-docx = { workspace = true }
+typst-pandoc = { workspace = true }
 typst-eval = { workspace = true }
 typst-layout = { workspace = true }
 typst-html = { workspace = true }

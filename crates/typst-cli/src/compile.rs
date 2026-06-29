@@ -14,6 +14,7 @@ use typst::layout::PageRanges;
 use typst::syntax::Span;
 use typst_bundle::{Bundle, BundleOptions, VirtualFs};
 use typst_docx::{DocxDocument, DocxOptions};
+use typst_pandoc::{PandocDocument, PandocOptions};
 use typst_html::{HtmlDocument, HtmlOptions};
 use typst_kit::diagnostics::DiagnosticWorld;
 use typst_kit::timer::Timer;
@@ -118,6 +119,7 @@ impl CompileConfig {
                 Some(ext) if ext.eq_ignore_ascii_case("svg") => OutputFormat::Svg,
                 Some(ext) if ext.eq_ignore_ascii_case("html") => OutputFormat::Html,
                 Some(ext) if ext.eq_ignore_ascii_case("docx") => OutputFormat::Docx,
+                Some(ext) if ext.eq_ignore_ascii_case("pandoc") => OutputFormat::Pandoc,
                 _ => bail!(
                     "could not infer output format for path {}.\n\
                      consider providing the format manually with `--format/-f`",
@@ -139,6 +141,7 @@ impl CompileConfig {
                     OutputFormat::Svg => "svg",
                     OutputFormat::Html => "html",
                     OutputFormat::Docx => "docx",
+                    OutputFormat::Pandoc => "pandoc",
                     OutputFormat::Bundle => "",
                 },
             ))
@@ -357,6 +360,14 @@ fn compile_and_export(
                 warnings,
             }
         }
+        OutputFormat::Pandoc => {
+            let Warned { output, warnings } = typst::compile::<PandocDocument>(world);
+            let result = output.and_then(|document| export_pandoc(&document, config));
+            Warned {
+                output: result.map(|()| vec![config.output.clone()]),
+                warnings,
+            }
+        }
     }
 }
 
@@ -368,6 +379,17 @@ fn export_docx(document: &DocxDocument, config: &CompileConfig) -> SourceResult<
         .output
         .write(&bytes)
         .map_err(|err| eco_format!("failed to write DOCX file ({err})"))
+        .at(Span::detached())
+}
+
+/// Export to a Pandoc JSON AST.
+fn export_pandoc(document: &PandocDocument, config: &CompileConfig) -> SourceResult<()> {
+    let options = PandocOptions { pretty: config.pretty };
+    let bytes = typst_pandoc::pandoc(document, &options)?;
+    config
+        .output
+        .write(&bytes)
+        .map_err(|err| eco_format!("failed to write Pandoc file ({err})"))
         .at(Span::detached())
 }
 
@@ -402,7 +424,10 @@ fn export_paged(
         OutputFormat::Svg => {
             export_image(document, config, ImageExportFormat::Svg).at(Span::detached())
         }
-        OutputFormat::Html | OutputFormat::Bundle | OutputFormat::Docx => unreachable!(),
+        OutputFormat::Html
+        | OutputFormat::Bundle
+        | OutputFormat::Docx
+        | OutputFormat::Pandoc => unreachable!(),
     }
 }
 

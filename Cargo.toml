@@ -20,6 +20,7 @@ typst = { path = "crates/typst", version = "0.15.0" }
 typst-bundle = { path = "crates/typst-bundle", version = "0.15.0" }
 typst-cli = { path = "crates/typst-cli", version = "0.15.0" }
 typst-docx = { path = "crates/typst-docx", version = "0.15.0" }
+typst-pandoc = { path = "crates/typst-pandoc", version = "0.15.0" }
 typst-eval = { path = "crates/typst-eval", version = "0.15.0" }
 typst-html = { path = "crates/typst-html", version = "0.15.0" }
 typst-ide = { path = "crates/typst-ide", version = "0.15.0" }

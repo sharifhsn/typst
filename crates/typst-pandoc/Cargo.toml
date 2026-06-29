@@ -1,8 +1,6 @@
 [package]
-name = "typst"
-description = "A new markup-based typesetting system that is powerful and easy to learn."
-categories = ["compilers", "science"]
-keywords = ["markup", "typesetting", "typst"]
+name = "typst-pandoc"
+description = "Typst's Pandoc (JSON AST) exporter."
 version = { workspace = true }
 rust-version = { workspace = true }
 authors = { workspace = true }
@@ -10,24 +8,24 @@ edition = { workspace = true }
 homepage = { workspace = true }
 repository = { workspace = true }
 license = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
 readme = { workspace = true }
 
 [dependencies]
-typst-docx = { workspace = true }
-typst-pandoc = { workspace = true }
-typst-eval = { workspace = true }
-typst-html = { workspace = true }
-typst-layout = { workspace = true }
 typst-library = { workspace = true }
+typst-layout = { workspace = true }
+typst-render = { workspace = true }
 typst-macros = { workspace = true }
-typst-realize = { workspace = true }
 typst-syntax = { workspace = true }
 typst-timing = { workspace = true }
 typst-utils = { workspace = true }
-arrayvec = { workspace = true }
 comemo = { workspace = true }
 ecow = { workspace = true }
 rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+unicode-math-class = { workspace = true }
 
 [lints]
 workspace = true

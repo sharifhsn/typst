@@ -37,7 +37,7 @@ use typst_utils::{Get, Numeric};
 
 /// Register show rules for the [paged target](Target::Paged).
 pub fn register(rules: &mut NativeRuleMap) {
-    use Target::{Docx, Paged};
+    use Target::{Docx, Pandoc, Paged};
 
     // Model.
     rules.register(Paged, STRONG_RULE);
@@ -124,6 +124,46 @@ pub fn register(rules: &mut NativeRuleMap) {
     rules.register(Docx, BIBLIOGRAPHY_RULE);
     rules.register(Docx, CSL_LIGHT_RULE);
     rules.register(Docx, CSL_INDENT_RULE);
+
+    // The Pandoc target mirrors the Docx target's reuse of the inline-formatting
+    // normalization rules: they fold `StrongElem`/`EmphElem`/`SubElem`/… into
+    // `TextElem` style flags (`delta`, `emph`, `shift_settings`, `deco`,
+    // `smallcaps`), which keeps inline formatting *inline* during realization (so
+    // paragraphs aren't split and the surrounding spaces survive) instead of
+    // leaving raw formatting elements that would interrupt paragraph grouping.
+    // The Pandoc backend reads these flags back off the style chain and wraps the
+    // run in the matching Pandoc inline node (`Strong`/`Emph`/…). Without these,
+    // the spaces around `*bold*`/`_emph_` are trimmed (paragraph-boundary
+    // collapse) — the canonical inter-word-space defect.
+    rules.register(Pandoc, STRONG_RULE);
+    rules.register(Pandoc, EMPH_RULE);
+    rules.register(Pandoc, SUB_RULE);
+    rules.register(Pandoc, SUPER_RULE);
+    rules.register(Pandoc, UNDERLINE_RULE);
+    rules.register(Pandoc, OVERLINE_RULE);
+    rules.register(Pandoc, STRIKE_RULE);
+    rules.register(Pandoc, HIGHLIGHT_RULE);
+    rules.register(Pandoc, SMALLCAPS_RULE);
+
+    // `#align(..)[body]` normalizes into a `set align` on the body so it does not
+    // interrupt paragraph grouping (the Pandoc backend currently ignores the
+    // resulting alignment — Pandoc has no per-block alignment node — but keeping
+    // the content inline preserves spaces and paragraph structure).
+    rules.register(Pandoc, ALIGN_RULE);
+
+    // `@key` references → citations / cross-reference links; citations and
+    // bibliographies resolve through citeproc here (building the `Works` that
+    // citations look up). Without them a citation stays a raw `RefElem`, no
+    // `CiteGroup` forms, and the bibliography can never locate its citations
+    // (a convergence deadlock). The Pandoc backend lowers the resulting formatted
+    // content like any other inline text.
+    rules.register(Pandoc, REF_RULE);
+    rules.register(Pandoc, LINK_MARKER_RULE);
+    rules.register(Pandoc, DIRECT_LINK_RULE);
+    rules.register(Pandoc, CITE_GROUP_RULE);
+    rules.register(Pandoc, BIBLIOGRAPHY_RULE);
+    rules.register(Pandoc, CSL_LIGHT_RULE);
+    rules.register(Pandoc, CSL_INDENT_RULE);
 
     // Layout.
     rules.register(Paged, ALIGN_RULE);
