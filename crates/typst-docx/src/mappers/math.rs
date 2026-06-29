@@ -195,6 +195,8 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
     fn emit_items(&mut self, items: &[MathItem]) -> SourceResult<()> {
         let mut i = 0;
         while i < items.len() {
+            // An n-ary operator WITH limits: a `Scripts` whose base is a large
+            // operator (∑/∫/∏/…). The bounds become sub/sup of an `m:nary`.
             if let MathItem::Component(comp) = &items[i]
                 && let MathKind::Scripts(scripts) = &comp.kind
                 && let Some(chr) = nary_operator_char(&scripts.base)
@@ -204,12 +206,16 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
                 let upper = scripts.top.as_ref().or(scripts.top_right.as_ref());
                 let lower = scripts.bottom.as_ref().or(scripts.bottom_right.as_ref());
                 let lim = scripts.top.is_some() || scripts.bottom.is_some();
-                // The operand runs until the next relation or the end of the run.
-                let mut j = i + 1;
-                while j < items.len() && !is_relation(&items[j]) {
-                    j += 1;
-                }
+                let j = operand_end(items, i + 1);
                 self.emit_nary(chr, lower, upper, lim, &items[i + 1..j])?;
+                i = j;
+            }
+            // A BARE large operator with no limits (`∫ f dif x`, `∑ a_i`): still an
+            // n-ary operator — typeset it as a stretchy `m:nary` (bounds hidden)
+            // binding the following operand, not as a small literal glyph.
+            else if let Some(chr) = nary_operator_char(&items[i]) {
+                let j = operand_end(items, i + 1);
+                self.emit_nary(chr, None, None, false, &items[i + 1..j])?;
                 i = j;
             } else {
                 self.emit_item(&items[i])?;
@@ -306,13 +312,17 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
 
     // -- Leaves -------------------------------------------------------------
 
-    /// A single glyph. Identifiers (letters) are italic by Word's default, so we
-    /// emit a bare run; everything else (operators, digits, symbols) is upright
-    /// via `m:nor`.
+    /// A single glyph. Typst has ALREADY applied any italic styling by remapping
+    /// the letter to its Plane-1 math-alphanumeric codepoint (e.g. `x` → 𝑥
+    /// U+1D465, `A` → 𝐴 U+1D434), so a glyph that reaches here is meant to render
+    /// as-is. We therefore always emit `m:nor` to stop Word from applying its OWN
+    /// default math italic on top — which would (a) double-slant the already-italic
+    /// Plane-1 glyphs and (b) wrongly italicize the letters Typst deliberately left
+    /// plain/upright: uppercase Greek (Γ, Δ), `upright(..)`, and the differential
+    /// `d` of `dif`. Word renders a Plane-1 glyph in upright mode as the italic
+    /// glyph it already is, so italic variables still look italic.
     fn emit_glyph(&mut self, glyph: &GlyphItem) -> SourceResult<()> {
-        let text = glyph.text.as_str();
-        let italic = is_single_math_letter(text);
-        self.text_run(text, !italic);
+        self.text_run(glyph.text.as_str(), true);
         Ok(())
     }
 
@@ -575,10 +585,13 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
         // extract its codepoint and map it to a combining form.
         let chr = accent_char(&acc.accent);
 
-        if acc.position == Position::Below {
-            // OMML's `m:acc` is an over-accent only. Approximate an under-accent
-            // with a bottom `m:groupChr`.
-            return self.emit_group_char(&acc.base, chr, Position::Below);
+        // A spreader (over/under brace, bracket, paren, shell) must STRETCH across
+        // the whole base — that is OMML's `m:groupChr`, not the single-glyph
+        // `m:acc`. Spreaders are flagged by `exact_frame_width`; an under-accent
+        // (`Position::Below`) likewise has no `m:acc` form. Ordinary over-accents
+        // (hat, bar, dot, tilde, vec) use `m:acc`.
+        if acc.position == Position::Below || acc.exact_frame_width {
+            return self.emit_group_char(&acc.base, chr, acc.position);
         }
 
         self.buf.open("m:acc").children();
@@ -781,32 +794,6 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
 // Glyph classification + operator tables (self-contained; no `MathClass`).
 // ===========================================================================
 
-/// Whether `text` is a single character that Word renders italic by default
-/// (an alphabetic identifier). Operators, punctuation, digits, multi-codepoint
-/// graphemes, and non-letters are excluded (they should be upright).
-fn is_single_math_letter(text: &str) -> bool {
-    let mut chars = text.chars();
-    let Some(c) = chars.next() else { return false };
-    if chars.next().is_some() {
-        return false;
-    }
-    // Basic Latin / Greek / Coptic letters render italic by Word's math engine.
-    // Digits and symbols do not.
-    c.is_alphabetic() && !is_upright_letter(c)
-}
-
-/// Letters that should stay upright even though they are alphabetic (e.g. the
-/// dotless i/j and already-styled math-alphanumeric letters, which Typst emits
-/// as their target codepoints). Math-alphanumeric letters (U+1D400+) are kept
-/// upright because applying italic on top would double-transform.
-fn is_upright_letter(c: char) -> bool {
-    // Math alphanumeric symbols block: already-variant letters.
-    ('\u{1D400}'..='\u{1D7FF}').contains(&c)
-        // Blackboard/script/fraktur letterlike symbols.
-        || matches!(c, 'ℂ' | 'ℍ' | 'ℕ' | 'ℙ' | 'ℚ' | 'ℝ' | 'ℤ' | 'ℎ' | 'ℬ' | 'ℰ'
-            | 'ℱ' | 'ℋ' | 'ℐ' | 'ℒ' | 'ℳ' | 'ℜ' | 'ℭ' | 'ℑ' | 'ℌ' | 'ℨ')
-}
-
 /// If `item` is a single large operator glyph that takes n-ary limits (∑ ∫ ∏ ⋃
 /// …), returns its character. Detection is purely from the codepoint, which is
 /// also exactly what OMML needs for `m:chr` — so this avoids any dependency on
@@ -815,6 +802,25 @@ fn is_upright_letter(c: char) -> bool {
 /// ends an n-ary operator's operand (`∫ f dx` stops before `= …`).
 fn is_relation(item: &MathItem) -> bool {
     matches!(item, MathItem::Component(c) if c.props.class == Some(MathClass::Relation))
+}
+
+/// The end index (exclusive) of an n-ary operator's operand, starting at
+/// `start`. The operand binds the items that follow the operator up to — but not
+/// including — the next *relation* (`=`, `<`, …) or *binary operator* (`+`, `−`,
+/// `±`). Stopping at a binary operator keeps `∑_i a_i + ∑_j b_j` as two sibling
+/// sums (instead of nesting the second inside the first's operand), while a
+/// following n-ary operator is NOT a boundary, so `∑_i ∑_j a` still nests.
+fn operand_end(items: &[MathItem], start: usize) -> usize {
+    let mut j = start;
+    while j < items.len() {
+        if let MathItem::Component(c) = &items[j]
+            && matches!(c.props.class, Some(MathClass::Relation | MathClass::Binary))
+        {
+            break;
+        }
+        j += 1;
+    }
+    j
 }
 
 fn nary_operator_char(item: &MathItem) -> Option<char> {

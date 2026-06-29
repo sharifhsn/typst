@@ -158,6 +158,45 @@ fn nary_operator_nests_its_operand() {
 }
 
 #[test]
+fn upright_letters_get_m_nor() {
+    // Typst pre-applies italic by remapping to Plane-1 codepoints, so a plain
+    // letter reaching the converter is upright-intended (uppercase Greek,
+    // `upright(..)`, the differential `d`) and must carry `m:nor` — otherwise
+    // Word slants it.
+    let p = parts("$ Gamma + upright(B) $");
+    let doc = &p["word/document.xml"];
+    // Every math run is upright now (Plane-1 italic glyphs carry their own slant).
+    assert!(doc.contains("m:nor"), "upright math letters carry <m:nor/>");
+    assert!(!doc.contains("Γ</m:t></m:r>") || doc.contains("<m:nor/>"), "Γ is upright");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn bare_nary_operator_and_operand_boundary() {
+    // A large operator without bounds is still typeset as an n-ary (not a small
+    // literal glyph), and its operand stops at a binary operator so sibling sums
+    // do not nest.
+    let p = parts("$ integral f dif x $ and $ sum_i a_i + sum_j b_j $");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("m:nary"), "a bare integral is an n-ary operator");
+    // Two sums + one integral = 3 n-ary operators; if the first sum swallowed the
+    // second there would be only 2.
+    assert_eq!(doc.matches("<m:nary>").count(), 3, "sibling sums are not nested");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn over_spreader_stretches() {
+    // overbrace/overbracket span the base (stretchy `m:groupChr`), unlike a hat
+    // (a single-glyph `m:acc`).
+    let p = parts("$ overbrace(x+y+z, n) $ and $ hat(a) $");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<m:groupChr>"), "overbrace stretches via groupChr");
+    assert!(doc.contains("<m:acc>"), "a hat stays a single-glyph accent");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn outline_bakes_entries_with_resolvable_bookmarks() {
     // A heading table of contents bakes its entries (so it shows without a
     // manual field update), and every entry's PAGEREF must target a real
