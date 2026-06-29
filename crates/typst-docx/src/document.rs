@@ -281,6 +281,9 @@ struct SectGeom {
     /// Explicit `set page(footer:)` content.
     footer: Option<Content>,
     footer_suppressed: bool,
+    /// `set page(background:)` content — a full-page image/art drawn behind the
+    /// text. Emitted as a `behindDoc` page-anchored drawing in the header.
+    background: Option<Content>,
 }
 
 /// Splits the document into page-geometry sections, mirroring
@@ -428,6 +431,8 @@ fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGe
         Smart::Custom(None) => (None, true),
         Smart::Auto => (None, false),
     };
+    let background =
+        sc.get_ref(PageElem::background).clone().filter(|c| !c.is_empty());
 
     SectGeom {
         page_w: props::abs_to_twip(size.x),
@@ -449,6 +454,7 @@ fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGe
         header_suppressed,
         footer,
         footer_suppressed,
+        background,
     }
 }
 
@@ -507,15 +513,35 @@ fn build_section(
         sect.pg_num = Some(PgNumType { fmt: numbering_fmt(ctx, numbering), start: None });
     }
 
-    // -- Explicit header content -------------------------------------------
-    if let Some(content) = &geom.header {
-        // Lower into the part's OWN relationships table (images/links in a header
-        // must resolve against `headerN.xml.rels`, not the document's).
-        let (blocks, rels) = ctx.part_blocks(content, styles)?;
-        let part_name = ctx.next_hdrftr_name(true);
-        let rel = ctx.add_header_rel(&part_name);
-        sect.headers.push(HdrFtrRef { kind: "default", rel });
-        header_parts.push(HdrFtrPart { part_name, is_header: true, blocks, rels });
+    // -- Header content + page background ----------------------------------
+    // A `set page(background:)` image is emitted as a full-page `behindDoc`
+    // page-anchored drawing at the *top* of the (default) header, so it repeats
+    // on every page behind the body text — the Word idiom for a page background /
+    // watermark. The background and the explicit header share ONE part so their
+    // image relationships live in a single `headerN.xml.rels` (no rId collision).
+    if geom.header.is_some() || geom.background.is_some() {
+        let saved = ctx.part_rels.take();
+        ctx.part_rels = Some(crate::package::Rels::new());
+        let mut blocks = Vec::new();
+        if let Some(bg) = &geom.background
+            && let Some(block) = background_block(ctx, bg, geom, styles)?
+        {
+            blocks.push(block);
+        }
+        if let Some(content) = &geom.header {
+            blocks.extend(ctx.blocks(content, styles)?);
+        }
+        let rels = ctx.part_rels.take().unwrap_or_default();
+        ctx.part_rels = saved;
+        // Emit the header part whenever a header is explicitly set (even if it
+        // lowered to nothing) — matching the prior unconditional behaviour — or
+        // when the background produced a drawing.
+        if geom.header.is_some() || !blocks.is_empty() {
+            let part_name = ctx.next_hdrftr_name(true);
+            let rel = ctx.add_header_rel(&part_name);
+            sect.headers.push(HdrFtrRef { kind: "default", rel });
+            header_parts.push(HdrFtrPart { part_name, is_header: true, blocks, rels });
+        }
     }
 
     // -- Explicit footer content -------------------------------------------
@@ -558,6 +584,56 @@ fn build_section(
     }
 
     Ok((sect, header_parts, footer_parts))
+}
+
+/// Rasterizes a `set page(background:)` body and wraps it in a full-page
+/// `behindDoc` page-anchored drawing (one paragraph). Rasterized at the full page
+/// *width* so a `width: 100%` background fills the page; the drawing's extent is
+/// the full page size so it covers the sheet edge-to-edge. `None` if the
+/// background lays out to nothing. Must be called inside an active part-rels
+/// context (the image relationship belongs to the header part).
+fn background_block(
+    ctx: &mut DocxCtx,
+    bg: &Content,
+    geom: &SectGeom,
+    styles: StyleChain,
+) -> SourceResult<Option<crate::dom::Block>> {
+    use crate::dom::{Anchor, AnchorPos, AnchorWrap, Block, Drawing, Para, ParaChild, Run};
+    use typst_library::layout::Abs;
+
+    // EMU per twip = 914400 / 1440.
+    const EMU_PER_TWIP: i64 = 635;
+
+    let saved_w = ctx.raster_width;
+    ctx.raster_width = Abs::pt(geom.page_w as f64 / 20.0);
+    let result = ctx.rasterize(bg, styles, bg.span())?;
+    ctx.raster_width = saved_w;
+    let Some((rel, _size)) = result else {
+        return Ok(None);
+    };
+
+    let docpr_id = ctx.next_drawing_id();
+    let drawing = Drawing {
+        rel,
+        w_emu: geom.page_w as i64 * EMU_PER_TWIP,
+        h_emu: geom.page_h as i64 * EMU_PER_TWIP,
+        alt: None,
+        docpr_id,
+        name: ecow::eco_format!("Background {docpr_id}"),
+        anchor: Some(Anchor {
+            z: ctx.next_z(),
+            pos_h: AnchorPos { rel_from: "page", align: None, offset: Some(0) },
+            pos_v: AnchorPos { rel_from: "page", align: None, offset: Some(0) },
+            wrap: AnchorWrap::None,
+            dist: [0, 0, 0, 0],
+            behind: true,
+        }),
+        shape: None,
+    };
+    Ok(Some(Block::Para(Para {
+        props: crate::dom::ParaProps::default(),
+        content: vec![ParaChild::Run(Run::Drawing(drawing))],
+    })))
 }
 
 /// Classifies a page-numbering pattern's first counting symbol into a Word

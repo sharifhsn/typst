@@ -371,6 +371,26 @@ fn url_link_looks_like_a_link() {
 }
 
 #[test]
+fn page_background_becomes_a_behind_text_header_image() {
+    // `set page(background: ..)` → a full-page `behindDoc`, page-anchored image in
+    // the (default) header, so it repeats on every page behind the body text.
+    let p = parts(
+        "#set page(background: rect(width: 100%, height: 100%, fill: aqua))\nBody text.",
+    );
+    let header = p
+        .keys()
+        .find(|k| k.starts_with("word/header") && k.ends_with(".xml"))
+        .map(|k| &p[k])
+        .expect("a header part for the background");
+    assert!(header.contains("behindDoc=\"1\""), "background sits behind the text");
+    assert!(header.contains("relativeFrom=\"page\""), "positioned against the page");
+    assert!(header.contains("<a:blip"), "the background is an embedded image");
+    // The body text is unaffected.
+    assert!(p["word/document.xml"].contains("Body text"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn framed_box_in_a_figure_is_rasterized_not_a_textbox() {
     // A framed box (`#figure(rect[..])`) is centered by the figure, and a
     // *centered* `wps:txbx` text box does not flow its text in LibreOffice. Such a

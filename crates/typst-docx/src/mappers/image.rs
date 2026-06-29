@@ -289,6 +289,7 @@ pub fn place(
         pos_v,
         wrap,
         dist: [0, 0, 0, 0],
+        behind: false,
     });
 
     Ok(Some(Block::Para(Para {
@@ -452,6 +453,7 @@ fn float_figure_body(
         pos_v: AnchorPos { rel_from: "margin", align: Some(v_align), offset: None },
         wrap: AnchorWrap::TopAndBottom,
         dist: [0, 0, dist, dist],
+        behind: false,
     });
 
     // The anchored drawing lives in its own paragraph; any other body blocks

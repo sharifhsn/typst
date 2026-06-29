@@ -394,6 +394,9 @@ pub struct Anchor {
     pub wrap: AnchorWrap,
     /// `distT`/`distB`/`distL`/`distR` in EMU.
     pub dist: [i64; 4],
+    /// `behindDoc` — place the drawing *behind* the text (a page background /
+    /// watermark) rather than in front.
+    pub behind: bool,
 }
 
 /// One axis of an anchor position (`<wp:positionH>` / `<wp:positionV>`).

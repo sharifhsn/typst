@@ -481,7 +481,7 @@ fn write_anchor_envelope(w: &mut XmlWriter, d: &Drawing, a: &Anchor) {
         .attr("distR", &a.dist[3].to_string())
         .attr("simplePos", "0")
         .attr("relativeHeight", &a.z.to_string())
-        .attr("behindDoc", "0")
+        .attr("behindDoc", if a.behind { "1" } else { "0" })
         .attr("locked", "0")
         .attr("layoutInCell", "1")
         .attr("allowOverlap", "1")
