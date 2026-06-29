@@ -207,18 +207,46 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             Region::new(Size::new(self.raster_width, Abs::inf()), Axes::splat(false));
         let loc = self.locator.next(&span);
         let layout_frame = self.engine.library.routines.layout_frame;
-        let mut throwaway = typst_library::engine::Sink::new();
-        let mut sub = typst_library::engine::Engine {
-            world: self.engine.world,
-            library: self.engine.library,
-            introspector: typst_utils::Protected::from_raw(
-                self.engine.introspector.into_raw(),
-            ),
-            traced: self.engine.traced,
-            sink: throwaway.track_mut(),
-            route: typst_library::engine::Route::extend(self.engine.route.track()),
+
+        // Lay the content out in an isolated sub-engine. The layouter can *panic*
+        // (not just error) on content it cannot handle frame-wise — e.g. a
+        // presentation-package slide whose absolute placement resolves against the
+        // infinite region height and trips `assert!(size.is_finite())` deep in flow
+        // distribution. That is a raw Rust panic that would otherwise abort the
+        // entire export with no usable message. Since rasterization is a
+        // best-effort fallback, catch it and degrade: drop just this one piece of
+        // content (and warn), so the rest of the document still exports. The panic
+        // hook is silenced for the duration so no scary backtrace reaches the user.
+        let (frame, panicked) = {
+            let mut throwaway = typst_library::engine::Sink::new();
+            let mut sub = typst_library::engine::Engine {
+                world: self.engine.world,
+                library: self.engine.library,
+                introspector: typst_utils::Protected::from_raw(
+                    self.engine.introspector.into_raw(),
+                ),
+                traced: self.engine.traced,
+                sink: throwaway.track_mut(),
+                route: typst_library::engine::Route::extend(self.engine.route.track()),
+            };
+            let prev_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                layout_frame(&mut sub, content, loc, styles, region)
+            }));
+            std::panic::set_hook(prev_hook);
+            match caught {
+                // A layout *error* (vs panic) means the content does not lay out on
+                // this iteration — common and benign during introspection
+                // convergence — so degrade quietly.
+                Ok(result) => (result.ok(), false),
+                Err(_) => (None, true),
+            }
         };
-        Ok(layout_frame(&mut sub, content, loc, styles, region).ok())
+        if panicked {
+            self.warn_ignored("content that could not be laid out", span);
+        }
+        Ok(frame)
     }
 
     /// Lays out arbitrary content and rasterizes it to a PNG, embedding it as a
