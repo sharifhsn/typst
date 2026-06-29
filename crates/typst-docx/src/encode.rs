@@ -180,7 +180,17 @@ fn decl_ooxml_namespaces(w: &mut XmlWriter) {
         )
         .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
         .attr("xmlns:pic", "http://schemas.openxmlformats.org/drawingml/2006/picture")
-        .attr("xmlns:mc", "http://schemas.openxmlformats.org/markup-compatibility/2006");
+        .attr("xmlns:mc", "http://schemas.openxmlformats.org/markup-compatibility/2006")
+        // `mc:Ignorable="w14 wp14"` (below) names these prefixes, so they MUST be
+        // declared or the Markup-Compatibility markup is invalid: Word then
+        // refuses to open the file ("unreadable content", offers to repair) on
+        // EVERY document. LibreOffice silently tolerates the dangling prefixes,
+        // which is why this hid until tested in real Word.
+        .attr("xmlns:w14", "http://schemas.microsoft.com/office/word/2010/wordml")
+        .attr(
+            "xmlns:wp14",
+            "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
+        );
 }
 
 fn build_document(document: &DocxDocument, pretty: bool) -> String {
