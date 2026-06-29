@@ -1064,6 +1064,17 @@ static PAR: GroupingRule = GroupingRule {
             || elem == FootnoteElem::ELEM
         {
             GroupingEffect::Trigger
+        } else if elem == EquationElem::ELEM
+            // An *inline* equation kept native (the DOCX target) must stay in its
+            // paragraph so the spaces around it survive (`a $x$ b`); a block
+            // equation is display-level and still interrupts. Paged/HTML turn
+            // inline equations into inline content before grouping, so they never
+            // reach here raw — this only affects DOCX.
+            && content
+                .to_packed::<EquationElem>()
+                .is_some_and(|eq| !eq.block.get(StyleChain::default()))
+        {
+            GroupingEffect::Trigger
         } else if elem == SpaceElem::ELEM {
             GroupingEffect::Inner
         } else if let Some(elem) = content.to_packed::<HtmlElem>() {

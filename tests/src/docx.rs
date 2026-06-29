@@ -406,6 +406,21 @@ fn inline_equation_stays_in_its_paragraph() {
     let para = &para[..para.find("</w:p>").unwrap()];
     assert!(para.contains("m:oMath"), "the inline equation shares the text's paragraph");
     assert!(para.contains("text after it"), "text after the equation stays in the paragraph");
+    // The spaces flanking the equation must survive: Typst trims them when it
+    // splits the paragraph at a raw inline equation, so the converter relies on
+    // the PAR grouping rule keeping the equation inline. Check for a lone-space
+    // run immediately before `<m:oMath>` and immediately after `</m:oMath>`.
+    let omath = para.find("<m:oMath>").unwrap();
+    let omath_end = para.find("</m:oMath>").unwrap();
+    assert!(
+        para[..omath].trim_end().ends_with("</w:r>")
+            && para[..omath].contains("<w:t xml:space=\"preserve\"> </w:t>"),
+        "a space run precedes the inline equation"
+    );
+    assert!(
+        para[omath_end..].contains("<w:t xml:space=\"preserve\"> </w:t>"),
+        "a space run follows the inline equation"
+    );
     assert_all_wellformed(&p);
 }
 
