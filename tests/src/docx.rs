@@ -371,6 +371,27 @@ fn url_link_looks_like_a_link() {
 }
 
 #[test]
+fn framed_box_in_a_figure_is_rasterized_not_a_textbox() {
+    // A framed box (`#figure(rect[..])`) is centered by the figure, and a
+    // *centered* `wps:txbx` text box does not flow its text in LibreOffice. Such a
+    // body must rasterize to a (centered) image so it renders in every consumer.
+    let p = parts("#figure(rect(width: 3cm, height: 1cm, fill: aqua)[box], caption: [c])");
+    let doc = &p["word/document.xml"];
+    assert!(
+        !doc.contains("<w:txbxContent"),
+        "a framed box inside a figure must not become a centered text box"
+    );
+    assert!(doc.contains("<a:blip"), "it is rasterized to an inline image instead");
+    // A *standalone* framed box (not centered) still uses a real text box.
+    let q = parts("#rect(width: 3cm, height: 1cm, fill: aqua)[box]");
+    assert!(
+        q["word/document.xml"].contains("<w:txbxContent"),
+        "a standalone framed box is still an editable text box"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn labeled_targets_get_bookmarks_so_refs_resolve() {
     // A `@ref` to a numbered equation and a `#link` to a plain labeled paragraph
     // both need a bookmark at the target, or the hyperlink anchor dangles. The

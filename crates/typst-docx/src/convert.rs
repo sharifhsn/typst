@@ -609,6 +609,19 @@ fn handle_block_inner(
         // A block-level framed container (`#rect`/`#box`/`#square` standing as its
         // own block) with flowing content → shaded + bordered paragraphs that
         // break across pages, mirroring `#block`.
+    } else if is_framed_container(child) && ctx.suppress_text_box {
+        // A framed container in a *centered* context (a figure body): a centered
+        // `wps:txbx` text box does not flow its text in LibreOffice. Rasterize the
+        // box to an image instead — a centered inline image renders correctly in
+        // every consumer (Word renders the text box fine, but this keeps both).
+        if let Some(run) = mappers::image::laid_out_fallback(child, styles, ctx)? {
+            out.push(Block::Para(Para {
+                props: ParaProps::default(),
+                content: vec![ParaChild::Run(run)],
+            }));
+        } else {
+            ctx.warn_ignored(child.elem().name(), child.span());
+        }
     } else if is_framed_container(child) {
         // A short, single-line standalone framed container → a Word text box (a
         // sized, framed box). Standalone text boxes render correctly (an *inline*

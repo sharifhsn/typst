@@ -173,8 +173,15 @@ pub fn figure(
         float_figure_body(elem, place, styles, ctx)?
     } else {
         // In-flow body. Figures are centered by their show-set rule; mirror that
-        // by centering each top-level paragraph the body produces.
-        let mut body_blocks = ctx.blocks(&elem.body, styles)?;
+        // by centering each top-level paragraph the body produces. A framed box in
+        // this centered context must NOT become a `wps:txbx` text box (centered
+        // text boxes don't flow their text in LibreOffice); the flag makes such a
+        // box rasterize to a centered image instead, which renders everywhere.
+        let saved = ctx.suppress_text_box;
+        ctx.suppress_text_box = true;
+        let blocks = ctx.blocks(&elem.body, styles);
+        ctx.suppress_text_box = saved;
+        let mut body_blocks = blocks?;
         for block in &mut body_blocks {
             if let Block::Para(para) = block
                 && para.props.jc.is_none()

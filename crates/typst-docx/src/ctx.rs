@@ -112,6 +112,13 @@ pub struct DocxCtx<'a, 'e> {
     /// the footnote story makes the file unopenable — so an inner `FootnoteElem`
     /// is flattened to its body text inline instead of emitting a nested mark.
     pub(crate) in_footnote: bool,
+
+    /// Whether the current block context will be *centered* (a figure body).
+    /// A centered `wps:txbx` text box does not flow its text in LibreOffice (it
+    /// renders as an empty frame with the text leaked to the margin); Word renders
+    /// it fine, but for cross-consumer fidelity a framed box in this context is
+    /// rasterized to a centered image instead.
+    pub(crate) suppress_text_box: bool,
 }
 
 impl<'a, 'e> DocxCtx<'a, 'e> {
@@ -148,6 +155,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             quoter: SmartQuoter::new(),
             last_char: None,
             in_footnote: false,
+            suppress_text_box: false,
         }
     }
 
