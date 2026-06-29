@@ -370,6 +370,29 @@ fn labeled_targets_get_bookmarks_so_refs_resolve() {
 }
 
 #[test]
+fn aligned_equation_keeps_its_alignment() {
+    // `a + b &= c \ x &= y` must vertically align the `=` columns. `m:eqArr`
+    // cannot express per-column alignment, so the converter emits a matrix whose
+    // columns alternate right/left justification (matching Typst's layout).
+    let p = parts("$ a + b &= c \\\n  x &= y $");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<m:m>"), "aligned equation becomes a matrix");
+    // Two alignment columns: the first right-aligned, the second left-aligned.
+    let jc: Vec<_> = doc
+        .match_indices("m:mcJc m:val=\"")
+        .map(|(i, _)| {
+            let s = &doc[i + 14..];
+            s[..s.find('"').unwrap()].to_string()
+        })
+        .collect();
+    assert_eq!(jc, vec!["right", "left"], "columns alternate right/left");
+    // Plain (unaligned) multi-line stays a centered equation array.
+    let q = parts("$ a \\\n b $");
+    assert!(q["word/document.xml"].contains("<m:eqArr"), "gather stays an eqArr");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn inline_equation_stays_in_its_paragraph() {
     // Typst splits a paragraph containing an inline equation into
     // `[par, equation, par]`; the exporter must rejoin them, or the equation

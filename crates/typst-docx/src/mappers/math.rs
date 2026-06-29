@@ -766,18 +766,63 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
         Ok(())
     }
 
-    /// A multiline equation body (`align`/`gather`/`cases` rows) → `m:eqArr`.
+    /// A multiline equation body (`align`/`gather` rows).
+    ///
+    /// With no alignment points (`gather`, a plain multi-line equation) every row
+    /// is a single column → a centered `m:eqArr`, which is exactly right. With
+    /// alignment points (`a + b &= c \ x &= y`) `m:eqArr` cannot express the
+    /// per-column alignment, so emit a borderless matrix whose columns alternate
+    /// right/left justification — matching Typst's layout, which right-aligns the
+    /// even columns and left-aligns the odd ones (the `Right` alternator). This
+    /// vertically aligns the `&` points the way Word's own aligned equations do.
     fn emit_multiline(&mut self, multi: &MultilineItem) -> SourceResult<()> {
-        self.buf.open("m:eqArr").children();
-        for row in &multi.rows {
-            // Each row is one equation-array line; flatten its alignment columns.
-            self.buf.open("m:e").children();
-            for col in row.iter() {
-                self.emit_item(col)?;
+        let ncols = multi.rows.iter().map(|r| r.len()).max().unwrap_or(0);
+
+        if ncols <= 1 {
+            self.buf.open("m:eqArr").children();
+            for row in &multi.rows {
+                self.buf.open("m:e").children();
+                for col in row.iter() {
+                    self.emit_item(col)?;
+                }
+                self.buf.close();
             }
             self.buf.close();
+            return Ok(());
         }
-        self.buf.close();
+
+        self.buf.open("m:m").children();
+        self.buf.open("m:mPr").children();
+        // Hide the dotted placeholder boxes Word draws for the empty cells that
+        // pad short rows.
+        self.buf.open("m:plcHide").attr("m:val", "1").empty();
+        self.buf.open("m:mcs").children();
+        for c in 0..ncols {
+            let jc = if c % 2 == 0 { "right" } else { "left" };
+            self.buf.open("m:mc").children();
+            self.buf.open("m:mcPr").children();
+            self.buf.open("m:count").attr("m:val", "1").empty();
+            self.buf.open("m:mcJc").attr("m:val", jc).empty();
+            self.buf.close(); // m:mcPr
+            self.buf.close(); // m:mc
+        }
+        self.buf.close(); // m:mcs
+        // No gap at the alignment point so `a + b` and `= c` read continuously.
+        self.buf.open("m:cGp").attr("m:val", "0").empty();
+        self.buf.close(); // m:mPr
+
+        for row in &multi.rows {
+            self.buf.open("m:mr").children();
+            for c in 0..ncols {
+                self.buf.open("m:e").children();
+                if let Some(col) = row.get(c) {
+                    self.emit_item(col)?;
+                }
+                self.buf.close(); // m:e
+            }
+            self.buf.close(); // m:mr
+        }
+        self.buf.close(); // m:m
         Ok(())
     }
 
