@@ -409,6 +409,27 @@ fn short_block_rect_stays_a_text_box() {
 }
 
 #[test]
+fn leading_page_setup_does_not_emit_a_blank_first_page() {
+    // A document that opens with `#set page(..)` gets a synthetic leading
+    // pagebreak; emitting it as `<w:br w:type="page"/>` would add a blank first
+    // page. It must be dropped — but a real `#pagebreak()` after content is kept.
+    let p = parts("#set page(\"a5\")\n= Heading\n\nBody.");
+    let doc = &p["word/document.xml"];
+    assert!(
+        !doc.contains("w:type=\"page\""),
+        "a leading page-setup break must not become a page break"
+    );
+
+    let q = parts("First.\n\n#pagebreak()\n\nSecond.");
+    assert_eq!(
+        q["word/document.xml"].matches("w:type=\"page\"").count(),
+        1,
+        "a real mid-document pagebreak is preserved"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn bodyless_rect_stays_a_vector_shape() {
     // A `#rect` with no body is still a bare decorative vector shape, not a
     // (empty) text box.

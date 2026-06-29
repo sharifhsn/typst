@@ -46,6 +46,22 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
     let mut last_was_par = false;
 
     for (child, styles) in children {
+        // A *leading* pagebreak (before any content) is page-setup machinery, not
+        // a real break: a document that opens with `#set page(..)` — most theses /
+        // books / papers — gets a synthetic pagebreak marking the start of the
+        // page run, which as `<w:br>` would add a spurious blank first page. Drop
+        // any pagebreak emitted before the first content, mirroring
+        // `resolve_sections` (and typst-layout's page-run logic, which never
+        // renders a page before the first one). A `#pagebreak()` *after* content is
+        // a real break and is kept.
+        if child.is::<typst_library::layout::PagebreakElem>()
+            && !have_pending
+            && pending.is_empty()
+            // No *visible* content yet — leading introspection tags don't count.
+            && !blocks.iter().any(|b| !matches!(b, Block::Tag(_)))
+        {
+            continue;
+        }
         if child.is::<ParbreakElem>() {
             let from = blocks.len();
             flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
@@ -128,6 +144,21 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
     let from = blocks.len();
     flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
     apply_pending_v(&mut blocks, from, pending_v);
+
+    // Drop a *trailing* pagebreak-only paragraph: a document closing a `set page`
+    // run leaves a page-boundary break after the last content which, as `<w:br>`,
+    // would add a blank final page (the symmetric case to the leading break
+    // dropped above). A real break is always followed by content, so this only
+    // ever removes the spurious closing one.
+    while let Some(Block::Para(para)) = blocks.last() {
+        if !para.content.is_empty()
+            && para.content.iter().all(|c| matches!(c, ParaChild::Run(Run::PageBreak)))
+        {
+            blocks.pop();
+        } else {
+            break;
+        }
+    }
 
     // A paragraph using a fractional `#h(1fr)` (a fill-tab) gets a right-aligned
     // tab stop at the content width, so the tab pushes the following content to
