@@ -448,6 +448,11 @@ fn handle_block_inner(
 ) -> SourceResult<()> {
     if let Some(elem) = child.to_packed::<TagElem>() {
         out.push(Block::Tag(elem.tag.clone()));
+    } else if let Some(elem) = child.to_packed::<typst_library::pdf::PdfMarkerTag>() {
+        // A PDF accessibility delimiter wraps real content (`body`); it has no DOCX
+        // meaning itself, so unwrap it and lower the body (otherwise the wrapped
+        // content — a whole figure, list, paragraph — is dropped).
+        out.extend(ctx.blocks(&elem.body, styles)?);
     } else if child.is::<typst_library::layout::PagebreakElem>() {
         // A page break maps to a `<w:br w:type="page"/>` in its own paragraph.
         out.push(Block::Para(Para {
@@ -652,11 +657,40 @@ fn handle_block_inner(
                 props: Default::default(),
                 content: runs.into_iter().map(ParaChild::Run).collect(),
             }));
-        } else {
+        } else if let Some(run) = mappers::image::laid_out_fallback(child, styles, ctx)? {
+            // A drawable block with no extractable text — a diagonal/endpoint
+            // `#line`, `#polygon`, `#curve`, a `#layout`/`#stack`/`#move`/
+            // `#rotate`/`#scale` body, … — rasterizes to an image so the visual
+            // survives instead of being silently dropped.
+            out.push(Block::Para(Para {
+                props: ParaProps::default(),
+                content: vec![ParaChild::Run(run)],
+            }));
+        } else if !is_invisible_noop(child) {
             ctx.warn_ignored(child.elem().name(), child.span());
         }
     }
     Ok(())
+}
+
+/// Whether an element is an intentionally invisible no-op or pure layout
+/// scaffolding that produces nothing visible — warning that it "was ignored" is
+/// noise, since no content is lost (it renders nothing in the PDF either). This
+/// is NOT for elements with real visual output that merely failed to map (a
+/// shape, a drawn line): those keep their warning.
+pub(crate) fn is_invisible_noop(child: &Content) -> bool {
+    child.is::<ParbreakElem>()
+        // Inter-block spacing (a leftover/fractional `#v`) has no flowing-document
+        // equivalent, but it carries no content.
+        || child.is::<typst_library::layout::VElem>()
+        // `#hide[..]` is invisible by design (extractable bodies are kept as
+        // hidden text elsewhere; a non-extractable one is genuinely nothing).
+        || child.is::<typst_library::layout::HideElem>()
+        // Float-flush / column-break markers.
+        || child.is::<typst_library::layout::FlushElem>()
+        || child.is::<typst_library::layout::ColbreakElem>()
+        // A tagged-PDF accessibility delimiter (unwrapped to its body elsewhere).
+        || child.is::<typst_library::pdf::PdfMarkerTag>()
 }
 
 /// Lowers a raw [`BlockElem`] (`#block(..)` / `#rect(..)`-via-block), mapping

@@ -1076,6 +1076,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                     }
                 }
             }
+        } else if let Some(elem) = child.to_packed::<typst_library::pdf::PdfMarkerTag>() {
+            // A tagged-PDF accessibility delimiter wraps real inline content; it
+            // has no DOCX meaning, so unwrap it and lower the body.
+            out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<typst_library::layout::HideElem>() {
             // `#hide[..]` → hidden text (`<w:vanish/>`): invisible but present
             // (searchable, screen-reader-readable), instead of dropped. Extract
@@ -1109,7 +1113,13 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             self.emit_rasterized_figure_seqs(before, styles, out);
             match run {
                 Some(run) => out.push(run),
-                None => self.warn_ignored(child.elem().name(), child.span()),
+                // Only warn about a genuine drop. Invisible no-ops (spacing, a
+                // hidden body, layout scaffolding) render nothing in the PDF
+                // either, so a warning would be a false alarm.
+                None if !crate::convert::is_invisible_noop(child) => {
+                    self.warn_ignored(child.elem().name(), child.span())
+                }
+                None => {}
             }
         }
         Ok(())
