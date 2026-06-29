@@ -340,6 +340,36 @@ fn cross_reference_is_a_clickable_hyperlink() {
 }
 
 #[test]
+fn labeled_targets_get_bookmarks_so_refs_resolve() {
+    // A `@ref` to a numbered equation and a `#link` to a plain labeled paragraph
+    // both need a bookmark at the target, or the hyperlink anchor dangles. The
+    // converter brackets labeled blocks (the equation) and labeled inline content
+    // (the `<spot>` on a paragraph) with bookmarks.
+    let p = parts(
+        "#set math.equation(numbering: \"(1)\")\n\
+         $ E = m c^2 $ <emc>\n\n\
+         As in @emc.\n\n\
+         A spot to jump to. <spot>\n\n\
+         #link(<spot>)[go]",
+    );
+    let doc = &p["word/document.xml"];
+    let collect = |key: &str, skip: usize| -> std::collections::BTreeSet<String> {
+        doc.match_indices(key)
+            .map(|(i, _)| {
+                let s = &doc[i + skip..];
+                s[..s.find('"').unwrap()].to_string()
+            })
+            .collect()
+    };
+    let anchors = collect("w:anchor=\"", 10);
+    let bookmarks = collect("w:name=\"", 8);
+    assert!(anchors.len() >= 2, "an equation ref and a label link, got {anchors:?}");
+    let dangling: Vec<_> = anchors.difference(&bookmarks).collect();
+    assert!(dangling.is_empty(), "every link anchor resolves to a bookmark: {dangling:?}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn inline_equation_stays_in_its_paragraph() {
     // Typst splits a paragraph containing an inline equation into
     // `[par, equation, par]`; the exporter must rejoin them, or the equation

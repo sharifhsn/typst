@@ -97,7 +97,18 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
                 }
                 pending_props = Some(props);
             }
+            let par_start = pending.len();
             inline_children(ctx, &par.body, *styles, &mut pending)?;
+            // A labeled paragraph (`text … <spot>`) is a valid `#link(<spot>)`
+            // target, so bracket its content with a bookmark (otherwise the link
+            // anchor is dangling).
+            if child.label().is_some()
+                && let Some(loc) = child.location()
+            {
+                let (id, name) = ctx.add_bookmark(loc);
+                pending.insert(par_start, ParaChild::BookmarkStart { id, name });
+                pending.push(ParaChild::BookmarkEnd { id });
+            }
             have_pending = true;
             last_was_par = true;
         } else if let Some(elem) = child.to_packed::<TagElem>() {
@@ -390,6 +401,46 @@ fn equation_has_inner_label(eq_body: &Content) -> bool {
 
 /// Dispatches one realized native block element.
 fn handle_block(
+    ctx: &mut DocxCtx,
+    child: &Content,
+    styles: typst_library::foundations::StyleChain,
+    out: &mut Vec<Block>,
+) -> SourceResult<()> {
+    let block_start = out.len();
+    handle_block_inner(ctx, child, styles, out)?;
+
+    // Bookmark a LABELED block (a numbered equation `$…$ <eq>`, a labeled list,
+    // …) so a `@ref`/`#link` to it resolves to a real target. Headings and
+    // figures emit their own bookmark, so skip them to avoid a duplicate name.
+    if child.label().is_some()
+        && let Some(loc) = child.location()
+        && !child.is::<HeadingElem>()
+        && !child.is::<FigureElem>()
+    {
+        let (id, name) = ctx.add_bookmark(loc);
+        bracket_bookmark(&mut out[block_start..], id, name);
+    }
+    Ok(())
+}
+
+/// Brackets `blocks` with a bookmark — `bookmarkStart` on its first paragraph,
+/// `bookmarkEnd` on its last — without inserting any paragraph. Skips silently
+/// when the range has no paragraph to anchor on (a bare table/image block, rare
+/// as a labeled target).
+fn bracket_bookmark(blocks: &mut [Block], id: u32, name: ecow::EcoString) {
+    let first = blocks.iter().position(|b| matches!(b, Block::Para(_)));
+    let last = blocks.iter().rposition(|b| matches!(b, Block::Para(_)));
+    if let (Some(f), Some(l)) = (first, last) {
+        if let Block::Para(p) = &mut blocks[f] {
+            p.content.insert(0, ParaChild::BookmarkStart { id, name });
+        }
+        if let Block::Para(p) = &mut blocks[l] {
+            p.content.push(ParaChild::BookmarkEnd { id });
+        }
+    }
+}
+
+fn handle_block_inner(
     ctx: &mut DocxCtx,
     child: &Content,
     styles: typst_library::foundations::StyleChain,

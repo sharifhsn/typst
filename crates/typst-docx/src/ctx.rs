@@ -745,6 +745,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
 
         let mut out: Vec<ParaChild> = Vec::new();
         for (child, child_styles) in pairs {
+            // A labeled inline element (`… text <spot>`) is a valid `#link(<spot>)`
+            // target; bracket the runs it produces with a bookmark so the link
+            // resolves. (Tags carry no visible runs, so skip them.)
+            let label_loc = (!child.is::<TagElem>())
+                .then(|| child.location().filter(|_| child.label().is_some()))
+                .flatten();
+            let child_out_start = out.len();
+
             if let Some(elem) = child.to_packed::<TagElem>() {
                 // Preserve inline introspection tags. These are how the
                 // introspector learns about inline elements (citations,
@@ -818,6 +826,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 let mut runs = Vec::new();
                 self.handle_inline(child, child_styles, &props, &mut runs)?;
                 out.extend(runs.into_iter().map(ParaChild::Run));
+            }
+
+            // Bracket a labeled inline child's output with a bookmark so a
+            // `#link(<label>)` to it resolves.
+            if let Some(loc) = label_loc
+                && out.len() > child_out_start
+            {
+                let (id, name) = self.add_bookmark(loc);
+                out.insert(child_out_start, ParaChild::BookmarkStart { id, name });
+                out.push(ParaChild::BookmarkEnd { id });
             }
         }
 
