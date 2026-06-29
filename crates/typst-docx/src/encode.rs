@@ -91,20 +91,25 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
         let footnotes_xml = build_footnotes(document, pretty);
         package.add_xml("word/footnotes.xml", CT_FOOTNOTES, footnotes_xml);
         doc_rels.add(REL_FOOTNOTES, "footnotes.xml", RelMode::Internal);
+        // A footnote body that holds an image / external link references it by
+        // r:id; that id resolves against footnotes.xml's OWN rels part, not the
+        // document's. Without this, Word refuses to open the file.
+        write_part_rels(&mut package, "footnotes.xml", &document.footnote_rels);
     }
 
     // -- header/footer parts --
-    // The relationships were already registered in `doc_rels` during section
-    // resolution (document.rs), so the `r:id` on each headerReference/
-    // footerReference matches the Relationship here. We only emit the part file
-    // + its content-type Override.
+    // The headerReference/footerReference relationships live in `doc_rels`; the
+    // part's OWN relationships (images, external links in its content) live in a
+    // sibling `word/_rels/<part>.rels` so their r:ids resolve correctly.
     for part in &document.header_parts {
         let xml = build_hdrftr(part, pretty);
         package.add_xml(&format!("word/{}", part.part_name), CT_HEADER, xml);
+        write_part_rels(&mut package, &part.part_name, &part.rels);
     }
     for part in &document.footer_parts {
         let xml = build_hdrftr(part, pretty);
         package.add_xml(&format!("word/{}", part.part_name), CT_FOOTER, xml);
+        write_part_rels(&mut package, &part.part_name, &part.rels);
     }
 
     // -- media parts --
@@ -970,6 +975,22 @@ fn write_sectpr(w: &mut XmlWriter, sect: &SectPr) {
         w.leaf("w:titlePg");
     }
     w.close();
+}
+
+/// Writes a part's own relationships as `word/_rels/<part>.rels`, but only when
+/// the part actually has relationships (images, external links in its content).
+/// OPC associates the `.rels` with its part by the naming convention, so no
+/// explicit reference is needed. An `r:id` in `headerN.xml` / `footnotes.xml`
+/// resolves against THIS part, not `document.xml.rels`.
+fn write_part_rels(package: &mut Package, part_name: &str, rels: &Rels) {
+    if rels.is_empty() {
+        return;
+    }
+    package.add_xml(
+        &format!("word/_rels/{part_name}.rels"),
+        "application/vnd.openxmlformats-package.relationships+xml",
+        rels.to_xml(),
+    );
 }
 
 /// Serializes a header (`w:hdr`) or footer (`w:ftr`) part. Never emits an empty

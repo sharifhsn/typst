@@ -22,6 +22,10 @@ pub struct DocxDocument {
     pub(crate) numbering: NumberingTable,
     pub(crate) media: Vec<MediaPart>,
     pub(crate) doc_rels: Rels,
+    /// Relationships created while lowering footnote bodies — they belong in
+    /// `word/_rels/footnotes.xml.rels`, not the document's, or Word rejects the
+    /// file. Empty when no footnote contains an image/external link.
+    pub(crate) footnote_rels: Rels,
     pub(crate) bookmarks: BookmarkTable,
     pub(crate) max_heading_level: u8,
     pub(crate) uses_fields: bool,
@@ -544,6 +548,11 @@ pub struct HdrFtrPart {
     /// true = header (root `w:hdr`, header content-type), false = footer (`w:ftr`).
     pub is_header: bool,
     pub blocks: Vec<Block>,
+    /// Relationships (images, external links) created while lowering this part's
+    /// content. They MUST live in this part's own `word/_rels/<name>.rels` — an
+    /// `r:id` in `header1.xml` resolves against `header1.xml.rels`, not the
+    /// document's — or Word refuses to open the file.
+    pub rels: crate::package::Rels,
 }
 
 impl Default for SectPr {

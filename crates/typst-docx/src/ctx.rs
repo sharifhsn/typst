@@ -59,6 +59,13 @@ pub struct DocxCtx<'a, 'e> {
     media_dedup: FxHashMap<u128, EcoString>,
 
     pub(crate) doc_rels: Rels,
+    /// Relationships for footnote-body content (→ `footnotes.xml.rels`); used
+    /// while [`Self::in_footnote`] is set.
+    pub(crate) footnote_rels: Rels,
+    /// When `Some`, relationships are routed here instead of `doc_rels` — used to
+    /// collect a header/footer part's own relationships while its content is
+    /// lowered (an `r:id` in `headerN.xml` must resolve against `headerN.xml.rels`).
+    pub(crate) part_rels: Option<Rels>,
     next_bookmark_id: u32,
     next_docpr_id: u32,
     /// Monotonic id for unique header/footer part names across sections.
@@ -120,6 +127,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             media: Vec::new(),
             media_dedup: FxHashMap::default(),
             doc_rels: Rels::new(),
+            footnote_rels: Rels::new(),
+            part_rels: None,
             next_bookmark_id: 1,
             next_docpr_id: 1,
             next_hdrftr_id: 1,
@@ -343,26 +352,46 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         id
     }
 
-    /// Embeds image bytes as a media part (dedup by byte hash); returns the rId.
+    /// The relationships table the *current* content lowers into: a header/footer
+    /// part's own table while one is being built, the footnote table while a
+    /// footnote body is lowered, else the document's. An `r:id` used in a part
+    /// must resolve against that part's `.rels`, so relationships created while
+    /// lowering header/footer/footnote content must NOT land in `document.xml.rels`.
+    fn active_rels(&mut self) -> &mut Rels {
+        if let Some(rels) = self.part_rels.as_mut() {
+            rels
+        } else if self.in_footnote {
+            &mut self.footnote_rels
+        } else {
+            &mut self.doc_rels
+        }
+    }
+
+    /// Embeds image bytes as a media part (the part is deduped by byte hash and
+    /// shared across the package); returns the rId of a relationship to it,
+    /// allocated in the *active* part's relationships (see [`Self::active_rels`]).
     pub fn add_image(&mut self, bytes: &[u8], ext: &str) -> EcoString {
         let hash = typst_utils::hash128(bytes);
-        if let Some(rel) = self.media_dedup.get(&hash) {
-            return rel.clone();
-        }
-        let n = self.media.len() + 1;
-        let ext = ext.to_ascii_lowercase();
-        let part_name: EcoString = eco_format!("word/media/image{n}.{ext}");
-        // Targets in document.xml.rels are relative to word/.
-        let target: EcoString = eco_format!("media/image{n}.{ext}");
-        let rel = self.doc_rels.add(REL_IMAGE, &target, RelMode::Internal);
-        self.media.push(MediaPart {
-            rel: rel.clone(),
-            part_name,
-            ext: ext.into(),
-            bytes: bytes.to_vec(),
-        });
-        self.media_dedup.insert(hash, rel.clone());
-        rel
+        // Resolve (or create) the shared media part → its `word/`-relative target.
+        let target = if let Some(t) = self.media_dedup.get(&hash) {
+            t.clone()
+        } else {
+            let n = self.media.len() + 1;
+            let ext = ext.to_ascii_lowercase();
+            let part_name: EcoString = eco_format!("word/media/image{n}.{ext}");
+            let target: EcoString = eco_format!("media/image{n}.{ext}");
+            self.media.push(MediaPart {
+                // The rId is per-referencing-part (allocated below), not a
+                // property of the media part itself.
+                rel: EcoString::new(),
+                part_name,
+                ext: ext.into(),
+                bytes: bytes.to_vec(),
+            });
+            self.media_dedup.insert(hash, target.clone());
+            target
+        };
+        self.active_rels().add(REL_IMAGE, &target, RelMode::Internal)
     }
 
     /// Allocates a unique `wp:docPr` id (>= 1) for a Drawing.
@@ -443,9 +472,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         (id, name)
     }
 
-    /// Allocates (or reuses) an external hyperlink relationship; returns the rId.
+    /// Allocates (or reuses) an external hyperlink relationship in the active
+    /// part's relationships (document / footnote / header-footer); returns the rId.
     pub fn add_external_rel(&mut self, url: &str) -> EcoString {
-        self.doc_rels.add(REL_HYPERLINK, url, RelMode::External)
+        self.active_rels().add(REL_HYPERLINK, url, RelMode::External)
     }
 
     /// Registers a header part relationship (`Target` relative to `word/`);
@@ -999,6 +1029,24 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         let children = self.realize_fragment(&arenas, body, styles)?;
         let pairs: Vec<_> = children.to_vec();
         crate::convert::convert_children(self, &pairs)
+    }
+
+    /// Lowers a separate OPC part's content (a header/footer body) into blocks,
+    /// collecting the relationships it creates (images, external links) into that
+    /// part's own relationships table — which the caller writes as
+    /// `word/_rels/<part>.rels`. An `r:id` in a header/footer part must resolve
+    /// against its own `.rels`, not the document's.
+    pub fn part_blocks(
+        &mut self,
+        body: &Content,
+        styles: StyleChain,
+    ) -> SourceResult<(Vec<Block>, Rels)> {
+        let saved = self.part_rels.take();
+        self.part_rels = Some(Rels::new());
+        let result = self.blocks(body, styles);
+        let rels = self.part_rels.take().unwrap_or_default();
+        self.part_rels = saved;
+        Ok((result?, rels))
     }
 
     /// Realizes a fragment body into native pairs.

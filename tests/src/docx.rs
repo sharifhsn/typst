@@ -265,6 +265,32 @@ fn outline_falls_back_to_introspected_headings() {
 }
 
 #[test]
+fn header_link_relationship_lives_in_the_header_part_rels() {
+    // A link/image in a header references a relationship by r:id; that id must
+    // resolve against the header part's OWN .rels, not document.xml.rels, or Word
+    // refuses to open the file.
+    let p = parts(
+        "#set page(header: [#link(\"https://example.com\")[site] head])\nBody.",
+    );
+    let header = p
+        .keys()
+        .find(|k| k.starts_with("word/header") && k.ends_with(".xml"))
+        .expect("a header part");
+    let rid = {
+        let h = &p[header];
+        let i = h.find("r:id=\"").expect("header references an r:id") + 6;
+        h[i..][..h[i..].find('"').unwrap()].to_string()
+    };
+    let rels_name = format!("word/_rels/{}.rels", header.trim_start_matches("word/"));
+    let rels = p.get(&rels_name).expect("the header part has its own .rels");
+    assert!(
+        rels.contains(&format!("Id=\"{rid}\"")) && rels.contains("example.com"),
+        "the header's r:id resolves in its own .rels"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn hide_becomes_hidden_text() {
     // `#hide` content → `<w:vanish/>`: invisible in the page but present in the
     // document (searchable / screen-reader-readable), rather than dropped.

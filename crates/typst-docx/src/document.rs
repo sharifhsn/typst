@@ -73,6 +73,7 @@ pub fn docx_document(
         numbering,
         media,
         doc_rels,
+        footnote_rels,
         bookmarks,
         max_heading_level,
         uses_fields,
@@ -160,6 +161,7 @@ pub fn docx_document(
             std::mem::take(&mut ctx.numbering),
             std::mem::take(&mut ctx.media),
             std::mem::take(&mut ctx.doc_rels),
+            std::mem::take(&mut ctx.footnote_rels),
             std::mem::take(&mut ctx.bookmarks),
             ctx.max_heading_level,
             ctx.uses_fields,
@@ -233,6 +235,7 @@ pub fn docx_document(
         numbering,
         media,
         doc_rels,
+        footnote_rels,
         bookmarks,
         max_heading_level,
         uses_fields,
@@ -502,20 +505,22 @@ fn build_section(
 
     // -- Explicit header content -------------------------------------------
     if let Some(content) = &geom.header {
-        let blocks = ctx.blocks(content, styles)?;
+        // Lower into the part's OWN relationships table (images/links in a header
+        // must resolve against `headerN.xml.rels`, not the document's).
+        let (blocks, rels) = ctx.part_blocks(content, styles)?;
         let part_name = ctx.next_hdrftr_name(true);
         let rel = ctx.add_header_rel(&part_name);
         sect.headers.push(HdrFtrRef { kind: "default", rel });
-        header_parts.push(HdrFtrPart { part_name, is_header: true, blocks });
+        header_parts.push(HdrFtrPart { part_name, is_header: true, blocks, rels });
     }
 
     // -- Explicit footer content -------------------------------------------
     if let Some(content) = &geom.footer {
-        let blocks = ctx.blocks(content, styles)?;
+        let (blocks, rels) = ctx.part_blocks(content, styles)?;
         let part_name = ctx.next_hdrftr_name(false);
         let rel = ctx.add_footer_rel(&part_name);
         sect.footers.push(HdrFtrRef { kind: "default", rel });
-        footer_parts.push(HdrFtrPart { part_name, is_header: false, blocks });
+        footer_parts.push(HdrFtrPart { part_name, is_header: false, blocks, rels });
     }
 
     // -- Synthetic page-number band (numbering set, band left as `auto`) ----
@@ -528,6 +533,7 @@ fn build_section(
                 part_name,
                 is_header: true,
                 blocks: vec![page_number_para("Header", geom.number_jc)],
+                rels: crate::package::Rels::new(),
             });
             ctx.mark_field();
         } else if !geom.number_in_header
@@ -541,6 +547,7 @@ fn build_section(
                 part_name,
                 is_header: false,
                 blocks: vec![page_number_para("Footer", geom.number_jc)],
+                rels: crate::package::Rels::new(),
             });
             ctx.mark_field();
         }
