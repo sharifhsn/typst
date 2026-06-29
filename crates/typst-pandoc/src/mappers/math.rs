@@ -1,111 +1,101 @@
-//! Math mapper: `EquationElem` → a rasterized `Image` (inline or block).
+//! Math mapper: `EquationElem` → a Pandoc `Math` node (LaTeX string), with a
+//! rasterize-to-`Image` safety net.
 //!
-//! Pandoc stores math as an opaque LaTeX *string* (`Math InlineMath "<tex>"` /
-//! `Math DisplayMath "<tex>"`), but Typst has no Typst-math→LaTeX emitter. For
-//! THIS workflow we take the cheap, always-correct route: rasterize the
-//! equation to a PNG `data:` URI and emit it as an `Image` — inline for an
-//! inline equation, a `Para`-wrapped block image for a display equation.
+//! Pandoc stores math as an opaque LaTeX *string*
+//! (`Math InlineMath "<tex>"` / `Math DisplayMath "<tex>"`). Typst has no
+//! Typst-math→LaTeX emitter, so we resolve the equation body to the [`MathItem`]
+//! IR — the very same IR the DOCX backend lowers to OMML — via
+//! [`resolve_equation`], then walk it into a LaTeX string with
+//! [`crate::mappers::math_latex::emit`]. Inline equations become
+//! `Math(InlineMath, latex)`; block (display) equations become a `Para` holding
+//! a single `Math(DisplayMath, latex)`.
 //!
-//! Two correctness obligations are met here, both load-bearing:
+//! **Safety net (no regressions).** The emitter returns
+//! [`Unrepresentable`](super::math_latex::Unrepresentable) for any sub-construct
+//! it cannot render cleanly — embedded `box(..)`/`External` content, an inner
+//! introspection tag (a per-line `#<label>`), an unmapped non-ASCII glyph, an
+//! unrepresentable delimiter/accent. In every such case we fall back to the
+//! original rasterize-to-`Image` path for that whole equation, so we never emit
+//! broken LaTeX and never lose content. A partial emitter that bails to raster
+//! is a strict improvement over always-raster.
 //!
-//! 1. **Drop the baked equation number.** If we rasterized the `EquationElem`
-//!    as-is, `typst-layout`'s math layout would bake the `(1)` number (and its
-//!    right-aligned gutter) straight into the pixels — the writer owns
-//!    numbering in every other mapper, so a baked number would both
-//!    double-count and stretch the image to the full text width. We strip it by
-//!    laying the equation out under a style chain that sets
-//!    `EquationElem::numbering = None`.
+//! Two correctness obligations carry over from the rasterize design:
+//!
+//! 1. **Drop the baked equation number.** The writer owns numbering in every
+//!    Pandoc mapper. For the LaTeX path this is automatic (we emit only the body
+//!    LaTeX, never `(N)`); for the rasterize fallback we lay the equation out
+//!    under a style chain that sets `EquationElem::numbering = None` so the
+//!    number is not baked into the pixels.
 //!
 //! 2. **Preserve inner labels/tags for convergence.** An equation body may carry
 //!    introspection tags — a per-line `#<eqa>` label, a `#ref` target, a cite —
-//!    that the introspector must still see, or the document never converges
-//!    ("label does not exist" / "citation could not be located"). The shared
-//!    `ctx.rasterize` *already* harvests frame tags into `ctx.deferred_tags`
-//!    BEFORE its degenerate-size drop (see `ctx.rs`), so the rasterize path
-//!    keeps these tags for free. A labeled/numbered equation additionally
-//!    exposes its `anchor_id` on the emitted `Image` so a `#ref` to the
-//!    equation resolves to a real anchor (the shared id namespace).
-//
-// TODO(next-workflow): MathItem -> LaTeX-string emitter. Replace the rasterize
-// calls below with a structural walk of the math IR (`resolve_equation` →
-// `MathItem`) into a LaTeX string, then emit `Math(InlineMath, latex)` /
-// `Para[Math(DisplayMath, latex)]`. The STRUCTURAL BLUEPRINT is the OMML walk in
-// `crates/typst-docx/src/mappers/math.rs` (`Emitter::emit_kind`): each
-// `MathKind` maps to one LaTeX construct — Fraction→`\frac{num}{den}`,
-// SkewedFraction→`{num}/{den}`, Radical→`\sqrt[deg]{rad}`,
-// Scripts→`base^{sup}_{sub}`, Accent→`\hat{..}`/`\bar{..}`/…,
-// Line→`\overline{..}`/`\underline{..}`, Fenced→`\left( .. \right)`,
-// Table→`\begin{matrix} a & b \\ .. \end{matrix}`,
-// Multiline→`\begin{aligned} .. \end{aligned}`, Cancel→`\cancel{..}`. The n-ary
-// lookahead (∑∫∏ + following operand until the next relation) is the SAME shape
-// as the DOCX `emit_items`/`emit_nary` but SIMPLER for LaTeX: just linear
-// juxtaposition — `\sum_{lo}^{hi} integrand` with no nested `m:e`. The long tail
-// is the per-glyph symbol→command table (∫→`\int`, ≤→`\leq`, α→`\alpha`, …;
-// unknown codepoint → `\unicode{...}` or `\text{..}`). `Box`/`External` math
-// have no LaTeX form → keep the rasterize fallback below for those sub-cases.
-// HOOK POINT: branch on whether the IR walk fully succeeded; on any
-// unrepresentable sub-item fall back to `rasterize_inline`/`rasterize_block`
-// exactly as below, so the emitter can be landed incrementally.
+//!    that the introspector must still see, or the document never converges. The
+//!    emitter treats any inner `MathItem::Tag` as unrepresentable and bails to
+//!    the rasterize path, whose `ctx.rasterize` harvests the frame tags into
+//!    `ctx.deferred_tags` BEFORE its degenerate-size drop. So a labeled inner
+//!    line keeps its tag for free, via the fallback.
+//!
+//! A numbered/labeled equation additionally exposes its `anchor_id` on the
+//! emitted node (a `Span` wrapping the inline `Math`, or the block `Para`) so a
+//! `#ref` to the equation resolves to a real anchor in the shared id namespace.
 
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Packed, Style, StyleChain};
+use typst_library::introspection::Locator;
 use typst_library::math::EquationElem;
+use typst_library::math::ir::resolve_equation;
+use typst_library::routines::Arenas;
 use typst_utils::LazyHash;
 
-use crate::ast::{Block, Inline};
+use crate::ast::{Block, Inline, MathType, empty_attr};
 use crate::ctx::PandocCtx;
 
+use super::math_latex;
 use super::{rasterize_block, rasterize_inline};
 
-/// An inline equation → an inline raster `Image`.
-///
-/// The baked equation number is stripped before layout (an inline equation is
-/// normally unnumbered anyway, but this keeps the two paths uniform). Inner
-/// tags are harvested by `ctx.rasterize` for convergence.
+/// An inline equation → an inline `Math(InlineMath, latex)` node, or, if the
+/// equation cannot be cleanly emitted as LaTeX, a raster `Image` fallback.
 pub fn equation_inline(
     elem: &Packed<EquationElem>,
     styles: StyleChain,
     ctx: &mut PandocCtx,
 ) -> SourceResult<Vec<Inline>> {
-    // Hold the reset styles on the stack so the chained borrow outlives the
-    // rasterize call below (no leak / no shared arena needed).
+    if let Some(latex) = try_latex(elem, styles, ctx)? {
+        let math = Inline::Math(MathType::InlineMath, latex);
+        // Wrap in an id-carrying `Span` only when locatable, so `#ref(<eq>)`
+        // resolves; otherwise emit the bare `Math` node.
+        return Ok(vec![anchor_inline(elem, ctx, math)]);
+    }
+
+    // Fallback: rasterize (number stripped before layout, tags harvested).
     let reset = unnumbered();
     let styles = styles.chain(&reset);
-
     let mut inlines = rasterize_inline(elem.pack_ref(), styles, ctx)?;
-
-    // If the equation is labeled/locatable, expose its shared anchor id on the
-    // image so `#ref(<eq>)` (a `Link` to `#anchor_id`) resolves to a real
-    // target. Attach to the first emitted image (the rasterize fallback emits at
-    // most one).
     if let Some(loc) = elem.location()
         && let Some(Inline::Image(attr, _, _)) = inlines.first_mut()
     {
         attr.0 = ctx.anchor_id(loc).to_string();
     }
-
     Ok(inlines)
 }
 
-/// A block (display) equation → a `Para` holding a raster `Image`.
-///
-/// The baked `(N)` equation number is stripped before layout (the writer owns
-/// numbering — see module docs). Inner tags are harvested by `ctx.rasterize`.
-/// A numbered/labeled equation carries its `anchor_id` on the image so refs to
-/// the equation resolve.
+/// A block (display) equation → a `Para` holding `Math(DisplayMath, latex)`, or
+/// a `Para` holding a raster `Image` if the equation is not cleanly LaTeX.
 pub fn equation_block(
     elem: &Packed<EquationElem>,
     styles: StyleChain,
     ctx: &mut PandocCtx,
 ) -> SourceResult<Vec<Block>> {
+    if let Some(latex) = try_latex(elem, styles, ctx)? {
+        let math = Inline::Math(MathType::DisplayMath, latex);
+        let inline = anchor_inline(elem, ctx, math);
+        return Ok(vec![Block::Para(vec![inline])]);
+    }
+
+    // Fallback: rasterize the display equation (number stripped, tags harvested).
     let reset = unnumbered();
     let styles = styles.chain(&reset);
-
     let mut blocks = rasterize_block(elem.pack_ref(), styles, ctx)?;
-
-    // Attach the shared anchor id to the block image (if locatable) so a `#ref`
-    // to this equation lands on a real anchor. `rasterize_block` emits a single
-    // `Para[Image]`; find that image and set its id.
     if let Some(loc) = elem.location() {
         let id = ctx.anchor_id(loc);
         if let Some(Block::Para(inlines)) = blocks.first_mut()
@@ -114,60 +104,93 @@ pub fn equation_block(
             attr.0 = id.to_string();
         }
     }
-
     Ok(blocks)
+}
+
+/// Resolves the equation body to the math IR and walks it into a LaTeX string,
+/// returning `None` if the equation has no location (cannot be resolved) or if
+/// any sub-item is unrepresentable (the caller then rasterizes).
+fn try_latex(
+    elem: &Packed<EquationElem>,
+    styles: StyleChain,
+    ctx: &mut PandocCtx,
+) -> SourceResult<Option<String>> {
+    // An equation without a location cannot be IR-resolved (it would have been
+    // assigned one during realization for any real document element); fall back.
+    let Some(loc) = elem.location() else {
+        return Ok(None);
+    };
+
+    // Resolve to the math IR. The IR borrows from `arenas`, which lives only for
+    // this call — fine, we serialize to a LaTeX `String` immediately. Mirror the
+    // HTML/DOCX backends: `Locator::synthesize` over the element's own location.
+    let arenas = Arenas::default();
+    let item =
+        resolve_equation(elem, ctx.engine(), Locator::synthesize(loc), &arenas, styles)?;
+
+    Ok(math_latex::emit(&item).ok())
+}
+
+/// Wraps an inline `Math` node in an id-carrying `Span` when the equation is
+/// locatable (so `#ref(<eq>)` resolves to a real anchor), or returns the bare
+/// node otherwise. Using a `Span` keeps the node a single inline while attaching
+/// the shared-namespace anchor id; pandoc carries the id through to every writer.
+fn anchor_inline(
+    elem: &Packed<EquationElem>,
+    ctx: &PandocCtx,
+    math: Inline,
+) -> Inline {
+    match elem.location() {
+        Some(loc) => {
+            let mut attr = empty_attr();
+            attr.0 = ctx.anchor_id(loc).to_string();
+            Inline::Span(attr, vec![math])
+        }
+        None => math,
+    }
+}
+
+/// Builds a one-property style forcing `EquationElem::numbering` to `None`, so
+/// the rasterize fallback does not bake the equation number into the pixels.
+fn unnumbered() -> LazyHash<Style> {
+    EquationElem::numbering.set(None).wrap()
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::ast::{Block, Inline, empty_attr};
+    use crate::ast::{Block, Inline, MathType};
 
-    const PNG: &str = "data:image/png;base64,iVBORw0KGgo=";
-
-    /// The inline equation shape: a bare `Image` (data-URI raster), with the
-    /// equation's `anchor_id` carried as the `Attr` id when locatable, so a
-    /// `#ref` (a `Link` to `#anchor_id`) lands on a real target. The surrounding
-    /// inter-word `Space`s are the caller's responsibility — here we just guard
-    /// the node this mapper produces.
+    /// The inline-equation clean shape: a `Span` carrying the equation's anchor
+    /// id and wrapping a single `Math InlineMath` node. The surrounding
+    /// inter-word `Space`s are the caller's responsibility.
     #[test]
-    fn inline_equation_is_image_with_anchor() {
-        let mut img = Inline::Image(empty_attr(), Vec::new(), (PNG.into(), String::new()));
-        if let Inline::Image(attr, _, _) = &mut img {
-            attr.0 = "ref-00ff".into();
-        }
-        let json = serde_json::to_value(&img).unwrap();
-        assert_eq!(json["t"], "Image");
-        // Attr id (c[0][0]) carries the anchor; target url (c[2][0]) is the URI.
+    fn inline_equation_is_span_math() {
+        let math = Inline::Math(MathType::InlineMath, "a^2 + b^2".into());
+        let mut attr = crate::ast::empty_attr();
+        attr.0 = "ref-00ff".into();
+        let span = Inline::Span(attr, vec![math]);
+        let json = serde_json::to_value(&span).unwrap();
+        assert_eq!(json["t"], "Span");
+        // Span Attr id (c[0][0]) carries the anchor.
         assert_eq!(json["c"][0][0], "ref-00ff");
-        assert_eq!(json["c"][2][0], PNG);
-        // Alt is empty (rasterized math carries no alt here).
-        assert!(json["c"][1].as_array().unwrap().is_empty());
+        // The wrapped node is a Math InlineMath with the LaTeX string.
+        assert_eq!(json["c"][1][0]["t"], "Math");
+        assert_eq!(json["c"][1][0]["c"][0]["t"], "InlineMath");
+        assert_eq!(json["c"][1][0]["c"][1], "a^2 + b^2");
     }
 
-    /// The block equation shape: a `Para` holding a single `Image`, the anchor
-    /// id on the image. No baked `(N)` number node — the writer owns numbering.
+    /// The block-equation clean shape: a `Para` holding a single
+    /// `Math DisplayMath` node (no baked `(N)` number — the writer owns it).
     #[test]
-    fn block_equation_is_para_image_with_anchor() {
-        let mut img = Inline::Image(empty_attr(), Vec::new(), (PNG.into(), String::new()));
-        if let Inline::Image(attr, _, _) = &mut img {
-            attr.0 = "ref-aa11".into();
-        }
-        let para = Block::Para(vec![img]);
+    fn block_equation_is_para_display_math() {
+        let math = Inline::Math(MathType::DisplayMath, "\\frac{1}{2}".into());
+        let para = Block::Para(vec![math]);
         let json = serde_json::to_value(&para).unwrap();
         assert_eq!(json["t"], "Para");
-        assert_eq!(json["c"][0]["t"], "Image");
-        assert_eq!(json["c"][0]["c"][0][0], "ref-aa11");
-        // Exactly one inline (the image) — no trailing number run.
+        assert_eq!(json["c"][0]["t"], "Math");
+        assert_eq!(json["c"][0]["c"][0]["t"], "DisplayMath");
+        assert_eq!(json["c"][0]["c"][1], "\\frac{1}{2}");
+        // Exactly one inline (the math) — no trailing number run.
         assert_eq!(json["c"].as_array().unwrap().len(), 1);
     }
-}
-
-/// Builds a one-property style that forces `EquationElem::numbering` to `None`,
-/// so the math layout does not bake the equation number into the rasterized
-/// pixels. The writer owns numbering in every Pandoc mapper; baking it here
-/// would both double-count and stretch the image to the full text width via the
-/// number gutter. (Same `set(..).wrap()` pattern as the `TargetElem` reset in
-/// `ctx.rasterize`.)
-fn unnumbered() -> LazyHash<Style> {
-    EquationElem::numbering.set(None).wrap()
 }

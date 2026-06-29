@@ -62,6 +62,7 @@ pub mod image;
 pub mod link;
 pub mod list;
 pub mod math;
+mod math_latex;
 pub mod outline;
 pub mod quote;
 pub mod table;
