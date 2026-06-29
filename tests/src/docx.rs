@@ -316,6 +316,30 @@ fn core_properties_carry_author_and_revision() {
 }
 
 #[test]
+fn cross_reference_is_a_clickable_hyperlink() {
+    // `@label` to a heading/figure renders the correct number AND is a real
+    // clickable hyperlink to the target's bookmark (the destination survives as
+    // the `LinkElem::current` style after the marker is stripped in realize).
+    let p = parts(
+        "#set heading(numbering: \"1.\")\n= Intro <intro>\n\n= Methods\n\nAs in @intro.",
+    );
+    let doc = &p["word/document.xml"];
+    // The ref paragraph carries a hyperlink, not bare text.
+    let para = doc.split("<w:p>").find(|p| p.contains("As in")).expect("ref para");
+    assert!(para.contains("<w:hyperlink"), "the cross-reference is a hyperlink");
+    let anchor = {
+        let i = para.find("w:anchor=\"").expect("anchor") + 10;
+        &para[i..][..para[i..].find('"').unwrap()]
+    };
+    // …and it targets a bookmark that actually exists.
+    assert!(
+        doc.contains(&format!("w:name=\"{anchor}\"")),
+        "the ref anchor {anchor} resolves to a real bookmark"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn inline_equation_stays_in_its_paragraph() {
     // Typst splits a paragraph containing an inline equation into
     // `[par, equation, par]`; the exporter must rejoin them, or the equation

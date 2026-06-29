@@ -16,7 +16,9 @@ use typst_library::text::{
 };
 use typst_library::text::{HighlightElem, SmallcapsElem, StrikeElem, UnderlineElem};
 use typst_library::visualize::ImageElem;
-use typst_library::model::{DirectLinkElem, FootnoteElem, LinkElem, LinkMarker, RefElem};
+use typst_library::model::{
+    DirectLinkElem, Destination, FootnoteElem, LinkElem, LinkMarker, RefElem,
+};
 use typst_syntax::Span;
 
 use crate::dom::{
@@ -779,13 +781,70 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                     p.bdr.get_or_insert(b);
                 }
                 out.extend(self.inline_pchildren(&fbody, child_styles, p)?);
+            } else if let Some(dest) = child_styles.get_cloned(LinkElem::current) {
+                // Linked content whose marker element was stripped during
+                // realization — a cross-reference (`@fig`), bibliography
+                // back-reference, etc. The destination survives as the
+                // `LinkElem::current` style (paged layout reads the same style),
+                // so re-wrap the runs in a real `<w:hyperlink>` to make the
+                // reference clickable. The runs keep their own colour (Word
+                // cross-references are not blue-underlined like URL links).
+                let mut runs = Vec::new();
+                self.handle_inline(child, child_styles, &props, &mut runs)?;
+                match dest {
+                    Destination::Location(loc) => {
+                        let (_id, name) = self.add_bookmark(loc);
+                        out.push(ParaChild::Hyperlink {
+                            rel: None,
+                            anchor: Some(name),
+                            runs,
+                        });
+                    }
+                    Destination::Url(url) => {
+                        let rel = self.add_external_rel(url.as_str());
+                        out.push(ParaChild::Hyperlink {
+                            rel: Some(rel),
+                            anchor: None,
+                            runs,
+                        });
+                    }
+                    // A page/coordinate destination has no DOCX equivalent: emit
+                    // the text without a link.
+                    Destination::Position(_) => {
+                        out.extend(runs.into_iter().map(ParaChild::Run));
+                    }
+                }
             } else {
                 let mut runs = Vec::new();
                 self.handle_inline(child, child_styles, &props, &mut runs)?;
                 out.extend(runs.into_iter().map(ParaChild::Run));
             }
         }
-        Ok(out)
+
+        // A cross-reference often realizes as several runs (supplement + space +
+        // number), each carrying the same destination, so the loop above made one
+        // `<w:hyperlink>` per run. Coalesce directly-adjacent hyperlinks with the
+        // same target into a single one.
+        let mut merged: Vec<ParaChild> = Vec::with_capacity(out.len());
+        for child in out {
+            if let ParaChild::Hyperlink { rel, anchor, mut runs } = child {
+                if let Some(ParaChild::Hyperlink {
+                    rel: prev_rel,
+                    anchor: prev_anchor,
+                    runs: prev_runs,
+                }) = merged.last_mut()
+                    && *prev_rel == rel
+                    && *prev_anchor == anchor
+                {
+                    prev_runs.append(&mut runs);
+                    continue;
+                }
+                merged.push(ParaChild::Hyperlink { rel, anchor, runs });
+            } else {
+                merged.push(child);
+            }
+        }
+        Ok(merged)
     }
 
     /// Handles a single realized inline child, appending runs to `out`.
