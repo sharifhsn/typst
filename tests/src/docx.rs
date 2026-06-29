@@ -134,6 +134,59 @@ fn table_maps_to_wtbl() {
 }
 
 #[test]
+fn stroke_none_table_has_no_cell_borders() {
+    // `stroke: none` must turn borders OFF — every cell side becomes an explicit
+    // `w:val="nil"` (not left to inherit the table's default border).
+    let p = parts("#table(columns: 2, stroke: none, [a], [b], [c], [d])");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<w:tcBorders>"), "a borderless cell still emits tcBorders");
+    assert!(doc.contains("w:val=\"nil\""), "with sides turned off (nil)");
+    // A normal table keeps visible borders.
+    let normal = parts("#table(columns: 2, [a], [b])");
+    assert!(
+        normal["word/document.xml"].contains("<w:top w:val=\"single\""),
+        "a default table keeps single borders"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn grid_cell_alignment_is_kept() {
+    // `#grid` cell alignment must reach `w:jc` (it was only read off `#table`
+    // cells before, silently dropping it for grids).
+    let p = parts("#grid(columns: 2, align: center, grid.cell[A], [B])");
+    assert!(
+        p["word/document.xml"].contains("w:jc w:val=\"center\""),
+        "grid cell alignment becomes w:jc"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn nested_bullets_indent_by_level() {
+    // A nested bullet list must descend ilvl (depth fold), not stay flat at 0.
+    let p = parts("- a\n- b\n  - b1\n    - b1a");
+    let doc = &p["word/document.xml"];
+    for lvl in ["0", "1", "2"] {
+        assert!(
+            doc.contains(&format!("<w:ilvl w:val=\"{lvl}\"/>")),
+            "nested bullets reach ilvl {lvl}"
+        );
+    }
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn nested_full_enum_numbers_include_ancestry() {
+    // `#set enum(full: true)` nested numbering must read `1.`, `1.1.`, `2.` — the
+    // parent ancestry folded onto each item body.
+    let p = parts("#set enum(full: true)\n+ one\n  + one-a\n+ two");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("1.1."), "nested full enum shows the parent path (1.1.)");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn math_maps_to_omml() {
     let p = parts("$ x^2 + y^2 = z^2 $");
     assert!(

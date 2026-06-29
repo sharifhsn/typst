@@ -263,10 +263,17 @@ fn cell_blocks(
 /// `Smart::Auto` leaves both unspecified (Word's defaults — top/left — already
 /// match Typst's cell defaults).
 fn cell_alignment(cell: &ResolvedCell, styles: StyleChain) -> (Option<Jc>, Option<VAlign>) {
-    let Some(tc) = cell.body.to_packed::<TableCell>() else {
+    // The resolved cell body is a `TableCell` for a `#table` but a `GridCell` for
+    // a `#grid` (which the DOCX backend also lowers to a `w:tbl`); read alignment
+    // off whichever it is, or neither.
+    let align = if let Some(tc) = cell.body.to_packed::<TableCell>() {
+        tc.align.get(styles)
+    } else if let Some(gc) = cell.body.to_packed::<GridCell>() {
+        gc.align.get(styles)
+    } else {
         return (None, None);
     };
-    let Smart::Custom(align) = tc.align.get(styles) else {
+    let Smart::Custom(align) = align else {
         return (None, None);
     };
     align_to_docx(align)
@@ -422,7 +429,10 @@ fn row_height(grid: &CellGrid, y: usize) -> Option<RowHeight> {
     match sizing {
         Sizing::Rel(rel) if rel.rel.get() == 0.0 => {
             let dxa = (rel.abs.abs.to_pt() * 20.0).round() as i32;
-            (dxa > 0).then_some(RowHeight { val: dxa, exact: true })
+            // A fixed Typst row height is a MINIMUM — content taller than it
+            // overflows, never clips. Word's `hRule="exact"` clips, so use
+            // `atLeast` to match (LibreOffice grows either way, masking this).
+            (dxa > 0).then_some(RowHeight { val: dxa, exact: false })
         }
         _ => None,
     }

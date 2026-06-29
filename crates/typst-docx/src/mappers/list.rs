@@ -247,7 +247,13 @@ fn enum_static_fallback(
             first_line: None,
             hanging: Some(HANGING_TWIPS),
         };
-        emit_static_marker_item(ctx, &item.body, styles, marker, ind, &mut out)?;
+        // Fold this item's number into `EnumElem::parents` on the body (as the
+        // layout pipeline does), so a NESTED enum sees the full ancestry — for its
+        // indent level and for `full: true` numbers like `1.2.`. Without it every
+        // nested enum collapses to level 0 with a flat number.
+        let item_body =
+            item.body.clone().set(EnumElem::parents, core::iter::once(number).collect());
+        emit_static_marker_item(ctx, &item_body, styles, marker, ind, &mut out)?;
 
         number = if reversed {
             number.saturating_sub(1)
@@ -375,7 +381,12 @@ fn emit_item(
     ilvl: u8,
     out: &mut Vec<Block>,
 ) -> SourceResult<()> {
-    let blocks = ctx.blocks(body, styles)?;
+    // Fold `ListElem::depth += 1` onto the item body (exactly as the layout
+    // pipeline does, `typst-layout/src/lists.rs`), so a list NESTED inside this
+    // item sees the incremented depth and indents one level deeper. Without it
+    // every nested bullet list collapses back to level 0.
+    let body = body.clone().set(ListElem::depth, Depth(1));
+    let blocks = ctx.blocks(&body, styles)?;
     let body_indent = LEVEL_INDENT_TWIPS * (ilvl as i32 + 1);
 
     let mut numbered = false;

@@ -388,13 +388,12 @@ fn write_cell(w: &mut XmlWriter, cell: &Cell) {
 }
 
 fn write_cell_borders(w: &mut XmlWriter, borders: &CellBorders) {
-    if borders.top.is_none()
-        && borders.bottom.is_none()
-        && borders.left.is_none()
-        && borders.right.is_none()
-    {
-        return;
-    }
+    // Always emit all four sides: after Typst resolves the grid, a `None` side
+    // means "no stroke" (not "inherit"), so it must be written as an explicit
+    // `w:val="nil"` to turn OFF the table's default border. Returning early for an
+    // all-`None` (e.g. `stroke: none`) cell let the blanket `w:tblBorders` show
+    // through — the exact opposite of what was asked. (Cells that DO have strokes
+    // are unchanged: they already emitted a full `w:tcBorders`.)
     w.open("w:tcBorders").start_children();
     write_border_side(w, "w:top", &borders.top);
     write_border_side(w, "w:left", &borders.left);
