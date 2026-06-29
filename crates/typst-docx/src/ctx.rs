@@ -517,11 +517,19 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         let size = styles.resolve(TextElem::size);
         p.size_half_pt = Some(props::pt_to_half_pt(size.to_pt()));
 
-        // Color.
+        // Color. A run carrying the `Hyperlink` character style must keep that
+        // style's blue + underline, so don't emit an explicit colour when it's
+        // the default black — that would override the style back to invisible
+        // body text. An explicitly non-black fill (e.g. `#show link: set
+        // text(red)`) still wins.
         if let typst_library::visualize::Paint::Solid(color) =
             styles.get_ref(TextElem::fill)
         {
-            p.color = Some(props::color_to_hex(color));
+            let hex = props::color_to_hex(color);
+            let link_default = p.style.as_deref() == Some("Hyperlink") && hex == [0, 0, 0];
+            if !link_default {
+                p.color = Some(hex);
+            }
         }
 
         // Font (first family).

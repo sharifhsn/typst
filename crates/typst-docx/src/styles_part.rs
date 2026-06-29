@@ -61,8 +61,19 @@ pub fn build(info: &DocumentInfo, max_heading_level: u8, pretty: bool) -> String
     // FootnoteText (paragraph) + FootnoteReference (character).
     style(&mut w, "FootnoteText", "footnote text", Some("Normal"), false, false);
     char_style(&mut w, "FootnoteReference", "footnote reference", true);
-    // Hyperlink (character).
-    char_style(&mut w, "Hyperlink", "Hyperlink", false);
+    // Hyperlink (character) — blue + single underline, Word's default so links
+    // actually look like links (the run suppresses its own default-black colour
+    // for this style; an explicitly coloured link still overrides).
+    w.open("w:style")
+        .attr("w:type", "character")
+        .attr("w:styleId", "Hyperlink")
+        .start_children();
+    w.open("w:name").attr(xml::W_VAL, "Hyperlink").empty();
+    w.open(xml::W_RPR).start_children();
+    w.open("w:color").attr(xml::W_VAL, "0563C1").empty();
+    w.open("w:u").attr(xml::W_VAL, "single").empty();
+    w.close(); // w:rPr
+    w.close(); // w:style
     // TOC1..9.
     for level in 1..=9 {
         let id = format!("TOC{level}");

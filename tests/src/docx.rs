@@ -340,6 +340,37 @@ fn cross_reference_is_a_clickable_hyperlink() {
 }
 
 #[test]
+fn url_link_looks_like_a_link() {
+    // A `#link("url")[text]` must render as a real Word hyperlink: blue +
+    // underline. The `Hyperlink` character style supplies that, and the run must
+    // NOT carry an explicit black colour (which would override the style back to
+    // invisible body text — the bug this guards against).
+    let p = parts("See #link(\"https://typst.app\")[the site] now.");
+    let doc = &p["word/document.xml"];
+    let styles = &p["word/styles.xml"];
+    // The Hyperlink character style is defined with a colour + underline.
+    let hl = styles
+        .split("w:styleId=\"Hyperlink\"")
+        .nth(1)
+        .and_then(|s| s.split("</w:style>").next())
+        .expect("Hyperlink style");
+    assert!(hl.contains("<w:color"), "Hyperlink style sets a colour");
+    assert!(hl.contains("<w:u "), "Hyperlink style underlines");
+    // The link run uses the style and does NOT pin its own black colour.
+    let link = doc
+        .split("<w:hyperlink")
+        .nth(1)
+        .and_then(|s| s.split("</w:hyperlink>").next())
+        .expect("a hyperlink");
+    assert!(link.contains("w:val=\"Hyperlink\""), "link run uses the Hyperlink style");
+    assert!(
+        !link.contains("<w:color w:val=\"000000\""),
+        "link run must not override the style with black"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn labeled_targets_get_bookmarks_so_refs_resolve() {
     // A `@ref` to a numbered equation and a `#link` to a plain labeled paragraph
     // both need a bookmark at the target, or the hyperlink anchor dangles. The
