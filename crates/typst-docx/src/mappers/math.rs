@@ -173,11 +173,14 @@ fn fallback(elem: &Packed<EquationElem>, styles: StyleChain, block: bool) -> Equ
 struct Emitter<'c, 'a, 'e> {
     ctx: &'c mut DocxCtx<'a, 'e>,
     buf: Omml,
+    /// The current run colour (a non-default solid `text(fill:)` on the enclosing
+    /// math component), applied to emitted runs via a `w:rPr`. `None` = default.
+    color: Option<[u8; 3]>,
 }
 
 impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
     fn new(ctx: &'c mut DocxCtx<'a, 'e>) -> Self {
-        Self { ctx, buf: Omml::new() }
+        Self { ctx, buf: Omml::new(), color: None }
     }
 
     /// Emits a sequence of items (the children of an `m:e`/`m:num`/…) by
@@ -253,6 +256,17 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
     /// Emits the OMML for a single resolved component, dispatching on its kind.
     /// Mirrors `mathml.rs::handle_realized`'s kind match.
     fn emit_kind(&mut self, comp: &MathComponent) -> SourceResult<()> {
+        // Carry the component's text colour onto the runs it emits (a colored
+        // equation, `$ #text(red)[x] $`). Inherited via the style chain, so each
+        // component refreshes it; default/black emits no colour.
+        let prev_color = self.color;
+        self.color = component_color(comp);
+        let r = self.emit_kind_inner(comp);
+        self.color = prev_color;
+        r
+    }
+
+    fn emit_kind_inner(&mut self, comp: &MathComponent) -> SourceResult<()> {
         match &comp.kind {
             MathKind::Group(group) => {
                 // A group is a transparent horizontal run of items.
@@ -348,6 +362,16 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
         if upright {
             self.buf.open("m:rPr").children();
             self.buf.leaf("m:nor");
+            self.buf.close();
+        }
+        // A non-default colour rides on a regular `w:rPr` inside the math run
+        // (this is how Word colours math), placed after `m:rPr`, before `m:t`.
+        if let Some([r, g, b]) = self.color {
+            self.buf.open("w:rPr").children();
+            self.buf
+                .open("w:color")
+                .attr("w:val", &format!("{r:02X}{g:02X}{b:02X}"))
+                .empty();
             self.buf.close();
         }
         // Preserve significant whitespace.
@@ -802,6 +826,20 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
 /// ends an n-ary operator's operand (`∫ f dx` stops before `= …`).
 fn is_relation(item: &MathItem) -> bool {
     matches!(item, MathItem::Component(c) if c.props.class == Some(MathClass::Relation))
+}
+
+/// The component's run colour, if it carries a non-default solid `text(fill:)`
+/// (e.g. `#text(red)[$x$]`). Default black returns `None` so ordinary math is
+/// byte-identical (no `w:color` noise).
+fn component_color(comp: &MathComponent) -> Option<[u8; 3]> {
+    use typst_library::visualize::Paint;
+    match comp.styles.get_ref(typst_library::text::TextElem::fill) {
+        Paint::Solid(c) => {
+            let hex = crate::props::color_to_hex(c);
+            (hex != [0, 0, 0]).then_some(hex)
+        }
+        _ => None,
+    }
 }
 
 /// The end index (exclusive) of an n-ary operator's operand, starting at

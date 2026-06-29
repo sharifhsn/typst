@@ -239,6 +239,16 @@ fn bare_nary_operator_and_operand_boundary() {
 }
 
 #[test]
+fn colored_math_carries_its_color() {
+    // `#text(red)[$x$]` inside an equation must color the math run (a `w:rPr`
+    // colour on the math `m:r`), not render black.
+    let p = parts("$ y = #text(red)[x] + b $");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<w:color w:val=\"FF4136\""), "the red math run carries its color");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn over_spreader_stretches() {
     // overbrace/overbracket span the base (stretchy `m:groupChr`), unlike a hat
     // (a single-glyph `m:acc`).
