@@ -431,6 +431,22 @@ fn footnote_in_a_box_never_lands_in_a_text_box() {
 }
 
 #[test]
+fn figure_in_a_box_is_not_a_text_box() {
+    // A figure/image/table inside a framed container must NOT become a text box
+    // (Word-fragile, and the size+extract double-layout corrupts its cross-ref
+    // number). It flows as a shaded paragraph instead, which lays out once.
+    let p = parts(
+        "#figure(rect(width: 1cm, height: 1cm), caption: [A]) <a>\n\n\
+         #rect(fill: aqua)[#figure(rect(width: 1cm, height: 1cm), caption: [B]) <b>]\n\n\
+         See @a and @b.",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(!doc.contains("wps:txbx"), "a figure-bearing box is not a text box");
+    assert!(doc.contains("<w:shd "), "it flows as a shaded paragraph");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn short_block_rect_stays_a_text_box() {
     // A short single-line framed container keeps the sized text-box look.
     let p = parts("#rect(fill: yellow, inset: 4pt)[Short label]");

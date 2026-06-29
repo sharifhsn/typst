@@ -93,6 +93,13 @@ pub fn text_box(
     if crate::convert::body_has_footnote(&body) {
         return Ok(None);
     }
+    // Figures/images/tables/math/nested frames are Word-fragile inside a text box,
+    // and a counter element inside one is laid out twice (measure + extract),
+    // which corrupts cross-reference numbers. Such a body takes the
+    // shaded-paragraph path instead, which lays out once and is correct.
+    if !crate::convert::body_textbox_safe(&body) {
+        return Ok(None);
+    }
 
     // Size the frame from the laid-out container; bail to rasterization if it lays
     // out to nothing usable.

@@ -326,6 +326,43 @@ pub(crate) fn body_has_footnote(body: &Content) -> bool {
     .is_break()
 }
 
+/// Whether a framed container's body is safe to put inside a Word *text box*
+/// (`wps:txbx`). A text box is only robust for plain text + inline formatting.
+/// Richer content is either Word-fragile inside a text box (drawings — figures,
+/// images, nested shapes/boxes — and complex fields / math) or is mis-handled by
+/// the text-box build path (a figure/table counter inside is laid out twice —
+/// once to size the box, once to extract — which reorders its introspection and
+/// corrupts cross-reference numbers). Such a body is instead routed to the
+/// flowing shaded-paragraph representation, which lays out once and is correct.
+pub(crate) fn body_textbox_safe(body: &Content) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::layout::{BoxElem, GridElem};
+    use typst_library::math::EquationElem;
+    use typst_library::model::{EnumElem, FigureElem, ListElem, TableElem, TermsElem};
+    use typst_library::visualize::{
+        CircleElem, EllipseElem, ImageElem, PolygonElem, RectElem, SquareElem,
+    };
+    body.traverse(&mut |e: Content| {
+        let unsafe_in_textbox = e.is::<FigureElem>()
+            || e.is::<ImageElem>()
+            || e.is::<TableElem>()
+            || e.is::<GridElem>()
+            || e.is::<EquationElem>()
+            || e.is::<ListElem>()
+            || e.is::<EnumElem>()
+            || e.is::<TermsElem>()
+            // A nested framed container would become a text box inside a text box.
+            || e.is::<BoxElem>()
+            || e.is::<RectElem>()
+            || e.is::<SquareElem>()
+            || e.is::<EllipseElem>()
+            || e.is::<CircleElem>()
+            || e.is::<PolygonElem>();
+        if unsafe_in_textbox { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+    })
+    .is_continue()
+}
+
 /// Whether an equation body carries a label *inside* it (a per-line label),
 /// whose location only exists once the equation is laid out per visual line.
 ///
@@ -764,9 +801,13 @@ fn handle_block_framed(
     }
     // Only flowing/block content takes the main-story paragraph path; a short
     // single-line callout stays a (standalone, sized) text box — UNLESS the body
-    // has a footnote, which is illegal inside a text box, so it must flow here to
-    // keep both the frame and the footnote. Decided before extraction.
-    if !body_is_flowing(&body, styles) && !body_has_footnote(&body) {
+    // has a footnote (illegal in a text box) or content that is Word-fragile /
+    // mis-laid inside one (figures, images, tables, math, nested frames), in
+    // which case it must flow here to stay correct. Decided before extraction.
+    if !body_is_flowing(&body, styles)
+        && !body_has_footnote(&body)
+        && body_textbox_safe(&body)
+    {
         return Ok(false);
     }
 
