@@ -326,23 +326,21 @@ fn decorative_shape_becomes_a_vector_drawing() {
 }
 
 #[test]
-fn styled_box_becomes_a_text_box_with_real_text() {
-    // A `#box(fill|stroke)[text]` becomes a Word text box (`wps:txbx`) holding
-    // real, editable paragraphs — not a flattened raster image.
+fn inline_styled_box_becomes_boxed_inline_text() {
+    // An inline `#box(fill|stroke)[text]` becomes boxed *inline* text — run
+    // shading (`w:shd`) + a run border (`w:bdr`) — which flows correctly in the
+    // line. An inline Word text box does NOT flow its content (it renders as a
+    // displaced empty frame), so it must not be used here.
     let p = parts(
-        "#box(fill: luma(230), stroke: 1pt + blue, inset: 6pt, radius: 3pt)\
-         [A framed callout with #link(\"https://typst.app\")[a link].]",
+        "Tail #box(fill: luma(230), stroke: 1pt + blue, inset: 6pt)\
+         [a framed callout] end.",
     );
     let doc = &p["word/document.xml"];
-    assert!(doc.contains("wps:txbx"), "the styled box becomes a text box");
-    assert!(doc.contains("w:txbxContent"), "with editable text-box content");
-    assert!(
-        doc.contains("A framed callout"),
-        "the box's text is preserved as real runs"
-    );
-    assert!(doc.contains("w:hyperlink"), "and inner links survive");
-    assert!(doc.contains("prst=\"roundRect\""), "the radius gives a rounded frame");
-    assert!(!p.keys().any(|k| k.starts_with("word/media/")), "and nothing is rasterized");
+    assert!(doc.contains("<w:bdr"), "the box stroke becomes a run border");
+    assert!(doc.contains("<w:shd "), "the box fill becomes run shading");
+    assert!(doc.contains("a framed callout"), "the text is real and inline");
+    assert!(!doc.contains("wps:txbx"), "and NOT an ill-flowing inline text box");
+    assert!(!p.keys().any(|k| k.starts_with("word/media/")), "nor a raster");
     assert_all_wellformed(&p);
 }
 

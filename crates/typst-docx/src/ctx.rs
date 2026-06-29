@@ -840,21 +840,26 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<LinkMarker>() {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
-        } else if let Some(body) = mappers::shape::framed_body(child, styles)
-            && crate::convert::body_has_footnote(&body)
+        } else if let Some((body, fill, bdr)) = mappers::shape::inline_frame(child, styles)
+            && (fill.is_some() || bdr.is_some())
             && crate::convert::body_extractable(&body)
         {
-            // A footnote is illegal inside a Word text box, so an inline framed
-            // container whose body has a footnote is extracted frameless — the
-            // text + footnote stay in the main story (the box outline is dropped,
-            // which Word has no inline equivalent for once the footnote rules it
-            // out of a text box).
-            out.extend(self.inline_runs(&body, styles, props.clone())?);
-        } else if let Some(run) = mappers::shape::text_box(child, styles, self)? {
-            // A framed container with text — `#box(fill|stroke)[..]`, `#rect[..]`,
-            // `#square[..]` — becomes a Word *text box* holding the real, editable
-            // text rather than a flat rasterized image.
-            out.push(run);
+            // An *inline* framed container (`#box(fill|stroke)[..]` mid-line) →
+            // boxed text via run shading + a run border, which flows correctly in
+            // the line. (An inline Word *text box* does NOT flow its content —
+            // Word/LibreOffice render it as a displaced empty frame — so text
+            // boxes are reserved for standalone block-level boxes, handled in
+            // `convert::handle_block`.) A footnote inside is fine here: its run
+            // stays in the main story. A non-extractable body (a per-line equation
+            // label) or a gradient-only fill falls through to rasterization.
+            let mut p = props.clone();
+            if let Some(f) = fill {
+                p.shd_fill.get_or_insert(f);
+            }
+            if let Some(b) = bdr {
+                p.bdr.get_or_insert(b);
+            }
+            out.extend(self.inline_runs(&body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<typst_library::layout::BoxElem>() {
             // A non-text-box `#box` (no visible frame, or a body that must
             // rasterize): keep the existing rasterize/extract handling.

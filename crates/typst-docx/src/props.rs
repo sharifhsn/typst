@@ -119,6 +119,15 @@ impl RunProps {
         if self.vanish {
             w.open("w:vanish").empty();
         }
+        // 11c. bdr — run border box (inline framed container).
+        if let Some(b) = &self.bdr {
+            w.open("w:bdr")
+                .attr(xml::W_VAL, b.style)
+                .attr("w:sz", &b.sz.to_string())
+                .attr("w:space", &b.space.to_string())
+                .attr("w:color", &hex(b.color))
+                .empty();
+        }
         // 12. shd
         if let Some(fill) = self.shd_fill {
             w.open(xml::W_SHD)

@@ -489,9 +489,29 @@ fn handle_block(
     } else if is_framed_container(child) && handle_block_framed(ctx, child, styles, out)? {
         // A block-level framed container (`#rect`/`#box`/`#square` standing as its
         // own block) with flowing content → shaded + bordered paragraphs that
-        // break across pages, mirroring `#block`. Short / single-line content
-        // returns `false` and falls through to the inline text-box path below
-        // (a sized text box reads better for a badge/label than a full-width box).
+        // break across pages, mirroring `#block`.
+    } else if is_framed_container(child) {
+        // A short, single-line standalone framed container → a Word text box (a
+        // sized, framed box). Standalone text boxes render correctly (an *inline*
+        // one does not — that case is handled by run shading in `handle_inline`).
+        // Not a text-box candidate (gradient fill, layout-bound body) → fall back
+        // to the generic inline path so the content still survives.
+        if let Some(run) = mappers::shape::text_box(child, styles, ctx)? {
+            out.push(Block::Para(Para {
+                props: ParaProps::default(),
+                content: vec![ParaChild::Run(run)],
+            }));
+        } else {
+            let runs = ctx.inline_runs(child, styles, RunProps::default())?;
+            if runs.is_empty() {
+                ctx.warn_ignored(child.elem().name(), child.span());
+            } else {
+                out.push(Block::Para(Para {
+                    props: ParaProps::default(),
+                    content: runs.into_iter().map(ParaChild::Run).collect(),
+                }));
+            }
+        }
     } else {
         // Fall back: treat anything else as inline content in a paragraph.
         let runs = ctx.inline_runs(child, styles, RunProps::default())?;
@@ -702,24 +722,24 @@ fn handle_block_framed(
         return Ok(false);
     }
 
-    // Only flowing/block content benefits from a paragraph representation; a
-    // single inline line stays a (sized) text box — UNLESS the body has a
-    // footnote, which is illegal inside a text box, so it must take the
-    // main-story paragraph path here to keep both the frame and the footnote.
-    let mut inner = ctx.blocks(&body, styles)?;
-    if !is_flowing(&inner) && !body_has_footnote(&body) {
-        return Ok(false);
-    }
-
     let shd_fill = match &fill {
         Some(Paint::Solid(c)) => Some(crate::props::color_to_hex(c)),
         _ => None,
     };
     let pbdr = block_borders(&stroke_sides, styles);
-    // No visible frame → not a callout; let the inline path handle it.
+    // No visible frame → not a callout; let the caller handle it.
     if shd_fill.is_none() && pbdr.is_none() {
         return Ok(false);
     }
+    // Only flowing/block content takes the main-story paragraph path; a short
+    // single-line callout stays a (standalone, sized) text box — UNLESS the body
+    // has a footnote, which is illegal inside a text box, so it must flow here to
+    // keep both the frame and the footnote. Decided before extraction.
+    if !body_is_flowing(&body, styles) && !body_has_footnote(&body) {
+        return Ok(false);
+    }
+
+    let mut inner = ctx.blocks(&body, styles)?;
 
     // Forward the content's introspection tags (cites/refs/labels inside the
     // callout must reach the introspector).
@@ -788,18 +808,28 @@ fn shape_stroke_sides(
     }
 }
 
-/// Whether extracted content should *flow* (break across pages) — true for
-/// multi-block content, a table, or a paragraph holding explicit line breaks (a
-/// raw code block). A single breakless paragraph (a short label) is not flowing.
-fn is_flowing(blocks: &[Block]) -> bool {
-    match blocks {
-        [] => false,
-        [Block::Para(p)] => p
-            .content
-            .iter()
-            .any(|c| matches!(c, ParaChild::Run(Run::Break | Run::PageBreak))),
-        _ => true,
-    }
+/// Whether a framed container's body is *flowing* block content that should
+/// break across pages (a multi-paragraph callout, a code listing, a list, a
+/// table) rather than a short inline label. Checked on the raw body (no
+/// extraction): flowing iff it contains a paragraph break, a block raw listing,
+/// a list/enum/term list, a table/grid, or a nested block.
+fn body_is_flowing(body: &Content, styles: typst_library::foundations::StyleChain) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::layout::{BlockElem, GridElem};
+    use typst_library::model::{EnumElem, ListElem, TableElem, TermsElem};
+    use typst_library::text::RawElem;
+    body.traverse(&mut |e: Content| {
+        let flowing = e.is::<ParbreakElem>()
+            || e.is::<ListElem>()
+            || e.is::<EnumElem>()
+            || e.is::<TermsElem>()
+            || e.is::<TableElem>()
+            || e.is::<GridElem>()
+            || e.is::<BlockElem>()
+            || e.to_packed::<RawElem>().is_some_and(|r| r.block.get(styles));
+        if flowing { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+    })
+    .is_break()
 }
 
 /// Sums two optional twip values, returning `None` only when both are absent.

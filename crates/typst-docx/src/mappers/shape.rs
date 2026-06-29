@@ -132,21 +132,32 @@ pub fn text_box(
     })))
 }
 
-/// The body of a `#box`/`#rect`/`#square`, or `None` for any other element (or a
-/// bodyless one). Used to decide framed-container handling without resolving the
-/// full frame.
-pub fn framed_body(child: &Content, styles: StyleChain) -> Option<Content> {
-    use typst_library::layout::BoxElem;
-    use typst_library::visualize::{RectElem, SquareElem};
-    if let Some(e) = child.to_packed::<BoxElem>() {
-        e.body.get_cloned(styles)
-    } else if let Some(e) = child.to_packed::<RectElem>() {
-        e.body.get_cloned(styles)
-    } else if let Some(e) = child.to_packed::<SquareElem>() {
-        e.body.get_cloned(styles)
-    } else {
-        None
-    }
+/// Resolves an *inline* framed container (`#box`/`#rect`/`#square` mid-line) to
+/// `(body, run-shading fill, run border)` — the building blocks of boxed inline
+/// text via `<w:shd>` + `<w:bdr>`, which (unlike an inline text box) flows
+/// correctly within the line in Word. Returns `None` for a non-framed element or
+/// a bodyless one; a gradient fill is dropped (no inline gradient form).
+#[allow(clippy::type_complexity)]
+pub fn inline_frame(
+    child: &Content,
+    styles: StyleChain,
+) -> Option<(Content, Option<[u8; 3]>, Option<crate::dom::ParaBorder>)> {
+    let framed = framed_container(child, styles)?;
+    let fill = match framed.fill_paint {
+        Some(Paint::Solid(c)) => Some(color_to_hex(&c)),
+        _ => None,
+    };
+    let bdr = framed.stroke.map(|s| {
+        let pt = s.w_emu as f64 / 12700.0;
+        crate::dom::ParaBorder {
+            style: "single",
+            // `w:bdr/@w:sz` is in eighths of a point; keep a visible minimum.
+            sz: ((pt * 8.0).round() as u32).max(2),
+            space: 0,
+            color: s.color,
+        }
+    });
+    Some((framed.body, fill, bdr))
 }
 
 /// The frame properties a `#box`/`#rect`/`#square` with a body contributes to a

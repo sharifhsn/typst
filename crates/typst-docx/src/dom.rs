@@ -173,6 +173,10 @@ pub struct RunProps {
     pub position_half_pt: Option<i32>,
     pub size_half_pt: Option<u32>,
     pub shd_fill: Option<[u8; 3]>,
+    /// `<w:bdr>` run border (a character border box). Renders an *inline* framed
+    /// container (`#box(stroke:)[..]` mid-line) as boxed text that flows in the
+    /// line — Word does not flow an inline text box's content. Default none.
+    pub bdr: Option<ParaBorder>,
     /// `<w:u>` underline, when present. `text(underline:)` / `#underline`. The
     /// style (`w:val`) and colour are derived from the line's stroke (dash
     /// pattern → dotted/dash/dotDash, paint → `w:color`); a plain underline is
