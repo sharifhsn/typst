@@ -22,11 +22,22 @@ pub struct PandocDocument {
     pub(crate) info: DocumentInfo,
     pub(crate) blocks: Vec<Block>,
     pub(crate) introspector: Arc<PandocIntrospector>,
+    /// The document's bibliography serialized to a BibLaTeX (`.bib`) string, or
+    /// `None` if the document has no bibliography. The CLI writes this as a
+    /// sidecar next to the JSON output so that `pandoc --citeproc` can re-resolve
+    /// the structured `Cite` nodes the converter emits.
+    pub(crate) bibliography: Option<String>,
 }
 
 impl PandocDocument {
     pub fn info(&self) -> &DocumentInfo {
         &self.info
+    }
+
+    /// The synthesized BibLaTeX (`.bib`) source for the document's bibliography,
+    /// if any. Intended to be written as a sidecar beside the Pandoc JSON.
+    pub fn bibliography(&self) -> Option<&str> {
+        self.bibliography.as_deref()
     }
 }
 

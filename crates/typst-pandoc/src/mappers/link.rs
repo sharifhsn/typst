@@ -89,6 +89,8 @@ mod tests {
         assert_eq!(json["c"][2], serde_json::json!(["https://typst.app", ""]));
     }
 
+    /// An *unlabeled* cross-reference target gets a stable hash anchor; the
+    /// in-text `Link` targets it as `#ref-<hash>`.
     #[test]
     fn internal_link_shape() {
         let link = Inline::Link(
@@ -98,5 +100,21 @@ mod tests {
         );
         let json = serde_json::to_value(&link).unwrap();
         assert_eq!(json["c"][2][0], "#ref-00000000deadbeef");
+    }
+
+    /// A *labeled* target (`= Intro <intro>`) gets the readable id `intro`; the
+    /// `@intro` cross-reference `Link` therefore targets `#intro`. Both the
+    /// heading's `Attr` id and this link URL are produced by
+    /// `PandocCtx::anchor_id`, so they are identical by construction (the id
+    /// derivation itself is unit-tested in `ctx::tests`).
+    #[test]
+    fn internal_link_to_label_is_readable() {
+        let link = Inline::Link(
+            empty_attr(),
+            vec![Inline::Str("Section".into()), Inline::Space, Inline::Str("1".into())],
+            ("#intro".into(), String::new()),
+        );
+        let json = serde_json::to_value(&link).unwrap();
+        assert_eq!(json["c"][2][0], "#intro");
     }
 }

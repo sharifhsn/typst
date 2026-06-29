@@ -306,6 +306,23 @@ impl BibliographyElem {
         }
         vec
     }
+
+    /// Synthesizes a single BibLaTeX (`.bib`) string covering every
+    /// bibliography in the document, or `None` if the document has no
+    /// bibliography. The Pandoc exporter writes this as a sidecar so that
+    /// `pandoc --citeproc --bibliography=<sidecar>` can re-resolve the
+    /// document's structured `Cite` nodes. Entries from multiple bibliographies
+    /// are concatenated in document order. The keys are guaranteed unique across
+    /// the document (decoding bails on duplicate keys), so concatenation cannot
+    /// introduce collisions.
+    pub fn biblatex(introspector: Tracked<dyn Introspector + '_>) -> Option<String> {
+        let mut out = String::new();
+        for elem in introspector.query(&Self::ELEM.select()).iter() {
+            let this = elem.to_packed::<Self>().unwrap();
+            out.push_str(&this.sources.derived.to_biblatex_string());
+        }
+        if out.is_empty() { None } else { Some(out) }
+    }
 }
 
 impl Packed<BibliographyElem> {
@@ -412,6 +429,21 @@ impl Bibliography {
 
     fn iter(&self) -> impl Iterator<Item = (Label, &hayagriva::Entry)> {
         self.0.iter().map(|(&k, v)| (k, v))
+    }
+
+    /// Serializes this bibliography's entries to a BibLaTeX (`.bib`) string.
+    ///
+    /// Used by the Pandoc exporter to synthesize a `.bib` sidecar so that
+    /// structured `Cite` nodes can be re-resolved by `pandoc --citeproc`. The
+    /// entries are the already-decoded `hayagriva::Entry` values (read from
+    /// `.bib` or hayagriva-YAML alike), collected into a `hayagriva::Library`
+    /// and round-tripped through `hayagriva::io::to_biblatex_str`, which
+    /// guarantees the output re-parses (all escaping/bracing is delegated to the
+    /// `biblatex` crate). Document order is preserved (the underlying map is an
+    /// `IndexMap`).
+    pub fn to_biblatex_string(&self) -> String {
+        let library: Library = self.0.values().cloned().collect();
+        hayagriva::io::to_biblatex_str(&library)
     }
 }
 
@@ -695,6 +727,10 @@ pub struct RenderedBibliography {
 
 /// The rendered parts for a bibliography entry.
 pub struct RenderedEntry {
+    /// The citation key of this entry (e.g. `einstein1905`). Exposed so exporters
+    /// that emit structured citations (the Pandoc target) can map a cite's
+    /// backlink anchor back to its key.
+    pub key: EcoString,
     /// An optional prefix. This is exposed separately because this will go into
     /// its own column for grid-based styles.
     pub prefix: Option<Content>,
@@ -763,6 +799,26 @@ impl Works {
             .cloned()
             .ok_or_else(citation_could_not_be_located)
             .at(span)?
+    }
+
+    /// Returns, for every rendered bibliography entry across all bibliographies,
+    /// its backlink [`Location`] paired with its citation key.
+    ///
+    /// In-text citations link to exactly these backlink locations (they share the
+    /// well-known `entry_location` derivation), so an exporter can use this map to
+    /// recover the cite key behind a realized in-text citation — turning the
+    /// already-formatted cite link into a structured citation. Used by the Pandoc
+    /// target to emit `Cite` nodes that `pandoc --citeproc` can re-resolve.
+    pub fn entry_keys(&self) -> Vec<(Location, EcoString)> {
+        let mut out = Vec::new();
+        for rendered in self.bibliographies.values() {
+            if let Ok(bib) = rendered {
+                for entry in &bib.entries {
+                    out.push((entry.backlink, entry.key.clone()));
+                }
+            }
+        }
+        out
     }
 
     /// Returns the shown content for a bibliography.
@@ -1224,7 +1280,12 @@ fn show_bibliography(
             }
         });
 
-        entries.push(RenderedEntry { prefix, body, backlink: entry_location(bib, k) });
+        entries.push(RenderedEntry {
+            key: item.key.as_str().into(),
+            prefix,
+            body,
+            backlink: entry_location(bib, k),
+        });
     }
 
     Ok(RenderedBibliography { entries, hanging_indent: rendered.hanging_indent })

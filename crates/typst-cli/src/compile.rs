@@ -363,10 +363,7 @@ fn compile_and_export(
         OutputFormat::Pandoc => {
             let Warned { output, warnings } = typst::compile::<PandocDocument>(world);
             let result = output.and_then(|document| export_pandoc(&document, config));
-            Warned {
-                output: result.map(|()| vec![config.output.clone()]),
-                warnings,
-            }
+            Warned { output: result, warnings }
         }
     }
 }
@@ -383,14 +380,52 @@ fn export_docx(document: &DocxDocument, config: &CompileConfig) -> SourceResult<
 }
 
 /// Export to a Pandoc JSON AST.
-fn export_pandoc(document: &PandocDocument, config: &CompileConfig) -> SourceResult<()> {
-    let options = PandocOptions { pretty: config.pretty };
+///
+/// When the document has a bibliography, also synthesizes a BibLaTeX `.bib`
+/// sidecar (via hayagriva's `to_biblatex_str`) next to the JSON output and
+/// records its filename in the document's `meta.bibliography`, so that
+/// `pandoc --citeproc` can re-resolve the structured `Cite` nodes the exporter
+/// emits. Returns every file written (the JSON, plus the sidecar if any) so the
+/// dependency tracker sees them.
+fn export_pandoc(
+    document: &PandocDocument,
+    config: &CompileConfig,
+) -> SourceResult<Vec<Output>> {
+    let mut written = Vec::with_capacity(2);
+
+    // If there is a bibliography and we are writing to a real path (not stdout),
+    // write the `.bib` sidecar next to the output and reference it in the
+    // metadata. With stdout (or no bibliography) we skip the sidecar — but still
+    // emit structured `Cite` + the self-contained fallback references, so the
+    // JSON is correct without citeproc either way.
+    let bib_meta = match (document.bibliography(), &config.output) {
+        (Some(bib), Output::Path(out_path)) => {
+            let bib_path = out_path.with_extension("bib");
+            std::fs::write(&bib_path, bib.as_bytes())
+                .map_err(|err| eco_format!("failed to write bibliography sidecar ({err})"))
+                .at(Span::detached())?;
+            written.push(Output::Path(bib_path.clone()));
+            // Record the sidecar's *filename* (relative to the JSON output) in the
+            // metadata, so the reference is portable: pandoc resolves a relative
+            // `bibliography` path against its working directory, and the common
+            // case runs pandoc from the output directory.
+            bib_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        }
+        _ => None,
+    };
+
+    let options = PandocOptions { pretty: config.pretty, bibliography: bib_meta };
     let bytes = typst_pandoc::pandoc(document, &options)?;
     config
         .output
         .write(&bytes)
         .map_err(|err| eco_format!("failed to write Pandoc file ({err})"))
-        .at(Span::detached())
+        .at(Span::detached())?;
+    written.push(config.output.clone());
+
+    Ok(written)
 }
 
 /// Export to HTML.

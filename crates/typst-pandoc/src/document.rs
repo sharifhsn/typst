@@ -10,6 +10,8 @@ use typst_library::introspection::{Locator, Tag};
 use typst_library::model::DocumentInfo;
 use typst_library::routines::{Arenas, RealizationKind};
 
+use typst_syntax::Span;
+
 use crate::ast::{Block, Inline, Meta, MetaValue};
 use crate::ctx::PandocCtx;
 use crate::dom::PandocDocument;
@@ -48,6 +50,33 @@ pub fn pandoc_document(
 
     let pairs: Vec<_> = children.to_vec();
 
+    // Synthesize the document's bibliography into a BibLaTeX (`.bib`) string, so
+    // the CLI can write it as a sidecar beside the JSON. This lets
+    // `pandoc --citeproc --bibliography=<sidecar>` re-resolve the structured
+    // `Cite` nodes the citation mapper emits. The query is a pure read of the
+    // (now-stabilized) shared introspector — no sink side effect — so it does not
+    // perturb convergence. `None` when the document has no bibliography.
+    let bibliography = {
+        let introspector = engine.introspector.access(
+            "querying bibliography elements to synthesize a .bib sidecar is a pure query",
+        );
+        typst_library::model::BibliographyElem::biblatex(*introspector)
+    };
+
+    // Build the bibliography-entry anchor → cite-key map, so the conversion's
+    // post-walk pass can recover the cite key behind each realized in-text
+    // citation `Link` and emit a structured `Cite`. `Works::generate` is the same
+    // memoized call the bibliography show rule already made during realization, so
+    // this is effectively free and cannot perturb convergence (it is a pure
+    // function of the stabilized introspector). An empty list when there is no
+    // bibliography (or a transient `Works` failure) — the self-contained formatted
+    // references still render either way.
+    let entry_keys = match typst_library::model::Works::generate(engine, Span::detached())
+    {
+        Ok(works) => works.entry_keys(),
+        Err(_) => Vec::new(),
+    };
+
     // Walk the native element tree into the Pandoc AST.
     //
     // Isolate the conversion walk's error sink (same reasoning as the rasterize
@@ -72,6 +101,7 @@ pub fn pandoc_document(
             route: typst_library::engine::Route::extend(engine.route.track()),
         };
         let mut ctx = PandocCtx::new(&mut sub, &mut locator);
+        ctx.load_cite_anchors(&entry_keys);
         let blocks = crate::convert::run(&mut ctx, &pairs)?;
         let deferred_tags = std::mem::take(&mut ctx.deferred_tags);
         (blocks, deferred_tags)
@@ -94,6 +124,7 @@ pub fn pandoc_document(
         info,
         blocks,
         introspector: Arc::new(introspector),
+        bibliography,
     })
 }
 
@@ -101,10 +132,23 @@ pub fn pandoc_document(
 /// keywords/description). Empty fields are omitted; the map is `{}` when nothing
 /// is set. Meta values are tagged (`{"t":"MetaInlines",…}`) — a bare string
 /// hard-fails pandoc's reader.
-pub(crate) fn build_meta(info: &DocumentInfo) -> Meta {
+pub(crate) fn build_meta(info: &DocumentInfo, bibliography: Option<&str>) -> Meta {
     use typst_library::foundations::Smart;
 
     let mut meta = Meta::new();
+
+    // Record the synthesized `.bib` sidecar so `pandoc --citeproc` re-resolves
+    // the structured `Cite` nodes against it. Pandoc reads `bibliography` from
+    // the document metadata as a string (or list of strings) path; a single
+    // `MetaInlines` string is the canonical form.
+    if let Some(path) = bibliography
+        && !path.is_empty()
+    {
+        meta.insert(
+            "bibliography".into(),
+            MetaValue::MetaInlines(vec![Inline::Str(path.to_string())]),
+        );
+    }
 
     if let Some(title) = &info.title
         && !title.is_empty()

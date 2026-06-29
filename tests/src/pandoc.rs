@@ -116,7 +116,8 @@ fn compile_files(src: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
     let doc = typst::compile::<PandocDocument>(&world)
         .output
         .expect("compilation failed");
-    pandoc(&doc, &PandocOptions { pretty: false }).expect("pandoc export failed")
+    pandoc(&doc, &PandocOptions { pretty: false, ..Default::default() })
+        .expect("pandoc export failed")
 }
 
 /// Deserializes the bytes as generic JSON, asserting well-formedness and the
@@ -351,7 +352,9 @@ fn figure_maps_to_figure_with_anchor_and_caption() {
     assert!(out.contains("Figure"), "a figure maps to a Figure");
     assert!(out.contains("Caption"), "carrying a caption");
     assert!(out.contains("A box"), "the caption text survives");
-    assert!(out.contains("ref-"), "the figure carries a stable anchor id");
+    // The figure carries a stable, label-derived anchor id (`<f>` → `f`); an
+    // unlabeled figure would instead get the `ref-<hash>` fallback.
+    assert!(out.contains("\"f\""), "the figure carries its label-derived anchor id");
     // No baked \"Figure N:\" prefix (writer owns numbering).
     assert!(!out.contains("Figure 1:"), "the baked supplement/number is dropped");
 }
@@ -373,7 +376,9 @@ fn cross_reference_is_a_fragment_link() {
         return;
     };
     assert!(out.contains("Link"), "a cross-reference maps to a Link");
-    assert!(out.contains("#ref-"), "whose URL is a #-fragment in the shared namespace");
+    // The URL is a `#`-fragment in the shared id namespace; with a label
+    // (`<m>`) it is the readable `#m`, matching the heading's anchor id.
+    assert!(out.contains("#m"), "whose URL is a #-fragment in the shared namespace");
 }
 
 #[test]

@@ -11,6 +11,13 @@ use crate::dom::PandocDocument;
 pub struct PandocOptions {
     /// Whether to pretty-print the JSON.
     pub pretty: bool,
+    /// The filename of the synthesized `.bib` sidecar, if one was written. When
+    /// set, it is recorded in the document's `meta.bibliography` so that running
+    /// `pandoc --citeproc` (which reads `bibliography` from the metadata)
+    /// re-resolves the structured `Cite` nodes against it. The CLI sets this to
+    /// the sidecar's path (relative to the JSON output, so the metadata is
+    /// portable) after writing the sidecar.
+    pub bibliography: Option<String>,
 }
 
 /// Serializes a Pandoc document into JSON bytes.
@@ -27,7 +34,7 @@ pub fn pandoc(
 ) -> SourceResult<Vec<u8>> {
     let doc = Pandoc {
         pandoc_api_version: PANDOC_API_VERSION,
-        meta: crate::document::build_meta(&document.info),
+        meta: crate::document::build_meta(&document.info, options.bibliography.as_deref()),
         // The blocks are already built; borrow them into a throwaway envelope by
         // cloning is avoided by serializing a borrowed view instead.
         blocks: Vec::new(),

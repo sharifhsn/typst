@@ -33,8 +33,145 @@ use crate::mappers;
 /// Lowers the top-level realized children into the document body blocks.
 pub fn run(ctx: &mut PandocCtx, children: &[Pair]) -> SourceResult<Vec<Block>> {
     let mut blocks = convert_children(ctx, children)?;
+    // Recover structured `Cite` nodes from realized in-text citation `Link`s,
+    // using the bibliography anchor → cite-key map. This runs *before*
+    // `prune_dangling_links` so the wrapped cite link (which targets a
+    // bibliography-entry anchor that has no representable id) is not demoted.
+    structure_cites(&mut blocks, &ctx.cite_anchors);
     prune_dangling_links(&mut blocks);
     Ok(blocks)
+}
+
+/// Rewrites every realized in-text citation `Link` into a structured
+/// `Inline::Cite` so that `pandoc --citeproc` can re-resolve it against the
+/// synthesized `.bib` sidecar. A citation arrives as a `Link` whose `#`-fragment
+/// URL is the bibliography entry's backlink anchor; [`PandocCtx::cite_anchors`]
+/// maps that anchor to the cite key. The original `Link` is kept inside the
+/// `Cite` as the baked fallback, so non-`--citeproc` output is unchanged. A
+/// no-op when the map is empty (no bibliography).
+fn structure_cites(
+    blocks: &mut [Block],
+    anchors: &std::collections::HashMap<ecow::EcoString, ecow::EcoString>,
+) {
+    if anchors.is_empty() {
+        return;
+    }
+    for b in blocks.iter_mut() {
+        structure_cites_block(b, anchors);
+    }
+}
+
+/// Recurses into a block, rewriting cite links within every inline it carries.
+fn structure_cites_block(
+    block: &mut Block,
+    anchors: &std::collections::HashMap<ecow::EcoString, ecow::EcoString>,
+) {
+    match block {
+        Block::Plain(inl) | Block::Para(inl) => structure_cites_inlines(inl, anchors),
+        Block::Header(_, _, inl) => structure_cites_inlines(inl, anchors),
+        Block::Div(_, bs) | Block::BlockQuote(bs) => {
+            for b in bs {
+                structure_cites_block(b, anchors);
+            }
+        }
+        Block::BulletList(items) | Block::OrderedList(_, items) => {
+            for item in items {
+                for b in item {
+                    structure_cites_block(b, anchors);
+                }
+            }
+        }
+        Block::DefinitionList(items) => {
+            for (term, defs) in items {
+                structure_cites_inlines(term, anchors);
+                for def in defs {
+                    for b in def {
+                        structure_cites_block(b, anchors);
+                    }
+                }
+            }
+        }
+        Block::Figure(_, cap, bs) => {
+            for b in &mut cap.1 {
+                structure_cites_block(b, anchors);
+            }
+            for b in bs {
+                structure_cites_block(b, anchors);
+            }
+        }
+        Block::Table(_, _, _, head, bodies, foot) => {
+            structure_cites_rows(&mut head.1, anchors);
+            for body in bodies.iter_mut() {
+                structure_cites_rows(&mut body.2, anchors);
+                structure_cites_rows(&mut body.3, anchors);
+            }
+            structure_cites_rows(&mut foot.1, anchors);
+        }
+        Block::CodeBlock(..) | Block::RawBlock(..) | Block::HorizontalRule => {}
+    }
+}
+
+/// Rewrites cite links inside every cell of a table row list.
+fn structure_cites_rows(
+    rows: &mut [crate::ast::Row],
+    anchors: &std::collections::HashMap<ecow::EcoString, ecow::EcoString>,
+) {
+    for row in rows.iter_mut() {
+        for cell in row.1.iter_mut() {
+            for b in cell.4.iter_mut() {
+                structure_cites_block(b, anchors);
+            }
+        }
+    }
+}
+
+fn structure_cites_inlines(
+    inlines: &mut [Inline],
+    anchors: &std::collections::HashMap<ecow::EcoString, ecow::EcoString>,
+) {
+    use crate::ast::{Citation, CitationMode};
+    for node in inlines.iter_mut() {
+        // Recurse into containers first so nested cites are handled.
+        match node {
+            Inline::Emph(v)
+            | Inline::Strong(v)
+            | Inline::Underline(v)
+            | Inline::Strikeout(v)
+            | Inline::Superscript(v)
+            | Inline::Subscript(v)
+            | Inline::SmallCaps(v)
+            | Inline::Quoted(_, v)
+            | Inline::Span(_, v)
+            | Inline::Cite(_, v) => structure_cites_inlines(v, anchors),
+            Inline::Note(bs) => {
+                for b in bs {
+                    structure_cites_block(b, anchors);
+                }
+            }
+            _ => {}
+        }
+
+        // Then, if this node is a bibliographic cite link, wrap it in a `Cite`.
+        if let Inline::Link(_, body, (url, _)) = node {
+            structure_cites_inlines(body, anchors);
+            if let Some(anchor) = url.strip_prefix('#')
+                && let Some(key) = anchors.get(anchor)
+            {
+                let citation = Citation {
+                    id: key.to_string(),
+                    prefix: Vec::new(),
+                    suffix: Vec::new(),
+                    mode: CitationMode::NormalCitation,
+                    note_num: 0,
+                    hash: 0,
+                };
+                // Keep the original link as the fallback so non-citeproc output is
+                // unchanged (clickable `[1]` that still jumps to the entry).
+                let original = std::mem::replace(node, Inline::Space);
+                *node = Inline::Cite(vec![citation], vec![original]);
+            }
+        }
+    }
 }
 
 /// Removes the `Link` wrapper from any internal (`#anchor`) link whose target
@@ -574,6 +711,9 @@ pub(crate) fn handle_inline(
             None => {}
             Some(body) => inline_into(ctx, &body, styles, out)?,
         }
+    } else if let Some(elem) = child.to_packed::<typst_library::layout::PlaceElem>() {
+        // `#place(..)` in a run context: keep the body inline (position lost).
+        inline_into(ctx, &elem.body.clone(), styles, out)?;
     } else {
         // No idiomatic inline representation: rasterize and embed as an image.
         if let Some((url, _size)) = ctx.rasterize(child, styles, child.span())? {
@@ -816,6 +956,14 @@ fn handle_block(
     } else if let Some(elem) = child.to_packed::<typst_library::layout::PadElem>() {
         // Keep `#pad(..)[body]` as real blocks (indent has no AST equivalent).
         out.extend(blocks(ctx, &elem.body.clone(), styles)?);
+    } else if let Some(elem) = child.to_packed::<typst_library::layout::PlaceElem>() {
+        // `#place(..)` is absolute positioning with no Pandoc AST equivalent: the
+        // position is necessarily lost in a linear document. Rather than drop the
+        // body wholesale (which empties layout-driven docs whose entire content
+        // sits in `#place` — CVs, posters, game canvases), splice the body into
+        // the flow in document order. A body with no idiomatic blocks (a bare
+        // cetz/layouter canvas) still rasterizes via the recursion's fallbacks.
+        out.extend(blocks(ctx, &elem.body.clone(), styles)?);
     } else if child.is::<typst_library::layout::FlushElem>()
         || child.is::<typst_library::layout::ColbreakElem>()
     {
@@ -851,7 +999,7 @@ fn handle_block(
 
 #[cfg(test)]
 mod tests {
-    use super::{coalesce_inlines, prune_dangling_links};
+    use super::{coalesce_inlines, prune_dangling_links, structure_cites};
     use crate::ast::{empty_attr, id_attr, Block, Inline};
 
     /// Adjacent `Link`s with the same `Attr` + `Target` merge their bodies into
@@ -949,5 +1097,45 @@ mod tests {
             })
             .collect();
         assert!(text.contains("[2]"), "demoted link keeps its text");
+    }
+
+    /// A realized in-text citation `Link` whose `#anchor` matches a bibliography
+    /// entry anchor is rewritten into a structured `Inline::Cite` carrying the
+    /// cite key, with the original `Link` kept as the baked fallback body.
+    #[test]
+    fn structure_cites_wraps_matching_link() {
+        let mut anchors = std::collections::HashMap::new();
+        anchors.insert("ref-abc".into(), "smith21".into());
+        let mut blocks = vec![Block::Para(vec![Inline::Link(
+            empty_attr(),
+            vec![Inline::Str("[1]".into())],
+            ("#ref-abc".into(), String::new()),
+        )])];
+        structure_cites(&mut blocks, &anchors);
+        let Block::Para(inl) = &blocks[0] else { panic!() };
+        match &inl[0] {
+            Inline::Cite(cites, fallback) => {
+                assert_eq!(cites.len(), 1);
+                assert_eq!(cites[0].id, "smith21");
+                // The original link is preserved as the fallback body.
+                assert!(matches!(fallback[0], Inline::Link(..)));
+            }
+            _ => panic!("expected a Cite"),
+        }
+    }
+
+    /// An empty anchor map (no bibliography) leaves all links untouched — the
+    /// pass is a no-op, so non-cite documents are byte-unchanged.
+    #[test]
+    fn structure_cites_noop_without_bibliography() {
+        let anchors = std::collections::HashMap::new();
+        let mut blocks = vec![Block::Para(vec![Inline::Link(
+            empty_attr(),
+            vec![Inline::Str("[1]".into())],
+            ("#ref-abc".into(), String::new()),
+        )])];
+        structure_cites(&mut blocks, &anchors);
+        let Block::Para(inl) = &blocks[0] else { panic!() };
+        assert!(matches!(inl[0], Inline::Link(..)), "link is untouched");
     }
 }

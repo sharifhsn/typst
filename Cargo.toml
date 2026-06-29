@@ -161,6 +161,12 @@ opt-level = 2
 inherits = "dev"
 opt-level = 2
 
+# Pin hayagriva to a fork that adds `hayagriva::io::to_biblatex_str`, the BibLaTeX
+# writer the Pandoc exporter needs to synthesize a `.bib` sidecar for its
+# structured-`Cite` + `--citeproc` round-trip. Drop once it lands in a release.
+[patch.crates-io]
+hayagriva = { git = "https://github.com/sharifhsn/hayagriva", rev = "b5b96fa5b57a1df17ad1f43df3af33eeb57510fd" }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
