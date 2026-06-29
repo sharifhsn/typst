@@ -78,6 +78,22 @@ pub fn footnote(
     Ok(Run::FootnoteRef { props, id })
 }
 
+/// Lowers a footnote that appears *inside another footnote's body*. Word forbids
+/// nesting footnotes (a `w:footnoteReference` in the footnote story makes the
+/// file unopenable), so the inner note's body is emitted inline as ordinary
+/// runs — the content survives, just without a separate reference/number.
+pub fn flatten_nested(
+    elem: &Packed<FootnoteElem>,
+    styles: StyleChain,
+    props: &RunProps,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Vec<Run>> {
+    match resolve_body(elem, ctx)? {
+        Some(content) => ctx.inline_runs(&content, styles, props.clone()),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Resolves the footnote's body content and lowers it into block content for
 /// `footnotes.xml`, applying the `FootnoteText` paragraph style.
 fn body_blocks(
@@ -87,8 +103,19 @@ fn body_blocks(
 ) -> SourceResult<Vec<Block>> {
     let body = resolve_body(elem, ctx)?;
 
+    // Lower the body with `in_footnote` set, so any footnote nested inside this
+    // one is flattened to inline text rather than emitting an (illegal) nested
+    // `w:footnoteReference` into the footnote story.
+    let was_in_footnote = ctx.in_footnote;
+    ctx.in_footnote = true;
+    let lowered = match &body {
+        Some(content) => ctx.blocks(content, styles),
+        None => Ok(Vec::new()),
+    };
+    ctx.in_footnote = was_in_footnote;
+
     let mut blocks = match body {
-        Some(content) => ctx.blocks(&content, styles)?,
+        Some(_) => lowered?,
         // A reference whose target could not be resolved, or an empty footnote:
         // emit a single empty footnote-text paragraph so the `w:id` still has a
         // matching, well-formed `w:footnote` body (a dangling id is the #1 cause

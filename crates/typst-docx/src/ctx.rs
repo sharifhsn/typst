@@ -97,6 +97,12 @@ pub struct DocxCtx<'a, 'e> {
     quoter: SmartQuoter,
     /// The last character emitted into a text run, for smart quoting.
     last_char: Option<char>,
+
+    /// Whether we are currently lowering a footnote's body (into `footnotes.xml`).
+    /// Word forbids a footnote *inside* a footnote — a `w:footnoteReference` in
+    /// the footnote story makes the file unopenable — so an inner `FootnoteElem`
+    /// is flattened to its body text inline instead of emitting a nested mark.
+    pub(crate) in_footnote: bool,
 }
 
 impl<'a, 'e> DocxCtx<'a, 'e> {
@@ -130,6 +136,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             raster_width: Abs::pt(450.0),
             quoter: SmartQuoter::new(),
             last_char: None,
+            in_footnote: false,
         }
     }
 
@@ -853,7 +860,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         } else if let Some(elem) = child.to_packed::<RefElem>() {
             out.extend(mappers::reference::reference(elem, styles, props.clone(), self)?);
         } else if let Some(elem) = child.to_packed::<FootnoteElem>() {
-            out.push(mappers::footnote::footnote(elem, styles, self)?);
+            if self.in_footnote {
+                // A footnote inside a footnote is illegal in Word; inline the
+                // inner note's body text so the content survives without a nested
+                // reference (which would make the file unopenable).
+                out.extend(mappers::footnote::flatten_nested(elem, styles, props, self)?);
+            } else {
+                out.push(mappers::footnote::footnote(elem, styles, self)?);
+            }
         } else if let Some(elem) = child.to_packed::<DirectLinkElem>() {
             // A `DirectLinkElem` is the realized link-wrapper around ref/footnote
             // content. In a run-only context we keep just the body; the enclosing
