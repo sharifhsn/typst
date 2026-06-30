@@ -1030,6 +1030,10 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
     w.open("w:settings")
         .attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
         .start_children();
+    // Standard Word defaults (kept in canonical schema order). The half-inch
+    // default tab and `doNotCompress` spacing are what Word itself writes.
+    w.open("w:defaultTabStop").attr(xml::W_VAL, "720").empty();
+    w.open("w:characterSpacingControl").attr(xml::W_VAL, "doNotCompress").empty();
     if document.uses_fields {
         w.open("w:updateFields").attr(xml::W_VAL, "true").empty();
     }
@@ -1039,6 +1043,26 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
         w.open("w:footnote").attr("w:id", "0").empty();
         w.close();
     }
+    // Mark the document with the modern (Word 2013+) feature set. Without a
+    // `<w:compat>` block Word assumes legacy behaviour and opens the file in
+    // "Compatibility Mode" (a banner in the title bar, and the older layout
+    // engine); declaring `compatibilityMode = 15` opens it as a native document.
+    // The other settings are the ones Word writes alongside it.
+    w.open("w:compat").start_children();
+    for (name, val) in [
+        ("compatibilityMode", "15"),
+        ("overrideTableStyleFontSizeAndJustification", "1"),
+        ("enableOpenTypeFeatures", "1"),
+        ("doNotFlipMirrorIndents", "1"),
+        ("differentiateMultirowTableHeaders", "1"),
+    ] {
+        w.open("w:compatSetting")
+            .attr("w:name", name)
+            .attr("w:uri", "http://schemas.microsoft.com/office/word")
+            .attr("w:val", val)
+            .empty();
+    }
+    w.close(); // compat
     w.close();
     w.finish()
 }
