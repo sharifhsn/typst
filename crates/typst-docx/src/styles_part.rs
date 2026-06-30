@@ -58,6 +58,16 @@ pub fn build(
     // Normal (default paragraph style).
     style(&mut w, "Normal", "Normal", None, true, false);
 
+    // The three implicit defaults every Word document defines: the default
+    // character style (base of all character styles), the default table style
+    // (base of every table) and the default list style.
+    w.raw(
+        r#"<w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont">"#,
+    );
+    w.raw(r#"<w:name w:val="Default Paragraph Font"/><w:uiPriority w:val="1"/><w:semiHidden/><w:unhideWhenUsed/></w:style>"#);
+    w.raw(r#"<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style>"#);
+    w.raw(r#"<w:style w:type="numbering" w:default="1" w:styleId="NoList"><w:name w:val="No List"/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/></w:style>"#);
+
     // Heading styles.
     for level in 1..=max_heading_level.max(1) {
         let id = format!("Heading{level}");
@@ -78,6 +88,14 @@ pub fn build(
         w.close();
         w.close(); // style
     }
+
+    // Header / Footer paragraph styles (+ their linked character styles) — the
+    // running-head/foot styles every Word document defines and that header/footer
+    // paragraphs use.
+    w.raw(r#"<w:style w:type="paragraph" w:styleId="Header"><w:name w:val="header"/><w:basedOn w:val="Normal"/><w:link w:val="HeaderChar"/><w:uiPriority w:val="99"/><w:unhideWhenUsed/><w:pPr><w:tabs><w:tab w:val="center" w:pos="4680"/><w:tab w:val="right" w:pos="9360"/></w:tabs></w:pPr></w:style>"#);
+    w.raw(r#"<w:style w:type="character" w:styleId="HeaderChar"><w:name w:val="Header Char"/><w:basedOn w:val="DefaultParagraphFont"/><w:link w:val="Header"/><w:uiPriority w:val="99"/></w:style>"#);
+    w.raw(r#"<w:style w:type="paragraph" w:styleId="Footer"><w:name w:val="footer"/><w:basedOn w:val="Normal"/><w:link w:val="FooterChar"/><w:uiPriority w:val="99"/><w:unhideWhenUsed/><w:pPr><w:tabs><w:tab w:val="center" w:pos="4680"/><w:tab w:val="right" w:pos="9360"/></w:tabs></w:pPr></w:style>"#);
+    w.raw(r#"<w:style w:type="character" w:styleId="FooterChar"><w:name w:val="Footer Char"/><w:basedOn w:val="DefaultParagraphFont"/><w:link w:val="Footer"/><w:uiPriority w:val="99"/></w:style>"#);
 
     // ListParagraph.
     style(&mut w, "ListParagraph", "List Paragraph", Some("Normal"), false, false);

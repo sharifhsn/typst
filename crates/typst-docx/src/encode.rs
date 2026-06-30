@@ -34,6 +34,8 @@ const REL_NUMBERING: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering";
 const REL_FOOTNOTES: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes";
+const REL_ENDNOTES: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes";
 const REL_SETTINGS: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings";
 const REL_THEME: &str =
@@ -52,6 +54,8 @@ const CT_NUMBERING: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml";
 const CT_FOOTNOTES: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml";
+const CT_ENDNOTES: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml";
 const CT_SETTINGS: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml";
 const CT_CORE: &str =
@@ -138,16 +142,18 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
         doc_rels.add(REL_NUMBERING, "numbering.xml", RelMode::Internal);
     }
 
-    // -- word/footnotes.xml (conditional) --
-    if !document.footnotes.is_empty() {
-        let footnotes_xml = build_footnotes(document, pretty);
-        package.add_xml("word/footnotes.xml", CT_FOOTNOTES, footnotes_xml);
-        doc_rels.add(REL_FOOTNOTES, "footnotes.xml", RelMode::Internal);
-        // A footnote body that holds an image / external link references it by
-        // r:id; that id resolves against footnotes.xml's OWN rels part, not the
-        // document's. Without this, Word refuses to open the file.
-        write_part_rels(&mut package, "footnotes.xml", &document.footnote_rels);
-    }
+    // -- word/footnotes.xml + word/endnotes.xml --
+    // Word writes both parts in every document — a stub with just the separator
+    // definitions when there are no notes — so emit them unconditionally.
+    let footnotes_xml = build_footnotes(document, pretty);
+    package.add_xml("word/footnotes.xml", CT_FOOTNOTES, footnotes_xml);
+    doc_rels.add(REL_FOOTNOTES, "footnotes.xml", RelMode::Internal);
+    // A footnote body that holds an image / external link references it by r:id;
+    // that id resolves against footnotes.xml's OWN rels part, not the document's.
+    // Without this, Word refuses to open the file.
+    write_part_rels(&mut package, "footnotes.xml", &document.footnote_rels);
+    package.add_xml("word/endnotes.xml", CT_ENDNOTES, build_endnotes(pretty));
+    doc_rels.add(REL_ENDNOTES, "endnotes.xml", RelMode::Internal);
 
     // -- header/footer parts --
     // The headerReference/footerReference relationships live in `doc_rels`; the
@@ -1178,12 +1184,19 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
     if document.uses_fields {
         w.open("w:updateFields").attr(xml::W_VAL, "true").empty();
     }
-    if !document.footnotes.is_empty() {
-        w.open("w:footnotePr").start_children();
-        w.open("w:footnote").attr("w:id", "-1").empty();
-        w.open("w:footnote").attr("w:id", "0").empty();
-        w.close();
-    }
+    // Header drawing-canvas defaults (the header sibling of shapeDefaults).
+    w.raw("<w:hdrShapeDefaults><o:shapedefaults v:ext=\"edit\" spidmax=\"1026\"/>\
+           </w:hdrShapeDefaults>");
+    // Footnote/endnote separator references (Word writes both in every document,
+    // pointing at the separator definitions in footnotes.xml / endnotes.xml).
+    w.open("w:footnotePr").start_children();
+    w.open("w:footnote").attr("w:id", "-1").empty();
+    w.open("w:footnote").attr("w:id", "0").empty();
+    w.close();
+    w.open("w:endnotePr").start_children();
+    w.open("w:endnote").attr("w:id", "-1").empty();
+    w.open("w:endnote").attr("w:id", "0").empty();
+    w.close();
     // Mark the document with the modern (Word 2013+) feature set. Without a
     // `<w:compat>` block Word assumes legacy behaviour and opens the file in
     // "Compatibility Mode" (a banner in the title bar, and the older layout
@@ -1345,8 +1358,8 @@ fn build_footnotes(document: &DocxDocument, pretty: bool) -> String {
     w.start_children();
 
     // Separators.
-    write_separator(&mut w, -1, "separator");
-    write_separator(&mut w, 0, "continuationSeparator");
+    write_separator(&mut w, "w:footnote", -1, "separator");
+    write_separator(&mut w, "w:footnote", 0, "continuationSeparator");
 
     for footnote in &document.footnotes {
         write_footnote(&mut w, footnote);
@@ -1356,8 +1369,21 @@ fn build_footnotes(document: &DocxDocument, pretty: bool) -> String {
     w.finish()
 }
 
-fn write_separator(w: &mut XmlWriter, id: i32, kind: &'static str) {
-    w.open("w:footnote")
+/// Builds `word/endnotes.xml`. Typst has no endnotes, so this is always the stub
+/// (just the separator definitions) that Word writes in every document.
+fn build_endnotes(pretty: bool) -> String {
+    let mut w = XmlWriter::new(pretty);
+    w.open("w:endnotes");
+    decl_ooxml_namespaces(&mut w);
+    w.start_children();
+    write_separator(&mut w, "w:endnote", -1, "separator");
+    write_separator(&mut w, "w:endnote", 0, "continuationSeparator");
+    w.close();
+    w.finish()
+}
+
+fn write_separator(w: &mut XmlWriter, elem: &'static str, id: i32, kind: &'static str) {
+    w.open(elem)
         .attr("w:type", kind)
         .attr("w:id", &id.to_string())
         .start_children();
