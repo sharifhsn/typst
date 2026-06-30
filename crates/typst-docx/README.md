@@ -10,6 +10,19 @@ rendering. Output opens cleanly in Microsoft Word and LibreOffice.
 > native, editable OOXML; graphics that have no OOXML equivalent fall back to an
 > embedded image. See the support tables below for exactly what maps where.
 
+## Clean, restylable output
+
+The exporter aims for the document you'd get if a careful person had built it in
+Word — not a flattened rendering. It uses Word's **built-in styles** (`Heading 1`,
+`List Paragraph`, `Quote`, `Caption`, `Hyperlink`, `TOC 1`–`9`, `Bibliography`),
+so the Navigation pane, Styles gallery, and "update style" all work. The
+document's predominant **font, size, and language are hoisted into `docDefaults`**
+and the body inherits them — each run's formatting carries only what *deviates*
+(bold, a different size, a colour). Editing the `Normal` style (or the theme font)
+in Word therefore restyles the whole document, and `document.xml` stays compact.
+This makes the docx pleasant both for a human to tweak in Word's GUI and for a
+tool to regenerate by editing the (far more compact) Typst source.
+
 ## How content is mapped
 
 Every element falls into one of three tiers:
