@@ -23,6 +23,12 @@ in Word therefore restyles the whole document, and `document.xml` stays compact.
 This makes the docx pleasant both for a human to tweak in Word's GUI and for a
 tool to regenerate by editing the (far more compact) Typst source.
 
+The package is also structured like one Word itself saves: it ships the standard
+`theme1.xml`, `fontTable.xml` and `webSettings.xml`, a full `settings.xml` with
+the modern compatibility block (so Word opens it natively, not in "Compatibility
+Mode"), and wraps newer constructs such as text boxes in `mc:AlternateContent`
+with a legacy fallback for older consumers.
+
 ## How content is mapped
 
 Every element falls into one of three tiers:
