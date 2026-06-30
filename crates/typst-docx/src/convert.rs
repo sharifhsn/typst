@@ -507,15 +507,21 @@ fn handle_block_inner(
             crate::dom::Indent { left: Some(em), right: Some(em), ..Default::default() }
         });
 
-        let runs = ctx.inline_runs(&elem.body, styles, RunProps::default())?;
-        out.push(Block::Para(Para {
-            props: crate::dom::ParaProps {
-                style: Some("Quote".into()),
-                ind: indent.clone(),
-                ..Default::default()
-            },
-            content: runs.into_iter().map(ParaChild::Run).collect(),
-        }));
+        // Lower the body as blocks (not flat runs) so a multi-paragraph quote
+        // stays multiple paragraphs instead of collapsing into one; style each as
+        // a `Quote` paragraph and apply the block quote's left/right indent.
+        let mut body_blocks = ctx.blocks(&elem.body, styles)?;
+        for b in &mut body_blocks {
+            if let Block::Para(para) = b {
+                para.props.style.get_or_insert_with(|| "Quote".into());
+                if let Some(ind) = &indent {
+                    let pind = para.props.ind.get_or_insert_with(Default::default);
+                    pind.left = Some(pind.left.unwrap_or(0) + ind.left.unwrap_or(0));
+                    pind.right = Some(pind.right.unwrap_or(0) + ind.right.unwrap_or(0));
+                }
+            }
+        }
+        out.extend(body_blocks);
 
         // The attribution ("— author", or a prose citation) renders below a
         // block quote, right-aligned (Typst's default). Was previously dropped.
@@ -598,10 +604,16 @@ fn handle_block_inner(
             }
         }
         out.extend(blocks);
-    } else if child.is::<typst_library::layout::FlushElem>()
-        || child.is::<typst_library::layout::ColbreakElem>()
-    {
-        // Float-flush / column-break markers: no DOCX representation, no content.
+    } else if child.is::<typst_library::layout::ColbreakElem>() {
+        // `#colbreak()` → a column break, moving the following content to the next
+        // column of a multi-column section.
+        out.push(Block::Para(Para {
+            props: ParaProps::default(),
+            content: vec![ParaChild::Run(Run::ColumnBreak)],
+        }));
+    } else if child.is::<typst_library::layout::FlushElem>() {
+        // A float-flush marker (`place` float ordering) has no DOCX equivalent and
+        // carries no content of its own.
     } else if let Some(elem) = child.to_packed::<typst_library::layout::PlaceElem>() {
         // Top-level `#place(..)` → a floating drawing (G8). The body is lowered
         // to an image (native or rasterized) wrapped in a `<wp:anchor>`.
@@ -686,9 +698,8 @@ pub(crate) fn is_invisible_noop(child: &Content) -> bool {
         // `#hide[..]` is invisible by design (extractable bodies are kept as
         // hidden text elsewhere; a non-extractable one is genuinely nothing).
         || child.is::<typst_library::layout::HideElem>()
-        // Float-flush / column-break markers.
+        // A float-flush marker (`place` float ordering): no DOCX equivalent.
         || child.is::<typst_library::layout::FlushElem>()
-        || child.is::<typst_library::layout::ColbreakElem>()
         // A tagged-PDF accessibility delimiter (unwrapped to its body elsewhere).
         || child.is::<typst_library::pdf::PdfMarkerTag>()
 }

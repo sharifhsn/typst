@@ -773,6 +773,11 @@ fn write_run(w: &mut XmlWriter, run: &Run) {
             w.open(xml::W_BR).attr("w:type", "page").empty();
             w.close();
         }
+        Run::ColumnBreak => {
+            w.open(xml::W_R).start_children();
+            w.open(xml::W_BR).attr("w:type", "column").empty();
+            w.close();
+        }
         Run::Tab | Run::FillTab => {
             w.open(xml::W_R).start_children();
             w.leaf(xml::W_TAB);

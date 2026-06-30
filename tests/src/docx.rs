@@ -371,6 +371,28 @@ fn url_link_looks_like_a_link() {
 }
 
 #[test]
+fn colbreak_becomes_a_column_break() {
+    // `#colbreak()` is a real layout instruction (move to the next column), not a
+    // no-op — it must survive as `<w:br w:type="column"/>`.
+    let p = parts("#set page(columns: 2)\nLeft.\n#colbreak()\nNext column.");
+    assert!(
+        p["word/document.xml"].contains("w:type=\"column\""),
+        "a column break must be emitted"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn multi_paragraph_block_quote_keeps_its_paragraphs() {
+    // A two-paragraph block quote must stay two paragraphs — the internal parbreak
+    // is real separation, not something to silently drop (which would merge them).
+    let p = parts("#quote(block: true)[First para.\n\nSecond para.]");
+    let n = p["word/document.xml"].matches("w:val=\"Quote\"").count();
+    assert_eq!(n, 2, "both quoted paragraphs keep the Quote style as separate <w:p>");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn page_background_becomes_a_behind_text_header_image() {
     // `set page(background: ..)` → a full-page `behindDoc`, page-anchored image in
     // the (default) header, so it repeats on every page behind the body text.

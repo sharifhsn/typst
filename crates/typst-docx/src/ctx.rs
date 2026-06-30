@@ -969,6 +969,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         } else if child.is::<LinebreakElem>() {
             out.push(Run::Break);
             self.last_char = None;
+        } else if child.is::<typst_library::model::ParbreakElem>() {
+            // A paragraph break that reached a run-only context (a footnote, a
+            // table cell rendered inline, …) cannot start a new `<w:p>`, but it
+            // must not silently merge the two paragraphs — emit a line break so
+            // the visual separation survives. (Block contexts split into real
+            // paragraphs upstream and never reach here.)
+            out.push(Run::Break);
+            self.last_char = None;
         } else if let Some(elem) = child.to_packed::<SmartQuoteElem>() {
             let double = elem.double.get(styles);
             let quote: EcoString = if elem.enabled.get(styles) {

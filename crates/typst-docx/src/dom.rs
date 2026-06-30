@@ -143,6 +143,9 @@ pub enum Run {
     Text { props: RunProps, text: EcoString },
     Break,
     PageBreak,
+    /// A `#colbreak()` → `<w:br w:type="column"/>`: moves the following content to
+    /// the next column in a multi-column section.
+    ColumnBreak,
     Tab,
     /// A tab from a fractional `#h(1fr)` (the push-apart idiom). Encoded as a
     /// tab, but its paragraph gains a right-aligned tab stop at the content width
