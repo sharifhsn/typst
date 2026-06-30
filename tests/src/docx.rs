@@ -188,6 +188,19 @@ fn horizontal_stack_lowers_to_a_table_row() {
 }
 
 #[test]
+fn inline_columns_flow_their_text_natively() {
+    // `#columns(n)[..]` wraps flowing content (whole academic papers and
+    // cheatsheets do this). It must keep the text editable, not rasterize the
+    // body to an image — the column split is approximated as a single column.
+    let p = parts("#columns(2)[A first column paragraph. #colbreak() A second one.]");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("first column paragraph"), "column text is kept");
+    assert!(doc.contains("A second one"), "all column content is kept");
+    assert!(!doc.contains("<w:drawing>"), "columns are not rasterized");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn nested_bullets_indent_by_level() {
     // A nested bullet list must descend ilvl (depth fold), not stay flat at 0.
     let p = parts("- a\n- b\n  - b1\n    - b1a");

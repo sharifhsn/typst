@@ -486,6 +486,13 @@ fn handle_block_inner(
         // a borderless table row — keeping the text editable instead of
         // rasterizing the whole block.
         out.extend(mappers::stack::stack(elem, styles, ctx)?);
+    } else if let Some(elem) = child.to_packed::<typst_library::layout::ColumnsElem>() {
+        // `#columns(n)[..]` balances flowing content across n columns. There is
+        // no per-block multi-column construct in a flowing story (columns are a
+        // section property), so lower the body as ordinary blocks — the text
+        // stays editable instead of being rasterized to an image. The visual
+        // column split is approximated as a single column.
+        out.extend(ctx.blocks(&elem.body, styles)?);
     } else if let Some(elem) = child.to_packed::<OutlineElem>() {
         out.extend(mappers::outline::outline(elem, styles, ctx)?);
     } else if let Some(elem) = child.to_packed::<EquationElem>() {
