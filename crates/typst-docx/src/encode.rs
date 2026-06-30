@@ -36,6 +36,12 @@ const REL_FOOTNOTES: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes";
 const REL_SETTINGS: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings";
+const REL_THEME: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
+const REL_FONT_TABLE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable";
+const REL_WEB_SETTINGS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/webSettings";
 
 // Content types.
 const CT_DOCUMENT: &str =
@@ -56,6 +62,11 @@ const CT_HEADER: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml";
 const CT_FOOTER: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml";
+const CT_THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml";
+const CT_FONT_TABLE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml";
+const CT_WEB_SETTINGS: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml";
 
 /// Serializes a DOCX document into the OPC zip bytes.
 #[typst_macros::time(name = "docx encode")]
@@ -82,6 +93,43 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     let settings_xml = build_settings(document, pretty);
     package.add_xml("word/settings.xml", CT_SETTINGS, settings_xml);
     doc_rels.add(REL_SETTINGS, "settings.xml", RelMode::Internal);
+
+    // -- word/theme/theme1.xml --
+    package.add_xml(
+        "word/theme/theme1.xml",
+        CT_THEME,
+        crate::parts::build_theme(&document.text_defaults, pretty),
+    );
+    doc_rels.add(REL_THEME, "theme/theme1.xml", RelMode::Internal);
+
+    // -- word/fontTable.xml --
+    // The document font + the standard auxiliary fonts (bullet glyphs, math).
+    let mut fonts: Vec<String> = Vec::new();
+    if let Some(f) = &document.text_defaults.font {
+        fonts.push(f.to_string());
+    }
+    for f in ["Symbol", "Courier New"] {
+        if !fonts.iter().any(|x| x == f) {
+            fonts.push(f.to_string());
+        }
+    }
+    if document.uses_math {
+        fonts.push("Cambria Math".to_string());
+    }
+    package.add_xml(
+        "word/fontTable.xml",
+        CT_FONT_TABLE,
+        crate::parts::build_font_table(&fonts, pretty),
+    );
+    doc_rels.add(REL_FONT_TABLE, "fontTable.xml", RelMode::Internal);
+
+    // -- word/webSettings.xml --
+    package.add_xml(
+        "word/webSettings.xml",
+        CT_WEB_SETTINGS,
+        crate::parts::build_web_settings(pretty),
+    );
+    doc_rels.add(REL_WEB_SETTINGS, "webSettings.xml", RelMode::Internal);
 
     // -- word/numbering.xml (conditional) --
     if !document.numbering.abstracts.is_empty() {
@@ -1029,9 +1077,11 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
     let mut w = XmlWriter::new(pretty);
     w.open("w:settings")
         .attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+        .attr("xmlns:m", "http://schemas.openxmlformats.org/officeDocument/2006/math")
         .start_children();
-    // Standard Word defaults (kept in canonical schema order). The half-inch
-    // default tab and `doNotCompress` spacing are what Word itself writes.
+    // The settings Word itself writes, in canonical schema order.
+    w.open("w:zoom").attr("w:percent", "100").empty();
+    w.open("w:proofState").attr("w:spelling", "clean").attr("w:grammar", "clean").empty();
     w.open("w:defaultTabStop").attr(xml::W_VAL, "720").empty();
     w.open("w:characterSpacingControl").attr(xml::W_VAL, "doNotCompress").empty();
     if document.uses_fields {
@@ -1063,6 +1113,44 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
             .empty();
     }
     w.close(); // compat
+    // Office Math defaults (Cambria Math, the standard break/justification rules)
+    // so OMML equations render exactly as in Word's equation editor.
+    if document.uses_math {
+        w.open("m:mathPr").start_children();
+        w.open("m:mathFont").attr("m:val", "Cambria Math").empty();
+        w.open("m:brkBin").attr("m:val", "before").empty();
+        w.open("m:brkBinSub").attr("m:val", "--").empty();
+        w.open("m:smallFrac").attr("m:val", "0").empty();
+        w.leaf("m:dispDef");
+        w.open("m:lMargin").attr("m:val", "0").empty();
+        w.open("m:rMargin").attr("m:val", "0").empty();
+        w.open("m:defJc").attr("m:val", "centerGroup").empty();
+        w.open("m:wrapIndent").attr("m:val", "1440").empty();
+        w.open("m:intLim").attr("m:val", "subSup").empty();
+        w.open("m:naryLim").attr("m:val", "undOvr").empty();
+        w.close(); // mathPr
+    }
+    // Spell-check language for the theme fonts.
+    let lang = document.text_defaults.lang.as_deref().unwrap_or("en-US");
+    w.open("w:themeFontLang").attr(xml::W_VAL, lang).empty();
+    // Map the colour-scheme slots to the theme (what Word writes for a doc using
+    // the Office theme).
+    w.open("w:clrSchemeMapping")
+        .attr("w:bg1", "light1")
+        .attr("w:t1", "dark1")
+        .attr("w:bg2", "light2")
+        .attr("w:t2", "dark2")
+        .attr("w:accent1", "accent1")
+        .attr("w:accent2", "accent2")
+        .attr("w:accent3", "accent3")
+        .attr("w:accent4", "accent4")
+        .attr("w:accent5", "accent5")
+        .attr("w:accent6", "accent6")
+        .attr("w:hyperlink", "hyperlink")
+        .attr("w:followedHyperlink", "followedHyperlink")
+        .empty();
+    w.open("w:decimalSymbol").attr(xml::W_VAL, ".").empty();
+    w.open("w:listSeparator").attr(xml::W_VAL, ",").empty();
     w.close();
     w.finish()
 }
@@ -1225,7 +1313,18 @@ fn build_app(pretty: bool) -> String {
     w.open("Properties")
         .attr("xmlns", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties")
         .start_children();
+    // The standard extended properties Word writes. Document statistics
+    // (Pages/Words/Characters) are recomputed by Word on open, so they are
+    // omitted; the booleans/version are the fixed scaffolding.
+    w.elem_text("Template", "Normal.dotm");
     w.elem_text("Application", "Typst");
+    w.elem_text("DocSecurity", "0");
+    w.elem_text("ScaleCrop", "false");
+    w.elem_text("Company", "");
+    w.elem_text("LinksUpToDate", "false");
+    w.elem_text("SharedDoc", "false");
+    w.elem_text("HyperlinksChanged", "false");
+    w.elem_text("AppVersion", "16.0000");
     w.close();
     w.finish()
 }

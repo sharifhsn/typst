@@ -13,6 +13,7 @@ mod encode;
 mod introspect;
 mod mappers;
 mod package;
+mod parts;
 mod props;
 mod rules;
 mod styles_part;
