@@ -466,6 +466,33 @@ fn standard_word_parts_are_present() {
 }
 
 #[test]
+fn standard_gallery_and_linked_heading_styles_are_defined() {
+    // A survey of real Word documents shows they universally define the gallery
+    // styles (Title/Subtitle/Strong/Emphasis/Table Grid) and pair each heading
+    // with a linked character style. We define them too so the Styles gallery
+    // matches a Word-authored package and heading char formatting works.
+    let p = parts("= Heading one\n== Heading two\nBody.");
+    let styles = &p["word/styles.xml"];
+    for id in [
+        "Title", "TitleChar", "Subtitle", "Strong", "Emphasis", "TableGrid",
+        "FollowedHyperlink", "PageNumber",
+    ] {
+        assert!(
+            styles.contains(&format!("w:styleId=\"{id}\"")),
+            "gallery style {id} should be defined"
+        );
+    }
+    // Each used heading level is paired with its linked character style.
+    assert!(styles.contains("w:styleId=\"Heading1Char\""), "Heading1 is linked");
+    assert!(styles.contains("w:styleId=\"Heading2Char\""), "Heading2 is linked");
+    assert!(
+        styles.contains("<w:link w:val=\"Heading1Char\"/>"),
+        "the heading paragraph style links to its char style"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn paragraphs_carry_unique_w14_para_ids() {
     // Word stamps every content paragraph with a `w14:paraId`/`w14:textId`
     // (the identity its comments/revisions/co-authoring anchor to). We emit

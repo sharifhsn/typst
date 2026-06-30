@@ -68,9 +68,13 @@ pub fn build(
     w.raw(r#"<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style>"#);
     w.raw(r#"<w:style w:type="numbering" w:default="1" w:styleId="NoList"><w:name w:val="No List"/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/></w:style>"#);
 
-    // Heading styles.
+    // Heading styles, each paired with a linked character style
+    // (`HeadingNChar`) exactly as Word writes them — so applying heading
+    // formatting to a *span* works and the Styles pane shows the same linked
+    // pair a Word-authored document carries.
     for level in 1..=max_heading_level.max(1) {
         let id = format!("Heading{level}");
+        let char_id = format!("Heading{level}Char");
         let name = format!("heading {level}");
         w.open("w:style")
             .attr("w:type", "paragraph")
@@ -79,6 +83,7 @@ pub fn build(
         w.open("w:name").attr(xml::W_VAL, &name).empty();
         w.open("w:basedOn").attr(xml::W_VAL, "Normal").empty();
         w.open("w:next").attr(xml::W_VAL, "Normal").empty();
+        w.open("w:link").attr(xml::W_VAL, &char_id).empty();
         w.open(xml::W_PPR).start_children();
         w.leaf("w:keepNext");
         w.open("w:outlineLvl").attr(xml::W_VAL, &(level - 1).to_string()).empty();
@@ -87,7 +92,34 @@ pub fn build(
         w.leaf(xml::W_B);
         w.close();
         w.close(); // style
+
+        // The linked character style carries the same run formatting.
+        w.open("w:style")
+            .attr("w:type", "character")
+            .attr("w:styleId", &char_id)
+            .start_children();
+        w.open("w:name").attr(xml::W_VAL, &format!("Heading {level} Char")).empty();
+        w.open("w:basedOn").attr(xml::W_VAL, "DefaultParagraphFont").empty();
+        w.open("w:link").attr(xml::W_VAL, &id).empty();
+        w.open(xml::W_RPR).start_children();
+        w.leaf(xml::W_B);
+        w.close();
+        w.close(); // style
     }
+
+    // The standard gallery styles Word always offers — Title/Subtitle (paired
+    // with their linked character styles), the Strong/Emphasis character styles
+    // (the bold/italic toggles in the ribbon), and the Table Grid table style.
+    // We render with direct formatting, but defining these makes the same
+    // built-in styles available when the document is edited in Word, matching a
+    // Word-authored package.
+    w.raw(r#"<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:link w:val="TitleChar"/><w:uiPriority w:val="10"/><w:qFormat/><w:pPr><w:spacing w:after="0"/></w:pPr><w:rPr><w:sz w:val="56"/><w:szCs w:val="56"/></w:rPr></w:style>"#);
+    w.raw(r#"<w:style w:type="character" w:styleId="TitleChar"><w:name w:val="Title Char"/><w:basedOn w:val="DefaultParagraphFont"/><w:link w:val="Title"/><w:uiPriority w:val="10"/><w:rPr><w:sz w:val="56"/><w:szCs w:val="56"/></w:rPr></w:style>"#);
+    w.raw(r#"<w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:link w:val="SubtitleChar"/><w:uiPriority w:val="11"/><w:qFormat/><w:rPr><w:i/><w:iCs/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>"#);
+    w.raw(r#"<w:style w:type="character" w:styleId="SubtitleChar"><w:name w:val="Subtitle Char"/><w:basedOn w:val="DefaultParagraphFont"/><w:link w:val="Subtitle"/><w:uiPriority w:val="11"/><w:rPr><w:i/><w:iCs/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>"#);
+    w.raw(r#"<w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:basedOn w:val="DefaultParagraphFont"/><w:uiPriority w:val="22"/><w:qFormat/><w:rPr><w:b/><w:bCs/></w:rPr></w:style>"#);
+    w.raw(r#"<w:style w:type="character" w:styleId="Emphasis"><w:name w:val="Emphasis"/><w:basedOn w:val="DefaultParagraphFont"/><w:uiPriority w:val="20"/><w:qFormat/><w:rPr><w:i/><w:iCs/></w:rPr></w:style>"#);
+    w.raw(r#"<w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/><w:basedOn w:val="TableNormal"/><w:uiPriority w:val="39"/><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tblBorders></w:tblPr></w:style>"#);
 
     // Header / Footer paragraph styles (+ their linked character styles) — the
     // running-head/foot styles every Word document defines and that header/footer
@@ -119,6 +151,11 @@ pub fn build(
     w.open("w:u").attr(xml::W_VAL, "single").empty();
     w.close(); // w:rPr
     w.close(); // w:style
+    // FollowedHyperlink + PageNumber — the other two common built-in character
+    // styles Word offers (a visited link, a page-number field); defined so they
+    // are available when editing, matching a Word-authored package.
+    w.raw(r#"<w:style w:type="character" w:styleId="FollowedHyperlink"><w:name w:val="FollowedHyperlink"/><w:basedOn w:val="DefaultParagraphFont"/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/><w:rPr><w:color w:val="954F72"/><w:u w:val="single"/></w:rPr></w:style>"#);
+    w.raw(r#"<w:style w:type="character" w:styleId="PageNumber"><w:name w:val="page number"/><w:basedOn w:val="DefaultParagraphFont"/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/></w:style>"#);
     // TOC1..9.
     for level in 1..=9 {
         let id = format!("TOC{level}");
