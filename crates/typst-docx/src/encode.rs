@@ -1114,6 +1114,8 @@ fn write_sectpr(w: &mut XmlWriter, sect: &SectPr) {
     if sect.title_pg {
         w.leaf("w:titlePg");
     }
+    // The line grid Word always writes in a section (default line pitch).
+    w.open("w:docGrid").attr("w:linePitch", "360").empty();
     w.close();
 }
 
@@ -1162,6 +1164,11 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
     w.open("w:settings")
         .attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
         .attr("xmlns:m", "http://schemas.openxmlformats.org/officeDocument/2006/math")
+        .attr("xmlns:o", "urn:schemas-microsoft-com:office:office")
+        .attr("xmlns:v", "urn:schemas-microsoft-com:vml")
+        .attr("xmlns:w14", "http://schemas.microsoft.com/office/word/2010/wordml")
+        .attr("xmlns:mc", "http://schemas.openxmlformats.org/markup-compatibility/2006")
+        .attr("mc:Ignorable", "w14")
         .start_children();
     // The settings Word itself writes, in canonical schema order.
     w.open("w:zoom").attr("w:percent", "100").empty();
@@ -1197,23 +1204,29 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
             .empty();
     }
     w.close(); // compat
+    // A revision-save-id block. Word stamps these to track editing sessions;
+    // every real document carries one, so emit a deterministic root id.
+    let fp = format!("{:08X}", doc_fingerprint(document));
+    w.open("w:rsids").start_children();
+    w.open("w:rsidRoot").attr(xml::W_VAL, &fp).empty();
+    w.open("w:rsid").attr(xml::W_VAL, &fp).empty();
+    w.close(); // rsids
     // Office Math defaults (Cambria Math, the standard break/justification rules)
-    // so OMML equations render exactly as in Word's equation editor.
-    if document.uses_math {
-        w.open("m:mathPr").start_children();
-        w.open("m:mathFont").attr("m:val", "Cambria Math").empty();
-        w.open("m:brkBin").attr("m:val", "before").empty();
-        w.open("m:brkBinSub").attr("m:val", "--").empty();
-        w.open("m:smallFrac").attr("m:val", "0").empty();
-        w.leaf("m:dispDef");
-        w.open("m:lMargin").attr("m:val", "0").empty();
-        w.open("m:rMargin").attr("m:val", "0").empty();
-        w.open("m:defJc").attr("m:val", "centerGroup").empty();
-        w.open("m:wrapIndent").attr("m:val", "1440").empty();
-        w.open("m:intLim").attr("m:val", "subSup").empty();
-        w.open("m:naryLim").attr("m:val", "undOvr").empty();
-        w.close(); // mathPr
-    }
+    // so OMML equations render exactly as in Word's equation editor. Word writes
+    // these even in a document with no equations.
+    w.open("m:mathPr").start_children();
+    w.open("m:mathFont").attr("m:val", "Cambria Math").empty();
+    w.open("m:brkBin").attr("m:val", "before").empty();
+    w.open("m:brkBinSub").attr("m:val", "--").empty();
+    w.open("m:smallFrac").attr("m:val", "0").empty();
+    w.leaf("m:dispDef");
+    w.open("m:lMargin").attr("m:val", "0").empty();
+    w.open("m:rMargin").attr("m:val", "0").empty();
+    w.open("m:defJc").attr("m:val", "centerGroup").empty();
+    w.open("m:wrapIndent").attr("m:val", "1440").empty();
+    w.open("m:intLim").attr("m:val", "subSup").empty();
+    w.open("m:naryLim").attr("m:val", "undOvr").empty();
+    w.close(); // mathPr
     // Spell-check language for the theme fonts.
     let lang = document.text_defaults.lang.as_deref().unwrap_or("en-US");
     w.open("w:themeFontLang").attr(xml::W_VAL, lang).empty();
@@ -1233,10 +1246,36 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
         .attr("w:hyperlink", "hyperlink")
         .attr("w:followedHyperlink", "followedHyperlink")
         .empty();
+    // VML shape defaults (what Word writes for drawing-canvas bookkeeping).
+    w.raw("<w:shapeDefaults><o:shapedefaults v:ext=\"edit\" spidmax=\"1026\"/>\
+           <o:shapelayout v:ext=\"edit\"><o:idmap v:ext=\"edit\" data=\"1\"/>\
+           </o:shapelayout></w:shapeDefaults>");
     w.open("w:decimalSymbol").attr(xml::W_VAL, ".").empty();
     w.open("w:listSeparator").attr(xml::W_VAL, ",").empty();
+    // The per-document id Word stamps (in the w14 extension namespace, declared +
+    // marked ignorable on the root). Deterministic from the document content.
+    w.open("w14:docId").attr("w14:val", &fp).empty();
     w.close();
     w.finish()
+}
+
+/// A deterministic 32-bit fingerprint of the document (FNV-1a over the title,
+/// block count and heading depth) used for the rsid / docId values. It only needs
+/// to be stable and reasonably document-specific; Word regenerates it on save.
+fn doc_fingerprint(document: &DocxDocument) -> u32 {
+    let mut h: u32 = 0x811C_9DC5;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= b as u32;
+            h = h.wrapping_mul(0x0100_0193);
+        }
+    };
+    if let Some(title) = &document.info.title {
+        feed(title.as_bytes());
+    }
+    feed(&(document.body.len() as u32).to_le_bytes());
+    feed(&[document.max_heading_level]);
+    h
 }
 
 // ---------------------------------------------------------------------------
@@ -1397,15 +1436,23 @@ fn build_app(pretty: bool) -> String {
     w.open("Properties")
         .attr("xmlns", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties")
         .start_children();
-    // The standard extended properties Word writes. Document statistics
-    // (Pages/Words/Characters) are recomputed by Word on open, so they are
-    // omitted; the booleans/version are the fixed scaffolding.
+    // The standard extended properties Word writes, in its usual field order. The
+    // document statistics (Pages/Words/Characters/Lines/Paragraphs) are recomputed
+    // by Word the moment it opens or saves the file, so they start at zero; the
+    // rest is the fixed scaffolding every Word document carries.
     w.elem_text("Template", "Normal.dotm");
+    w.elem_text("TotalTime", "0");
+    w.elem_text("Pages", "1");
+    w.elem_text("Words", "0");
+    w.elem_text("Characters", "0");
     w.elem_text("Application", "Typst");
     w.elem_text("DocSecurity", "0");
+    w.elem_text("Lines", "0");
+    w.elem_text("Paragraphs", "0");
     w.elem_text("ScaleCrop", "false");
     w.elem_text("Company", "");
     w.elem_text("LinksUpToDate", "false");
+    w.elem_text("CharactersWithSpaces", "0");
     w.elem_text("SharedDoc", "false");
     w.elem_text("HyperlinksChanged", "false");
     w.elem_text("AppVersion", "16.0000");

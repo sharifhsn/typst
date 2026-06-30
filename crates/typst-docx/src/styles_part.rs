@@ -48,6 +48,13 @@ pub fn build(
     w.close(); // rPrDefault
     w.close(); // docDefaults
 
+    // The standard Word `latentStyles` block: it declares the visibility, sort
+    // priority and quick-format flags of the ~370 built-in styles, so the Styles
+    // gallery and pane behave exactly as in a document Word itself produced (the
+    // recommended styles show, the obscure ones stay hidden). It is the same fixed
+    // block every Word document carries.
+    w.raw(include_str!("latent_styles.xml"));
+
     // Normal (default paragraph style).
     style(&mut w, "Normal", "Normal", None, true, false);
 
