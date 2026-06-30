@@ -10,4 +10,5 @@ pub mod math;
 pub mod outline;
 pub mod reference;
 pub mod shape;
+pub mod stack;
 pub mod table;

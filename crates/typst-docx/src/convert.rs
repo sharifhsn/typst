@@ -480,6 +480,12 @@ fn handle_block_inner(
         // like a table, keeping its content as editable text rather than being
         // rasterized or dropped.
         out.extend(mappers::table::grid(elem, styles, ctx)?);
+    } else if let Some(elem) = child.to_packed::<typst_library::layout::StackElem>() {
+        // A `#stack` is a pure layout container (common in CV/resume entries):
+        // a vertical stack lowers to its children in order, a horizontal one to
+        // a borderless table row — keeping the text editable instead of
+        // rasterizing the whole block.
+        out.extend(mappers::stack::stack(elem, styles, ctx)?);
     } else if let Some(elem) = child.to_packed::<OutlineElem>() {
         out.extend(mappers::outline::outline(elem, styles, ctx)?);
     } else if let Some(elem) = child.to_packed::<EquationElem>() {

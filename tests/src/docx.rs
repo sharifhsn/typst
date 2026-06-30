@@ -163,6 +163,31 @@ fn grid_cell_alignment_is_kept() {
 }
 
 #[test]
+fn vertical_stack_lowers_to_sequential_paragraphs() {
+    // A `#stack` is a pure layout container — common in CV/resume entries — and
+    // must keep its text editable, not rasterize. A vertical stack's children
+    // flow one below another.
+    let p = parts("#stack(dir: ttb, spacing: 6pt, [First entry], [Second entry])");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("First entry"), "stack child text is kept");
+    assert!(doc.contains("Second entry"), "all stack children are kept");
+    assert!(!doc.contains("<w:drawing>"), "a text stack is not rasterized");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn horizontal_stack_lowers_to_a_table_row() {
+    // A horizontal stack places children side by side → a borderless table row,
+    // mirroring how a layout `#grid` lowers.
+    let p = parts("#stack(dir: ltr, [Left col], 1fr, [Right col])");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<w:tbl>"), "a horizontal stack becomes a table");
+    assert!(doc.contains("Left col") && doc.contains("Right col"), "both columns kept");
+    assert!(!doc.contains("<w:drawing>"), "not rasterized");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn nested_bullets_indent_by_level() {
     // A nested bullet list must descend ilvl (depth fold), not stay flat at 0.
     let p = parts("- a\n- b\n  - b1\n    - b1a");
@@ -396,6 +421,57 @@ fn standard_word_parts_are_present() {
     let s = &p["word/settings.xml"];
     assert!(s.contains("compatibilityMode") && s.contains("w:val=\"15\""), "compat 15");
     assert!(s.contains("clrSchemeMapping") && s.contains("defaultTabStop"), "rich settings");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn paragraphs_carry_unique_w14_para_ids() {
+    // Word stamps every content paragraph with a `w14:paraId`/`w14:textId`
+    // (the identity its comments/revisions/co-authoring anchor to). We emit
+    // them deterministically, unique within and across parts, and declare
+    // `w14` in each part root's `mc:Ignorable` so they are MCE-valid on `w:p`.
+    let p = parts(
+        "#set page(header: [Head], numbering: \"1\")\n\
+         = Intro\n\
+         A paragraph with a note.#footnote[A note.]\n\n\
+         Another paragraph.",
+    );
+
+    let collect_ids = |xml: &str| -> Vec<String> {
+        xml.match_indices("w14:paraId=\"")
+            .map(|(i, m)| {
+                let rest = &xml[i + m.len()..];
+                rest[..rest.find('"').unwrap()].to_string()
+            })
+            .collect()
+    };
+
+    let doc = &p["word/document.xml"];
+    let body_ids = collect_ids(doc);
+    assert!(body_ids.len() >= 3, "every body paragraph has a paraId");
+    // The `w14` attributes are only legal on `w:p` because the root marks them
+    // ignorable.
+    assert!(doc.contains("mc:Ignorable=\"w14"), "document root ignores w14");
+
+    // Collect ids from every part; they must be globally unique (disjoint
+    // per-part lanes), which a strict validator requires.
+    let mut all = Vec::new();
+    for (name, xml) in &p {
+        if name.ends_with(".xml") {
+            all.extend(collect_ids(xml));
+        }
+    }
+    let mut sorted = all.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), all.len(), "paraIds are globally unique: {all:?}");
+
+    // The footnote body (a separate part) is in its own lane, not the body's.
+    let notes = &p["word/footnotes.xml"];
+    assert!(
+        collect_ids(notes).iter().any(|id| id.starts_with("7")),
+        "footnote paragraphs use the notes lane"
+    );
     assert_all_wellformed(&p);
 }
 

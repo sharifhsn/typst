@@ -272,6 +272,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         use typst_library::foundations::Smart;
         use typst_library::layout::{Abs, Sides};
 
+        if std::env::var_os("DOCX_DEBUG_RASTER").is_some() {
+            eprintln!("RASTERIZE: {}", content.elem().name());
+        }
+
         // First lay out in an infinite-height region (so a tall figure is captured
         // whole, not page-clipped).
         let inf_frame = self.layout_export_frame(content, styles, span, Abs::inf())?;
