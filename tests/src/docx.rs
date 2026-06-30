@@ -371,6 +371,32 @@ fn url_link_looks_like_a_link() {
 }
 
 #[test]
+fn document_default_font_size_are_hoisted_into_doc_defaults() {
+    // The document's most common font/size is hoisted into `docDefaults`; body
+    // runs that match inherit it (no per-run `rFonts`/`sz`), so editing the Normal
+    // style in Word restyles the whole document. Only deviations emit `rPr`.
+    let p = parts(
+        "#set text(font: \"Liberation Serif\", size: 12pt)\n\
+         Plain body text here, repeated so it is the most common run.\n\n\
+         More plain body so the mode is clearly the body font.\n\n\
+         #text(font: \"Liberation Mono\")[deviating run]",
+    );
+    let styles = &p["word/styles.xml"];
+    let doc = &p["word/document.xml"];
+
+    // docDefaults carries the document's font + size (the mode).
+    let dd = &styles[styles.find("<w:docDefaults>").unwrap()..];
+    let dd = &dd[..dd.find("</w:docDefaults>").unwrap()];
+    assert!(dd.contains("liberation serif"), "default font hoisted: {dd}");
+    assert!(dd.contains("w:val=\"24\""), "default size (12pt = 24 half-pt) hoisted: {dd}");
+
+    // The body does NOT repeat the default font; only the deviating run does.
+    assert!(!doc.contains("liberation serif"), "body inherits the default font");
+    assert!(doc.contains("liberation mono"), "a deviating run still emits its font");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn colbreak_becomes_a_column_break() {
     // `#colbreak()` is a real layout instruction (move to the next column), not a
     // no-op — it must survive as `<w:br w:type="column"/>`.

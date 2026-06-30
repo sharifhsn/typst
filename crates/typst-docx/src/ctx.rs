@@ -571,26 +571,28 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     pub fn resolve_text_props(&self, styles: StyleChain, inherited: RunProps) -> RunProps {
         let mut p = inherited;
 
-        // Size.
-        let size = styles.resolve(TextElem::size);
-        p.size_half_pt = Some(props::pt_to_half_pt(size.to_pt()));
+        // Size. The document's most common size is later hoisted into
+        // `docDefaults` and stripped from the runs that match it (see
+        // `hoist_text_defaults`); here we record the absolute value.
+        let size = props::pt_to_half_pt(styles.resolve(TextElem::size).to_pt());
+        p.size_half_pt = Some(size);
 
-        // Color. A run carrying the `Hyperlink` character style must keep that
-        // style's blue + underline, so don't emit an explicit colour when it's
-        // the default black — that would override the style back to invisible
-        // body text. An explicitly non-black fill (e.g. `#show link: set
-        // text(red)`) still wins.
+        // Colour. Black is Word's own default (in `docDefaults`), so omit it and
+        // inherit — this both keeps the body compact and lets a run carrying the
+        // `Hyperlink` character style keep that style's blue (emitting black would
+        // override it back to invisible body text). An explicitly non-black fill
+        // (e.g. `#text(red)` or `#show link: set text(red)`) still wins.
         if let typst_library::visualize::Paint::Solid(color) =
             styles.get_ref(TextElem::fill)
         {
             let hex = props::color_to_hex(color);
-            let link_default = p.style.as_deref() == Some("Hyperlink") && hex == [0, 0, 0];
-            if !link_default {
+            if hex != [0, 0, 0] {
                 p.color = Some(hex);
             }
         }
 
-        // Font (first family).
+        // Font (first family). The most common one is later hoisted into
+        // `docDefaults` and stripped from matching runs.
         if let Some(first) = styles.get_ref(TextElem::font).into_iter().next() {
             p.font = Some(first.as_str().into());
         }
@@ -660,9 +662,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             p.cs = true;
         }
 
-        // Language tag.
-        let lang = styles.get(TextElem::lang);
-        p.lang = Some(lang.as_str().into());
+        // Language tag (`code[-region]`). The most common one is later hoisted
+        // into `docDefaults` and stripped from matching runs.
+        let lang_value = styles.get(TextElem::lang);
+        let code = lang_value.as_str();
+        p.lang = Some(match styles.get(TextElem::region) {
+            Some(region) => ecow::eco_format!("{code}-{}", region.as_str()),
+            None => code.into(),
+        });
 
         p
     }

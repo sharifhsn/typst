@@ -7,7 +7,12 @@ use crate::props;
 use crate::xml::{self, XmlWriter};
 
 /// Builds the `styles.xml` part.
-pub fn build(info: &DocumentInfo, max_heading_level: u8, pretty: bool) -> String {
+pub fn build(
+    info: &DocumentInfo,
+    defaults: &crate::dom::TextDefaults,
+    max_heading_level: u8,
+    pretty: bool,
+) -> String {
     let mut w = XmlWriter::new(pretty);
     w.open(xml::W_STYLES)
         .attr(
@@ -16,14 +21,29 @@ pub fn build(info: &DocumentInfo, max_heading_level: u8, pretty: bool) -> String
         )
         .start_children();
 
-    // docDefaults: base font + size.
-    let base_size_half_pt = props::pt_to_half_pt(11.0);
+    // docDefaults: the document's root font / size / colour / language, which the
+    // whole body inherits (each run only overrides what differs). Editing the
+    // `Normal` style or the theme font in Word then restyles the document.
     let _ = info;
     w.open("w:docDefaults").start_children();
     w.open("w:rPrDefault").start_children();
     w.open(xml::W_RPR).start_children();
-    w.open(xml::W_SZ).attr(xml::W_VAL, &base_size_half_pt.to_string()).empty();
-    w.open(xml::W_SZCS).attr(xml::W_VAL, &base_size_half_pt.to_string()).empty();
+    if let Some(font) = &defaults.font {
+        w.open(xml::W_RFONTS)
+            .attr("w:ascii", font)
+            .attr("w:hAnsi", font)
+            .attr("w:cs", font)
+            .attr("w:eastAsia", font)
+            .empty();
+    }
+    w.open(xml::W_SZ).attr(xml::W_VAL, &defaults.size_half_pt.to_string()).empty();
+    w.open(xml::W_SZCS).attr(xml::W_VAL, &defaults.size_half_pt.to_string()).empty();
+    if let Some(c) = defaults.color {
+        w.open("w:color").attr(xml::W_VAL, &props::hex(c)).empty();
+    }
+    if let Some(lang) = &defaults.lang {
+        w.open("w:lang").attr(xml::W_VAL, lang).empty();
+    }
     w.close(); // rPr
     w.close(); // rPrDefault
     w.close(); // docDefaults

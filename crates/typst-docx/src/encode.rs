@@ -69,8 +69,12 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     let mut doc_rels = clone_rels(&document.doc_rels);
 
     // -- word/styles.xml --
-    let styles_xml =
-        styles_part::build(&document.info, document.max_heading_level, pretty);
+    let styles_xml = styles_part::build(
+        &document.info,
+        &document.text_defaults,
+        document.max_heading_level,
+        pretty,
+    );
     package.add_xml("word/styles.xml", CT_STYLES, styles_xml);
     doc_rels.add(REL_STYLES, "styles.xml", RelMode::Internal);
 

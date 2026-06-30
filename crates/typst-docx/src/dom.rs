@@ -28,6 +28,8 @@ pub struct DocxDocument {
     pub(crate) footnote_rels: Rels,
     pub(crate) bookmarks: BookmarkTable,
     pub(crate) max_heading_level: u8,
+    /// The document's root text properties, hoisted into `docDefaults`.
+    pub(crate) text_defaults: TextDefaults,
     pub(crate) uses_fields: bool,
     pub(crate) uses_math: bool,
     pub(crate) introspector: Arc<DocxIntrospector>,
@@ -160,6 +162,30 @@ pub enum Run {
     /// An inline equation `<m:oMath>` (serialized XML).
     OmmlInline(String),
     Field(Field),
+}
+
+/// The document's root text properties, resolved once from the root style chain
+/// and hoisted into `docDefaults` (`word/styles.xml`). Per-run `<w:rPr>` then
+/// carries only the properties that *deviate* from these, so the body inherits
+/// the document font/size/colour: changing the `Normal` style or theme font in
+/// Word restyles the whole document, and `document.xml` stays compact.
+#[derive(Clone)]
+pub struct TextDefaults {
+    /// Default font family (first of `text(font:)`).
+    pub font: Option<EcoString>,
+    /// Default size in half-points.
+    pub size_half_pt: u32,
+    /// Default text colour; `None` = black/auto (omitted, Word's own default).
+    pub color: Option<[u8; 3]>,
+    /// BCP-47 language tag for spell-check (e.g. `en-US`).
+    pub lang: Option<EcoString>,
+}
+
+impl Default for TextDefaults {
+    fn default() -> Self {
+        // 11pt, Word's own default, until the real root styles are resolved.
+        Self { font: None, size_half_pt: 22, color: None, lang: None }
+    }
 }
 
 /// Flattened character formatting → `<w:rPr>`.

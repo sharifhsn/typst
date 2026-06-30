@@ -67,9 +67,9 @@ pub fn docx_document(
     let (
         mut body,
         sect,
-        header_parts,
-        footer_parts,
-        footnotes,
+        mut header_parts,
+        mut footer_parts,
+        mut footnotes,
         numbering,
         media,
         doc_rels,
@@ -228,6 +228,12 @@ pub fn docx_document(
     // figure or box still resolve.
     tags.extend(deferred_tags);
 
+    // Hoist the document's most common font/size/language into `docDefaults` and
+    // strip them from matching runs, so the body inherits (restylable in Word,
+    // compact `document.xml`).
+    let text_defaults =
+        hoist_text_defaults(&mut body, &mut header_parts, &mut footer_parts, &mut footnotes);
+
     let mut introspector = DocxIntrospector::new(&tags);
     introspector.set_anchors(crate::bookmark::anchors(&bookmarks));
 
@@ -242,12 +248,126 @@ pub fn docx_document(
         footnote_rels,
         bookmarks,
         max_heading_level,
+        text_defaults,
         uses_fields,
         uses_math,
         introspector: Arc::new(introspector),
         header_parts,
         footer_parts,
     })
+}
+
+/// Computes the document's most common run properties — font, size and language —
+/// over the body, returns them as the [`TextDefaults`] to hoist into
+/// `docDefaults`, and strips them from every run that matches across all the
+/// block groups (body, headers/footers, footnotes). The body then inherits its
+/// font/size/language from `docDefaults` (so editing the `Normal` style or the
+/// theme font in Word restyles the whole document) and each run's `<w:rPr>`
+/// carries only deviations, keeping `document.xml` compact.
+fn hoist_text_defaults(
+    body: &mut [Block],
+    headers: &mut [HdrFtrPart],
+    footers: &mut [HdrFtrPart],
+    footnotes: &mut [crate::dom::Footnote],
+) -> crate::dom::TextDefaults {
+    use rustc_hash::FxHashMap;
+
+    // The dominant text — the body — decides the defaults.
+    let mut fonts: FxHashMap<ecow::EcoString, u32> = FxHashMap::default();
+    let mut sizes: FxHashMap<u32, u32> = FxHashMap::default();
+    let mut langs: FxHashMap<ecow::EcoString, u32> = FxHashMap::default();
+    visit_run_props(body, &mut |p| {
+        if let Some(f) = &p.font {
+            *fonts.entry(f.clone()).or_default() += 1;
+        }
+        if let Some(s) = p.size_half_pt {
+            *sizes.entry(s).or_default() += 1;
+        }
+        if let Some(l) = &p.lang {
+            *langs.entry(l.clone()).or_default() += 1;
+        }
+    });
+    let mode = |m: FxHashMap<ecow::EcoString, u32>| {
+        m.into_iter().max_by_key(|(_, n)| *n).map(|(k, _)| k)
+    };
+    let defaults = crate::dom::TextDefaults {
+        font: mode(fonts),
+        size_half_pt: sizes.into_iter().max_by_key(|(_, n)| *n).map(|(k, _)| k).unwrap_or(22),
+        color: None,
+        lang: mode(langs),
+    };
+
+    // Strip the defaults from every matching run so it inherits from docDefaults.
+    let mut strip = |p: &mut crate::dom::RunProps| {
+        if p.font == defaults.font {
+            p.font = None;
+        }
+        if p.size_half_pt == Some(defaults.size_half_pt) {
+            p.size_half_pt = None;
+        }
+        if p.lang == defaults.lang {
+            p.lang = None;
+        }
+    };
+    visit_run_props(body, &mut strip);
+    for h in headers {
+        visit_run_props(&mut h.blocks, &mut strip);
+    }
+    for f in footers {
+        visit_run_props(&mut f.blocks, &mut strip);
+    }
+    for fnote in footnotes {
+        visit_run_props(&mut fnote.blocks, &mut strip);
+    }
+    drop(strip);
+    defaults
+}
+
+/// Visits every text run's [`RunProps`] in `blocks`, recursing through table
+/// cells and table-of-contents entries.
+fn visit_run_props(blocks: &mut [Block], f: &mut dyn FnMut(&mut crate::dom::RunProps)) {
+    use crate::dom::{ParaChild, Run};
+    fn visit_children(
+        children: &mut [ParaChild],
+        f: &mut dyn FnMut(&mut crate::dom::RunProps),
+    ) {
+        for c in children {
+            match c {
+                ParaChild::Run(Run::Text { props, .. }) => f(props),
+                ParaChild::Hyperlink { runs, .. } => {
+                    for r in runs {
+                        if let Run::Text { props, .. } = r {
+                            f(props);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for b in blocks {
+        match b {
+            Block::Para(para) => visit_children(&mut para.content, f),
+            Block::Table(t) => {
+                for row in &mut t.rows {
+                    for cell in &mut row.cells {
+                        visit_run_props(&mut cell.blocks, f);
+                    }
+                }
+            }
+            Block::Toc(t) => {
+                for para in &mut t.entries {
+                    visit_children(&mut para.content, f);
+                }
+                for r in &mut t.fallback {
+                    if let Run::Text { props, .. } = r {
+                        f(props);
+                    }
+                }
+            }
+            Block::SectionBreak(_) | Block::Tag(_) => {}
+        }
+    }
 }
 
 /// The engine-free part of the resolved page setup. The page-number format
