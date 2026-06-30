@@ -247,7 +247,15 @@ fn decl_ooxml_namespaces(w: &mut XmlWriter) {
         .attr(
             "xmlns:wp14",
             "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
-        );
+        )
+        // `wps` is named by `mc:Choice Requires="wps"` around a text box, so the
+        // prefix must be in scope at the root; `v` is the legacy VML used in the
+        // matching `mc:Fallback`.
+        .attr(
+            "xmlns:wps",
+            "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+        )
+        .attr("xmlns:v", "urn:schemas-microsoft-com:vml");
 }
 
 fn build_document(document: &DocxDocument, pretty: bool) -> String {
@@ -476,6 +484,32 @@ fn write_border_side(w: &mut XmlWriter, name: &'static str, border: &Option<Bord
 /// (`<wp:anchor>`) DrawingML picture, sharing the same `a:graphic`/`pic:pic`
 /// payload.
 fn write_drawing(w: &mut XmlWriter, d: &Drawing) {
+    // A text box (`wps:txbx`) is a 2010 DrawingML feature. Wrap it in
+    // `mc:AlternateContent`: the modern `wps` drawing in `mc:Choice Requires="wps"`,
+    // and a legacy VML `v:textbox` in `mc:Fallback` so a consumer that does not
+    // support `wps` (Word 2007, some others) still renders the framed text instead
+    // of dropping it. Plain pictures and vector shapes need no fallback.
+    if let Some(shape) = &d.shape
+        && let Some(tb) = &shape.txbx
+    {
+        w.open(xml::W_R).start_children();
+        w.open("mc:AlternateContent").start_children();
+        w.open("mc:Choice").attr("Requires", "wps").start_children();
+        w.open("w:drawing").start_children();
+        match &d.anchor {
+            None => write_inline_envelope(w, d),
+            Some(a) => write_anchor_envelope(w, d, a),
+        }
+        w.close(); // w:drawing
+        w.close(); // mc:Choice
+        w.open("mc:Fallback").start_children();
+        write_vml_textbox(w, d, shape, tb);
+        w.close(); // mc:Fallback
+        w.close(); // mc:AlternateContent
+        w.close(); // w:r
+        return;
+    }
+
     w.open(xml::W_R).start_children();
     w.open("w:drawing").start_children();
     match &d.anchor {
@@ -484,6 +518,56 @@ fn write_drawing(w: &mut XmlWriter, d: &Drawing) {
     }
     w.close(); // w:drawing
     w.close(); // w:r
+}
+
+/// Emits the legacy VML fallback (`<w:pict><v:rect><v:textbox>…`) for a text box,
+/// carrying the same fill/stroke/inset and the same editable paragraphs as the
+/// modern `wps` form, sized in points (VML's unit).
+fn write_vml_textbox(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec, tb: &crate::dom::TextBox) {
+    let pt = |emu: i64| format!("{:.2}", emu as f64 / 12700.0);
+    let hex = |c: [u8; 3]| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
+
+    w.open("w:pict").start_children();
+    w.open("v:rect")
+        .attr("style", &format!("width:{}pt;height:{}pt", pt(d.w_emu), pt(d.h_emu)));
+    match shape.fill {
+        Some(c) => {
+            w.attr("fillcolor", &hex(c));
+        }
+        None => {
+            w.attr("filled", "f");
+        }
+    }
+    match &shape.stroke {
+        Some(s) => {
+            w.attr("strokecolor", &hex(s.color))
+                .attr("strokeweight", &format!("{}pt", pt(s.w_emu)));
+        }
+        None => {
+            w.attr("stroked", "f");
+        }
+    }
+    w.start_children();
+    let inset = format!(
+        "{}pt,{}pt,{}pt,{}pt",
+        pt(tb.ins[0]),
+        pt(tb.ins[1]),
+        pt(tb.ins[2]),
+        pt(tb.ins[3])
+    );
+    w.open("v:textbox").attr("inset", &inset).start_children();
+    w.open("w:txbxContent").start_children();
+    let mut ends_with_para = false;
+    for block in &tb.blocks {
+        ends_with_para = write_block(w, block);
+    }
+    if !ends_with_para {
+        w.leaf(xml::W_P);
+    }
+    w.close(); // w:txbxContent
+    w.close(); // v:textbox
+    w.close(); // v:rect
+    w.close(); // w:pict
 }
 
 /// Emits the `<wp:inline>` envelope (the original inline image body).

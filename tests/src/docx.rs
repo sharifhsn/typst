@@ -371,6 +371,35 @@ fn url_link_looks_like_a_link() {
 }
 
 #[test]
+fn text_box_has_a_vml_fallback() {
+    // A `wps:txbx` text box is a 2010 DrawingML feature; it is wrapped in
+    // `mc:AlternateContent` with a legacy VML `v:textbox` fallback so consumers
+    // that don't support `wps` still render the framed text.
+    let p = parts("#rect(width: 4cm, height: 1cm, fill: aqua, stroke: 1pt)[box text]");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<mc:AlternateContent"), "wrapped in mc:AlternateContent");
+    assert!(doc.contains("Requires=\"wps\""), "the modern choice requires wps");
+    assert!(doc.contains("<wps:txbx"), "modern wps text box in the Choice");
+    assert!(doc.contains("<v:textbox"), "legacy VML text box in the Fallback");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn standard_word_parts_are_present() {
+    // A document Word itself writes always ships a theme, a font table and web
+    // settings; emit them so the package looks native.
+    let p = parts("Hello.");
+    assert!(p.contains_key("word/theme/theme1.xml"), "theme present");
+    assert!(p.contains_key("word/fontTable.xml"), "font table present");
+    assert!(p.contains_key("word/webSettings.xml"), "web settings present");
+    // settings.xml carries the compat block + the standard settings.
+    let s = &p["word/settings.xml"];
+    assert!(s.contains("compatibilityMode") && s.contains("w:val=\"15\""), "compat 15");
+    assert!(s.contains("clrSchemeMapping") && s.contains("defaultTabStop"), "rich settings");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn document_default_font_size_are_hoisted_into_doc_defaults() {
     // The document's most common font/size is hoisted into `docDefaults`; body
     // runs that match inherit it (no per-run `rFonts`/`sz`), so editing the Normal
