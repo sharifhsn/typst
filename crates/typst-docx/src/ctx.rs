@@ -1093,6 +1093,21 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             match elem.body.get_cloned(styles) {
                 // An empty `#box` (`#box(width: 1em)` spacer): nothing to render.
                 None => {}
+                // A *plain* box — no fill, stroke or clip, so nothing visual to
+                // preserve — is just inline content held together (`#box[..]` to
+                // prevent a line break, `#box(width: ..)[label]`, a baseline
+                // shift). Extract its runs so the text stays selectable instead
+                // of rasterizing it to an image; the only thing lost is the box's
+                // geometric constraint, which has no inline-flow equivalent.
+                // `body_extractable` still guards the one layout-bound case (a
+                // per-line equation label inside).
+                Some(body)
+                    if box_is_plain(elem, styles)
+                        && crate::convert::body_extractable(&body)
+                        && crate::convert::body_inline_extractable(&body) =>
+                {
+                    out.extend(self.inline_runs(&body, styles, props.clone())?);
+                }
                 Some(body) => {
                     // Rasterize the box (this keeps a styled box's visual and, for
                     // a box that lays out real content, its labels via the frame
@@ -1237,6 +1252,20 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             styles,
         )
     }
+}
+
+/// Whether a `#box` carries no visual of its own (no fill, no stroke on any
+/// side, no clip) — so it is pure inline layout and its body can be extracted
+/// as runs rather than rasterized to preserve a background/border/clip.
+fn box_is_plain(
+    elem: &typst_library::foundations::Packed<typst_library::layout::BoxElem>,
+    styles: StyleChain,
+) -> bool {
+    if elem.fill.get_cloned(styles).is_some() || elem.clip.get(styles) {
+        return false;
+    }
+    let s = elem.stroke.get_cloned(styles);
+    s.top.is_none() && s.bottom.is_none() && s.left.is_none() && s.right.is_none()
 }
 
 /// Whether a laid-out size is finite and strictly positive on both axes (Word

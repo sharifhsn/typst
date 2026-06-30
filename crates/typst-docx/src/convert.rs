@@ -374,6 +374,39 @@ pub(crate) fn body_textbox_safe(body: &Content) -> bool {
     .is_continue()
 }
 
+/// Whether a `#box` body is purely inline-level flow that the inline run
+/// pipeline can carry faithfully — so the box can be unwrapped to keep its text
+/// selectable rather than rasterized.
+///
+/// A box wrapping *block-level* content (a figure with a caption + counter, a
+/// list, a table/grid, a stack, a heading) must NOT be unwrapped inline:
+/// inline lowering would drop the block structure (and, for a figure, its
+/// caption and `SEQ` counter step — drifting cross-reference numbers). Such a
+/// box keeps the rasterize path, which preserves the visual and emits the
+/// hidden figure-counter step. Inline images, shapes and inline equations are
+/// fine and stay extractable.
+pub(crate) fn body_inline_extractable(body: &Content) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::layout::{ColumnsElem, GridElem, StackElem};
+    use typst_library::model::{
+        EnumElem, FigureElem, HeadingElem, ListElem, OutlineElem, TableElem, TermsElem,
+    };
+    body.traverse(&mut |e: Content| {
+        let is_block_flow = e.is::<FigureElem>()
+            || e.is::<TableElem>()
+            || e.is::<GridElem>()
+            || e.is::<StackElem>()
+            || e.is::<ColumnsElem>()
+            || e.is::<ListElem>()
+            || e.is::<EnumElem>()
+            || e.is::<TermsElem>()
+            || e.is::<HeadingElem>()
+            || e.is::<OutlineElem>();
+        if is_block_flow { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+    })
+    .is_continue()
+}
+
 /// Whether an equation body carries a label *inside* it (a per-line label),
 /// whose location only exists once the equation is laid out per visual line.
 ///

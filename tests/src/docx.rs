@@ -188,6 +188,22 @@ fn horizontal_stack_lowers_to_a_table_row() {
 }
 
 #[test]
+fn plain_inline_box_keeps_its_text_selectable() {
+    // A plain `#box[..]` (no fill/stroke/clip — used to prevent a line break or
+    // to size inline content) must keep its text as runs, not rasterize it to
+    // an image. A *framed* box still rasterizes / shades to preserve its visual.
+    let plain = parts("before #box[keep together] after");
+    let doc = &plain["word/document.xml"];
+    assert!(doc.contains("keep together"), "plain box text stays as runs");
+    assert!(!doc.contains("<w:drawing>"), "a plain box is not rasterized");
+
+    // A filled box still renders its background (shaded run), text kept.
+    let filled = parts("#box(fill: yellow)[hi]");
+    assert!(filled["word/document.xml"].contains("hi"), "filled box keeps text too");
+    assert_all_wellformed(&plain);
+}
+
+#[test]
 fn inline_columns_flow_their_text_natively() {
     // `#columns(n)[..]` wraps flowing content (whole academic papers and
     // cheatsheets do this). It must keep the text editable, not rasterize the
