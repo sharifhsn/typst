@@ -148,6 +148,26 @@ deferring them), and `pdf-marker-tag` accessibility delimiters (the wrapped body
 is unwrapped and kept; the structural role is conveyed by native Heading/list
 styles).
 
+### Templates that assume a paged model
+
+A small number of templates (~2% of a 627-document corpus) **fail to compile**
+to docx although they compile to PDF. The error always originates in the
+template's own code, not in OOXML generation — it assumes the paged layout
+model that docx does not have:
+
+- reading a page number that does not exist (`loc.page-numbering()` is `none`,
+  `query(..page..)`), the same root as page-number cross-references;
+- numbering or `query(...).first()`/`.last()`/`.at(n)` that assumes a
+  layout-time introspector state (e.g. "a heading always precedes this figure",
+  "every heading has two number components") which only holds once the document
+  is laid out into pages;
+- asserting a show rule runs an exact number of times across the laid-out
+  document.
+
+These are limitations of running a paged-only template through a flowing target,
+not exporter defects, and are left to the template author (typically a one-line
+guard such as `.at(1, default: 0)` or a `target`-conditional branch).
+
 ## Usage
 
 ```
