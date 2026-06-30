@@ -159,13 +159,17 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     // The headerReference/footerReference relationships live in `doc_rels`; the
     // part's OWN relationships (images, external links in its content) live in a
     // sibling `word/_rels/<part>.rels` so their r:ids resolve correctly.
-    for part in &document.header_parts {
-        let xml = build_hdrftr(part, pretty);
+    // Each part gets a disjoint `w14:paraId` base (1 MiB of headroom per part)
+    // so paragraph identities never collide across the package. The body uses
+    // the `0x0000_0000` lane; headers `0x1nnn_….`, footers `0x4nnn_…`, notes
+    // `0x7000_0000` (see `build_footnotes`).
+    for (i, part) in document.header_parts.iter().enumerate() {
+        let xml = build_hdrftr(part, 0x1000_0000 + i as u32 * 0x0010_0000, pretty);
         package.add_xml(&format!("word/{}", part.part_name), CT_HEADER, xml);
         write_part_rels(&mut package, &part.part_name, &part.rels);
     }
-    for part in &document.footer_parts {
-        let xml = build_hdrftr(part, pretty);
+    for (i, part) in document.footer_parts.iter().enumerate() {
+        let xml = build_hdrftr(part, 0x4000_0000 + i as u32 * 0x0010_0000, pretty);
         package.add_xml(&format!("word/{}", part.part_name), CT_FOOTER, xml);
         write_part_rels(&mut package, &part.part_name, &part.rels);
     }
@@ -313,7 +317,7 @@ fn write_block(w: &mut XmlWriter, block: &Block) -> bool {
             // body level). This both delimits the section and applies its page
             // geometry to all preceding content; the default `nextPage` type
             // also performs the page transition.
-            w.open(xml::W_P).start_children();
+            open_para(w);
             w.open(xml::W_PPR).start_children();
             write_sectpr(w, sect);
             w.close(); // pPr
@@ -324,8 +328,21 @@ fn write_block(w: &mut XmlWriter, block: &Block) -> bool {
     }
 }
 
+/// Opens a `<w:p>` carrying a fresh `w14:paraId`/`w14:textId` — the stable
+/// paragraph identity Word stamps on every content paragraph (it anchors
+/// comments, tracked-changes and co-authoring) — and leaves it open for
+/// children. The `w14` attributes are valid on `w:p` because every part root
+/// lists `w14` in its `mc:Ignorable`.
+fn open_para(w: &mut XmlWriter) {
+    let pid = w.next_para_id();
+    w.open(xml::W_P)
+        .attr("w14:paraId", &pid)
+        .attr("w14:textId", &pid)
+        .start_children();
+}
+
 fn write_para(w: &mut XmlWriter, para: &Para) {
-    w.open(xml::W_P).start_children();
+    open_para(w);
     para.props.write_ppr(w);
     for child in &para.content {
         write_para_child(w, child);
@@ -1144,11 +1161,15 @@ fn write_part_rels(package: &mut Package, part_name: &str, rels: &Rels) {
 /// Serializes a header (`w:hdr`) or footer (`w:ftr`) part. Never emits an empty
 /// root: a trailing empty `<w:p/>` is appended if the content doesn't end in a
 /// paragraph (a bare `w:hdr`/`w:ftr` is non-conformant in some Word builds).
-fn build_hdrftr(part: &HdrFtrPart, pretty: bool) -> String {
+fn build_hdrftr(part: &HdrFtrPart, base: u32, pretty: bool) -> String {
     let root = if part.is_header { "w:hdr" } else { "w:ftr" };
     let mut w = XmlWriter::new(pretty);
+    w.set_para_base(base);
     w.open(root);
     decl_ooxml_namespaces(&mut w);
+    // `w14` (the `w14:paraId`/`textId` on each paragraph) must be MCE-ignorable
+    // on this part's own root, exactly as Word writes it.
+    w.attr("mc:Ignorable", "w14 wp14");
     w.start_children();
     let mut ends_with_para = false;
     for block in &part.blocks {
@@ -1353,8 +1374,11 @@ fn build_numbering(document: &DocxDocument, pretty: bool) -> String {
 
 fn build_footnotes(document: &DocxDocument, pretty: bool) -> String {
     let mut w = XmlWriter::new(pretty);
+    // The notes lane for `w14:paraId` (disjoint from body/header/footer ranges).
+    w.set_para_base(0x7000_0000);
     w.open("w:footnotes");
     decl_ooxml_namespaces(&mut w);
+    w.attr("mc:Ignorable", "w14 wp14");
     w.start_children();
 
     // Separators.
@@ -1375,6 +1399,7 @@ fn build_endnotes(pretty: bool) -> String {
     let mut w = XmlWriter::new(pretty);
     w.open("w:endnotes");
     decl_ooxml_namespaces(&mut w);
+    w.attr("mc:Ignorable", "w14 wp14");
     w.start_children();
     write_separator(&mut w, "w:endnote", -1, "separator");
     write_separator(&mut w, "w:endnote", 0, "continuationSeparator");

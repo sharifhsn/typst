@@ -13,6 +13,8 @@ pub struct XmlWriter {
     open_tag: bool,
     pretty: bool,
     indent: usize,
+    /// Running counter for `w14:paraId`/`w14:textId` allocation within this part.
+    para_seq: u32,
 }
 
 impl XmlWriter {
@@ -20,7 +22,24 @@ impl XmlWriter {
     pub fn new(pretty: bool) -> Self {
         let mut buf = String::with_capacity(1024);
         buf.push_str(XML_DECL);
-        Self { buf, stack: Vec::new(), open_tag: false, pretty, indent: 0 }
+        Self { buf, stack: Vec::new(), open_tag: false, pretty, indent: 0, para_seq: 0 }
+    }
+
+    /// Seeds this part's paragraph-id counter. Each package part (document,
+    /// each header/footer, the notes) is given a disjoint base range so the
+    /// `w14:paraId`s it allocates never collide with another part's — which a
+    /// strict OOXML validator flags as a duplicate-identity error.
+    pub fn set_para_base(&mut self, base: u32) {
+        self.para_seq = base;
+    }
+
+    /// Allocates the next `w14:paraId`/`w14:textId` for a paragraph: an 8-hex
+    /// value, unique within the part (and, via [`Self::set_para_base`], across
+    /// parts). Deterministic — driven only by paragraph order — so the export
+    /// stays byte-reproducible.
+    pub fn next_para_id(&mut self) -> String {
+        self.para_seq = self.para_seq.wrapping_add(1);
+        format!("{:08X}", self.para_seq)
     }
 
     /// Finishes the document, returning the serialized string.
