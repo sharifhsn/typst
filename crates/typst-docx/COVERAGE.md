@@ -95,15 +95,29 @@ whitespace count is fooled by pandoc `[]` image-placeholder tokens). Cumulative:
 | `#columns` | flow body as blocks (single-column approximation) | +27k / 46 docs |
 | plain `#box` | `box_is_plain` + `body_inline_extractable` → extract runs (block-bodied boxes still raster, keeping figure `SEQ`) | +2.9k / 71 docs |
 | `#layout` | invoke the closure with the page content size, lower the result | +3.9k / 58 docs |
+| `wrap-content` figure | a frameless `box(grid(figure, text))` lowers the grid-of-figure natively (narrow guard `body_is_wrap_figure` — a designed full-page box still rasterizes) | +215 / 3 docs (office/may "Table 1" caption recovered) |
 
 ## 5. Where genuinely-new findings can still come from
 
 The survey and the rasterize-recovery axes are exhausted (everything above).
 Remaining signal is **content correctness**, found with `docx_oracle.py pdf`
-(refs/cites/nums vs the PDF gold — noisy, read the per-token detail not the
-score):
+(refs/cites/nums vs the PDF gold — *very* noisy: the bulk of its flags are
+pdftotext artifacts — page-model `page N` refs, CJK mis-reads, multi-column
+extraction order, captions inside placeholder-figure rasters. Read the
+per-token detail, then **confirm against the docx directly** before trusting a
+flag; the cross-reference machinery itself was spot-checked and resolves
+correctly). What this surfaced:
 
-- cross-reference / caption **numbers** in recovered native content (figures,
-  tables, equations, sections, citations);
-- OMML math fidelity on uncommon constructs;
-- table edge cases (merges, nesting, alignment) in recovered `#grid`/`#stack`.
+- **wrap-content figures** — found + fixed (§4 above).
+- cross-reference / caption **numbers** in recovered native content — verified
+  correct on the docs checked (preprintx, mousse-notes; flags were noise).
+- OMML math fidelity on uncommon constructs, and table edge cases (merges,
+  nesting, alignment) in recovered `#grid`/`#stack` — not yet exhaustively
+  swept; the next place to look if more is wanted.
+
+**Lesson (load-bearing):** lowering a frameless box's body wholesale regressed a
+designed full-page layout box by −148 words (content vanished in the native
+re-walk). Any "lower this container natively" change must be guarded to a
+specific structural signature and validated with the alphabetic-word oracle A/B
+(0 real loss) before shipping — the whitespace word count is fooled by pandoc
+`[]` placeholders.

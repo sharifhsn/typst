@@ -407,6 +407,33 @@ pub(crate) fn body_inline_extractable(body: &Content) -> bool {
     .is_continue()
 }
 
+/// Whether a frameless box body is a *wrap-content figure*: a `#grid` that
+/// holds a `#figure`. This is the `wrap-it`/`wrap-content` shape
+/// (`box(grid(figure, text))`), the one frameless-box case worth lowering
+/// natively — narrow on purpose so a designed full-page layout box (which can
+/// lose content through a native re-walk) is left to rasterize.
+pub(crate) fn body_is_wrap_figure(body: &Content) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::layout::GridElem;
+    use typst_library::model::FigureElem;
+    let mut has_grid = false;
+    let mut has_figure = false;
+    body.traverse(&mut |e: Content| {
+        if e.is::<GridElem>() {
+            has_grid = true;
+        }
+        if e.is::<FigureElem>() {
+            has_figure = true;
+        }
+        if has_grid && has_figure {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    has_grid && has_figure
+}
+
 /// Whether an equation body carries a label *inside* it (a per-line label),
 /// whose location only exists once the equation is laid out per visual line.
 ///
@@ -993,8 +1020,23 @@ fn handle_block_framed(
         _ => None,
     };
     let pbdr = block_borders(&stroke_sides, styles);
-    // No visible frame → not a callout; let the caller handle it.
+    // No visible frame → not a callout.
     if shd_fill.is_none() && pbdr.is_none() {
+        // The specific recoverable case: a *frameless* block box wrapping a
+        // `#grid` that holds a `#figure` — i.e. a wrap-content figure, which
+        // lowers to `box(grid(figure, text))`. Rasterizing the whole box drops
+        // the figure, its caption + `SEQ`, and the wrapped text; lowering the
+        // grid natively (→ a table, figure → image + caption) recovers them, and
+        // the well-tested grid mapper doesn't drop content. We deliberately do
+        // NOT lower an arbitrary frameless box here — a designed full-page
+        // layout box can lose content through a native re-walk — so the body
+        // must structurally be a grid-of-figure, not just "non-text".
+        if body_is_wrap_figure(&body) {
+            let inner = ctx.blocks(&body, styles)?;
+            crate::document::collect_tags(&inner, &mut ctx.deferred_tags);
+            out.extend(inner);
+            return Ok(true);
+        }
         return Ok(false);
     }
     // Only flowing/block content takes the main-story paragraph path; a short

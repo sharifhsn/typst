@@ -216,6 +216,24 @@ fn plain_inline_box_keeps_its_text_selectable() {
 }
 
 #[test]
+fn wrap_content_figure_is_recovered_not_rasterized() {
+    // A `wrap-content` figure lowers to `layout(=> box(grid(figure, text)))`.
+    // The frameless block box must NOT rasterize the whole thing (which drops
+    // the figure, its caption and the wrapped text) — the grid-of-figure is
+    // lowered natively so the caption + table survive.
+    let p = parts(
+        "#layout(size => box(grid(columns: 2, \
+           figure(table(columns: 1, [x]), caption: [A sample table]), \
+           [Wrapped paragraph text here.])))",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("A sample table"), "the figure caption is recovered");
+    assert!(doc.contains("Wrapped paragraph text"), "the wrapped text is recovered");
+    assert!(doc.contains("<w:tbl>"), "the grid + table are native");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn inline_columns_flow_their_text_natively() {
     // `#columns(n)[..]` wraps flowing content (whole academic papers and
     // cheatsheets do this). It must keep the text editable, not rasterize the
