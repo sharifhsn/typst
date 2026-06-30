@@ -526,6 +526,13 @@ fn handle_block_inner(
         // stays editable instead of being rasterized to an image. The visual
         // column split is approximated as a single column.
         out.extend(ctx.blocks(&elem.body, styles)?);
+    } else if let Some(elem) = child.to_packed::<typst_library::layout::LayoutElem>() {
+        // `#layout(size => ..)` hands the closure the container size and uses the
+        // result. Responsive CV/poster templates wrap their entries in it, so
+        // rasterizing the whole thing drops the text. Call the closure with the
+        // page's content size and lower its result natively instead; if the
+        // closure cannot run standalone, fall back to rasterizing it.
+        handle_layout(ctx, elem, styles, out)?;
     } else if let Some(elem) = child.to_packed::<OutlineElem>() {
         out.extend(mappers::outline::outline(elem, styles, ctx)?);
     } else if let Some(elem) = child.to_packed::<EquationElem>() {
@@ -726,6 +733,42 @@ fn handle_block_inner(
             }));
         } else if !is_invisible_noop(child) {
             ctx.warn_ignored(child.elem().name(), child.span());
+        }
+    }
+    Ok(())
+}
+
+/// Lowers a `#layout(size => ..)` by invoking its closure with the page's
+/// content size, then lowering the produced content natively — so a responsive
+/// CV/poster wrapper keeps its text editable instead of rasterizing. The
+/// closure runs against the fully-resolved introspector (export is post-layout),
+/// so counters and references inside it are stable. If it cannot be evaluated
+/// standalone, fall back to rasterizing it so the visual still survives.
+fn handle_layout(
+    ctx: &mut DocxCtx,
+    elem: &typst_library::foundations::Packed<typst_library::layout::LayoutElem>,
+    styles: typst_library::foundations::StyleChain,
+    out: &mut Vec<Block>,
+) -> SourceResult<()> {
+    use comemo::Track;
+    use typst_library::foundations::{Context, dict};
+
+    let context = Context::new(elem.location(), Some(styles));
+    let args = [dict! { "width" => ctx.raster_width, "height" => ctx.raster_height }];
+    match elem.func.call(ctx.engine(), context.track(), args) {
+        Ok(value) => {
+            let content = value.display();
+            out.extend(ctx.blocks(&content, styles)?);
+        }
+        Err(_) => {
+            if let Some(run) =
+                mappers::image::laid_out_fallback(elem.pack_ref(), styles, ctx)?
+            {
+                out.push(Block::Para(Para {
+                    props: Default::default(),
+                    content: vec![ParaChild::Run(run)],
+                }));
+            }
         }
     }
     Ok(())

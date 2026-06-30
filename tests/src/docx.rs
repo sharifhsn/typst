@@ -188,6 +188,18 @@ fn horizontal_stack_lowers_to_a_table_row() {
 }
 
 #[test]
+fn layout_closure_is_invoked_and_extracted() {
+    // `#layout(size => ..)` is the responsive-CV/poster idiom. Its closure is
+    // invoked with the page's content size and the result lowered natively, so
+    // the text stays editable instead of the whole block rasterizing.
+    let p = parts("#layout(size => [Responsive paragraph content here.])");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("Responsive paragraph content"), "layout body is extracted");
+    assert!(!doc.contains("<w:drawing>"), "a text layout is not rasterized");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn plain_inline_box_keeps_its_text_selectable() {
     // A plain `#box[..]` (no fill/stroke/clip — used to prevent a line break or
     // to size inline content) must keep its text as runs, not rasterize it to
