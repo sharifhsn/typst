@@ -1187,6 +1187,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             } else {
                 self.rasterize_fallback(child, styles, out)?;
             }
+        } else if (child.is::<typst_library::layout::RotateElem>()
+            || child.is::<typst_library::layout::ScaleElem>())
+            && let Some(run) = mappers::shape::transformed(child, styles, self)?
+        {
+            // A bare (not `#move`-wrapped) `#rotate`/`#scale` whose body is a
+            // native shape/composition — the same recovery `move_` does, just
+            // without a translate step (see `mappers::shape::transformed`).
+            out.push(run);
         } else {
             self.rasterize_fallback(child, styles, out)?;
         }

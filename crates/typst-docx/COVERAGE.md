@@ -292,6 +292,59 @@ cases.
 - a horizontal-only or diagonal (`dx` != 0) text nudge — no clean inline OOXML
   analogue the way a pure vertical nudge has in `w:position`.
 
+### 7.1b Bare (not `#move`-wrapped) `#rotate`/`#scale` — IMPLEMENTED
+§7.1a's `collect_shapes` generalization (bake a similarity transform into path
+coordinates) is useful even without a `#move` in the mix: `#rotate(..)[shape]`
+or `#scale(..)[shape]` used directly still rasterized before this, since
+nothing laid out the WHOLE rotate/scale element under `Target::Paged` and ran
+it through shape extraction. Fixed with one new function
+(`mappers::shape::transformed`) that does exactly that — laying out `child`
+(the whole element, not just its body) via `layout_export_frame` produces a
+frame where the rotation/scale already shows up as an ordinary
+`FrameItem::Group`, so it's the same walk `move_` already does, minus the
+translate step — and one new `ctx.rs` dispatch arm gating it on
+`child.is::<RotateElem>() || child.is::<ScaleElem>()`. Validated: corpus-wide
+`RASTERIZE: rotate` 227->218 (18 docs, down from 20); 0 new EXPORT_ERR/
+INVALID, 0 oracle regressions; visually verified pixel-identical (gold PDF vs.
+LibreOffice-rendered DOCX) on a bare-rotate + bare-scale synthetic case.
+
+### 7.1c Investigated and reverted: `#place` nested in a framed container
+A broader corpus sweep by rasterize-cause (`DOCX_DEBUG_RASTER`, not just
+`move`) found `place` as the single largest remaining category (3624
+occurrences, 59 docs) — concentrated in a few templates using the
+`codetastic` package (QR codes/barcodes), which draws every module as its own
+`#place(dx:, dy:, square(..))` inside a sized `#box`. Root cause: `#place` at
+the top level correctly dispatches to `mappers::image::place` (which anchors
+a native shape/image drawing via `<wp:anchor>`) via `convert_children`'s
+block-level dispatch — but a `#place` nested inside a framed container
+(`#box`/`#rect` as the container for a text box or shaded-paragraph body) is
+lowered through `ctx.inline_runs` -> `handle_inline` instead, which had *no*
+dispatch arm for a bare `PlaceElem` at all, so it fell through to the generic
+rasterize fallback and flattened the WHOLE placed element (native shape body
+included) to a PNG — same class of gap `#move`/`#rotate`/`#scale` had before
+this session, just one more element.
+
+A fix was built (`mappers::image::place_inline`, refactoring the existing
+`place`'s anchor-computation logic into a shared `place_drawing` helper reused
+by both) and wired into `handle_inline`. It compiled, passed the test suite,
+and correctly stopped rasterizing (no `RASTERIZE: place` output; the XML had
+well-formed `<wp:anchor>` elements with plausible `relativeFrom="margin"`
+positions) — but rendering the actual DOCX in LibreOffice showed **nothing**:
+the anchored drawings were entirely invisible, not just mispositioned. An
+anchored (floating) drawing nested inside another container's own paragraph
+flow — as opposed to a top-level paragraph — is exotic enough in the OOXML
+model that LibreOffice's renderer (and very possibly Word's, untested) doesn't
+handle it the way a top-level `wp:anchor` does. Silently invisible content is
+strictly worse than a rasterized-but-visible PNG, so this was reverted in
+full (`git checkout` on the touched files) rather than shipped. Recovering
+this pattern for real would need either genuinely INLINE (non-anchored)
+positioning math for a nested `#place` — reusing the group/`wpg:wgp` machinery
+`#move` already has, computing each module's position algebraically as a
+plain shape/group child instead of a floating anchor — or verified evidence
+that Word itself handles nested anchors even where LibreOffice doesn't. Not
+attempted further this pass; flagging for a future session that starts by
+checking Word specifically, not LibreOffice, before investing more here.
+
 ### 7.2 Radial gradient (scoped out in §4, see the `6bcb673cf` commit)
 OOXML's radial gradient is expressed as an inset (`a:fillToRect`) into the
 *shape's own bounding box* — an ellipse whose size is implied by how far the

@@ -590,6 +590,29 @@ pub fn move_(
     build_shapes_drawing(ctx, &frame)
 }
 
+/// Maps a bare (not `#move`-wrapped) `#rotate(..)[body]`/`#scale(..)[body]`
+/// whose body is a native-representable shape/composition, the same way
+/// [`move_`] does for `#move` — the transform doesn't need any special
+/// handling of its own here: laying out `child` (the whole rotate/scale
+/// element, not just its body) via `layout_export_frame` produces a frame
+/// where the rotation/scale already shows up as an ordinary
+/// `FrameItem::Group` (exactly the shape [`extract_shapes`]/[`collect_shapes`]
+/// already knows how to bake into path coordinates via
+/// [`similarity_scale`]), so this is just that same walk with no translate
+/// step. `None` (fall through to rasterize) for anything [`build_shapes_drawing`]
+/// doesn't recognize (text, an image, a skew/non-uniform scale).
+pub fn transformed(
+    child: &Content,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Option<Run>> {
+    let height = ctx.raster_height;
+    let Some(frame) = ctx.layout_export_frame(child, styles, child.span(), height)? else {
+        return Ok(None);
+    };
+    build_shapes_drawing(ctx, &frame)
+}
+
 /// Maps a pure vertical nudge of plain text/inline content — `#move(dy:
 /// ..)[body]` with `dx` ~0 and `body` containing no shape/image/nested
 /// transform (see [`is_pure_text_body`]) — to real inline runs carrying a
