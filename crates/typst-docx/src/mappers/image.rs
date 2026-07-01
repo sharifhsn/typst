@@ -306,15 +306,21 @@ pub fn place(
         return Ok(vec![para_drawing(drawing)]);
     }
 
-    // Real block content (figure body + caption, table, text). For a FLOAT,
-    // flow it in place — live text, DOCX figure-flow model — instead of
-    // rasterizing the whole body.
-    if elem.float.get(styles) && !blocks.is_empty() {
+    // Real block content (figure body + caption, table, text) → flow it in
+    // place, keeping the text live, instead of rasterizing the whole body to a
+    // flat (text-dead) image. A float is Typst's own "reflow to region
+    // top/bottom", a clean semantic match; a non-float positioned overlay
+    // loses its exact position this way, but preserving the (usually far more
+    // valuable) text beats a positioned-but-dead raster. Genuinely visual
+    // placed content — a bare shape, a canvas — lowered to a single drawing
+    // above and never reaches here.
+    if !blocks.is_empty() {
         return Ok(blocks);
     }
 
-    // Non-float positioned content (a watermark/overlay/decoration) keeps its
-    // position: rasterize the whole body and anchor it.
+    // The body lowered to nothing at the block level (a pure layout closure, a
+    // visual with no extractable content): rasterize the whole body and anchor
+    // it so the visual survives.
     match laid_out_fallback(body, styles, ctx)? {
         Some(Run::Drawing(mut drawing)) => {
             set_place_anchor(&mut drawing, elem, styles, ctx);

@@ -555,6 +555,44 @@ correctly, and page count *drops* (`ioppub` 6->5) since the title block no
 longer consumes a full rasterized page. Full test suite green, corpus 617/627
 OK, 0 INVALID.
 
+### 7.1h Aggressive prefer-text-over-raster: all non-drawing `#place`, gradient/tiling boxes — IMPLEMENTED
+A deliberate policy shift: where the exporter previously rasterized
+text-bearing content to preserve a *visual* (exact position, a gradient fill),
+it now extracts the text and accepts a cosmetic downgrade — because live,
+selectable, editable text is almost always worth more than a
+positioned-but-dead pixel image. Two changes:
+
+1. **All non-drawing `#place` bodies flow** (§7.1g dropped its `float`-only
+   restriction). A non-float, absolutely-positioned `#place` (a CV sidebar, a
+   decorative overlay) now flows its blocks in place rather than
+   rasterizing-and-anchoring. It loses its exact position (in a tight
+   two-column CV the sidebar can overlap the main column), but keeps every word
+   live. Genuinely visual placed content (a bare shape/canvas, lowered to a
+   single drawing) still anchors, unchanged.
+2. **Gradient/tiling-filled boxes extract their content** (`handle_block_box`
+   dropped its `representable` fill gate). A `#block`/`#rect` with a gradient
+   or tiling fill and a content body now emits its paragraphs, approximating a
+   gradient by its first stop's colour as a solid `w:shd` shade (a tiling drops
+   to no shade). Only a genuine *layouter* body (`#block(width => ..)`, an
+   opaque closure with no extractable content) still rasterizes.
+
+**Validated — the aggressive bet paid off cleanly.** Corpus-wide: `block`
+2588->1142 (-56%), `box` 3212->2733, `sequence` 586->224, and `context`/
+`styled`/`hide` all fell out of the top-20 entirely — ~2500 fewer
+rasterizations. Oracle A/B flagged 26 docs and EVERY ONE is a content GAIN
+(extracted-text length up in all 26 — theorem/definition boxes now
+cross-referenceable, gradient callout boxes and positioned sidebars now live
+text; e.g. `ostfriesen-layout` +810, `put-thesis` +652, `clean-hda` +457
+chars). ZERO content losses across the whole corpus. Corpus batch went 617->
+**618** (a previously-failing doc now exports), 0 INVALID, full test suite
+green. Visually (LibreOffice): papers/theses render cleanly with live
+hyperlinked references and proper TOC/caption text; the one visible cost is
+mild column overlap in tight two-column CVs (a `#place` sidebar flowing into
+the main column) — content fully intact, just imperfectly positioned, exactly
+the accepted trade. The remaining `box`/`block` rasterizations are now almost
+entirely genuine layouter closures (`layout(size => ..)` with `measure()`) and
+`skew` content — the true opaque residue.
+
 ### 7.2 Radial gradient (scoped out in §4, see the `6bcb673cf` commit)
 OOXML's radial gradient is expressed as an inset (`a:fillToRect`) into the
 *shape's own bounding box* — an ellipse whose size is implied by how far the

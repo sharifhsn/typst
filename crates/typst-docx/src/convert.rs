@@ -886,15 +886,16 @@ fn handle_block_box(
     let stroke = elem.stroke.get_cloned(styles);
     let inset = elem.inset.get_cloned(styles);
 
-    let solid_fill = matches!(&fill, Some(Paint::Solid(_)));
-    // A gradient/tiling fill cannot be expressed as flat shading → rasterize.
-    let representable = fill.is_none() || solid_fill;
-
     let body = elem.body.get_ref(styles);
     let content = match body {
-        Some(BlockBody::Content(content)) if representable => content,
+        // Any content body (regardless of fill kind) → extract its paragraphs
+        // so the text stays live. A gradient/tiling fill can't be a flat
+        // paragraph shade, but approximating it (below) and keeping the text
+        // beats rasterizing the whole box to a text-dead image.
+        Some(BlockBody::Content(content)) => content,
         _ => {
-            // Layouter body OR gradient/tiling fill: rasterize the whole box.
+            // A layouter body (`#block(width => ..)`) is an opaque closure with
+            // no extractable content: rasterize the whole box.
             if let Some(run) =
                 mappers::image::laid_out_fallback(elem.pack_ref(), styles, ctx)?
             {
@@ -910,9 +911,15 @@ fn handle_block_box(
     // Recurse into the body to obtain its paragraphs.
     let mut inner = ctx.blocks(content, styles)?;
 
-    // Resolve the box decorations once.
+    // Resolve the box decorations once. A gradient fill is approximated by its
+    // first stop's colour (the dominant tone for most gradient backgrounds); a
+    // tiling has no single-colour analogue, so it drops to no shade — the text
+    // is preserved either way.
     let shd_fill = match &fill {
         Some(Paint::Solid(c)) => Some(crate::props::color_to_hex(c)),
+        Some(Paint::Gradient(g)) => {
+            g.stops_ref().first().map(|(c, _)| crate::props::color_to_hex(c))
+        }
         _ => None,
     };
     let pbdr = block_borders(&stroke, styles);
