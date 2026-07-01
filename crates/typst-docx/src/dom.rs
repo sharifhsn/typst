@@ -382,6 +382,30 @@ pub struct Drawing {
     /// `None` = a raster picture (`pic:pic`, uses `rel`); `Some` = a vector
     /// DrawingML shape (`wps:wsp`, ignores `rel`).
     pub shape: Option<ShapeSpec>,
+    /// `Some` = multiple native shapes composed together (a `wpg:wgp` group —
+    /// e.g. a `#move`d composition of several shapes/lines/curves that share
+    /// one coordinate space), taking priority over `shape`/`rel`. `None` for
+    /// every other drawing.
+    pub group: Option<GroupSpec>,
+}
+
+/// Several native shapes sharing one local coordinate space (a `wpg:wgp`
+/// group), used when a container's entire content is a composition of
+/// natively-representable shapes — recovering it as one editable, grouped
+/// drawing instead of rasterizing the whole composition.
+pub struct GroupSpec {
+    pub children: Vec<GroupChild>,
+}
+
+/// One shape within a [`GroupSpec`], positioned in the group's own local
+/// coordinate space (which spans `[0, w] x [0, h]` of the group's overall
+/// extent — the same non-negative convention `ShapeGeom::Path` already uses).
+pub struct GroupChild {
+    pub x_emu: i64,
+    pub y_emu: i64,
+    pub w_emu: i64,
+    pub h_emu: i64,
+    pub shape: ShapeSpec,
 }
 
 /// A vector DrawingML shape (a `#rect`/`#circle`/`#polygon`/… mapped to a Word

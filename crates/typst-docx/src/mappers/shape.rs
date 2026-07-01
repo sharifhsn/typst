@@ -15,7 +15,10 @@ use typst_library::visualize::{
 };
 
 use crate::ctx::DocxCtx;
-use crate::dom::{Drawing, PathSegment, Run, ShapeFill, ShapeGeom, ShapeSpec, ShapeStroke, TextBox};
+use crate::dom::{
+    Drawing, GroupChild, GroupSpec, PathSegment, Run, ShapeFill, ShapeGeom, ShapeSpec,
+    ShapeStroke, TextBox,
+};
 use crate::props::{abs_to_emu, color_to_hex};
 
 /// Maps a shape element to a vector DrawingML shape run, or `None` to rasterize.
@@ -42,6 +45,7 @@ pub fn shape(
         name,
         anchor: None,
         shape: Some(spec),
+        group: None,
     })))
 }
 
@@ -136,6 +140,7 @@ pub fn text_box(
             stroke,
             txbx: Some(TextBox { ins, blocks }),
         }),
+        group: None,
     })))
 }
 
@@ -493,16 +498,30 @@ fn prst_dash(array: &[Abs], thickness: Abs) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// Arbitrary vector paths: `#curve` and a diagonal/endpoint-defined `#line`.
+// Arbitrary vector paths: `#curve`, a diagonal/endpoint `#line`, and `#move`
+// compositions of either.
 // ---------------------------------------------------------------------------
 //
-// Both lay out to a single `Shape` item (`Geometry::Curve`/`Geometry::Line`)
-// whose points are already fully resolved (percentages, `auto`-mirrored Bézier
-// control points, relative-to-pen coordinates) by the shared layouter — the
-// same code every other export target uses, so this reuses it rather than
-// re-deriving that resolution logic. `#curve`'s Move/Line/Cubic/Close items map
-// 1:1 onto OOXML `a:custGeom`'s moveTo/lnTo/cubicBezTo/close; a `#line` is the
-// simplest case, a single open two-point path.
+// `#curve`/`#line` lay out to a single `Shape` frame item (`Geometry::Curve`/
+// `Geometry::Line`) whose points are already fully resolved (percentages,
+// `auto`-mirrored Bézier control points, relative-to-pen coordinates) by the
+// shared layouter — the same code every other export target uses, so this
+// reuses it rather than re-deriving that resolution logic. `#curve`'s
+// Move/Line/Cubic/Close items map 1:1 onto OOXML `a:custGeom`'s
+// moveTo/lnTo/cubicBezTo/close; a `#line` is the simplest case, a single open
+// two-point path.
+//
+// `#move` lays out its ENTIRE body (which may hold several shapes/lines/
+// curves — the common way to hand-compose a small diagram without a package
+// like CeTZ) via the general recursive layouter, then walks every frame item:
+// if the whole composition is native-representable shapes (optionally nested
+// one level into plain-translation frame groups — ordinary block-flow
+// nesting), it becomes ONE drawing — a single shape if there's only one, or a
+// `wpg:wgp` group of several sharing one coordinate space, so their relative
+// positioning survives instead of each computing its own independent
+// page-anchor. Anything else in the body (text, images, a rotate/scale/skew
+// transform) bails to rasterize, preserving the exact pre-existing behaviour
+// for everything not in this narrow window.
 
 /// Maps a `#curve` — straight and cubic-Bézier segments — to a native
 /// `a:custGeom` vector shape, or `None` to rasterize (a non-solid fill/stroke,
@@ -512,10 +531,10 @@ pub fn curve(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
-    let frame = layout_shape_frame(ctx, styles, elem.span(), |engine, locator, region| {
+    let frame = layout_shape_frame(ctx, elem.span(), |engine, locator, region| {
         typst_layout::layout_curve(elem, engine, locator, styles, region)
     })?;
-    build_path_shape(ctx, &frame)
+    build_shapes_drawing(ctx, &frame)
 }
 
 /// Maps a diagonal or explicit-endpoint `#line` to a native open `a:custGeom`
@@ -527,10 +546,48 @@ pub fn line(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
-    let frame = layout_shape_frame(ctx, styles, elem.span(), |engine, locator, region| {
+    let frame = layout_shape_frame(ctx, elem.span(), |engine, locator, region| {
         typst_layout::layout_line(elem, engine, locator, styles, region)
     })?;
-    build_path_shape(ctx, &frame)
+    build_shapes_drawing(ctx, &frame)
+}
+
+/// Maps `#move(dx:, dy:)[body]` to one or more native shapes when its ENTIRE
+/// body is a composition of natively-representable shapes/lines/curves — a
+/// single shape becomes one drawing; several become a `wpg:wgp` group sharing
+/// one coordinate space (recovering, e.g., a hand-drawn diagram built from a
+/// few `#move`d primitives — the dominant remaining rasterize cause in real
+/// documents; see `#76`'s corpus investigation). `None` (rasterize the whole
+/// `#move`, as before) the moment anything in the body isn't a
+/// plain-translated native shape — text, an image, or a further
+/// rotate/scale/skew.
+pub fn move_(
+    elem: &typst_library::foundations::Packed<typst_library::layout::MoveElem>,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Option<Run>> {
+    use typst_library::layout::{Axes, Rel, Size};
+
+    // Must go through `layout_export_frame` (not a bare `layout_frame` call):
+    // it chains in `Target::Paged`, which is what makes bare shape elements
+    // (`LineElem`, `CurveElem`, …) show-rule into their `BlockElem` layouters
+    // in the first place — under the ambient `Docx` target those show rules
+    // aren't registered, so the body's shapes would be dropped by flow
+    // collection ("was ignored during paged export") and the frame would come
+    // back empty.
+    let size = Size::new(ctx.raster_width, ctx.raster_height);
+    let height = ctx.raster_height;
+    let Some(mut frame) = ctx.layout_export_frame(&elem.body, styles, elem.span(), height)?
+    else {
+        return Ok(None);
+    };
+    // Mirrors `typst_layout::layout_move` exactly (dx/dy resolved against the
+    // region, then a visual-only translate of the laid-out body).
+    let delta = Axes::new(elem.dx.resolve(styles), elem.dy.resolve(styles))
+        .zip_map(size, Rel::relative_to);
+    frame.translate_visual(delta.to_point());
+
+    build_shapes_drawing(ctx, &frame)
 }
 
 /// Lays out a shape element to a [`typst_library::layout::Frame`] via the
@@ -539,7 +596,6 @@ pub fn line(
 /// percentages of their container.
 fn layout_shape_frame(
     ctx: &mut DocxCtx,
-    _styles: StyleChain,
     span: typst_syntax::Span,
     layout: impl FnOnce(
         &mut typst_library::engine::Engine,
@@ -553,66 +609,178 @@ fn layout_shape_frame(
     layout(ctx.engine(), locator, region)
 }
 
-/// Extracts the frame's one `Shape` item and lowers its geometry (a
-/// `Geometry::Curve` or `Geometry::Line`) into a [`ShapeSpec`] — a native path
-/// shape — or `None` if the fill/stroke can't be represented, or the path is
-/// empty/degenerate.
-fn build_path_shape(ctx: &mut DocxCtx, frame: &typst_library::layout::Frame) -> SourceResult<Option<Run>> {
-    use typst_library::layout::FrameItem;
-    use typst_library::visualize::Geometry;
+/// One extracted shape: its raw (un-normalized) path segments plus its
+/// resolved fill/stroke, in the SHARED coordinate space of whatever frame it
+/// was extracted from (so multiple shapes from one frame can be positioned
+/// relative to each other).
+struct ExtractedShape {
+    raw: Vec<RawSeg>,
+    fill: Option<ShapeFill>,
+    stroke: Option<ShapeStroke>,
+}
 
-    let Some((pos, FrameItem::Shape(shape, _))) =
-        frame.items().find(|(_, item)| matches!(item, FrameItem::Shape(..)))
-    else {
-        return Ok(None);
-    };
-    let pos = *pos;
+/// Walks every item in `frame`, extracting each native-representable shape —
+/// or bailing (`None`) the moment it finds anything that isn't one (text, an
+/// image, an unrepresentable fill/stroke, or a non-translation transform).
+/// Recurses one level into plain-translated sub-frames (`FrameItem::Group`
+/// with an identity scale/skew — ordinary block-flow nesting), since a
+/// `#move`d body composed of several block-level shapes typically nests that
+/// way.
+fn extract_shapes(frame: &typst_library::layout::Frame) -> Option<Vec<ExtractedShape>> {
+    let mut out = Vec::new();
+    collect_shapes(frame, typst_library::layout::Point::zero(), &mut out).then_some(out)
+}
 
-    let Some(fill) = resolved_fill(&shape.fill) else { return Ok(None) };
-    let Some(stroke) = resolved_stroke(&shape.stroke) else { return Ok(None) };
+fn collect_shapes(
+    frame: &typst_library::layout::Frame,
+    offset: typst_library::layout::Point,
+    out: &mut Vec<ExtractedShape>,
+) -> bool {
+    use typst_library::layout::{FrameItem, Point, Ratio};
 
-    // The frame item's own position matters: `layout_line` pushes its `Shape`
-    // at `start.to_point()` (not the origin) and the geometry is only the
-    // *delta* from there — so the position must be added back in, or the
-    // line's true start/end (and hence its bounding box) comes out wrong.
-    // `layout_curve` always pushes at `Point::zero()`, but folding `pos` in
-    // unconditionally is correct either way and future-proofs against that
-    // changing.
-    let raw = match &shape.geometry {
-        Geometry::Curve(curve) => raw_segments_from_curve(curve, pos),
-        Geometry::Line(delta) => {
-            vec![RawSeg::Move(pos), RawSeg::Line(pos + *delta)]
+    for (pos, item) in frame.items() {
+        let pos = offset + *pos;
+        match item {
+            FrameItem::Shape(shape, _) => {
+                let Some(fill) = resolved_fill(&shape.fill) else { return false };
+                let Some(stroke) = resolved_stroke(&shape.stroke) else { return false };
+                let Some(raw) = geometry_to_raw(&shape.geometry, pos) else { return false };
+                out.push(ExtractedShape { raw, fill, stroke });
+            }
+            FrameItem::Group(group) => {
+                let t = &group.transform;
+                let is_translation = t.sx == Ratio::one()
+                    && t.sy == Ratio::one()
+                    && t.kx == Ratio::zero()
+                    && t.ky == Ratio::zero();
+                if !is_translation || group.clip.is_some() {
+                    // A rotate/scale/skew or a clip path inside — the exact
+                    // "grouped shapes with a transform" case this pass doesn't
+                    // attempt (see COVERAGE.md); bail to rasterize.
+                    return false;
+                }
+                let sub_offset = pos + Point::new(t.tx, t.ty);
+                if !collect_shapes(&group.frame, sub_offset, out) {
+                    return false;
+                }
+            }
+            FrameItem::Tag(_) => {
+                // Introspection-only marker; carries no visual, safe to skip.
+            }
+            _ => return false, // text, image, link — not a pure shape composition
         }
-        Geometry::Rect(_) => return Ok(None),
-    };
-    if raw.is_empty() {
+    }
+    true
+}
+
+/// A resolved shape [`Geometry`](typst_library::visualize::Geometry) → its
+/// [`RawSeg`] path, offset by `pos` (the frame item's own position — see the
+/// note on why this matters below), or `None` for `Geometry::Rect` (an
+/// axis-aligned rect/square fill — not yet supported in this composed path;
+/// such a shape already maps natively when it is the sole top-level element
+/// via [`shape`], just not composed with others here).
+fn geometry_to_raw(
+    geometry: &typst_library::visualize::Geometry,
+    pos: typst_library::layout::Point,
+) -> Option<Vec<RawSeg>> {
+    use typst_library::visualize::Geometry;
+    match geometry {
+        Geometry::Curve(curve) => Some(raw_segments_from_curve(curve, pos)),
+        // `layout_line` pushes its `Shape` at `start.to_point()` (not the
+        // origin) and the geometry is only the *delta* from there — so `pos`
+        // must be added to both ends, or the line's true start/end (and hence
+        // its bounding box) comes out wrong.
+        Geometry::Line(delta) => Some(vec![RawSeg::Move(pos), RawSeg::Line(pos + *delta)]),
+        Geometry::Rect(_) => None,
+    }
+}
+
+/// Builds the final [`Run::Drawing`] from every shape found in `frame`: `None`
+/// if the frame holds anything not natively representable, a single native
+/// shape if it holds exactly one, or a `wpg:wgp` group if it holds several.
+fn build_shapes_drawing(
+    ctx: &mut DocxCtx,
+    frame: &typst_library::layout::Frame,
+) -> SourceResult<Option<Run>> {
+    let Some(shapes) = extract_shapes(frame) else { return Ok(None) };
+    if shapes.is_empty() {
         return Ok(None);
     }
 
-    let Some((segments, w, h)) = normalize_segments(raw) else { return Ok(None) };
-    // A perfectly horizontal/vertical line is legitimately degenerate on one
-    // axis; floor it to 1 EMU (imperceptible) rather than the 0 Word handles
-    // poorly for a drawing extent. `normalize_segments` already bailed when
-    // BOTH axes are degenerate (nothing to draw).
-    let w_emu = abs_to_emu(w).max(1);
-    let h_emu = abs_to_emu(h).max(1);
+    if shapes.len() == 1 {
+        let ExtractedShape { raw, fill, stroke } = shapes.into_iter().next().unwrap();
+        let Some((segments, w, h)) = normalize_segments(raw) else { return Ok(None) };
+        // A perfectly horizontal/vertical line is legitimately degenerate on
+        // one axis; floor it to 1 EMU (imperceptible) rather than the 0 Word
+        // handles poorly for a drawing extent. `normalize_segments` already
+        // bailed when BOTH axes are degenerate (nothing to draw).
+        let (w_emu, h_emu) = (abs_to_emu(w).max(1), abs_to_emu(h).max(1));
+        let docpr_id = ctx.next_drawing_id();
+        let name = ecow::eco_format!("Shape {docpr_id}");
+        return Ok(Some(Run::Drawing(Drawing {
+            rel: EcoString::new(),
+            w_emu,
+            h_emu,
+            alt: None,
+            docpr_id,
+            name,
+            anchor: None,
+            shape: Some(ShapeSpec { geom: ShapeGeom::Path(segments), fill, stroke, txbx: None }),
+            group: None,
+        })));
+    }
+
+    // Several shapes: position each relative to the GROUP's own shared origin
+    // (the union of every shape's own bounds), so their relative layout — not
+    // just each one's own local geometry — is preserved.
+    let bounds: Vec<_> = shapes.iter().map(|s| raw_bounds(&s.raw)).collect();
+    let (mut group_min_x, mut group_min_y, mut group_max_x, mut group_max_y) = bounds[0];
+    for &(x0, y0, x1, y1) in &bounds[1..] {
+        group_min_x = group_min_x.min(x0);
+        group_min_y = group_min_y.min(y0);
+        group_max_x = group_max_x.max(x1);
+        group_max_y = group_max_y.max(y1);
+    }
+    let (group_w, group_h) = (group_max_x - group_min_x, group_max_y - group_min_y);
+    if !group_w.to_pt().is_finite()
+        || !group_h.to_pt().is_finite()
+        || (group_w.to_pt() <= 0.0 && group_h.to_pt() <= 0.0)
+    {
+        return Ok(None);
+    }
+    let (group_w_emu, group_h_emu) = (abs_to_emu(group_w).max(1), abs_to_emu(group_h).max(1));
+
+    let mut children = Vec::with_capacity(shapes.len());
+    for (shape, (min_x, min_y, _, _)) in shapes.into_iter().zip(bounds) {
+        let ExtractedShape { raw, fill, stroke } = shape;
+        let Some((segments, w, h)) = normalize_segments(raw) else { continue };
+        children.push(GroupChild {
+            x_emu: abs_to_emu(min_x - group_min_x),
+            y_emu: abs_to_emu(min_y - group_min_y),
+            w_emu: abs_to_emu(w).max(1),
+            h_emu: abs_to_emu(h).max(1),
+            shape: ShapeSpec { geom: ShapeGeom::Path(segments), fill, stroke, txbx: None },
+        });
+    }
+    if children.len() < 2 {
+        // Every shape but one turned out degenerate after all; not worth a
+        // group for a single survivor — fall back to rasterizing rather than
+        // re-deriving the single-shape path for this rare edge case.
+        return Ok(None);
+    }
 
     let docpr_id = ctx.next_drawing_id();
-    let name = ecow::eco_format!("Shape {docpr_id}");
+    let name = ecow::eco_format!("Group {docpr_id}");
     Ok(Some(Run::Drawing(Drawing {
         rel: EcoString::new(),
-        w_emu,
-        h_emu,
+        w_emu: group_w_emu,
+        h_emu: group_h_emu,
         alt: None,
         docpr_id,
         name,
         anchor: None,
-        shape: Some(ShapeSpec {
-            geom: ShapeGeom::Path(segments),
-            fill,
-            stroke,
-            txbx: None,
-        }),
+        shape: None,
+        group: Some(GroupSpec { children }),
     })))
 }
 
@@ -679,6 +847,37 @@ fn raw_segments_from_curve(
         .collect()
 }
 
+/// The conservative bounding box of a raw path — see [`normalize_segments`]'s
+/// doc comment for why it's the control-point hull, not the tight curve
+/// extent. Returns `(min_x, min_y, max_x, max_y)` in the path's own (possibly
+/// negative) coordinate space. Shared by [`normalize_segments`] (a single
+/// shape's own bounds) and [`build_shapes_drawing`] (each group child's bounds
+/// relative to the whole group).
+fn raw_bounds(raw: &[RawSeg]) -> (Abs, Abs, Abs, Abs) {
+    let mut min_x = Abs::zero();
+    let mut min_y = Abs::zero();
+    let mut max_x = Abs::zero();
+    let mut max_y = Abs::zero();
+    let mut expand = |p: typst_library::layout::Point| {
+        min_x = min_x.min(p.x);
+        min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
+        max_y = max_y.max(p.y);
+    };
+    for seg in raw {
+        match seg {
+            RawSeg::Move(p) | RawSeg::Line(p) => expand(*p),
+            RawSeg::Cubic(c1, c2, end) => {
+                expand(*c1);
+                expand(*c2);
+                expand(*end);
+            }
+            RawSeg::Close => {}
+        }
+    }
+    (min_x, min_y, max_x, max_y)
+}
+
 /// Shifts a path so every coordinate is non-negative (the OOXML `a:custGeom`
 /// convention — the path's own local space spans `[0, w] x [0, h]`) and
 /// converts to EMU, returning the segments plus the path's true bounding size.
@@ -691,27 +890,7 @@ fn raw_segments_from_curve(
 /// `CurveBuilder::expand_bounds` in `typst-layout`) and would silently clip any
 /// segment that dips negative.
 fn normalize_segments(raw: Vec<RawSeg>) -> Option<(Vec<PathSegment>, Abs, Abs)> {
-    let mut min_x = Abs::zero();
-    let mut min_y = Abs::zero();
-    let mut max_x = Abs::zero();
-    let mut max_y = Abs::zero();
-    let mut expand = |p: typst_library::layout::Point| {
-        min_x = min_x.min(p.x);
-        min_y = min_y.min(p.y);
-        max_x = max_x.max(p.x);
-        max_y = max_y.max(p.y);
-    };
-    for seg in &raw {
-        match seg {
-            RawSeg::Move(p) | RawSeg::Line(p) => expand(*p),
-            RawSeg::Cubic(c1, c2, end) => {
-                expand(*c1);
-                expand(*c2);
-                expand(*end);
-            }
-            RawSeg::Close => {}
-        }
-    }
+    let (min_x, min_y, max_x, max_y) = raw_bounds(&raw);
     let (w, h) = (max_x - min_x, max_y - min_y);
     if !w.to_pt().is_finite() || !h.to_pt().is_finite() {
         return None;

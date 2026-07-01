@@ -781,6 +781,7 @@ fn background_block(
             behind: true,
         }),
         shape: None,
+        group: None,
     };
     Ok(Some(Block::Para(Para {
         props: crate::dom::ParaProps::default(),

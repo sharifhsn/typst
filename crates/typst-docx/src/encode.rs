@@ -7,8 +7,8 @@ use typst_library::model::DocumentInfo;
 
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, Drawing, DocxDocument,
-    Field, Footnote, HdrFtrPart, Para, ParaChild, PathSegment, Row, Run, SectPr, SectType,
-    ShapeFill, ShapeGeom, ShapeSpec, Tbl, Toc, VAlign, VMerge,
+    Field, Footnote, GroupSpec, HdrFtrPart, Para, ParaChild, PathSegment, Row, Run, SectPr,
+    SectType, ShapeFill, ShapeGeom, ShapeSpec, Tbl, Toc, VAlign, VMerge,
 };
 use crate::package::{Package, RelMode, Rels};
 use crate::styles_part;
@@ -720,6 +720,10 @@ fn write_anchor_pos(w: &mut XmlWriter, name: &'static str, pos: &AnchorPos) {
 /// Emits the shared `<a:graphic>`/`<pic:pic>` payload (identical for inline and
 /// anchored drawings).
 fn write_pic_payload(w: &mut XmlWriter, d: &Drawing) {
+    if let Some(group) = &d.group {
+        write_group_payload(w, d, group);
+        return;
+    }
     if let Some(shape) = &d.shape {
         write_shape_payload(w, d, shape);
         return;
@@ -767,25 +771,70 @@ fn write_pic_payload(w: &mut XmlWriter, d: &Drawing) {
     w.close(); // a:graphic
 }
 
+/// The `WordprocessingShape` namespace URI, shared by every `wps:*` element
+/// (a lone shape's payload, and each child of a group).
+const WPS_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
+
 /// Emits a vector DrawingML shape (`wps:wsp`) payload in place of `pic:pic`.
 fn write_shape_payload(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec) {
     const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
-    const WPS: &str =
-        "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
-    let hex = |c: [u8; 3]| format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
+    w.open("a:graphic").attr("xmlns:a", A).start_children();
+    w.open("a:graphicData").attr("uri", WPS_NS).start_children();
+    write_wsp(w, 0, 0, d.w_emu, d.h_emu, shape);
+    w.close(); // a:graphicData
+    w.close(); // a:graphic
+}
+
+/// Emits a `wpg:wgp` (`WordprocessingGroup`) payload: several native shapes
+/// sharing one coordinate space — e.g. a `#move`d composition of several
+/// shapes/lines/curves — as one editable, grouped drawing instead of a single
+/// rasterized image.
+fn write_group_payload(w: &mut XmlWriter, d: &Drawing, group: &GroupSpec) {
+    const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    const WPG: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup";
+    let (cx, cy) = (d.w_emu.to_string(), d.h_emu.to_string());
 
     w.open("a:graphic").attr("xmlns:a", A).start_children();
-    w.open("a:graphicData").attr("uri", WPS).start_children();
-    w.open("wps:wsp").attr("xmlns:wps", WPS).start_children();
+    w.open("a:graphicData").attr("uri", WPG).start_children();
+    w.open("wpg:wgp").attr("xmlns:wpg", WPG).attr("xmlns:wps", WPS_NS).start_children();
+    w.open("wpg:cNvGrpSpPr").empty();
+    w.open("wpg:grpSpPr").start_children();
+    w.open("a:xfrm").start_children();
+    w.open("a:off").attr("x", "0").attr("y", "0").empty();
+    w.open("a:ext").attr("cx", &cx).attr("cy", &cy).empty();
+    // The child coordinate space: children's own `a:xfrm` offsets/extents are
+    // expressed directly in this space, which we set 1:1 with the group's own
+    // extent (`chOff` = 0, `chExt` = the same `cx`/`cy`), so no extra scaling
+    // is needed between a child's local EMU coordinates and the group's.
+    w.open("a:chOff").attr("x", "0").attr("y", "0").empty();
+    w.open("a:chExt").attr("cx", &cx).attr("cy", &cy).empty();
+    w.close(); // a:xfrm
+    w.close(); // wpg:grpSpPr
+
+    for child in &group.children {
+        write_wsp(w, child.x_emu, child.y_emu, child.w_emu, child.h_emu, &child.shape);
+    }
+
+    w.close(); // wpg:wgp
+    w.close(); // a:graphicData
+    w.close(); // a:graphic
+}
+
+/// Emits one `wps:wsp` shape — the geometry/fill/stroke/text-box body shared
+/// by a lone shape drawing ([`write_shape_payload`]) and each child of a group
+/// ([`write_group_payload`]) — positioned at `(off_x, off_y)` within whatever
+/// coordinate space the caller established (the drawing's own top-left corner
+/// for a lone shape; the group's local child space for a group member).
+fn write_wsp(w: &mut XmlWriter, off_x: i64, off_y: i64, w_emu: i64, h_emu: i64, shape: &ShapeSpec) {
+    let hex = |c: [u8; 3]| format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
+
+    w.open("wps:wsp").attr("xmlns:wps", WPS_NS).start_children();
     w.open("wps:cNvSpPr").empty();
     w.open("wps:spPr").start_children();
 
     w.open("a:xfrm").start_children();
-    w.open("a:off").attr("x", "0").attr("y", "0").empty();
-    w.open("a:ext")
-        .attr("cx", &d.w_emu.to_string())
-        .attr("cy", &d.h_emu.to_string())
-        .empty();
+    w.open("a:off").attr("x", &off_x.to_string()).attr("y", &off_y.to_string()).empty();
+    w.open("a:ext").attr("cx", &w_emu.to_string()).attr("cy", &h_emu.to_string()).empty();
     w.close(); // a:xfrm
 
     match &shape.geom {
@@ -800,7 +849,7 @@ fn write_shape_payload(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec) {
             w.close();
         }
         ShapeGeom::Path(segments) => {
-            let (cx, cy) = (d.w_emu.to_string(), d.h_emu.to_string());
+            let (cx, cy) = (w_emu.to_string(), h_emu.to_string());
             w.open("a:custGeom").start_children();
             for empty in ["a:avLst", "a:gdLst", "a:ahLst", "a:cxnLst"] {
                 w.open(empty).empty();
@@ -923,8 +972,6 @@ fn write_shape_payload(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec) {
     }
 
     w.close(); // wps:wsp
-    w.close(); // a:graphicData
-    w.close(); // a:graphic
 }
 
 fn write_para_child(w: &mut XmlWriter, child: &ParaChild) {

@@ -200,7 +200,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     /// labels/refs/bibliography convergence is unaffected. Returns `None` if the
     /// content cannot be laid out in this context (e.g. a pagebreak with no page
     /// flow). Does not harvest tags or render — callers decide what to do.
-    fn layout_export_frame(
+    pub(crate) fn layout_export_frame(
         &mut self,
         content: &Content,
         styles: StyleChain,
@@ -1167,6 +1167,15 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // A diagonal or explicit-endpoint `#line` (a horizontal rule is
             // already handled as a paragraph border, earlier in the block
             // dispatch) maps to a native open path, same as `curve` above.
+            out.push(run);
+        } else if let Some(elem) = child.to_packed::<typst_library::layout::MoveElem>()
+            && let Some(run) = mappers::shape::move_(elem, styles, self)?
+        {
+            // `#move(dx:, dy:)[..]` whose ENTIRE body is native-representable
+            // shapes/lines/curves maps to a single shape or a `wpg:wgp` group,
+            // instead of rasterizing the whole composition — the dominant
+            // real-world rasterize cause (a hand-drawn diagram built from a
+            // few `#move`d primitives).
             out.push(run);
         } else {
             // No idiomatic representation (a drawn shape, an SVG/PDF image, an

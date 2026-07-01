@@ -102,7 +102,17 @@ pub fn image(
     // Alt text → `descr` for accessibility.
     let alt = elem.alt.get_cloned(styles);
 
-    Ok(Run::Drawing(Drawing { rel, w_emu, h_emu, alt, docpr_id, name, anchor: None, shape: None }))
+    Ok(Run::Drawing(Drawing {
+        rel,
+        w_emu,
+        h_emu,
+        alt,
+        docpr_id,
+        name,
+        anchor: None,
+        shape: None,
+        group: None,
+    }))
 }
 
 /// Lowers a [`FigureElem`] into its body blocks plus a caption paragraph.
@@ -530,6 +540,7 @@ pub fn laid_out_fallback(
         name,
         anchor: None,
         shape: None,
+        group: None,
     })))
 }
 

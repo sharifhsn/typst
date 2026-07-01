@@ -176,45 +176,66 @@ there is nothing for the exporter to read regardless of effort:
 ## 7. Ambitious forward design: what's left on the table for shapes
 
 This session mapped the *individual-shape* primitives (curve, line, gradient
-fill, dash/cap — §4 and the shape commits). The next tier of ambition is
-**composition** — recovering diagrams built from *many* shapes together, which
-today still rasterize as one image even though each piece, alone, would now
-map natively. Not implemented this pass (each is a real design, not a one-line
-fix); recorded here so a future pass starts from the analysis instead of redoing
-it.
+fill, dash/cap — §4 and the shape commits), then §7.1 (grouped shapes) was
+implemented and shipped in a follow-up pass. The remaining items (§7.2-§7.4)
+are recorded so a future pass starts from the analysis instead of redoing it.
 
-### 7.1 Grouped shapes (`wpg:wgp`) — the highest-value next step
-**The problem:** a hand-drawn diagram built from several `#place`d/`#move`d
-primitives (rects, lines, circles) — the common way to sketch a simple diagram
-*without* a package like CeTZ — rasterizes as one flat image today, because
-each shape only reaches the native-shape dispatch when *its own* content is the
-thing being lowered; a composition of several shapes inside one drawing
-container is captured whole by `ctx.rasterize` before any individual piece is
-inspected.
+### 7.1 Grouped shapes (`wpg:wgp`) — IMPLEMENTED
+**The problem:** a hand-drawn diagram built from several `#move`d primitives
+(rects, lines, circles) — the common way to sketch a simple diagram *without*
+a package like CeTZ — rasterized as one flat image, because each shape only
+reached the native-shape dispatch when *its own* content was the thing being
+lowered; a composition of several shapes inside one `#move` container was
+captured whole by `ctx.rasterize` before any individual piece was inspected.
 
-**The design:** detect a container whose *entire* content is a composition of
-purely-decorative, natively-representable primitives (shape/line/curve, placed
-via absolute offsets, no unrepresentable transform in the mix) and lower the
-*whole composition* into one `wpg:wgp` (`WordprocessingGroup`) DrawingML group
-shape — a single anchored drawing containing multiple `wps:wsp` children, each
-with its own offset within the group's local coordinate space (`a:chOff`/
-`a:chExt` on the group's `a:xfrm`, mirrored by each child's own `a:xfrm`). This
-is the union of the machinery already built:
-- the group's own bounding box = the union of each child shape's bbox (the
-  same conservative convex-hull bbox `normalize_segments` already computes
-  per-shape, applied across the whole set);
-- each child positioned via the SAME frame-item-position handling the
-  line/curve position bugfix (`dfa2f2da3`) already established is necessary;
-- the group anchored via the SAME `Anchor`/`place()` machinery already used
-  for a single native/rasterized drawing today.
+**The fix:** `#move(dx:, dy:)[body]` now walks its laid-out body
+(`mappers/shape.rs::extract_shapes`/`collect_shapes`) recursively through
+plain-translated `FrameItem::Group` nesting, collecting every
+`FrameItem::Shape` whose fill/stroke/geometry are natively representable and
+bailing to the old whole-container rasterize the moment it finds anything else
+(text, an image, a rotate/scale/skew, a clip). One matched shape lowers to the
+same single `wps:wsp` drawing `#curve`/`#line` already produce; several lower
+to one `wpg:wgp` group — a single anchored drawing whose `wpg:grpSpPr`
+declares the shared local coordinate space (`a:off`/`a:ext` +
+`a:chOff`/`a:chExt`, the union of every child's bbox) and each child is a
+`wps:wsp` positioned by its own `a:xfrm` within it (`encode.rs::write_wsp`,
+factored out of the single-shape path so both share one code path down to the
+XML).
 
-**Why not done this pass:** detecting "this content IS a pure shape
-composition" (vs. a mix that must still rasterize) is real classification
-work — walking a container's body, confirming every leaf is a supported
-primitive, bailing to the existing single-shape-or-rasterize behavior on the
-first exception — plus the `wpg:wgp` XML shape and the group/child
-coordinate-space math are new surface area deserving their own validation
-pass, not a rider on this session's shape work.
+**The bug that blocked the first attempt:** laying the body out via a bare
+`typst_layout::layout_frame` call (ambient `Docx`-target styles) dropped every
+shape silently — Word's shape elements (`LineElem`, `CurveElem`, `RectElem`, …)
+only become a `BlockElem` layouter via a show rule
+(`LINE_RULE`/`CURVE_RULE`/… in `typst-layout/src/rules.rs`) registered for
+`Target::Paged`, *not* `Target::Docx` (DOCX intercepts them natively before
+that show rule would ever fire, in the normal top-level dispatch). Re-laying
+out raw content under the ambient `Docx` target left those show rules
+unregistered, so flow collection (`typst-layout/src/flow/collect.rs`) hit its
+"anything else" fallback and warned+dropped each bare shape
+("`line` was ignored during paged export"), producing an empty frame. Fixed by
+routing through the existing `ctx.layout_export_frame` helper (already used by
+the rasterize fallback) instead, which chains in `Target::Paged` before laying
+out — the same mechanism that makes bare shapes drawable at all.
+
+**Validated:** corpus-wide, `RASTERIZE: move` occurrences dropped from 2597 to
+1587 (-39%) across 627 docs (0 new EXPORT_ERR/INVALID; still the same 11
+pre-existing template failures); `presentation/black-angular-frame` alone went
+1319->394. Oracle A/B (baseline vs. this change) shows 0 regressions on any
+signal. Synthetic multi-shape `#move` cases render pixel-identical between the
+gold Typst PDF and the DOCX round-tripped through LibreOffice.
+
+**What's still out of scope (bails to rasterize, same as before):**
+- a rotate/scale/skew or a clip anywhere in the `#move`d body (the
+  `FrameItem::Group` transform-identity check bails) — grouped shapes *with* a
+  transform is the natural next tier (§7.1 follow-up: a `wpg:wgp` child can
+  itself carry a rotation via `a:xfrm rot=`, but per-child skew/scale has no
+  OOXML equivalent and would need to fall back per-shape);
+- axis-aligned `Geometry::Rect` inside a composition (`geometry_to_raw`
+  returns `None` for it) — it already maps natively as a *sole* top-level
+  shape via the existing rect path, just not yet composed with siblings here;
+- any non-shape leaf (text, image) anywhere in the body, which still
+  rasterizes the *whole* `#move` — a mixed shape+caption composition doesn't
+  partially recover.
 
 ### 7.2 Radial gradient (scoped out in §4, see the `6bcb673cf` commit)
 OOXML's radial gradient is expressed as an inset (`a:fillToRect`) into the
