@@ -779,6 +779,20 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
         props: RunProps,
     ) -> SourceResult<Vec<Run>> {
+        // A `#place`-shape composition reached as paragraph content — e.g. a
+        // `#box`/`#rect` with no visual of its own (so it has no block
+        // structure of its own to preserve and its body is lowered here
+        // directly, not via `convert_children`'s block dispatch) whose ENTIRE
+        // content is a QR/barcode-style sequence of `#place`d shapes. See the
+        // analogous check in `convert_children`/`handle_inline` for why laying
+        // the whole thing out under `Target::Paged` recovers it as one native
+        // drawing instead of rasterizing (or, before this check existed,
+        // rasterizing once per `#place`).
+        if crate::convert::contains_place(body)
+            && let Some(run) = mappers::shape::transformed(body, styles, self)?
+        {
+            return Ok(vec![run]);
+        }
         // Re-realize the body as a paragraph interior (`RealizationKind::Par`)
         // so inline content is NOT regrouped into separate block paragraphs.
         let arenas = Arenas::default();
@@ -809,6 +823,12 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         props: RunProps,
     ) -> SourceResult<Vec<crate::dom::ParaChild>> {
         use crate::dom::ParaChild;
+        // See the identical check in `inline_runs`.
+        if crate::convert::contains_place(body)
+            && let Some(run) = mappers::shape::transformed(body, styles, self)?
+        {
+            return Ok(vec![ParaChild::Run(run)]);
+        }
         let arenas = Arenas::default();
         let children = (self.engine.library.routines.realize)(
             RealizationKind::Par,
@@ -1194,6 +1214,23 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // A bare (not `#move`-wrapped) `#rotate`/`#scale` whose body is a
             // native shape/composition — the same recovery `move_` does, just
             // without a translate step (see `mappers::shape::transformed`).
+            out.push(run);
+        } else if (child.is::<typst_library::layout::BlockElem>()
+            || crate::convert::is_framed_container(child))
+            && crate::convert::contains_place(child)
+            && let Some(run) = mappers::shape::transformed(child, styles, self)?
+        {
+            // A box/block/framed container reached as a paragraph's sole
+            // content (the common case — `#box(..)[..]` at the top level is
+            // wrapped in its own `ParElem`, so it lands here rather than in
+            // `convert_children`'s block dispatch) whose ENTIRE content is a
+            // composition of `#place`-positioned native shapes: the same
+            // recovery as the analogous check in `convert_children` (see its
+            // comment for why laying the whole container out under
+            // `Target::Paged` works — `#place`'s own non-floating layout
+            // already composites into the SAME frame via an ordinary
+            // `push_frame`, so this is just an ordinary shape composition from
+            // `collect_shapes`'s point of view).
             out.push(run);
         } else {
             self.rasterize_fallback(child, styles, out)?;

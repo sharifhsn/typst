@@ -308,42 +308,71 @@ translate step — and one new `ctx.rs` dispatch arm gating it on
 INVALID, 0 oracle regressions; visually verified pixel-identical (gold PDF vs.
 LibreOffice-rendered DOCX) on a bare-rotate + bare-scale synthetic case.
 
-### 7.1c Investigated and reverted: `#place` nested in a framed container
+### 7.1c `#place` nested in a framed container — IMPLEMENTED
 A broader corpus sweep by rasterize-cause (`DOCX_DEBUG_RASTER`, not just
 `move`) found `place` as the single largest remaining category (3624
-occurrences, 59 docs) — concentrated in a few templates using the
-`codetastic` package (QR codes/barcodes), which draws every module as its own
-`#place(dx:, dy:, square(..))` inside a sized `#box`. Root cause: `#place` at
-the top level correctly dispatches to `mappers::image::place` (which anchors
-a native shape/image drawing via `<wp:anchor>`) via `convert_children`'s
-block-level dispatch — but a `#place` nested inside a framed container
-(`#box`/`#rect` as the container for a text box or shaded-paragraph body) is
-lowered through `ctx.inline_runs` -> `handle_inline` instead, which had *no*
-dispatch arm for a bare `PlaceElem` at all, so it fell through to the generic
-rasterize fallback and flattened the WHOLE placed element (native shape body
-included) to a PNG — same class of gap `#move`/`#rotate`/`#scale` had before
-this session, just one more element.
+occurrences, 59 docs) — concentrated in templates using the `codetastic`
+package (QR codes/barcodes), which draws every module as its own
+`#place(dx:, dy:, square(..))` inside a sized `#box`.
 
-A fix was built (`mappers::image::place_inline`, refactoring the existing
-`place`'s anchor-computation logic into a shared `place_drawing` helper reused
-by both) and wired into `handle_inline`. It compiled, passed the test suite,
-and correctly stopped rasterizing (no `RASTERIZE: place` output; the XML had
-well-formed `<wp:anchor>` elements with plausible `relativeFrom="margin"`
-positions) — but rendering the actual DOCX in LibreOffice showed **nothing**:
-the anchored drawings were entirely invisible, not just mispositioned. An
-anchored (floating) drawing nested inside another container's own paragraph
-flow — as opposed to a top-level paragraph — is exotic enough in the OOXML
-model that LibreOffice's renderer (and very possibly Word's, untested) doesn't
-handle it the way a top-level `wp:anchor` does. Silently invisible content is
-strictly worse than a rasterized-but-visible PNG, so this was reverted in
-full (`git checkout` on the touched files) rather than shipped. Recovering
-this pattern for real would need either genuinely INLINE (non-anchored)
-positioning math for a nested `#place` — reusing the group/`wpg:wgp` machinery
-`#move` already has, computing each module's position algebraically as a
-plain shape/group child instead of a floating anchor — or verified evidence
-that Word itself handles nested anchors even where LibreOffice doesn't. Not
-attempted further this pass; flagging for a future session that starts by
-checking Word specifically, not LibreOffice, before investing more here.
+**First attempt (reverted): anchored inline drawing.** `#place` at the top
+level dispatches to `mappers::image::place`, which anchors a native
+shape/image drawing via `<wp:anchor>`. A `#place` nested inside a framed
+container instead reaches `handle_inline` with no dispatch arm for a bare
+`PlaceElem` at all, falling through to rasterize. The first fix
+(`mappers::image::place_inline`, reusing `place`'s anchor logic) compiled and
+stopped rasterizing, but LibreOffice rendered the resulting *nested* `wp:anchor`
+as entirely invisible — an anchored drawing inside another container's own
+paragraph flow is exotic enough that LibreOffice's renderer doesn't handle it
+the way a top-level one does. Reverted rather than ship silently-invisible
+content.
+
+**The real fix: don't anchor at all — recompute the whole container as one
+shape composition.** The insight that unblocked this: `#place`'s own
+*non-floating* layout (the common case; `float: true` is separate, unaffected,
+opt-in page/column floating) does not produce any special frame wrapper at
+all — `typst-layout/src/flow/distribute.rs::finalize` composites a placed
+child into its parent frame via an *ordinary* `output.push_frame(pos, frame)`,
+identical to how any other block child is placed. From
+[`collect_shapes`](§7.1)'s point of view, a `#box` full of `#place`d shapes is
+therefore no different from a `#move`d composition — it's just an ordinary
+frame with shape items (or plain-translation `FrameItem::Group`s) in it. So
+the SAME [`mappers::shape::transformed`](§7.1b) function (lay the whole thing
+out under `Target::Paged`, run `extract_shapes`/`build_shapes_drawing`)
+recovers it too, as long as it's handed the container's ENTIRE content rather
+than one `#place` at a time — sidestepping the anchor problem entirely, since
+the result is one ordinary INLINE (non-floating) drawing, not a floating one.
+
+**Where to intercept, and why it took two attempts to find:** a `#box`/`#rect`
+with no fill/stroke/clip of its own carries no visual, so realize flattens it
+away entirely — its content reaches the document as the direct body of an
+(implicit) paragraph, processed by `inline_runs`/`inline_pchildren`, *not*
+`convert_children`'s block dispatch (where a naive fix would look first — and
+where an earlier attempt in this same pass added a now-mostly-redundant but
+still useful defense-in-depth check, for the case where a `#box`/`#rect`
+*does* have a fill/stroke and so keeps its block structure through
+`handle_block_box`). The actual fix lives in three places, all gated on a
+cheap `Content::traverse` pre-filter (`contains_place`, checking for any
+`PlaceElem` anywhere inside) so ordinary paragraphs/boxes without `#place`
+pay zero extra cost:
+- `ctx.rs::inline_runs`/`inline_pchildren` — the chokepoint that actually
+  fires for a plain (no-fill) container's flattened body reached as
+  paragraph content;
+- `convert.rs::convert_children` and `ctx.rs::handle_inline` — for a
+  `#box`/`#rect`/`BlockElem` that *does* keep its own block structure (a fill
+  or stroke set) and so is walked as a container in its own right.
+
+**Validated:** the synthetic QR-code repro (`codetastic`, 225 modules) renders
+pixel-identical between the gold Typst PDF and the LibreOffice-rendered DOCX
+round-trip — as one native `wpg:wgp` group of 225 `wps:wsp` squares, fully
+vector/editable, not a raster image. Corpus-wide: `RASTERIZE: place` dropped
+3624->1900 (-48%), with the `tuhi-*-vuw` template family (postcard/programme/
+course-poster, each embedding a `codetastic` QR code) going to 0 `place`
+rasterizations. `black-angular-frame`'s `place` count is unchanged (1184) —
+correctly so: its nav-bar's `#place` calls wrap `layout(size => ..)` closures
+with `measure()` calls, genuinely opaque content, not a plain shape
+composition. 0 new EXPORT_ERR/INVALID, 0 oracle regressions, full test suite
+green.
 
 ### 7.2 Radial gradient (scoped out in §4, see the `6bcb673cf` commit)
 OOXML's radial gradient is expressed as an inset (`a:fillToRect`) into the

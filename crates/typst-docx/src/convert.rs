@@ -700,6 +700,27 @@ fn handle_block_inner(
         if let Some(block) = mappers::image::place(elem, styles, ctx)? {
             out.push(block);
         }
+    } else if (child.is::<typst_library::layout::BlockElem>() || is_framed_container(child))
+        && contains_place(child)
+        && let Some(run) = mappers::shape::transformed(child, styles, ctx)?
+    {
+        // A box/block/framed container whose ENTIRE content is a composition
+        // of `#place`-positioned native shapes — the common way a QR/barcode
+        // generator (e.g. `codetastic`) draws each module. `#place`'s own
+        // non-floating layout already composites its child into the SAME
+        // frame at an absolute position via an ordinary `push_frame` (not a
+        // special wrapper) — so from `collect_shapes`'s point of view, laying
+        // out the WHOLE container under `Target::Paged` (exactly what
+        // `mappers::shape::transformed` already does for a bare
+        // `#rotate`/`#scale`) makes this just an ordinary shape composition.
+        // Recovered as one INLINE (non-floating) drawing, sidestepping the
+        // "anchored drawing nested in a container" problem an earlier attempt
+        // hit (see COVERAGE.md §7.1c) — no `wp:anchor` is involved at all
+        // here.
+        out.push(Block::Para(Para {
+            props: ParaProps::default(),
+            content: vec![ParaChild::Run(run)],
+        }));
     } else if let Some(elem) = child.to_packed::<typst_library::layout::BlockElem>() {
         handle_block_box(ctx, elem, styles, out)?;
     } else if is_framed_container(child) && handle_block_framed(ctx, child, styles, out)? {
@@ -982,10 +1003,29 @@ fn stamp_box_decorations(
 /// Whether a native element is a framed container (`#box`/`#rect`/`#square`) that
 /// might carry a body — the candidates for the block-level shaded-paragraph or
 /// the inline text-box treatment.
-fn is_framed_container(child: &Content) -> bool {
+pub(crate) fn is_framed_container(child: &Content) -> bool {
     use typst_library::layout::BoxElem;
     use typst_library::visualize::{RectElem, SquareElem};
     child.is::<BoxElem>() || child.is::<RectElem>() || child.is::<SquareElem>()
+}
+
+/// Cheap pre-filter for [`mappers::shape::transformed`]'s container path:
+/// whether `child` (a box/block/framed container) has a `#place(..)`
+/// *anywhere* inside it — the shape it should attempt to recover. Skipping
+/// the (much more expensive) layout-and-extract attempt for the overwhelming
+/// majority of ordinary boxes/blocks that never use `#place` keeps this a
+/// no-cost check for typical documents.
+pub(crate) fn contains_place(child: &Content) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::layout::PlaceElem;
+    matches!(
+        child.traverse(&mut |e: Content| if e.is::<PlaceElem>() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }),
+        ControlFlow::Break(())
+    )
 }
 
 /// Maps a BLOCK-LEVEL framed container with *flowing* content to shaded +
