@@ -1008,6 +1008,18 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // paragraphs upstream and never reach here.)
             out.push(Run::Break);
             self.last_char = None;
+        } else if let Some(elem) = child.to_packed::<typst_library::layout::VElem>() {
+            // Vertical spacing that reached a run-only context (a plain box's
+            // body extracted inline, a footnote, …) — like `ParbreakElem` above,
+            // Word has no run-level vertical-space primitive, so approximate
+            // with a line break rather than silently dropping it (which would
+            // otherwise crush the surrounding content together with no gap at
+            // all — worse than an imprecise break). Zero amount → genuinely
+            // nothing to preserve.
+            if !elem.amount.is_zero() {
+                out.push(Run::Break);
+                self.last_char = None;
+            }
         } else if let Some(elem) = child.to_packed::<SmartQuoteElem>() {
             let double = elem.double.get(styles);
             let quote: EcoString = if elem.enabled.get(styles) {
@@ -1155,6 +1167,26 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         } else if let Some(elem) = child.to_packed::<typst_library::pdf::PdfMarkerTag>() {
             // A tagged-PDF accessibility delimiter wraps real inline content; it
             // has no DOCX meaning, so unwrap it and lower the body.
+            out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
+        } else if let Some(elem) = child.to_packed::<typst_library::pdf::ArtifactElem>() {
+            // `#pdf.artifact[..]` marks content as decorative for PDF
+            // accessibility (a repeated logo, a code listing's line-number
+            // gutter, …) — DOCX has no artifact concept, so unwrap and lower
+            // the body like any other content instead of rasterizing the
+            // whole marked region (which had been silently discarding
+            // whatever real text/shapes it wrapped).
+            out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
+        } else if let Some(elem) = child.to_packed::<typst_library::layout::GridCell>() {
+            // A bare `grid.cell(..)` reached as ordinary inline content — see
+            // the matching arm in `convert::convert_children` for how this
+            // shows up (a user-authored `grid.cell(..)` nested inside
+            // `#pdf.artifact(..)`, one layer inside Typst's own uniform outer
+            // cell wrapper). Unwrap and lower its body like any other wrapper.
+            out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
+        } else if let Some(elem) =
+            child.to_packed::<typst_library::model::TableCell>()
+        {
+            // Same as `GridCell` above, for `#table.cell(..)`.
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<typst_library::layout::HideElem>() {
             // `#hide[..]` → hidden text (`<w:vanish/>`): invisible but present

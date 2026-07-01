@@ -6,7 +6,7 @@ use typst_library::introspection::TagElem;
 use typst_library::math::EquationElem;
 use typst_library::model::{
     EnumElem, FigureElem, HeadingElem, ListElem, OutlineElem, ParElem, ParbreakElem,
-    QuoteElem, TableElem, TermsElem,
+    QuoteElem, TableCell, TableElem, TermsElem,
 };
 use typst_library::routines::Pair;
 
@@ -512,6 +512,28 @@ fn handle_block_inner(
         // A PDF accessibility delimiter wraps real content (`body`); it has no DOCX
         // meaning itself, so unwrap it and lower the body (otherwise the wrapped
         // content — a whole figure, list, paragraph — is dropped).
+        out.extend(ctx.blocks(&elem.body, styles)?);
+    } else if let Some(elem) = child.to_packed::<typst_library::pdf::ArtifactElem>() {
+        // `#pdf.artifact[..]` marks content as decorative for PDF accessibility
+        // (a repeated logo, a code listing's line-number gutter, a grid cell
+        // wrapping one of these, …) — same idea as `PdfMarkerTag` above: DOCX has
+        // no artifact concept, so unwrap and lower the body natively instead of
+        // rasterizing the whole marked region.
+        out.extend(ctx.blocks(&elem.body, styles)?);
+    } else if let Some(elem) = child.to_packed::<typst_library::layout::GridCell>() {
+        // A bare `grid.cell(..)` reached as ordinary content — not via the
+        // table mapper's own cell extraction (`mappers::table::cell_blocks`),
+        // which unwraps a *resolved* grid entry's `GridCell` wrapper directly.
+        // This happens one layer down: a user explicitly calling `grid.cell(..)`
+        // (e.g. to set a per-cell `fill`) inside `#pdf.artifact(..)` produces
+        // `GridCell(ArtifactElem(GridCell(body)))` once Typst's own grid
+        // resolution adds its uniform outer `GridCell` wrapper — the inner,
+        // user-authored `GridCell` has no meaning outside its parent grid's
+        // cell lattice, so unwrap it and lower its own body like any other
+        // wrapper instead of rasterizing.
+        out.extend(ctx.blocks(&elem.body, styles)?);
+    } else if let Some(elem) = child.to_packed::<TableCell>() {
+        // Same as `GridCell` above, for `#table.cell(..)`.
         out.extend(ctx.blocks(&elem.body, styles)?);
     } else if child.is::<typst_library::layout::PagebreakElem>() {
         // A page break maps to a `<w:br w:type="page"/>` in its own paragraph.

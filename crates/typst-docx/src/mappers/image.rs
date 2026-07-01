@@ -316,12 +316,26 @@ fn place_body_drawing(
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Drawing>> {
     // Lower the body like any block and pull out its first standalone drawing
-    // (covers a bare image, a centered figure-less image, etc.).
+    // (covers a bare image, a centered figure-less image, etc.) — but only
+    // trust that extraction when the body produced NOTHING else. Blindly
+    // taking the first drawing regardless of what else `blocks` holds is a
+    // real content-loss bug: a placed body richer than a lone image/shape
+    // (e.g. a decorative pattern whose own children fan out into several
+    // separately-lowered blocks) would silently drop everything past the
+    // first drawing found. Rasterize the WHOLE body instead in that case, so
+    // nothing is lost even though it costs the vector fidelity.
     let mut blocks = ctx.blocks(body, styles)?;
-    if let Some(drawing) = take_first_drawing(&mut blocks) {
+    let is_solely_one_drawing = matches!(
+        blocks.as_slice(),
+        [Block::Para(p)] if matches!(p.content.as_slice(), [ParaChild::Run(Run::Drawing(_))])
+    );
+    if is_solely_one_drawing
+        && let Some(drawing) = take_first_drawing(&mut blocks)
+    {
         return Ok(Some(drawing));
     }
-    // No native image inside: rasterize the whole placed body to a PNG.
+    // No native image inside (or richer content that must stay together):
+    // rasterize the whole placed body to a PNG.
     match laid_out_fallback(body, styles, ctx)? {
         Some(Run::Drawing(drawing)) => Ok(Some(drawing)),
         _ => Ok(None),

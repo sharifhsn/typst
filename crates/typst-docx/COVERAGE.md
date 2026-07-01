@@ -374,6 +374,72 @@ with `measure()` calls, genuinely opaque content, not a plain shape
 composition. 0 new EXPORT_ERR/INVALID, 0 oracle regressions, full test suite
 green.
 
+### 7.1d Categorized sweep: `#v`, `#pdf.artifact`, and a content-loss bug — IMPLEMENTED
+A full `DOCX_DEBUG_RASTER` sweep by element kind (not just `move`/`place`)
+found several more gaps, each investigated to a concrete root cause before
+fixing (a couple of dead ends included, recorded honestly):
+
+**Bare `#v()` reaching a run-only context.** A plain (no fill/stroke) box
+whose body mixes text and `#v()` (a common pattern for a two-line label —
+e.g. `box[#text(..)[name] #v(-.7em) #text(..)[title]]`, used 46 docs
+corpus-wide, 484 times alone in the `caidan` flyer template's per-item
+macro) gets flattened to inline content, but `handle_inline` had no arm for
+`VElem` — it silently vanished (not even a warning: `VElem` was already in
+`is_invisible_noop`), crushing the surrounding text together with no gap.
+Fixed with the same idea `ParbreakElem` already uses one arm up: approximate
+with a line break (`Run::Break`) rather than trying to preserve the exact
+spacing, which Word has no run-level primitive for anyway. Corpus-wide
+`RASTERIZE: v` (a spurious debug artifact of the old silent-drop path) drops
+1103->0.
+
+**`#pdf.artifact[..]` had no handler anywhere.** Zero dispatch arms in
+either `handle_inline` or `convert_children` — any accessibility-marked
+content (a decorative logo, or a code-listing package like `zebraw` marking
+its line-number gutter cells as artifacts) rasterized whole. Fixed by
+unwrapping it exactly like the existing `PdfMarkerTag` arm (no DOCX artifact
+concept, so just lower the body) in both places. This surfaced one more
+layer: `zebraw` wraps `pdf.artifact(grid.cell(..))` — a user-authored
+`grid.cell` nested inside the artifact — and Typst's own grid resolution
+adds ITS OWN uniform outer `GridCell` wrapper regardless, so unwrapping the
+artifact reveals a bare inner `GridCell`/`TableCell` with no meaning outside
+its parent grid's cell lattice and no dispatch arm of its own. Added one for
+each (unwrap to `.body`, lower like any other wrapper) in both dispatchers.
+Validated on the `unofficial-ouc-bachelor-thesis` corpus doc: its zebraw code
+listings' line numbers, previously silently dropped, now render (LibreOffice-
+verified); a full corpus oracle A/B confirms this as a pure recovery (higher
+`nums` signal — more numbers correctly present — not a regression), plus two
+`touying`-family presentation templates recovered section-title text via the
+same `[]`-placeholder pattern documented in §7.1a, and one previously-EXPORT_ERR
+doc (`wenyuan-campaign`, a label-resolution convergence failure) now compiles
+successfully as an unplanned side effect.
+
+**A genuine content-loss bug, found along the way (not itself about
+rasterization):** `mappers::image::place_body_drawing`'s `take_first_drawing`
+unconditionally took the *first* native drawing found in a placed body's
+lowered blocks and discarded everything else — silently, with no warning. A
+`#place`d body richer than a lone image/shape (rare, but real) would lose
+all but its first block. Fixed to only trust that shortcut when the body
+produced *exactly* one paragraph holding *exactly* one drawing; anything
+richer now rasterizes the whole body instead (preserving all the visual
+content, even at the cost of vector fidelity, rather than an arbitrary
+silent truncation).
+
+**Investigated, not fully resolved: `visualization/dudi-colorful-slides`'s
+540 `RASTERIZE: polygon`.** This template's `regular-pattern`/`triangle-grid`
+helpers build decorative arrays of triangles via repeated `shapes.push(polygon(..))`
+then `stack(dir: ltr, spacing: 0pt, ..shapes)`, wrapped in a bare `#place(..)`.
+A minimal repro of that exact shape (`place(stack(polygon, polygon))`)
+correctly rasterizes as one whole `RASTERIZE: stack` image, not per-polygon —
+so the real document's per-polygon rasterization has some additional
+wrinkle not yet isolated (`triangle-grid`'s own loop nesting looks
+questionable — a `stack(..)` call sits *outside* the inner per-cell loop but
+*inside* the outer per-row loop, in the package's own source, meaning its
+result is one of several bare content-producing statements silently joined
+by Typst's own block-scoping rules — worth a closer look, but not chased
+further this pass given it's concentrated in one corpus doc). The
+`take_first_drawing` fix above was found while investigating this and is a
+real, independent win either way.
+
 ### 7.2 Radial gradient (scoped out in §4, see the `6bcb673cf` commit)
 OOXML's radial gradient is expressed as an inset (`a:fillToRect`) into the
 *shape's own bounding box* — an ellipse whose size is implied by how far the
