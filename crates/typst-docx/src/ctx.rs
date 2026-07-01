@@ -1154,6 +1154,20 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // A decorative vector shape (`#rect`/`#circle`/`#polygon`/…) maps to a
             // DrawingML `wps:wsp` shape instead of a rasterized image.
             out.push(run);
+        } else if let Some(elem) = child.to_packed::<typst_library::visualize::CurveElem>()
+            && let Some(run) = mappers::shape::curve(elem, styles, self)?
+        {
+            // `#curve` — straight and cubic-Bézier segments — maps to a native
+            // `a:custGeom` path instead of rasterizing (a solid fill/stroke; a
+            // gradient/tiling one falls through to the rasterize path below).
+            out.push(run);
+        } else if let Some(elem) = child.to_packed::<typst_library::visualize::LineElem>()
+            && let Some(run) = mappers::shape::line(elem, styles, self)?
+        {
+            // A diagonal or explicit-endpoint `#line` (a horizontal rule is
+            // already handled as a paragraph border, earlier in the block
+            // dispatch) maps to a native open path, same as `curve` above.
+            out.push(run);
         } else {
             // No idiomatic representation (a drawn shape, an SVG/PDF image, an
             // externally-rendered figure, …): rasterize it and embed as an image

@@ -15,7 +15,7 @@ use typst_library::visualize::{
 };
 
 use crate::ctx::DocxCtx;
-use crate::dom::{Drawing, Run, ShapeGeom, ShapeSpec, ShapeStroke, TextBox};
+use crate::dom::{Drawing, PathSegment, Run, ShapeGeom, ShapeSpec, ShapeStroke, TextBox};
 use crate::props::{abs_to_emu, color_to_hex};
 
 /// Maps a shape element to a vector DrawingML shape run, or `None` to rasterize.
@@ -318,13 +318,15 @@ fn build(child: &Content, styles: StyleChain) -> Option<(Abs, Abs, ShapeSpec)> {
         if max_x.to_pt() <= 0.0 || max_y.to_pt() <= 0.0 {
             return None;
         }
-        let emu = pts
-            .iter()
-            .map(|p| (abs_to_emu(p.0), abs_to_emu(p.1)))
-            .collect();
+        let mut segments = Vec::with_capacity(pts.len() + 1);
+        for (i, p) in pts.iter().enumerate() {
+            let (x, y) = (abs_to_emu(p.0), abs_to_emu(p.1));
+            segments.push(if i == 0 { PathSegment::MoveTo(x, y) } else { PathSegment::LineTo(x, y) });
+        }
+        segments.push(PathSegment::Close);
         let fill = fill_color(e.fill.get_ref(styles))?;
         let stroke = single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
-        let geom = ShapeGeom::Path { points: emu, closed: true };
+        let geom = ShapeGeom::Path(segments);
         Some((max_x, max_y, ShapeSpec { geom, fill, stroke, txbx: None }))
     } else {
         None
@@ -405,4 +407,264 @@ fn resolve_stroke(stroke: Stroke, styles: StyleChain) -> Option<ShapeStroke> {
         }
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Arbitrary vector paths: `#curve` and a diagonal/endpoint-defined `#line`.
+// ---------------------------------------------------------------------------
+//
+// Both lay out to a single `Shape` item (`Geometry::Curve`/`Geometry::Line`)
+// whose points are already fully resolved (percentages, `auto`-mirrored Bézier
+// control points, relative-to-pen coordinates) by the shared layouter — the
+// same code every other export target uses, so this reuses it rather than
+// re-deriving that resolution logic. `#curve`'s Move/Line/Cubic/Close items map
+// 1:1 onto OOXML `a:custGeom`'s moveTo/lnTo/cubicBezTo/close; a `#line` is the
+// simplest case, a single open two-point path.
+
+/// Maps a `#curve` — straight and cubic-Bézier segments — to a native
+/// `a:custGeom` vector shape, or `None` to rasterize (a non-solid fill/stroke,
+/// or a degenerate/zero-size result).
+pub fn curve(
+    elem: &typst_library::foundations::Packed<typst_library::visualize::CurveElem>,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Option<Run>> {
+    let frame = layout_shape_frame(ctx, styles, elem.span(), |engine, locator, region| {
+        typst_layout::layout_curve(elem, engine, locator, styles, region)
+    })?;
+    build_path_shape(ctx, &frame)
+}
+
+/// Maps a diagonal or explicit-endpoint `#line` to a native open `a:custGeom`
+/// path (a horizontal rule is handled earlier, as a paragraph border — see
+/// `convert::handle_block_inner`). `None` to rasterize, for the same reasons as
+/// [`curve`].
+pub fn line(
+    elem: &typst_library::foundations::Packed<typst_library::visualize::LineElem>,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Option<Run>> {
+    let frame = layout_shape_frame(ctx, styles, elem.span(), |engine, locator, region| {
+        typst_layout::layout_line(elem, engine, locator, styles, region)
+    })?;
+    build_path_shape(ctx, &frame)
+}
+
+/// Lays out a shape element to a [`typst_library::layout::Frame`] via the
+/// shared layouter, sized against the page's content area (mirroring how
+/// rasterized content is sized) since `#curve`/`#line` points may be given as
+/// percentages of their container.
+fn layout_shape_frame(
+    ctx: &mut DocxCtx,
+    _styles: StyleChain,
+    span: typst_syntax::Span,
+    layout: impl FnOnce(
+        &mut typst_library::engine::Engine,
+        typst_library::introspection::Locator,
+        typst_library::layout::Region,
+    ) -> SourceResult<typst_library::layout::Frame>,
+) -> SourceResult<typst_library::layout::Frame> {
+    use typst_library::layout::{Axes, Region, Size};
+    let region = Region::new(Size::new(ctx.raster_width, ctx.raster_height), Axes::splat(false));
+    let locator = ctx.next_locator(span);
+    layout(ctx.engine(), locator, region)
+}
+
+/// Extracts the frame's one `Shape` item and lowers its geometry (a
+/// `Geometry::Curve` or `Geometry::Line`) into a [`ShapeSpec`] — a native path
+/// shape — or `None` if the fill/stroke can't be represented, or the path is
+/// empty/degenerate.
+fn build_path_shape(ctx: &mut DocxCtx, frame: &typst_library::layout::Frame) -> SourceResult<Option<Run>> {
+    use typst_library::layout::FrameItem;
+    use typst_library::visualize::Geometry;
+
+    let Some((pos, FrameItem::Shape(shape, _))) =
+        frame.items().find(|(_, item)| matches!(item, FrameItem::Shape(..)))
+    else {
+        return Ok(None);
+    };
+    let pos = *pos;
+
+    let Some(fill) = resolved_fill(&shape.fill) else { return Ok(None) };
+    let Some(stroke) = resolved_stroke(&shape.stroke) else { return Ok(None) };
+
+    // The frame item's own position matters: `layout_line` pushes its `Shape`
+    // at `start.to_point()` (not the origin) and the geometry is only the
+    // *delta* from there — so the position must be added back in, or the
+    // line's true start/end (and hence its bounding box) comes out wrong.
+    // `layout_curve` always pushes at `Point::zero()`, but folding `pos` in
+    // unconditionally is correct either way and future-proofs against that
+    // changing.
+    let raw = match &shape.geometry {
+        Geometry::Curve(curve) => raw_segments_from_curve(curve, pos),
+        Geometry::Line(delta) => {
+            vec![RawSeg::Move(pos), RawSeg::Line(pos + *delta)]
+        }
+        Geometry::Rect(_) => return Ok(None),
+    };
+    if raw.is_empty() {
+        return Ok(None);
+    }
+
+    let Some((segments, w, h)) = normalize_segments(raw) else { return Ok(None) };
+    // A perfectly horizontal/vertical line is legitimately degenerate on one
+    // axis; floor it to 1 EMU (imperceptible) rather than the 0 Word handles
+    // poorly for a drawing extent. `normalize_segments` already bailed when
+    // BOTH axes are degenerate (nothing to draw).
+    let w_emu = abs_to_emu(w).max(1);
+    let h_emu = abs_to_emu(h).max(1);
+
+    let docpr_id = ctx.next_drawing_id();
+    let name = ecow::eco_format!("Shape {docpr_id}");
+    Ok(Some(Run::Drawing(Drawing {
+        rel: EcoString::new(),
+        w_emu,
+        h_emu,
+        alt: None,
+        docpr_id,
+        name,
+        anchor: None,
+        shape: Some(ShapeSpec {
+            geom: ShapeGeom::Path(segments),
+            fill,
+            stroke,
+            txbx: None,
+        }),
+    })))
+}
+
+/// A resolved (post-layout) fill → its solid colour, or `None` (no fill).
+/// Returns the OUTER `None` when the paint is a gradient/tiling/pattern — no
+/// flat OOXML form — so the caller bails to rasterize.
+fn resolved_fill(fill: &Option<Paint>) -> Option<Option<[u8; 3]>> {
+    match fill {
+        None => Some(None),
+        Some(Paint::Solid(c)) => Some(Some(color_to_hex(c))),
+        Some(_) => None,
+    }
+}
+
+/// A resolved (post-layout) stroke → a uniform [`ShapeStroke`]. Same
+/// outer/inner `None` convention as [`resolved_fill`].
+fn resolved_stroke(
+    stroke: &Option<typst_library::visualize::FixedStroke>,
+) -> Option<Option<ShapeStroke>> {
+    match stroke {
+        None => Some(None),
+        Some(fx) => match &fx.paint {
+            Paint::Solid(c) => {
+                Some(Some(ShapeStroke { color: color_to_hex(c), w_emu: abs_to_emu(fx.thickness) }))
+            }
+            _ => None,
+        },
+    }
+}
+
+/// A curve/line command in the shape's own (possibly negative) coordinate
+/// space, before the shift to OOXML's non-negative convention.
+enum RawSeg {
+    Move(typst_library::layout::Point),
+    Line(typst_library::layout::Point),
+    Cubic(
+        typst_library::layout::Point,
+        typst_library::layout::Point,
+        typst_library::layout::Point,
+    ),
+    Close,
+}
+
+/// Lowers a resolved [`typst_library::visualize::Curve`] into [`RawSeg`]s,
+/// mirroring the SVG/PDF exporters' own item walk (`CurveItem::Move` →
+/// `RawSeg::Move`, …) — the direct, 1:1 translation of Typst's Bézier
+/// vocabulary into OOXML's. `pos` is the frame item's own position (added to
+/// every point; see the caller's note on why this matters).
+fn raw_segments_from_curve(
+    curve: &typst_library::visualize::Curve,
+    pos: typst_library::layout::Point,
+) -> Vec<RawSeg> {
+    use typst_library::visualize::CurveItem;
+    curve
+        .0
+        .iter()
+        .map(|item| match item {
+            CurveItem::Move(p) => RawSeg::Move(pos + *p),
+            CurveItem::Line(p) => RawSeg::Line(pos + *p),
+            CurveItem::Cubic(c1, c2, end) => {
+                RawSeg::Cubic(pos + *c1, pos + *c2, pos + *end)
+            }
+            CurveItem::Close => RawSeg::Close,
+        })
+        .collect()
+}
+
+/// Shifts a path so every coordinate is non-negative (the OOXML `a:custGeom`
+/// convention — the path's own local space spans `[0, w] x [0, h]`) and
+/// converts to EMU, returning the segments plus the path's true bounding size.
+///
+/// The bound is conservative rather than the mathematically tight curve
+/// extent: for a cubic segment it includes the two control points as well as
+/// the endpoints. A cubic Bézier always lies within the convex hull of its 4
+/// control points, so this never clips the curve — unlike reusing the laid-out
+/// frame's own `size()`, which only tracks the *positive* extent (see
+/// `CurveBuilder::expand_bounds` in `typst-layout`) and would silently clip any
+/// segment that dips negative.
+fn normalize_segments(raw: Vec<RawSeg>) -> Option<(Vec<PathSegment>, Abs, Abs)> {
+    let mut min_x = Abs::zero();
+    let mut min_y = Abs::zero();
+    let mut max_x = Abs::zero();
+    let mut max_y = Abs::zero();
+    let mut expand = |p: typst_library::layout::Point| {
+        min_x = min_x.min(p.x);
+        min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
+        max_y = max_y.max(p.y);
+    };
+    for seg in &raw {
+        match seg {
+            RawSeg::Move(p) | RawSeg::Line(p) => expand(*p),
+            RawSeg::Cubic(c1, c2, end) => {
+                expand(*c1);
+                expand(*c2);
+                expand(*end);
+            }
+            RawSeg::Close => {}
+        }
+    }
+    let (w, h) = (max_x - min_x, max_y - min_y);
+    if !w.to_pt().is_finite() || !h.to_pt().is_finite() {
+        return None;
+    }
+    // A perfectly horizontal or vertical `#line` is legitimately degenerate on
+    // ONE axis (it is a 1-D stroke, not a 2-D fill region) — floor that axis to
+    // a single, visually imperceptible EMU rather than bailing to rasterize
+    // (Word accepts a zero-size drawing extent poorly, but not a 1-EMU one). A
+    // point (both axes degenerate — a zero-length line) has nothing to draw.
+    if w.to_pt() <= 0.0 && h.to_pt() <= 0.0 {
+        return None;
+    }
+
+    let shift = |p: typst_library::layout::Point| -> (i64, i64) {
+        (abs_to_emu(p.x - min_x), abs_to_emu(p.y - min_y))
+    };
+    let segments = raw
+        .into_iter()
+        .map(|seg| match seg {
+            RawSeg::Move(p) => {
+                let (x, y) = shift(p);
+                PathSegment::MoveTo(x, y)
+            }
+            RawSeg::Line(p) => {
+                let (x, y) = shift(p);
+                PathSegment::LineTo(x, y)
+            }
+            RawSeg::Cubic(c1, c2, end) => {
+                let (c1x, c1y) = shift(c1);
+                let (c2x, c2y) = shift(c2);
+                let (ex, ey) = shift(end);
+                PathSegment::CubicTo(c1x, c1y, c2x, c2y, ex, ey)
+            }
+            RawSeg::Close => PathSegment::Close,
+        })
+        .collect();
+    Some((segments, w, h))
 }

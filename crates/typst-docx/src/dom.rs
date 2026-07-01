@@ -37,6 +37,14 @@ pub struct DocxDocument {
     pub(crate) header_parts: Vec<HdrFtrPart>,
     /// Footer parts (`word/footerN.xml`) referenced by the section(s).
     pub(crate) footer_parts: Vec<HdrFtrPart>,
+    /// `set page(fill: solid-color)` — a flat page background colour, from the
+    /// first section. Maps to the document-level `w:background` element
+    /// (Word's "Page Color"), distinct from `set page(background:)` (a full-page
+    /// image/art, which becomes a `behindDoc` drawing instead).
+    pub(crate) background_color: Option<[u8; 3]>,
+    /// Whether the document enables hyphenation (`#set text(hyphenate: ..)`,
+    /// resolved at the root style chain). Emits `w:autoHyphenation`.
+    pub(crate) hyphenate: bool,
 }
 
 impl DocxDocument {
@@ -403,8 +411,22 @@ pub enum ShapeGeom {
     Rect,
     RoundRect,
     Ellipse,
-    /// A path: the points, and whether it is closed (a polygon) or open (a line).
-    Path { points: Vec<(i64, i64)>, closed: bool },
+    /// An arbitrary vector path — straight and cubic-Bézier segments, mapping
+    /// 1:1 to `#curve`'s Move/Line/Cubic/Close (a `#polygon`, or a diagonal
+    /// `#line`, is the all-straight-segment special case). Coordinates are
+    /// pre-shifted so the whole path is non-negative, matching the shape's
+    /// declared bounding box (the OOXML `a:custGeom` coordinate convention).
+    Path(Vec<PathSegment>),
+}
+
+/// One command in a [`ShapeGeom::Path`], mapping to an OOXML `a:path` child
+/// element (`a:moveTo`/`a:lnTo`/`a:cubicBezTo`/`a:close`).
+pub enum PathSegment {
+    MoveTo(i64, i64),
+    LineTo(i64, i64),
+    /// Cubic Bézier: control 1, control 2, end point.
+    CubicTo(i64, i64, i64, i64, i64, i64),
+    Close,
 }
 
 pub struct ShapeStroke {

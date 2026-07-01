@@ -254,6 +254,8 @@ pub fn docx_document(
         introspector: Arc::new(introspector),
         header_parts,
         footer_parts,
+        background_color: first_geom.background_color,
+        hyphenate: first_geom.hyphenate,
     })
 }
 
@@ -404,6 +406,15 @@ struct SectGeom {
     /// `set page(background:)` content — a full-page image/art drawn behind the
     /// text. Emitted as a `behindDoc` page-anchored drawing in the header.
     background: Option<Content>,
+    /// `set page(fill: solid-color)` — a flat page background colour (Word's
+    /// "Page Color"). `None` for `auto`/`none`/a gradient or tiling fill (which
+    /// has no native `w:background` form and is left unset, matching Word's
+    /// own default of no page colour).
+    background_color: Option<[u8; 3]>,
+    /// Whether the section's body resolves to hyphenation enabled
+    /// (`#set text(hyphenate: ..)`, `auto` following justification). Emitted
+    /// document-wide as `w:autoHyphenation` (OOXML has no per-section form).
+    hyphenate: bool,
 }
 
 /// Splits the document into page-geometry sections, mirroring
@@ -553,6 +564,25 @@ fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGe
     };
     let background =
         sc.get_ref(PageElem::background).clone().filter(|c| !c.is_empty());
+    // A flat solid page-colour maps natively; `auto` (none), an explicit `none`,
+    // or a gradient/tiling paint have no `w:background` form and are left unset
+    // (a gradient page fill still reaches Word via `background:` if the author
+    // also sets one; otherwise it is silently not represented, matching how a
+    // gradient shape fill behaves before the native-gradient shape work).
+    let background_color = match sc.get_ref(PageElem::fill) {
+        Smart::Custom(Some(typst_library::visualize::Paint::Solid(c))) => {
+            Some(props::color_to_hex(c))
+        }
+        _ => None,
+    };
+
+    // `auto` (the default) follows justification, exactly as text layout
+    // resolves it — so a justified, hyphenated Typst document keeps that
+    // intent in Word instead of silently losing it (Word's own default is off).
+    let hyphenate = match sc.get(TextElem::hyphenate) {
+        Smart::Custom(v) => v,
+        Smart::Auto => sc.get(typst_library::model::ParElem::justify),
+    };
 
     SectGeom {
         page_w: props::abs_to_twip(size.x),
@@ -575,6 +605,8 @@ fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGe
         footer,
         footer_suppressed,
         background,
+        background_color,
+        hyphenate,
     }
 }
 

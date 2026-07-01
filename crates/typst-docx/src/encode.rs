@@ -7,8 +7,8 @@ use typst_library::model::DocumentInfo;
 
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, Drawing, DocxDocument,
-    Field, Footnote, HdrFtrPart, Para, ParaChild, Row, Run, SectPr, SectType, ShapeGeom,
-    ShapeSpec, Tbl, Toc, VAlign, VMerge,
+    Field, Footnote, HdrFtrPart, Para, ParaChild, PathSegment, Row, Run, SectPr, SectType,
+    ShapeGeom, ShapeSpec, Tbl, Toc, VAlign, VMerge,
 };
 use crate::package::{Package, RelMode, Rels};
 use crate::styles_part;
@@ -273,6 +273,14 @@ fn build_document(document: &DocxDocument, pretty: bool) -> String {
     w.open(xml::W_DOCUMENT);
     decl_ooxml_namespaces(&mut w);
     w.attr("mc:Ignorable", "w14 wp14").start_children();
+
+    // A flat page-colour (`set page(fill:)`) is a document-level element — one
+    // per package, a sibling of `w:body` — mirroring Word's own "Page Color".
+    if let Some(c) = document.background_color {
+        w.open("w:background")
+            .attr("w:color", &crate::props::hex(c))
+            .empty();
+    }
 
     w.open(xml::W_BODY).start_children();
 
@@ -782,7 +790,7 @@ fn write_shape_payload(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec) {
             w.open("a:avLst").empty();
             w.close();
         }
-        ShapeGeom::Path { points, closed } => {
+        ShapeGeom::Path(segments) => {
             let (cx, cy) = (d.w_emu.to_string(), d.h_emu.to_string());
             w.open("a:custGeom").start_children();
             for empty in ["a:avLst", "a:gdLst", "a:ahLst", "a:cxnLst"] {
@@ -796,17 +804,31 @@ fn write_shape_payload(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec) {
                 .empty();
             w.open("a:pathLst").start_children();
             w.open("a:path").attr("w", &cx).attr("h", &cy).start_children();
-            if let Some((x0, y0)) = points.first() {
-                w.open("a:moveTo").start_children();
-                w.open("a:pt").attr("x", &x0.to_string()).attr("y", &y0.to_string()).empty();
-                w.close();
-                for (x, y) in &points[1..] {
-                    w.open("a:lnTo").start_children();
-                    w.open("a:pt").attr("x", &x.to_string()).attr("y", &y.to_string()).empty();
-                    w.close();
-                }
-                if *closed {
-                    w.open("a:close").empty();
+            let pt = |w: &mut XmlWriter, x: i64, y: i64| {
+                w.open("a:pt").attr("x", &x.to_string()).attr("y", &y.to_string()).empty();
+            };
+            for seg in segments {
+                match *seg {
+                    PathSegment::MoveTo(x, y) => {
+                        w.open("a:moveTo").start_children();
+                        pt(w, x, y);
+                        w.close();
+                    }
+                    PathSegment::LineTo(x, y) => {
+                        w.open("a:lnTo").start_children();
+                        pt(w, x, y);
+                        w.close();
+                    }
+                    PathSegment::CubicTo(c1x, c1y, c2x, c2y, ex, ey) => {
+                        w.open("a:cubicBezTo").start_children();
+                        pt(w, c1x, c1y);
+                        pt(w, c2x, c2y);
+                        pt(w, ex, ey);
+                        w.close();
+                    }
+                    PathSegment::Close => {
+                        w.open("a:close").empty();
+                    }
                 }
             }
             w.close(); // a:path
@@ -1201,6 +1223,12 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
     w.open("w:zoom").attr("w:percent", "100").empty();
     w.open("w:proofState").attr("w:spelling", "clean").attr("w:grammar", "clean").empty();
     w.open("w:defaultTabStop").attr(xml::W_VAL, "720").empty();
+    // A bare element (no `w:val`) — Word's own CT_OnOff-by-presence convention —
+    // between defaultTabStop and characterSpacingControl, the schema position
+    // Word itself uses.
+    if document.hyphenate {
+        w.leaf("w:autoHyphenation");
+    }
     w.open("w:characterSpacingControl").attr(xml::W_VAL, "doNotCompress").empty();
     if document.uses_fields {
         w.open("w:updateFields").attr(xml::W_VAL, "true").empty();

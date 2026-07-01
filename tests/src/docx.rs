@@ -151,6 +151,47 @@ fn stroke_none_table_has_no_cell_borders() {
 }
 
 #[test]
+fn curve_maps_to_a_native_bezier_path() {
+    // `#curve` (straight + cubic-Bézier segments) must map to a native
+    // `a:custGeom` path with real `a:cubicBezTo` commands — not rasterize —
+    // when its fill/stroke are solid colours.
+    let p = parts(
+        "#curve(\
+           fill: blue, \
+           curve.move((0pt, 50pt)), \
+           curve.line((100pt, 50pt)), \
+           curve.cubic(none, (90pt, 0pt), (50pt, 0pt)), \
+           curve.close(), \
+         )",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<a:custGeom>"), "curve becomes a custom geometry");
+    assert!(doc.contains("<a:cubicBezTo>"), "the Bézier segment is kept, not flattened");
+    assert!(!doc.contains("<w:drawing><wp:inline") || !doc.contains("<a:blip"), "not rasterized");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn diagonal_line_maps_to_a_native_shape() {
+    // A diagonal (or explicit-endpoint) `#line` has no paragraph-border form
+    // (that's reserved for the horizontal-rule idiom) — it must become a
+    // native open path instead of a rasterized image.
+    let p = parts("#line(start: (0pt, 0pt), end: (80pt, 40pt), stroke: 2pt + red)");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<a:custGeom>"), "a diagonal line becomes a custom geometry");
+    assert!(!doc.contains("<a:blip"), "not rasterized to an image");
+    assert_all_wellformed(&p);
+
+    // A horizontal line keeps its existing (nicer) paragraph-border mapping,
+    // unaffected by the new diagonal-line path.
+    let h = parts("#line(length: 100%)");
+    assert!(
+        h["word/document.xml"].contains("<w:pBdr>"),
+        "a horizontal line still becomes a paragraph border"
+    );
+}
+
+#[test]
 fn grid_cell_alignment_is_kept() {
     // `#grid` cell alignment must reach `w:jc` (it was only read off `#table`
     // cells before, silently dropping it for grids).
@@ -627,6 +668,55 @@ fn page_background_becomes_a_behind_text_header_image() {
     // The body text is unaffected.
     assert!(p["word/document.xml"].contains("Body text"));
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn solid_page_fill_becomes_a_native_page_color() {
+    // `set page(fill: solid-color)` (Word's "Page Color") maps to the
+    // document-level `w:background` element — no image, no header part.
+    let p = parts("#set page(fill: rgb(\"#f0e6d2\"))\nBody text.");
+    assert!(
+        p["word/document.xml"].contains("<w:background w:color=\"F0E6D2\"/>"),
+        "solid page fill becomes a native w:background"
+    );
+    // A gradient page fill has no native `w:background` form and is left unset
+    // (distinct from `background:`, which still rasterizes to a behindDoc image).
+    let g = parts(
+        "#set page(fill: gradient.linear(red, blue))\nBody text.",
+    );
+    assert!(
+        !g["word/document.xml"].contains("<w:background"),
+        "a gradient page fill is not forced into a flat w:background"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn hyphenation_intent_becomes_auto_hyphenation_setting() {
+    // `#set text(hyphenate: true)` (or plain justification, since `auto`
+    // follows it) must survive as `w:autoHyphenation` — otherwise Word (which
+    // defaults hyphenation OFF) silently drops the author's line-breaking
+    // intent. This is a document-wide flag, read from the body's own resolved
+    // style chain (NOT the pre-realize root styles, which don't see the body's
+    // own `#set` rules).
+    let explicit = parts("#set text(hyphenate: true)\nSome body text.");
+    assert!(
+        explicit["word/settings.xml"].contains("<w:autoHyphenation/>"),
+        "explicit hyphenate: true sets autoHyphenation"
+    );
+
+    let via_justify = parts("#set par(justify: true)\nSome body text.");
+    assert!(
+        via_justify["word/settings.xml"].contains("<w:autoHyphenation/>"),
+        "auto hyphenate follows justification, like Typst's own layout"
+    );
+
+    let off = parts("Some body text.");
+    assert!(
+        !off["word/settings.xml"].contains("autoHyphenation"),
+        "no hyphenation intent means no setting (Word's own default)"
+    );
+    assert_all_wellformed(&explicit);
 }
 
 #[test]
