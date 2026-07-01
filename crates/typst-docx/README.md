@@ -112,14 +112,16 @@ figure numbering stays consistent.
 | Figures (caption + cross-reference) | ✅ | caption via `SEQ` field + bookmark |
 | **PNG / JPEG / GIF** images | ✅ | embedded **verbatim** (no re-encode) |
 | **SVG / PDF / WebP** images | 🖼️ | rasterized to PNG (no native Word form) |
-| Rect, square, circle, ellipse, polygon (solid fill) | ✅ | **native vector** `wps:wsp` DrawingML |
+| Rect, square, circle, ellipse, polygon (solid **or linear-gradient** fill) | ✅ | **native vector** `wps:wsp` DrawingML — solid → `a:solidFill`, linear gradient → `a:gradFill` |
 | Framed text boxes (`#box`/`#rect[text]`) | ✅ | editable `wps:txbx`, or flowing shaded paragraphs |
 | Horizontal rules (`#line`) | ✅ | paragraph bottom border |
+| Diagonal / endpoint `#line` | ✅ | native open `a:custGeom` path |
+| `#curve` (straight + cubic-Bézier segments) | ✅ | native `a:custGeom` — `a:lnTo`/`a:cubicBezTo`/`a:close`, 1:1 with Typst's own Move/Line/Cubic/Close vocabulary |
+| Stroke dash pattern + line cap (on the above) | ✅ | `a:prstDash` (approximated to the nearest OOXML preset) + `a:ln cap` |
 | `#place(…)` (floating) | ✅ | `wp:anchor` float |
-| Gradient / tiling / pattern fills | 🖼️ | no flat OOXML form |
-| Curves (`#curve`), diagonal lines | 🖼️ | |
+| Radial / conic gradient, tiling / pattern fills | 🖼️ | no flat OOXML form (radial is anchored to the shape's bounding box in OOXML, not free center+radius — scoped out, see the README's shape-mapping notes below) |
 | Transforms (`#rotate`, `#scale`, `#move`, skew) | 🖼️ | |
-| CeTZ / fletcher / canvas drawings, diagrams | 🖼️ | the main rasterize category |
+| CeTZ / fletcher / canvas drawings, diagrams | 🖼️ | the main rasterize category — the individual shapes/lines/curves such a diagram draws are native *only* when they reach the exporter as standalone top-level elements; a diagram composed of many shapes inside one drawing callback still rasterizes as one image (see COVERAGE.md's forward-design notes for the `wpg:wgp` group-shape idea that would lift this) |
 
 ### Page layout
 
@@ -131,8 +133,10 @@ figure numbering stays consistent.
 | Headers / footers | ✅ | header/footer parts |
 | Page numbering | ✅ | `PAGE` field + `pgNumType` |
 | `set page(background: image)` | ✅ | full-page `behindDoc` header image |
+| `set page(fill: solid-color)` | ✅ | document-level `w:background` (Word's "Page Color") — a gradient/tiling fill is not (yet) representable this way and stays unset |
 | Multi-section (geometry changes, landscape appendix) | ✅ | section breaks |
 | Document metadata (title / author / date) | ✅ | `core.xml` |
+| Hyphenation intent (`#set text(hyphenate: ..)`, or `auto` following justification) | ✅ | `w:autoHyphenation` (Word defaults this OFF, so it must be stated explicitly to preserve the author's intent) |
 
 ### Unsupported (dropped, with a warning)
 

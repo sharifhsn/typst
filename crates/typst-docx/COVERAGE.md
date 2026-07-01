@@ -121,3 +121,130 @@ re-walk). Any "lower this container natively" change must be guarded to a
 specific structural signature and validated with the alphabetic-word oracle A/B
 (0 real loss) before shipping — the whitespace word count is fooled by pandoc
 `[]` placeholders.
+
+## 6. Official-Word-feature audit (against Word's own ribbon tabs)
+
+Method: walk Word's own tab structure (Home / Insert / Design / Layout /
+References / Review / Developer — the taxonomy Microsoft itself organizes the
+product around) and check each feature against a Typst source concept, not
+just against real-document samples (§2's axis). Two categories of outcome:
+
+### Genuine gaps found and fixed this pass
+| Word feature | Typst source | Fix |
+|---|---|---|
+| Design ▸ Page Color | `set page(fill: solid-color)` | native `w:background` (§ README "Page layout") |
+| (no direct ribbon home — an editing default) | `#set text(hyphenate: ..)` / `auto` following justification | `w:autoHyphenation`, Word's own schema position |
+
+Both were silent losses: Typst carried the exact signal, the exporter simply
+never read it. Neither needed a design decision — once found, they were a
+single style-chain read each (see the `dfa2f2da3` commit for the false start:
+the first attempt read the pre-realize root `styles`, which never sees the
+body's own `#set` rules — fixed by reading from the *realized* section's style
+chain, the same one `PageElem::fill`/`background` already correctly use).
+
+### Confirmed already covered (audit ruled these out, not gaps)
+- **Alt text** (`wp:docPr descr`) — already wired from `image(alt: ..)`.
+- **Table of Figures** (References ▸ Captions) — already supported via
+  `#outline(target: figure)` → a `\c "Figure"` TOC field (`mappers/outline.rs`).
+- **Watermark** (Design ▸ Page Background) — already covered by the general
+  `set page(background:)` → `behindDoc` header-image mechanism (a rotated,
+  semi-transparent watermark is just a rasterized background image, same as
+  any other page background).
+
+### Out of scope — no Typst source concept (not exporter gaps)
+Word features that have **no corresponding Typst language construct**, so
+there is nothing for the exporter to read regardless of effort:
+- **Mailings** (mail merge, envelopes, labels) — a Typst compile always
+  produces one fixed document; there is no data-source/merge-field pipeline.
+- **Review** (Track Changes, Comments, Compare) — no revision/annotation
+  concept in Typst source; a compile is a single final render, not a diff.
+- **Developer** (content controls — checkbox/dropdown/date-picker/rich-text,
+  building blocks, macros) — these exist for round-trip *editable* Word forms;
+  a one-shot compile has no interactive-field concept to populate them from.
+- **SmartArt, WordArt (text-on-a-path/distorted text), embedded Excel Charts,
+  3D Models, Icons gallery** — no Typst diagram/chart/warped-text DSL to draw
+  from. (A chart-like visual built from Typst shapes/CeTZ still works via the
+  existing rasterize path; there's no *native* OOXML chart object to target.)
+- **Drop caps** — Word's `w:framePr dropCap` has no Typst-native trigger (no
+  built-in `dropcap` element); a user who fakes one with a large first letter +
+  float already gets the correct visual via existing float/text handling.
+- **Restrict Editing / document protection, Accessibility Checker itself** —
+  the Checker is an *analysis tool* over content we already emit correctly
+  (headings, alt text, table structure); protection flags have no source
+  trigger. Track Changes/Compare/macros: see above.
+
+## 7. Ambitious forward design: what's left on the table for shapes
+
+This session mapped the *individual-shape* primitives (curve, line, gradient
+fill, dash/cap — §4 and the shape commits). The next tier of ambition is
+**composition** — recovering diagrams built from *many* shapes together, which
+today still rasterize as one image even though each piece, alone, would now
+map natively. Not implemented this pass (each is a real design, not a one-line
+fix); recorded here so a future pass starts from the analysis instead of redoing
+it.
+
+### 7.1 Grouped shapes (`wpg:wgp`) — the highest-value next step
+**The problem:** a hand-drawn diagram built from several `#place`d/`#move`d
+primitives (rects, lines, circles) — the common way to sketch a simple diagram
+*without* a package like CeTZ — rasterizes as one flat image today, because
+each shape only reaches the native-shape dispatch when *its own* content is the
+thing being lowered; a composition of several shapes inside one drawing
+container is captured whole by `ctx.rasterize` before any individual piece is
+inspected.
+
+**The design:** detect a container whose *entire* content is a composition of
+purely-decorative, natively-representable primitives (shape/line/curve, placed
+via absolute offsets, no unrepresentable transform in the mix) and lower the
+*whole composition* into one `wpg:wgp` (`WordprocessingGroup`) DrawingML group
+shape — a single anchored drawing containing multiple `wps:wsp` children, each
+with its own offset within the group's local coordinate space (`a:chOff`/
+`a:chExt` on the group's `a:xfrm`, mirrored by each child's own `a:xfrm`). This
+is the union of the machinery already built:
+- the group's own bounding box = the union of each child shape's bbox (the
+  same conservative convex-hull bbox `normalize_segments` already computes
+  per-shape, applied across the whole set);
+- each child positioned via the SAME frame-item-position handling the
+  line/curve position bugfix (`dfa2f2da3`) already established is necessary;
+- the group anchored via the SAME `Anchor`/`place()` machinery already used
+  for a single native/rasterized drawing today.
+
+**Why not done this pass:** detecting "this content IS a pure shape
+composition" (vs. a mix that must still rasterize) is real classification
+work — walking a container's body, confirming every leaf is a supported
+primitive, bailing to the existing single-shape-or-rasterize behavior on the
+first exception — plus the `wpg:wgp` XML shape and the group/child
+coordinate-space math are new surface area deserving their own validation
+pass, not a rider on this session's shape work.
+
+### 7.2 Radial gradient (scoped out in §4, see the `6bcb673cf` commit)
+OOXML's radial gradient is expressed as an inset (`a:fillToRect`) into the
+*shape's own bounding box* — an ellipse whose size is implied by how far the
+insets pull in from each edge — not a free-form center + radius the way
+Typst's `gradient.radial(center:, radius:)` is. Mapping the common case
+(default center, no focal point) needs the inset-to-radius conversion formula
+derived and checked against real Word rendering before trusting it; mapping
+the general case (off-center, two-circle focal gradients) may not be possible
+at all in the OOXML model. Left rasterizing; a future pass should scope to
+just the "centered, no focal point" case and verify the inset formula
+empirically rather than derive it from the spec alone.
+
+### 7.3 Preset-shape recognition (low priority)
+Word ships ~187 preset geometries (`a:prstGeom`'s `prst` enum: arrows, stars,
+callouts, flowchart symbols, …). Typst has no source vocabulary for most of
+these (no built-in arrow/star/callout element) — a user who wants one already
+draws it as a `#polygon`, which we already map to a native (if `custGeom`,
+not preset) shape. Detecting "this polygon happens to be axis-aligned and
+shaped like a 5-point star" to swap in `prst="star5"` (getting Word's
+resizable handle instead of a fixed path) is a nice-to-have with no missing
+functionality behind it — not pursued.
+
+### 7.4 Connectors (`cxnSp`), 3D bevels, WordArt — no Typst source signal
+`a:ln headEnd`/`tailEnd` (arrowheads) has no Typst stroke field to read from
+(Typst strokes have no arrow-mark concept). 3D bevels/shape shadows
+(`a:sp3d`/`a:effectLst`) have no Typst *shape*-level source either — the
+user's own box-shadow work (a separate branch, `box-shadow`) adds a shadow to
+`#box`/`#block`, not to the vector shapes this session covers; wiring that
+in, when the branches meet, is a clean, well-scoped follow-up (a solid-color
+shadow → native `a:outerShdw`, keeping the rasterize path for anything
+`a:effectLst` can't express). WordArt (distorted text on a path) has no Typst
+source concept at all (Typst text is never warped to a path) — not pursued.
