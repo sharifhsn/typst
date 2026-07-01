@@ -27,7 +27,8 @@ pub fn shape(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
-    let Some((w, h, spec)) = build(child, styles) else {
+    let reference = typst_library::layout::Size::new(ctx.raster_width, ctx.raster_height);
+    let Some((w, h, spec)) = build(child, styles, reference) else {
         return Ok(None);
     };
     let (w_emu, h_emu) = (abs_to_emu(w), abs_to_emu(h));
@@ -277,12 +278,17 @@ fn resolve_insets(
 /// Builds `(width, height, spec)` for a representable decorative shape. The
 /// `size`/`radius` constructor args of `#square`/`#circle` fold into
 /// `width`/`height`, so all four read the same two fields.
-fn build(child: &Content, styles: StyleChain) -> Option<(Abs, Abs, ShapeSpec)> {
+fn build(
+    child: &Content,
+    styles: StyleChain,
+    reference: typst_library::layout::Size,
+) -> Option<(Abs, Abs, ShapeSpec)> {
     if let Some(e) = child.to_packed::<RectElem>() {
         if e.body.get_ref(styles).is_some() {
             return None;
         }
-        let (w, h) = explicit_size(e.width.get(styles), e.height.get(styles), styles)?;
+        let (w, h) =
+            explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
         let fill = fill_color(e.fill.get_ref(styles))?;
         let stroke = sides_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Rect, fill, stroke, txbx: None }))
@@ -290,7 +296,8 @@ fn build(child: &Content, styles: StyleChain) -> Option<(Abs, Abs, ShapeSpec)> {
         if e.body.get_ref(styles).is_some() {
             return None;
         }
-        let (w, h) = explicit_size(e.width.get(styles), e.height.get(styles), styles)?;
+        let (w, h) =
+            explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
         let fill = fill_color(e.fill.get_ref(styles))?;
         let stroke = sides_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Rect, fill, stroke, txbx: None }))
@@ -298,7 +305,8 @@ fn build(child: &Content, styles: StyleChain) -> Option<(Abs, Abs, ShapeSpec)> {
         if e.body.get_ref(styles).is_some() {
             return None;
         }
-        let (w, h) = explicit_size(e.width.get(styles), e.height.get(styles), styles)?;
+        let (w, h) =
+            explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
         let fill = fill_color(e.fill.get_ref(styles))?;
         let stroke = single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Ellipse, fill, stroke, txbx: None }))
@@ -306,7 +314,8 @@ fn build(child: &Content, styles: StyleChain) -> Option<(Abs, Abs, ShapeSpec)> {
         if e.body.get_ref(styles).is_some() {
             return None;
         }
-        let (w, h) = explicit_size(e.width.get(styles), e.height.get(styles), styles)?;
+        let (w, h) =
+            explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
         let fill = fill_color(e.fill.get_ref(styles))?;
         let stroke = single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Ellipse, fill, stroke, txbx: None }))
@@ -338,19 +347,27 @@ fn build(child: &Content, styles: StyleChain) -> Option<(Abs, Abs, ShapeSpec)> {
     }
 }
 
-/// Resolves an explicit `(width, height)` to absolute sizes, or `None` if either
-/// is auto, fractional, or percentage-relative.
+/// Resolves an explicit `(width, height)` to absolute sizes against
+/// `reference` (the page's own content area — the same reference `#move`'s
+/// dx/dy already resolve percentages against, see `move_`), or `None` if
+/// either is auto or fractional. A pure-absolute size resolves identically
+/// regardless of `reference` (its ratio component is zero), so this covers
+/// the common case unchanged and additionally recovers the very common
+/// `width: 100%`/`height: 100%` (fill the container) pattern, which used to
+/// bail unconditionally.
 fn explicit_size(
     width: Smart<Rel<Length>>,
     height: Sizing,
     styles: StyleChain,
+    reference: typst_library::layout::Size,
 ) -> Option<(Abs, Abs)> {
+    use typst_library::foundations::Resolve;
     let w = match width {
-        Smart::Custom(r) if r.rel.is_zero() => r.abs.resolve(styles),
+        Smart::Custom(r) => r.resolve(styles).relative_to(reference.x),
         _ => return None,
     };
     let h = match height {
-        Sizing::Rel(r) if r.rel.is_zero() => r.abs.resolve(styles),
+        Sizing::Rel(r) => r.resolve(styles).relative_to(reference.y),
         _ => return None,
     };
     Some((w, h))

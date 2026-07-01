@@ -440,6 +440,43 @@ further this pass given it's concentrated in one corpus doc). The
 `take_first_drawing` fix above was found while investigating this and is a
 real, independent win either way.
 
+### 7.1e Percentage-relative `#rect`/`#square`/`#circle`/`#ellipse` sizing — IMPLEMENTED
+The single largest remaining cause of shape rasterization, spread broadly
+(98 docs) rather than concentrated in an outlier: `explicit_size` (the
+decorative-shape size check in `mappers::shape::build`) required a *purely
+absolute* width/height, bailing on any percentage component — but
+`width: 100%`/`height: 100%` (fill the container) is an extremely common
+real-world pattern for a decorative background rect. A gradient-fill
+sibling finding from the same investigation turned out to be a false lead:
+`fill_color` already routes `Paint::Gradient` through the existing
+`linear_gradient_fill` (built in an earlier session for polygons) — verified
+directly, a gradient-filled rect with *absolute* sizing already mapped
+natively before this fix. The corpus examples flagged as "gradient doesn't
+work" all *also* had percentage sizing; the compound failure was
+misattributed to the gradient.
+
+**The fix:** resolve `Rel<Length>` against a real reference size instead of
+requiring its ratio component to be zero — the same `ctx.raster_width`/
+`raster_height` (the page's own content area) that `#move`'s `dx`/`dy` and
+the rotate/scale/composition work already resolve percentages against (§7.1,
+§7.1a). A pure-absolute size is unaffected (its ratio component is zero, so
+`relative_to` returns the same value regardless of reference); this is a
+strict superset of the old behavior, not a change to it.
+
+**Validated:** corpus-wide `RASTERIZE: rect` drops 1555->989 (-36%, 25 more
+docs fully clear of it, 98->73 remaining). Full test suite green, corpus
+batch 617/627 OK (up from 616 — see below), 0 oracle regressions. Visually
+verified pixel-accurate width resolution on a synthetic `width: 100%`/
+`width: 50%` case and on a real corpus doc (`modern-ipsy-thesis`).
+
+**Unplanned bonus, twice compounded:** this session's `#pdf.artifact`/
+`GridCell` fix (§7.1d) and this percentage-size fix together flip
+`layout/wenyuan-campaign` from EXPORT_ERR (a label-resolution convergence
+failure) to a clean compile — neither fix targeted that document or that
+failure mode; it's a downstream effect of more content resolving natively
+instead of needing a introspection-losing rasterize fallback partway through
+convergence.
+
 ### 7.2 Radial gradient (scoped out in §4, see the `6bcb673cf` commit)
 OOXML's radial gradient is expressed as an inset (`a:fillToRect`) into the
 *shape's own bounding box* — an ellipse whose size is implied by how far the
