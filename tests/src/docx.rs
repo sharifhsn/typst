@@ -192,6 +192,44 @@ fn diagonal_line_maps_to_a_native_shape() {
 }
 
 #[test]
+fn linear_gradient_fill_maps_to_native_gradfill() {
+    // A linear-gradient fill must become a native `a:gradFill`/`a:lin`, with
+    // stops converted to sRGB hex — NOT rasterize. Gradient stops are stored in
+    // the gradient's own interpolation space (Oklab by default), so reading
+    // their raw components verbatim (skipping the sRGB conversion) silently
+    // produces the wrong colour; this guards that regression directly with an
+    // exact hex match.
+    let p = parts(
+        "#rect(width: 100pt, height: 50pt, fill: gradient.linear(rgb(\"#ff0000\"), rgb(\"#0000ff\")))",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<a:gradFill"), "gradient fill becomes a:gradFill");
+    assert!(doc.contains("<a:srgbClr val=\"FF0000\"/>"), "first stop is exact red");
+    assert!(doc.contains("<a:srgbClr val=\"0000FF\"/>"), "second stop is exact blue, not Oklab-misread");
+    assert!(doc.contains("<a:lin ang=\"0\""), "0deg (left-to-right) maps to ang=0");
+    assert!(!doc.contains("<a:blip"), "not rasterized");
+
+    // A vertical (90deg) gradient maps to the OOXML angle convention (60,000ths
+    // of a degree, clockwise from left-to-right).
+    let v = parts(
+        "#rect(width: 100pt, height: 50pt, fill: gradient.linear(angle: 90deg, red, blue))",
+    );
+    assert!(
+        v["word/document.xml"].contains("<a:lin ang=\"5400000\""),
+        "90deg maps to ang=5400000"
+    );
+
+    // A radial gradient has no representable OOXML shape-relative form here and
+    // still rasterizes, same as before.
+    let r = parts("#rect(width: 100pt, height: 50pt, fill: gradient.radial(red, blue))");
+    assert!(
+        !r["word/document.xml"].contains("<a:gradFill"),
+        "radial gradients are not (yet) natively mapped"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn grid_cell_alignment_is_kept() {
     // `#grid` cell alignment must reach `w:jc` (it was only read off `#table`
     // cells before, silently dropping it for grids).

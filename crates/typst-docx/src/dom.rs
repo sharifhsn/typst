@@ -388,13 +388,24 @@ pub struct Drawing {
 /// `wps:wsp` instead of a rasterized image).
 pub struct ShapeSpec {
     pub geom: ShapeGeom,
-    /// Solid fill colour, or `None` for no fill.
-    pub fill: Option<[u8; 3]>,
+    /// The shape's fill, or `None` for no fill.
+    pub fill: Option<ShapeFill>,
     pub stroke: Option<ShapeStroke>,
     /// Real editable text framed by the shape (`wps:txbx`). `Some` turns the
     /// shape into a Word *text box* (a `#box(fill|stroke)[text]`); `None` is a
     /// bare decorative shape. Default `None`.
     pub txbx: Option<TextBox>,
+}
+
+/// A shape's fill: solid, or a linear gradient (`a:gradFill` + `a:lin`).
+/// Radial/conic gradients and tiling fills have no representable form here and
+/// are left to the rasterize path.
+pub enum ShapeFill {
+    Solid([u8; 3]),
+    /// Angle in 60,000ths of a degree (OOXML's `a:lin ang`), and colour stops
+    /// as (position in 0..=100000, colour) — both already in the OOXML
+    /// convention so the encoder only has to format them.
+    LinearGradient { angle_60000ths: i32, stops: Vec<(u32, [u8; 3])> },
 }
 
 /// The text-box content of a shape (`wps:txbx` → `w:txbxContent`): real

@@ -15,7 +15,7 @@ use typst_library::visualize::{
 };
 
 use crate::ctx::DocxCtx;
-use crate::dom::{Drawing, PathSegment, Run, ShapeGeom, ShapeSpec, ShapeStroke, TextBox};
+use crate::dom::{Drawing, PathSegment, Run, ShapeFill, ShapeGeom, ShapeSpec, ShapeStroke, TextBox};
 use crate::props::{abs_to_emu, color_to_hex};
 
 /// Maps a shape element to a vector DrawingML shape run, or `None` to rasterize.
@@ -72,7 +72,7 @@ pub fn text_box(
     // A gradient/tiling fill has no solid-colour text-box form: keep rasterizing
     // it so the visual survives.
     let fill = match fill_paint {
-        Some(Paint::Solid(c)) => Some(color_to_hex(&c)),
+        Some(Paint::Solid(c)) => Some(ShapeFill::Solid(color_to_hex(&c))),
         Some(_) => return Ok(None),
         None => None,
     };
@@ -353,12 +353,45 @@ fn explicit_size(
 
 /// `None` outer = unrepresentable fill (gradient/tiling) → rasterize; inner
 /// `None` = no fill.
-fn fill_color(paint: &Option<Paint>) -> Option<Option<[u8; 3]>> {
+fn fill_color(paint: &Option<Paint>) -> Option<Option<ShapeFill>> {
     match paint {
         None => Some(None),
-        Some(Paint::Solid(c)) => Some(Some(color_to_hex(c))),
+        Some(Paint::Solid(c)) => Some(Some(ShapeFill::Solid(color_to_hex(c)))),
+        Some(Paint::Gradient(g)) => linear_gradient_fill(g).map(Some),
         Some(_) => None,
     }
+}
+
+/// Maps a Typst [`Gradient`] to a native [`ShapeFill::LinearGradient`], or
+/// `None` (bail to rasterize) for a radial/conic gradient — those don't map
+/// cleanly onto OOXML's shape-relative `a:path` radial model (center/radius
+/// are free-form in Typst but the OOXML form is anchored to the bounding box),
+/// so they are scoped out rather than risk a subtly-wrong mapping.
+fn linear_gradient_fill(
+    gradient: &typst_library::visualize::Gradient,
+) -> Option<ShapeFill> {
+    use typst_library::visualize::{ColorSpace, Gradient, ProcessColorSpace};
+    let Gradient::Linear(lg) = gradient else { return None };
+    // A gradient's stops are stored in its own interpolation space (Oklab by
+    // default, not sRGB) for correct in-between blending — `Color::to_vec4_u8`
+    // reads a colour's CURRENT components verbatim, with no implicit space
+    // conversion, so calling it directly on a stop yields the Oklab L/a/b
+    // triple reinterpreted as RGB bytes (a plausible-looking but wrong colour).
+    // Convert every stop to sRGB first, exactly as the SVG exporter does
+    // before hex-encoding a stop (`paint.rs::write_gradients`).
+    let srgb = ColorSpace::Process(ProcessColorSpace::Srgb);
+    let stops = lg
+        .stops
+        .iter()
+        .map(|(c, pos)| {
+            let rgb = c.to_space(&srgb).unwrap_or_else(|_| c.clone());
+            ((pos.get() * 100_000.0).round() as u32, color_to_hex(&rgb))
+        })
+        .collect();
+    // OOXML's `a:lin ang` is measured the same way Typst's gradient angle is:
+    // 0 = left-to-right, increasing clockwise, in 60,000ths of a degree.
+    let angle_60000ths = (lg.angle.to_deg().rem_euclid(360.0) * 60_000.0).round() as i32;
+    Some(ShapeFill::LinearGradient { angle_60000ths, stops })
 }
 
 /// Resolves a single optional stroke. `None` outer = unrepresentable (gradient)
@@ -536,12 +569,8 @@ fn build_path_shape(ctx: &mut DocxCtx, frame: &typst_library::layout::Frame) -> 
 /// A resolved (post-layout) fill → its solid colour, or `None` (no fill).
 /// Returns the OUTER `None` when the paint is a gradient/tiling/pattern — no
 /// flat OOXML form — so the caller bails to rasterize.
-fn resolved_fill(fill: &Option<Paint>) -> Option<Option<[u8; 3]>> {
-    match fill {
-        None => Some(None),
-        Some(Paint::Solid(c)) => Some(Some(color_to_hex(c))),
-        Some(_) => None,
-    }
+fn resolved_fill(fill: &Option<Paint>) -> Option<Option<ShapeFill>> {
+    fill_color(fill)
 }
 
 /// A resolved (post-layout) stroke → a uniform [`ShapeStroke`]. Same

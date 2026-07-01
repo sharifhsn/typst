@@ -8,7 +8,7 @@ use typst_library::model::DocumentInfo;
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, Drawing, DocxDocument,
     Field, Footnote, HdrFtrPart, Para, ParaChild, PathSegment, Row, Run, SectPr, SectType,
-    ShapeGeom, ShapeSpec, Tbl, Toc, VAlign, VMerge,
+    ShapeFill, ShapeGeom, ShapeSpec, Tbl, Toc, VAlign, VMerge,
 };
 use crate::package::{Package, RelMode, Rels};
 use crate::styles_part;
@@ -561,9 +561,18 @@ fn write_vml_textbox(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec, tb: &cra
     w.open("w:pict").start_children();
     w.open("v:rect")
         .attr("style", &format!("width:{}pt;height:{}pt", pt(d.w_emu), pt(d.h_emu)));
-    match shape.fill {
-        Some(c) => {
-            w.attr("fillcolor", &hex(c));
+    // VML (the legacy fallback for pre-2007 consumers) has no gradient form
+    // worth the complexity here; approximate with the gradient's first stop —
+    // the modern `wps` Choice (the one virtually every consumer picks) has the
+    // real gradient.
+    match &shape.fill {
+        Some(ShapeFill::Solid(c)) => {
+            w.attr("fillcolor", &hex(*c));
+        }
+        Some(ShapeFill::LinearGradient { stops, .. }) => {
+            if let Some((_, c)) = stops.first() {
+                w.attr("fillcolor", &hex(*c));
+            }
         }
         None => {
             w.attr("filled", "f");
@@ -837,11 +846,23 @@ fn write_shape_payload(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec) {
         }
     }
 
-    match shape.fill {
-        Some(c) => {
+    match &shape.fill {
+        Some(ShapeFill::Solid(c)) => {
             w.open("a:solidFill").start_children();
-            w.open("a:srgbClr").attr("val", &hex(c)).empty();
+            w.open("a:srgbClr").attr("val", &hex(*c)).empty();
             w.close();
+        }
+        Some(ShapeFill::LinearGradient { angle_60000ths, stops }) => {
+            w.open("a:gradFill").attr("rotWithShape", "1").start_children();
+            w.open("a:gsLst").start_children();
+            for (pos, c) in stops {
+                w.open("a:gs").attr("pos", &pos.to_string()).start_children();
+                w.open("a:srgbClr").attr("val", &hex(*c)).empty();
+                w.close(); // a:gs
+            }
+            w.close(); // a:gsLst
+            w.open("a:lin").attr("ang", &angle_60000ths.to_string()).attr("scaled", "1").empty();
+            w.close(); // a:gradFill
         }
         None => {
             w.open("a:noFill").empty();
