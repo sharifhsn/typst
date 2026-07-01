@@ -1168,38 +1168,58 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // already handled as a paragraph border, earlier in the block
             // dispatch) maps to a native open path, same as `curve` above.
             out.push(run);
-        } else if let Some(elem) = child.to_packed::<typst_library::layout::MoveElem>()
-            && let Some(run) = mappers::shape::move_(elem, styles, self)?
-        {
-            // `#move(dx:, dy:)[..]` whose ENTIRE body is native-representable
-            // shapes/lines/curves maps to a single shape or a `wpg:wgp` group,
-            // instead of rasterizing the whole composition — the dominant
-            // real-world rasterize cause (a hand-drawn diagram built from a
-            // few `#move`d primitives).
-            out.push(run);
-        } else {
-            // No idiomatic representation (a drawn shape, an SVG/PDF image, an
-            // externally-rendered figure, …): rasterize it and embed as an image
-            // so the content survives instead of being dropped.
-            let before = self.deferred_tags.len();
-            let run = mappers::image::laid_out_fallback(child, styles, self)?;
-            // A figure whose *container* we rasterized (e.g. a `wrap-content`
-            // figure) never reaches the figure mapper, so it emits no visible
-            // `SEQ` field — Word's caption counter would then under-count and
-            // drift from the introspector-baked cross-reference numbers. Emit a
-            // hidden `SEQ \h` (increment without display) for each such figure,
-            // keeping Word's numbering consistent with the references.
-            self.emit_rasterized_figure_seqs(before, styles, out);
-            match run {
-                Some(run) => out.push(run),
-                // Only warn about a genuine drop. Invisible no-ops (spacing, a
-                // hidden body, layout scaffolding) render nothing in the PDF
-                // either, so a warning would be a false alarm.
-                None if !crate::convert::is_invisible_noop(child) => {
-                    self.warn_ignored(child.elem().name(), child.span())
-                }
-                None => {}
+        } else if let Some(elem) = child.to_packed::<typst_library::layout::MoveElem>() {
+            if let Some(run) = mappers::shape::move_(elem, styles, self)? {
+                // `#move(dx:, dy:)[..]` whose ENTIRE body is native-representable
+                // shapes/lines/curves maps to a single shape or a `wpg:wgp` group,
+                // instead of rasterizing the whole composition — the dominant
+                // real-world rasterize cause (a hand-drawn diagram built from a
+                // few `#move`d primitives).
+                out.push(run);
+            } else if let Some(runs) = mappers::shape::move_text(elem, styles, props, self)? {
+                // A pure vertical nudge (`dx` ~0) of plain text/inline content —
+                // e.g. a baseline tweak on an icon's caption — recovers as real,
+                // searchable/editable runs carrying a `w:position` shift instead
+                // of rasterizing (Word's own contract for `w:position` is the
+                // same "shift the run without affecting the line's height" as
+                // `#move`'s own "without affecting layout").
+                out.extend(runs);
+            } else {
+                self.rasterize_fallback(child, styles, out)?;
             }
+        } else {
+            self.rasterize_fallback(child, styles, out)?;
+        }
+        Ok(())
+    }
+
+    /// No idiomatic representation (a drawn shape, an SVG/PDF image, an
+    /// externally-rendered figure, …): rasterize it and embed as an image so
+    /// the content survives instead of being dropped.
+    fn rasterize_fallback(
+        &mut self,
+        child: &Content,
+        styles: StyleChain,
+        out: &mut Vec<Run>,
+    ) -> SourceResult<()> {
+        let before = self.deferred_tags.len();
+        let run = mappers::image::laid_out_fallback(child, styles, self)?;
+        // A figure whose *container* we rasterized (e.g. a `wrap-content`
+        // figure) never reaches the figure mapper, so it emits no visible
+        // `SEQ` field — Word's caption counter would then under-count and
+        // drift from the introspector-baked cross-reference numbers. Emit a
+        // hidden `SEQ \h` (increment without display) for each such figure,
+        // keeping Word's numbering consistent with the references.
+        self.emit_rasterized_figure_seqs(before, styles, out);
+        match run {
+            Some(run) => out.push(run),
+            // Only warn about a genuine drop. Invisible no-ops (spacing, a
+            // hidden body, layout scaffolding) render nothing in the PDF
+            // either, so a warning would be a false alarm.
+            None if !crate::convert::is_invisible_noop(child) => {
+                self.warn_ignored(child.elem().name(), child.span())
+            }
+            None => {}
         }
         Ok(())
     }

@@ -224,18 +224,73 @@ pre-existing template failures); `presentation/black-angular-frame` alone went
 signal. Synthetic multi-shape `#move` cases render pixel-identical between the
 gold Typst PDF and the DOCX round-tripped through LibreOffice.
 
+### 7.1a Follow-up pass: rect, rotate/scale, and text-only moves — IMPLEMENTED
+Three extensions landed in the same follow-up pass, closing most of §7.1's
+"what's still out of scope" list:
+
+**Rect in a composition.** `geometry_to_raw` lowered `Geometry::Curve`/`Line`
+to a raw path but bailed (`None`) on `Geometry::Rect`, so a rect mixed with
+lines/curves in one `#move` still rasterized the whole thing even though a
+*sole* rect already mapped natively via the preset-geometry path. Fixed by
+also lowering `Rect` to its 4-corner closed path (`Move`/3×`Line`/`Close`) —
+it composes exactly like any other shape once flattened to raw segments.
+
+**Rotate/scale inside a composition.** Originally `collect_shapes` bailed on
+any non-identity `FrameItem::Group` transform. Generalized: since an OOXML
+`a:custGeom` path is just a flat point list with no inherent orientation,
+baking the group's FULL accumulated transform directly into each point
+(`Point::transform`, composed via `pre_concat` down the recursion — mirroring
+exactly how every exporter's own `handle_group` accumulates transforms) covers
+rotation and reflection *exactly* (they preserve length, so a stroke's flat
+width is unaffected) and uniform scale *exactly* once the stroke width is also
+multiplied by the same factor (`similarity_scale`, a same-column-norm +
+orthogonal-columns check on the 2x2 linear part). Skew or non-uniform scale —
+no exact single-width stroke representation — still bails to rasterize. No
+`a:xfrm rot=` needed at all: the rotated/scaled shape's own path coordinates
+already encode the final orientation, reusing 100% of the group/bbox/EMU
+machinery §7.1 built. The bug that blocked §7.1's first attempt (bare shapes
+needing `Target::Paged` to show-rule into a layouter) doesn't recur here since
+`layout_export_frame` is unchanged — this pass only touched the *frame-walk*.
+
+**Text-only `#move` via `w:position`.** The dominant *remaining* rasterize
+cause turned out not to be transforms but plain text: real templates use
+`#move(dy: Npt)[text(...)]` as a baseline/vertical nudge (`#59`'s corpus dig
+found this exact pattern powering slide section titles). Word's own
+`w:position` (raise/lower a run's glyphs, in half-points, *without* affecting
+the paragraph's line height) is precisely `#move`'s "translate visually
+without affecting layout" contract for text — so a `#move` whose `dx` is ~0
+and whose ENTIRE body is plain inline content (`mappers/shape.rs::
+is_pure_text_body` — a conservative `Content::traverse` bailing on any shape,
+image, nested transform, grid, table, or figure anywhere inside) now lowers to
+real inline runs (`ctx.inline_runs`) carrying a composed `w:position` shift,
+instead of rasterizing. Deliberately conservative: a MIXED body (some real
+shape alongside text) still bails whole to rasterize, since embedding it this
+way would silently drop the shape's own position.
+
+**Validated:** corpus-wide, `RASTERIZE: move` dropped further from 1587 to
+1201 (-24% more; -54% from the pre-§7.1 baseline of 2597), docs affected
+41 (from 48). 0 new EXPORT_ERR/INVALID, same 11 pre-existing failures. Oracle
+A/B flagged exactly 2 docs (`black-angular-frame` words=0.62,
+`touying-simpl-swufe` words=0.98) — both manually confirmed as pure
+IMPROVEMENTS, not regressions: pandoc renders an alt-text-less rasterized
+image as literal `[]` in plain-text extraction, and in both docs the *only*
+diff was `[]` -> the correct section title / "Thank You!" text the old
+rasterize path had been silently reducing to an untagged image. Verified
+visually in LibreOffice (`black-angular-frame`'s "Configuration" section
+divider slide renders correctly, bold, inside its bordered box). Rotation and
+uniform-scale-with-stroke were also each verified pixel-identical between the
+gold Typst PDF and the LibreOffice-rendered DOCX round-trip on synthetic
+cases.
+
 **What's still out of scope (bails to rasterize, same as before):**
-- a rotate/scale/skew or a clip anywhere in the `#move`d body (the
-  `FrameItem::Group` transform-identity check bails) — grouped shapes *with* a
-  transform is the natural next tier (§7.1 follow-up: a `wpg:wgp` child can
-  itself carry a rotation via `a:xfrm rot=`, but per-child skew/scale has no
-  OOXML equivalent and would need to fall back per-shape);
-- axis-aligned `Geometry::Rect` inside a composition (`geometry_to_raw`
-  returns `None` for it) — it already maps natively as a *sole* top-level
-  shape via the existing rect path, just not yet composed with siblings here;
-- any non-shape leaf (text, image) anywhere in the body, which still
-  rasterizes the *whole* `#move` — a mixed shape+caption composition doesn't
-  partially recover.
+- skew or non-uniform scale (X/Y scaled by different factors) anywhere in the
+  `#move`d body — no exact single-width flat-stroke representation, so it's
+  left rasterizing rather than approximating;
+- a clip path anywhere in the composition;
+- any non-shape, non-text leaf (an image) anywhere in the body, or a MIXED
+  shape+text composition — either still rasterizes the *whole* `#move`;
+- a horizontal-only or diagonal (`dx` != 0) text nudge — no clean inline OOXML
+  analogue the way a pure vertical nudge has in `w:position`.
 
 ### 7.2 Radial gradient (scoped out in §4, see the `6bcb673cf` commit)
 OOXML's radial gradient is expressed as an inset (`a:fillToRect`) into the

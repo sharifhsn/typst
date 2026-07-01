@@ -590,6 +590,91 @@ pub fn move_(
     build_shapes_drawing(ctx, &frame)
 }
 
+/// Maps a pure vertical nudge of plain text/inline content — `#move(dy:
+/// ..)[body]` with `dx` ~0 and `body` containing no shape/image/nested
+/// transform (see [`is_pure_text_body`]) — to real inline runs carrying a
+/// `w:position` shift, instead of rasterizing. `None` (fall through to the
+/// existing rasterize fallback) whenever `dx` isn't negligible or `body`
+/// isn't plain text, since a MIXED composition (some real shape alongside
+/// text) would silently lose that shape's own shift if lowered this way — the
+/// same conservative bail every other native-shape path in this module takes.
+///
+/// Word's own contract for `w:position` — raise/lower a run's glyphs without
+/// affecting the paragraph's line height — mirrors `#move`'s "translate
+/// visually without affecting layout" exactly, which is what makes this
+/// substitution safe rather than approximate.
+pub fn move_text(
+    elem: &typst_library::foundations::Packed<typst_library::layout::MoveElem>,
+    styles: StyleChain,
+    props: &crate::dom::RunProps,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Option<Vec<Run>>> {
+    use typst_library::layout::{Axes, Rel, Size};
+
+    if !is_pure_text_body(&elem.body) {
+        return Ok(None);
+    }
+    // Mirrors `move_`'s own dx/dy resolution (against the raster region size)
+    // so a percentage `dx`/`dy` — rare, but the field type (`Rel<Length>`)
+    // permits it — resolves consistently between the two paths.
+    let size = Size::new(ctx.raster_width, ctx.raster_height);
+    let delta = Axes::new(elem.dx.resolve(styles), elem.dy.resolve(styles))
+        .zip_map(size, Rel::relative_to);
+    if delta.x != Abs::zero() {
+        return Ok(None);
+    }
+    let dy = delta.y;
+    let mut p = props.clone();
+    let existing = p.position_half_pt.unwrap_or(0);
+    // `w:position` is upward-positive while `#move`'s `dy` is downward-positive
+    // (same convention `TextElem::baseline` already negates — see
+    // `resolve_text_props`), so negate; then compose with whatever shift the
+    // ambient run properties already carry (e.g. a nested `#move`, or this
+    // sitting inside a `#super`/`#sub`).
+    let shift = existing + (-dy.to_pt() * 2.0).round() as i32;
+    p.position_half_pt = Some(shift);
+
+    Ok(Some(ctx.inline_runs(&elem.body, styles, p)?))
+}
+
+/// Whether `body` contains nothing but plain inline/text content — no drawn
+/// shape, image, or nested transform. Deliberately conservative: a single
+/// non-text element found anywhere inside bails (`false`), since [`move_`]
+/// (the shape/group composition path) and the whole-container rasterize
+/// fallback already try first — a body this check lets through is exactly the
+/// content [`move_text`] can safely lower to a `w:position`-shifted run.
+fn is_pure_text_body(body: &Content) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::layout::{GridElem, MoveElem, RotateElem, ScaleElem};
+    use typst_library::model::{FigureElem, TableElem};
+    use typst_library::visualize::{CurveElem, ImageElem, LineElem};
+
+    let mut has_non_text = false;
+    let _ = body.traverse(&mut |e: Content| {
+        if e.is::<LineElem>()
+            || e.is::<CurveElem>()
+            || e.is::<RectElem>()
+            || e.is::<SquareElem>()
+            || e.is::<EllipseElem>()
+            || e.is::<CircleElem>()
+            || e.is::<PolygonElem>()
+            || e.is::<ImageElem>()
+            || e.is::<MoveElem>()
+            || e.is::<RotateElem>()
+            || e.is::<ScaleElem>()
+            || e.is::<GridElem>()
+            || e.is::<TableElem>()
+            || e.is::<FigureElem>()
+        {
+            has_non_text = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    !has_non_text
+}
+
 /// Lays out a shape element to a [`typst_library::layout::Frame`] via the
 /// shared layouter, sized against the page's content area (mirroring how
 /// rasterized content is sized) since `#curve`/`#line` points may be given as
@@ -609,10 +694,11 @@ fn layout_shape_frame(
     layout(ctx.engine(), locator, region)
 }
 
-/// One extracted shape: its raw (un-normalized) path segments plus its
-/// resolved fill/stroke, in the SHARED coordinate space of whatever frame it
-/// was extracted from (so multiple shapes from one frame can be positioned
-/// relative to each other).
+/// One extracted shape: its raw (un-normalized) path segments — already
+/// carrying any ancestor rotation/reflection/uniform-scale baked directly
+/// into their coordinates — plus its resolved fill/stroke, in the SHARED
+/// coordinate space of whatever frame it was extracted from (so multiple
+/// shapes from one frame can be positioned relative to each other).
 struct ExtractedShape {
     raw: Vec<RawSeg>,
     fill: Option<ShapeFill>,
@@ -621,46 +707,79 @@ struct ExtractedShape {
 
 /// Walks every item in `frame`, extracting each native-representable shape —
 /// or bailing (`None`) the moment it finds anything that isn't one (text, an
-/// image, an unrepresentable fill/stroke, or a non-translation transform).
-/// Recurses one level into plain-translated sub-frames (`FrameItem::Group`
-/// with an identity scale/skew — ordinary block-flow nesting), since a
-/// `#move`d body composed of several block-level shapes typically nests that
-/// way.
+/// image, an unrepresentable fill/stroke, or a transform that isn't a
+/// similarity — see [`similarity_scale`]). Recurses through nested
+/// `FrameItem::Group`s (ordinary block-flow nesting, or a real
+/// `#rotate`/`#scale`/`#move`), accumulating their transforms so a rotated or
+/// uniformly-scaled shape/composition is recovered too: since an OOXML
+/// `a:custGeom` path is just a flat point list with no inherent orientation,
+/// baking the WHOLE accumulated transform directly into each point's
+/// coordinates (rather than trying to express the rotation as `a:xfrm rot=`)
+/// reuses every bit of the plain-translation machinery unchanged.
 fn extract_shapes(frame: &typst_library::layout::Frame) -> Option<Vec<ExtractedShape>> {
+    use typst_library::layout::Transform;
     let mut out = Vec::new();
-    collect_shapes(frame, typst_library::layout::Point::zero(), &mut out).then_some(out)
+    collect_shapes(frame, Transform::identity(), 1.0, &mut out).then_some(out)
+}
+
+/// A 2D affine transform's uniform scale factor, if it's a "similarity"
+/// (pure rotation and/or reflection, optionally combined with a UNIFORM
+/// scale — no skew, no non-uniform scale) — the class of transform that can
+/// be baked directly into a flat path's point coordinates while keeping a
+/// single scalar stroke width exactly correct (rotation/reflection preserve
+/// length; a uniform scale just multiplies it). `None` for anything else
+/// (skew, or X/Y scaled by different factors), which has no exact
+/// single-width representation and must keep rasterizing.
+fn similarity_scale(t: &typst_library::layout::Transform) -> Option<f64> {
+    let (sx, ky, kx, sy) = (t.sx.get(), t.ky.get(), t.kx.get(), t.sy.get());
+    let col1 = sx * sx + ky * ky;
+    let col2 = kx * kx + sy * sy;
+    let dot = sx * kx + ky * sy;
+    const EPS: f64 = 1e-4;
+    if col1 <= EPS || (col1 - col2).abs() > EPS * col1.max(col2) || dot.abs() > EPS * col1 {
+        return None;
+    }
+    Some(col1.sqrt())
 }
 
 fn collect_shapes(
     frame: &typst_library::layout::Frame,
-    offset: typst_library::layout::Point,
+    acc: typst_library::layout::Transform,
+    stroke_scale: f64,
     out: &mut Vec<ExtractedShape>,
 ) -> bool {
-    use typst_library::layout::{FrameItem, Point, Ratio};
+    use typst_library::layout::{FrameItem, Transform};
 
     for (pos, item) in frame.items() {
-        let pos = offset + *pos;
+        // Matches every exporter's own `handle_frame`/`render_group` walk
+        // (e.g. `typst-pdf`'s `handle_group`): each item is first translated
+        // by its own position within its parent frame, and a `Group` item's
+        // own transform then applies on top of that (`pre_concat`'s "prev
+        // happens first" order), before recursing into its sub-frame.
+        let item_transform = acc.pre_concat(Transform::translate(pos.x, pos.y));
         match item {
             FrameItem::Shape(shape, _) => {
                 let Some(fill) = resolved_fill(&shape.fill) else { return false };
-                let Some(stroke) = resolved_stroke(&shape.stroke) else { return false };
-                let Some(raw) = geometry_to_raw(&shape.geometry, pos) else { return false };
+                let Some(stroke) = resolved_stroke(&shape.stroke, stroke_scale) else {
+                    return false;
+                };
+                let raw = geometry_to_raw(&shape.geometry, item_transform);
                 out.push(ExtractedShape { raw, fill, stroke });
             }
             FrameItem::Group(group) => {
-                let t = &group.transform;
-                let is_translation = t.sx == Ratio::one()
-                    && t.sy == Ratio::one()
-                    && t.kx == Ratio::zero()
-                    && t.ky == Ratio::zero();
-                if !is_translation || group.clip.is_some() {
-                    // A rotate/scale/skew or a clip path inside — the exact
-                    // "grouped shapes with a transform" case this pass doesn't
-                    // attempt (see COVERAGE.md); bail to rasterize.
+                if group.clip.is_some() {
+                    // A clip path inside — not attempted; bail to rasterize.
                     return false;
                 }
-                let sub_offset = pos + Point::new(t.tx, t.ty);
-                if !collect_shapes(&group.frame, sub_offset, out) {
+                let Some(scale) = similarity_scale(&group.transform) else {
+                    // A skew or non-uniform scale — no exact flat-stroke-width
+                    // representation; the exact "grouped shapes with a
+                    // transform" case this pass doesn't attempt (see
+                    // COVERAGE.md); bail to rasterize.
+                    return false;
+                };
+                let new_acc = item_transform.pre_concat(group.transform);
+                if !collect_shapes(&group.frame, new_acc, stroke_scale * scale, out) {
                     return false;
                 }
             }
@@ -674,24 +793,37 @@ fn collect_shapes(
 }
 
 /// A resolved shape [`Geometry`](typst_library::visualize::Geometry) → its
-/// [`RawSeg`] path, offset by `pos` (the frame item's own position — see the
-/// note on why this matters below), or `None` for `Geometry::Rect` (an
-/// axis-aligned rect/square fill — not yet supported in this composed path;
-/// such a shape already maps natively when it is the sole top-level element
-/// via [`shape`], just not composed with others here).
+/// [`RawSeg`] path, with `transform` (the frame item's own position, composed
+/// with any ancestor rotation/reflection/uniform-scale — see
+/// [`collect_shapes`]) applied to every point. Always succeeds: every
+/// geometry variant (including `Rect`, lowered to its 4-corner closed path)
+/// is representable as a raw path, which is what lets a rect compose
+/// alongside lines/curves in a group — a rect as the SOLE top-level shape
+/// instead takes the nicer preset-geometry path in [`shape`], since Word
+/// gives `a:prstGeom prst="rect"` a resizable handle a `custGeom` path
+/// doesn't get.
 fn geometry_to_raw(
     geometry: &typst_library::visualize::Geometry,
-    pos: typst_library::layout::Point,
-) -> Option<Vec<RawSeg>> {
+    transform: typst_library::layout::Transform,
+) -> Vec<RawSeg> {
+    use typst_library::layout::Point;
     use typst_library::visualize::Geometry;
+    let at = |p: Point| p.transform(transform);
     match geometry {
-        Geometry::Curve(curve) => Some(raw_segments_from_curve(curve, pos)),
+        Geometry::Curve(curve) => raw_segments_from_curve(curve, transform),
         // `layout_line` pushes its `Shape` at `start.to_point()` (not the
-        // origin) and the geometry is only the *delta* from there — so `pos`
-        // must be added to both ends, or the line's true start/end (and hence
-        // its bounding box) comes out wrong.
-        Geometry::Line(delta) => Some(vec![RawSeg::Move(pos), RawSeg::Line(pos + *delta)]),
-        Geometry::Rect(_) => None,
+        // origin) and the geometry is only the *delta* from there — so both
+        // ends (the local origin and the local `delta`) go through the same
+        // `transform`, or the line's true start/end (and hence its bounding
+        // box) comes out wrong.
+        Geometry::Line(delta) => vec![RawSeg::Move(at(Point::zero())), RawSeg::Line(at(*delta))],
+        Geometry::Rect(size) => vec![
+            RawSeg::Move(at(Point::zero())),
+            RawSeg::Line(at(Point::new(size.x, Abs::zero()))),
+            RawSeg::Line(at(Point::new(size.x, size.y))),
+            RawSeg::Line(at(Point::new(Abs::zero(), size.y))),
+            RawSeg::Close,
+        ],
     }
 }
 
@@ -792,19 +924,28 @@ fn resolved_fill(fill: &Option<Paint>) -> Option<Option<ShapeFill>> {
 }
 
 /// A resolved (post-layout) stroke → a uniform [`ShapeStroke`]. Same
-/// outer/inner `None` convention as [`resolved_fill`].
+/// outer/inner `None` convention as [`resolved_fill`]. `scale` is the
+/// cumulative uniform scale of any ancestor group transforms (1.0 outside a
+/// composition, or under rotation/translation/reflection alone) — since
+/// rotating/translating a stroked path leaves its perceived width unchanged
+/// but scaling it does, the flat OOXML line width must scale by the same
+/// factor to stay visually correct (see [`similarity_scale`]).
 fn resolved_stroke(
     stroke: &Option<typst_library::visualize::FixedStroke>,
+    scale: f64,
 ) -> Option<Option<ShapeStroke>> {
     match stroke {
         None => Some(None),
         Some(fx) => match &fx.paint {
-            Paint::Solid(c) => Some(Some(ShapeStroke {
-                color: color_to_hex(c),
-                w_emu: abs_to_emu(fx.thickness),
-                cap: line_cap_to_ooxml(fx.cap),
-                dash: fx.dash.as_ref().map(|d| prst_dash(&d.array, fx.thickness)),
-            })),
+            Paint::Solid(c) => {
+                let thickness = fx.thickness * scale;
+                Some(Some(ShapeStroke {
+                    color: color_to_hex(c),
+                    w_emu: abs_to_emu(thickness),
+                    cap: line_cap_to_ooxml(fx.cap),
+                    dash: fx.dash.as_ref().map(|d| prst_dash(&d.array, thickness)),
+                }))
+            }
             _ => None,
         },
     }
@@ -826,21 +967,22 @@ enum RawSeg {
 /// Lowers a resolved [`typst_library::visualize::Curve`] into [`RawSeg`]s,
 /// mirroring the SVG/PDF exporters' own item walk (`CurveItem::Move` →
 /// `RawSeg::Move`, …) — the direct, 1:1 translation of Typst's Bézier
-/// vocabulary into OOXML's. `pos` is the frame item's own position (added to
-/// every point; see the caller's note on why this matters).
+/// vocabulary into OOXML's. `transform` is the frame item's own position
+/// composed with any ancestor transform (applied to every point; see the
+/// caller's note on why this matters).
 fn raw_segments_from_curve(
     curve: &typst_library::visualize::Curve,
-    pos: typst_library::layout::Point,
+    transform: typst_library::layout::Transform,
 ) -> Vec<RawSeg> {
     use typst_library::visualize::CurveItem;
     curve
         .0
         .iter()
         .map(|item| match item {
-            CurveItem::Move(p) => RawSeg::Move(pos + *p),
-            CurveItem::Line(p) => RawSeg::Line(pos + *p),
+            CurveItem::Move(p) => RawSeg::Move(p.transform(transform)),
+            CurveItem::Line(p) => RawSeg::Line(p.transform(transform)),
             CurveItem::Cubic(c1, c2, end) => {
-                RawSeg::Cubic(pos + *c1, pos + *c2, pos + *end)
+                RawSeg::Cubic(c1.transform(transform), c2.transform(transform), end.transform(transform))
             }
             CurveItem::Close => RawSeg::Close,
         })
