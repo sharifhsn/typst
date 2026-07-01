@@ -424,21 +424,11 @@ richer now rasterizes the whole body instead (preserving all the visual
 content, even at the cost of vector fidelity, rather than an arbitrary
 silent truncation).
 
-**Investigated, not fully resolved: `visualization/dudi-colorful-slides`'s
-540 `RASTERIZE: polygon`.** This template's `regular-pattern`/`triangle-grid`
-helpers build decorative arrays of triangles via repeated `shapes.push(polygon(..))`
-then `stack(dir: ltr, spacing: 0pt, ..shapes)`, wrapped in a bare `#place(..)`.
-A minimal repro of that exact shape (`place(stack(polygon, polygon))`)
-correctly rasterizes as one whole `RASTERIZE: stack` image, not per-polygon —
-so the real document's per-polygon rasterization has some additional
-wrinkle not yet isolated (`triangle-grid`'s own loop nesting looks
-questionable — a `stack(..)` call sits *outside* the inner per-cell loop but
-*inside* the outer per-row loop, in the package's own source, meaning its
-result is one of several bare content-producing statements silently joined
-by Typst's own block-scoping rules — worth a closer look, but not chased
-further this pass given it's concentrated in one corpus doc). The
-`take_first_drawing` fix above was found while investigating this and is a
-real, independent win either way.
+**`visualization/dudi-colorful-slides`'s 540 `RASTERIZE: polygon` — RESOLVED
+in §7.1f below** (the diagnosis in this section's first pass was incomplete;
+the real root cause and fix are documented there). The `take_first_drawing`
+fix above was found while investigating it and is a real, independent win
+either way.
 
 ### 7.1e Percentage-relative `#rect`/`#square`/`#circle`/`#ellipse` sizing — IMPLEMENTED
 The single largest remaining cause of shape rasterization, spread broadly
@@ -476,6 +466,54 @@ failure) to a clean compile — neither fix targeted that document or that
 failure mode; it's a downstream effect of more content resolving natively
 instead of needing a introspection-losing rasterize fallback partway through
 convergence.
+
+### 7.1f `#polygon` decorative patterns and corner wedges — IMPLEMENTED
+The single largest concentrated polygon-rasterize case
+(`visualization/dudi-colorful-slides`, 540 of the corpus's 658 `RASTERIZE:
+polygon`) plus a broad tail across 8 more docs. Two independent root causes,
+both fixed:
+
+**(1) `#place(stack(..polygons))` — a decorative full-bleed motif rasterized
+per-polygon.** A slide theme draws a geometric background by pushing dozens of
+`#polygon`s into a `#stack`, wrapped in a bare top-level `#place`. The path
+was: top-level `#place` -> `mappers::image::place` -> `place_body_drawing` ->
+`ctx.blocks(stack)` -> the *stack mapper* lowers a horizontal stack to a
+borderless **table row, one cell per child** -> each cell's polygon reaches
+`shape`/`build`, bails (see (2)), and rasterizes; then `place_body_drawing`
+throws the table away and rasterizes the whole stack anyway. So the 540
+per-polygon rasters were wasted work discarded into one whole-stack image —
+visually a flat raster of the motif. Fixed by giving `place_body_drawing` the
+SAME shape-composition path §7.1c gave `#box(place(..))`: try
+`mappers::shape::transformed(body)` first (lay the whole placed body out under
+`Target::Paged` — which resolves every polygon's percentage-relative
+coordinates against the page — and `build_shapes_drawing` groups them). The
+result is one `wpg:wgp` of vector polygons wrapped in the existing top-level
+`<wp:anchor>` `#place` already produces. Crucially this is a **top-level**
+anchor (unlike the nested-anchor case §7.1c had to abandon as
+LibreOffice-invisible) — verified: the striped bands and full-page triangle
+grids render correctly, as vector, in the LibreOffice round-trip.
+
+**(2) `#polygon` with negative or percentage vertex coordinates bailed in
+`build`.** The direct-polygon path read only each vertex's *absolute*
+component (`v.x.abs`, ignoring any percentage) and sized the shape by
+`max(0, coords)` — so a polygon whose vertices are all non-positive on an axis
+(a corner wedge drawn *upward*, `(1em, -0.5em)`, e.g. `mythographer-5e`'s
+sidebar edge triangles) hit `max_y <= 0` and rasterized, and a
+percentage-coordinate polygon resolved to a degenerate ~0 size. Fixed by
+resolving each vertex against the page reference (like §7.1e's rect sizing)
+and routing through the shared `RawSeg`/`normalize_segments` path `#curve`/
+`#line` already use, which shifts the whole path into the non-negative
+`a:custGeom` space and sizes it by its true bounding box. Corner wedges now
+render as native vector shapes at the correct positions (LibreOffice-verified
+against gold).
+
+**Validated:** corpus-wide `RASTERIZE: polygon` 658->6 (-99%); dudi 540->0,
+plus 7 more docs cleared entirely. The 6 residual (`kzn-ma`) are full-bleed
+cover decorations whose vertices reference `page.height`/`page.width`/
+`page.margin` — page-geometry the isolated re-layout can't resolve (the same
+hard class as the margin-note docs), correctly left rasterizing. Full test
+suite green, corpus batch 617/627 OK, 0 INVALID, 0 oracle regressions across
+the whole corpus.
 
 ### 7.2 Radial gradient (scoped out in §4, see the `6bcb673cf` commit)
 OOXML's radial gradient is expressed as an inset (`a:fillToRect`) into the

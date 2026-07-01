@@ -320,28 +320,40 @@ fn build(
         let stroke = single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Ellipse, fill, stroke, txbx: None }))
     } else if let Some(e) = child.to_packed::<PolygonElem>() {
-        let mut pts = Vec::new();
-        for v in e.vertices.iter() {
-            pts.push((v.x.abs.resolve(styles), v.y.abs.resolve(styles)));
-        }
-        if pts.len() < 2 {
+        use typst_library::foundations::Resolve;
+        use typst_library::layout::Point;
+        // Resolve each vertex against `reference` — a vertex is a `Rel<Length>`
+        // per axis, so a percentage component (e.g. `(50%, 0pt)`, common in a
+        // full-width decorative motif) resolves against the page like `#rect`'s
+        // percentage sizing, and an `em` length against the font size.
+        let verts: Vec<Point> = e
+            .vertices
+            .iter()
+            .map(|v| {
+                Point::new(
+                    v.x.resolve(styles).relative_to(reference.x),
+                    v.y.resolve(styles).relative_to(reference.y),
+                )
+            })
+            .collect();
+        if verts.len() < 2 {
             return None;
         }
-        let max_x = pts.iter().map(|p| p.0).fold(Abs::zero(), Abs::max);
-        let max_y = pts.iter().map(|p| p.1).fold(Abs::zero(), Abs::max);
-        if max_x.to_pt() <= 0.0 || max_y.to_pt() <= 0.0 {
-            return None;
+        // Route through the same `RawSeg`/`normalize_segments` path `#curve`/
+        // `#line` use, so a polygon with NEGATIVE vertex coordinates (e.g. a
+        // corner wedge drawn upward from its origin, `(1em, -0.5em)`) is shifted
+        // to the non-negative `a:custGeom` space and sized by its true bounding
+        // box — the old direct `max_x`/`max_y` logic silently bailed
+        // (`max_y <= 0`) on any all-non-positive axis, forcing a rasterize.
+        let mut raw = Vec::with_capacity(verts.len() + 1);
+        for (i, p) in verts.iter().enumerate() {
+            raw.push(if i == 0 { RawSeg::Move(*p) } else { RawSeg::Line(*p) });
         }
-        let mut segments = Vec::with_capacity(pts.len() + 1);
-        for (i, p) in pts.iter().enumerate() {
-            let (x, y) = (abs_to_emu(p.0), abs_to_emu(p.1));
-            segments.push(if i == 0 { PathSegment::MoveTo(x, y) } else { PathSegment::LineTo(x, y) });
-        }
-        segments.push(PathSegment::Close);
+        raw.push(RawSeg::Close);
+        let (segments, w, h) = normalize_segments(raw)?;
         let fill = fill_color(e.fill.get_ref(styles))?;
         let stroke = single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
-        let geom = ShapeGeom::Path(segments);
-        Some((max_x, max_y, ShapeSpec { geom, fill, stroke, txbx: None }))
+        Some((w, h, ShapeSpec { geom: ShapeGeom::Path(segments), fill, stroke, txbx: None }))
     } else {
         None
     }

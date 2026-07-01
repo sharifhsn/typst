@@ -308,13 +308,30 @@ pub fn place(
     })))
 }
 
-/// Lowers a `#place` body to a single `Drawing` (image payload or a rasterized
-/// fallback). Returns `None` if it lays out to nothing.
+/// Lowers a `#place` body to a single `Drawing` (a native shape/group, an
+/// image payload, or a rasterized fallback). Returns `None` if it lays out to
+/// nothing.
 fn place_body_drawing(
     body: &Content,
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Drawing>> {
+    // A placed body whose ENTIRE content is a composition of native shapes —
+    // e.g. a decorative background pattern built from many `#polygon`s in a
+    // `#stack` (`place(stack(..polygons))`), the common way a slide theme
+    // draws a full-bleed geometric motif — lowers to one `wpg:wgp` group of
+    // vector shapes, the same recovery `#move`/`#rotate`/`#place`-in-a-box
+    // already get (see COVERAGE.md §7.1). Laying the whole body out under
+    // `Target::Paged` resolves each shape's percentage-relative coordinates
+    // against the page and hands `build_shapes_drawing` a frame of concrete
+    // `Geometry::Curve` shapes to group. `None` (fall through) the moment the
+    // body holds anything that isn't a plain native shape (text, an image, an
+    // unrepresentable fill) — so a placed image or figure keeps its existing
+    // handling below.
+    if let Some(Run::Drawing(drawing)) = crate::mappers::shape::transformed(body, styles, ctx)? {
+        return Ok(Some(drawing));
+    }
+
     // Lower the body like any block and pull out its first standalone drawing
     // (covers a bare image, a centered figure-less image, etc.) — but only
     // trust that extraction when the body produced NOTHING else. Blindly
