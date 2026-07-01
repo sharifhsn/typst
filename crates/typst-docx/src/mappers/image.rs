@@ -81,7 +81,10 @@ pub fn image(
         // Vector / WebP / PDF have no Word-embeddable raster form, so lay the
         // image out and rasterize it to a PNG via the generic fallback.
         let content = elem.clone().pack();
-        if let Some(run) = laid_out_fallback(&content, styles, ctx)? {
+        // The vector image rasterizes to a single drawing (an image carries no
+        // extractable body text, so `laid_out_fallback`'s hidden-text runs are
+        // empty here) — take the drawing.
+        if let Some(run) = laid_out_fallback(&content, styles, ctx)?.into_iter().next() {
             return Ok(run);
         }
         ctx.warn_ignored("image could not be rasterized for DOCX export", span);
@@ -320,11 +323,15 @@ pub fn place(
 
     // The body lowered to nothing at the block level (a pure layout closure, a
     // visual with no extractable content): rasterize the whole body and anchor
-    // it so the visual survives.
-    match laid_out_fallback(body, styles, ctx)? {
+    // it so the visual survives, keeping any frame-recovered hidden text (the
+    // trailing runs) beside it so the placed content stays searchable.
+    let mut runs = laid_out_fallback(body, styles, ctx)?.into_iter();
+    match runs.next() {
         Some(Run::Drawing(mut drawing)) => {
             set_place_anchor(&mut drawing, elem, styles, ctx);
-            Ok(vec![para_drawing(drawing)])
+            let mut content = vec![ParaChild::Run(Run::Drawing(drawing))];
+            content.extend(runs.map(ParaChild::Run));
+            Ok(vec![Block::Para(Para { props: ParaProps::default(), content })])
         }
         _ => Ok(Vec::new()),
     }
@@ -593,29 +600,61 @@ fn take_first_drawing(blocks: &mut Vec<Block>) -> Option<Drawing> {
 ///    `docpr_id`, and build the `Drawing` exactly as [`image`] does, using the
 ///    frame's point size for the extents.
 ///
-/// Returns `None` only if the content lays out to nothing; callers then fall
-/// back to `warn_ignored`.
+/// Returns the drawing run followed by the frame-recovered text as hidden
+/// (`w:vanish`) runs, or an empty `Vec` if the content lays out to nothing
+/// (callers then fall back to `warn_ignored`).
 pub fn laid_out_fallback(
     content: &Content,
     styles: StyleChain,
     ctx: &mut DocxCtx,
-) -> SourceResult<Option<Run>> {
-    let Some((rel, size)) = ctx.rasterize(content, styles, content.span())? else {
-        return Ok(None);
+) -> SourceResult<Vec<Run>> {
+    let Some((rel, size, text)) = ctx.rasterize(content, styles, content.span())? else {
+        return Ok(Vec::new());
     };
     let docpr_id = ctx.next_drawing_id();
     let name: EcoString = ecow::eco_format!("Picture {docpr_id}");
-    Ok(Some(Run::Drawing(Drawing {
+    // The image carries the exact visual; alongside it, keep the text recovered
+    // from the laid-out frame as a HIDDEN run (`w:vanish`), so the rasterized
+    // region stays searchable, selectable, copy-pasteable, and screen-reader
+    // accessible instead of being pure dead pixels. Line breaks in the
+    // recovered text become `<w:br/>`s within the hidden run sequence.
+    let mut runs = Vec::with_capacity(2);
+    runs.push(Run::Drawing(Drawing {
         rel,
         w_emu: crate::props::abs_to_emu(size.x),
         h_emu: crate::props::abs_to_emu(size.y),
-        alt: None,
+        alt: Some(text.replace('\n', " ").into()).filter(|s: &EcoString| !s.trim().is_empty()),
         docpr_id,
         name,
         anchor: None,
         shape: None,
         group: None,
-    })))
+    }));
+    hidden_text_runs(&text, &mut runs);
+    Ok(runs)
+}
+
+/// Appends the frame-recovered `text` as hidden (`w:vanish`) runs — the words
+/// stay searchable/selectable but take no visual space beside the image.
+/// `\n` line separators become `Run::Break`s. The block is bracketed with
+/// hidden spaces so its first/last words keep a boundary against any adjacent
+/// visible run (otherwise a consumer concatenating run text — pandoc, Word's
+/// Find, copy-paste — would glue e.g. `urbane` + `Stoicos` into one token).
+fn hidden_text_runs(text: &str, out: &mut Vec<Run>) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let hidden = RunProps { vanish: true, ..RunProps::default() };
+    out.push(Run::Text { props: hidden.clone(), text: " ".into() });
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push(Run::Break);
+        }
+        if !line.is_empty() {
+            out.push(Run::Text { props: hidden.clone(), text: line.into() });
+        }
+    }
+    out.push(Run::Text { props: hidden.clone(), text: " ".into() });
 }
 
 // ---------------------------------------------------------------------------

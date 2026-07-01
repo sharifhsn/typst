@@ -263,12 +263,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     /// `None` if the content lays out to nothing. This is the universal fallback
     /// for content that has no idiomatic OOXML representation (drawn shapes, SVG
     /// images, externally-rendered figures, …).
+    /// Rasterizes `content` to a PNG media part and returns its relationship
+    /// id, size, and the plain text recovered from the laid-out frame (empty if
+    /// none) — the caller can attach that text as hidden runs so the
+    /// rasterized region stays searchable/selectable/accessible.
     pub fn rasterize(
         &mut self,
         content: &Content,
         styles: StyleChain,
         span: Span,
-    ) -> SourceResult<Option<(EcoString, typst_library::layout::Size)>> {
+    ) -> SourceResult<Option<(EcoString, typst_library::layout::Size, String)>> {
         use typst_library::foundations::Smart;
         use typst_library::layout::{Abs, Sides};
 
@@ -311,6 +315,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             },
         };
         let size = frame.size();
+        // Recover the rasterized region's text (reading-order reconstructed from
+        // the laid-out frame) so the caller can keep it searchable/accessible as
+        // hidden runs alongside the image.
+        let frame_text = frame_to_text(&frame);
 
         // Render to a pixmap at 2× for crispness, then PNG-encode.
         let page = typst_layout::Page {
@@ -336,7 +344,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         }));
         let Ok(Ok(png)) = rendered else { return Ok(None) };
 
-        Ok(Some((self.add_image(&png, "png"), size)))
+        Ok(Some((self.add_image(&png, "png"), size, frame_text)))
     }
 
     /// Lays content out and returns its outer size, without rasterizing or
@@ -1149,18 +1157,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                     // content and hence no labels to orphan, so plain extraction is
                     // safe; we discard any partial tag harvest first to be sure.
                     let mark = self.deferred_tags.len();
-                    match mappers::image::laid_out_fallback(child, styles, self)? {
-                        Some(run) => {
-                            // Keep Word's figure counter consistent with any
-                            // captioned figure the box rasterized (a hidden
-                            // `SEQ … \h`), as the generic fallback does.
-                            self.emit_rasterized_figure_seqs(mark, styles, out);
-                            out.push(run);
-                        }
-                        None => {
-                            self.deferred_tags.truncate(mark);
-                            out.extend(self.inline_runs(&body, styles, props.clone())?);
-                        }
+                    let runs = mappers::image::laid_out_fallback(child, styles, self)?;
+                    if !runs.is_empty() {
+                        // Keep Word's figure counter consistent with any
+                        // captioned figure the box rasterized (a hidden
+                        // `SEQ … \h`), as the generic fallback does.
+                        self.emit_rasterized_figure_seqs(mark, styles, out);
+                        out.extend(runs);
+                    } else {
+                        self.deferred_tags.truncate(mark);
+                        out.extend(self.inline_runs(&body, styles, props.clone())?);
                     }
                 }
             }
@@ -1280,7 +1286,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         out: &mut Vec<Run>,
     ) -> SourceResult<()> {
         let before = self.deferred_tags.len();
-        let run = mappers::image::laid_out_fallback(child, styles, self)?;
+        let runs = mappers::image::laid_out_fallback(child, styles, self)?;
         // A figure whose *container* we rasterized (e.g. a `wrap-content`
         // figure) never reaches the figure mapper, so it emits no visible
         // `SEQ` field — Word's caption counter would then under-count and
@@ -1288,15 +1294,13 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         // hidden `SEQ \h` (increment without display) for each such figure,
         // keeping Word's numbering consistent with the references.
         self.emit_rasterized_figure_seqs(before, styles, out);
-        match run {
-            Some(run) => out.push(run),
+        if !runs.is_empty() {
+            out.extend(runs);
+        } else if !crate::convert::is_invisible_noop(child) {
             // Only warn about a genuine drop. Invisible no-ops (spacing, a
             // hidden body, layout scaffolding) render nothing in the PDF
             // either, so a warning would be a false alarm.
-            None if !crate::convert::is_invisible_noop(child) => {
-                self.warn_ignored(child.elem().name(), child.span())
-            }
-            None => {}
+            self.warn_ignored(child.elem().name(), child.span())
         }
         Ok(())
     }
@@ -1455,4 +1459,72 @@ fn collect_frame_tags(frame: &Frame, out: &mut Vec<Tag>) {
             _ => {}
         }
     }
+}
+
+/// Collects each laid-out text run as `(top-left position, text, font size,
+/// run width)`, recursing through groups by their translation (a
+/// rotate/scale/skew is ignored — good enough for reading-order recovery).
+fn collect_frame_text(
+    frame: &Frame,
+    offset: typst_library::layout::Point,
+    out: &mut Vec<(typst_library::layout::Point, EcoString, Abs, Abs)>,
+) {
+    use typst_library::layout::Point;
+    for (pos, item) in frame.items() {
+        let p = offset + *pos;
+        match item {
+            FrameItem::Group(group) => {
+                let t = &group.transform;
+                collect_frame_text(&group.frame, p + Point::new(t.tx, t.ty), out);
+            }
+            FrameItem::Text(text) if !text.text.is_empty() => {
+                out.push((p, text.text.clone(), text.size, text.width()));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Reconstructs approximate reading-order text from a laid-out frame's text
+/// runs. Every word is present (each `TextItem` carries its plain `text`);
+/// lines are recovered by clustering on the y-position and inter-word spaces
+/// from x-gaps. Precise structure/formatting is lost, but the text is fully
+/// recovered — this is what lets content a *layout closure* produced (which
+/// yields an opaque `Frame`, not re-realizable blocks) still contribute
+/// searchable/selectable text rather than being a pure image. Returned as a
+/// single string with `\n` line separators; the caller decides visibility.
+fn frame_to_text(frame: &Frame) -> String {
+    use typst_library::layout::Point;
+    let mut items: Vec<(Point, EcoString, Abs, Abs)> = Vec::new();
+    collect_frame_text(frame, Point::zero(), &mut items);
+    if items.is_empty() {
+        return String::new();
+    }
+    // Reading order: top-to-bottom, then left-to-right.
+    items.sort_by(|a, b| {
+        a.0.y
+            .partial_cmp(&b.0.y)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.x.partial_cmp(&b.0.x).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    let mut s = String::new();
+    let mut last_y: Option<Abs> = None;
+    let mut last_x_end: Option<Abs> = None;
+    for (pos, text, size, width) in items {
+        if let Some(ly) = last_y
+            && (pos.y - ly).abs() > size * 0.6
+        {
+            s.push('\n');
+            last_x_end = None;
+        } else if let Some(xe) = last_x_end
+            && pos.x - xe > size * 0.25
+            && !s.ends_with(char::is_whitespace)
+        {
+            s.push(' ');
+        }
+        s.push_str(&text);
+        last_y = Some(pos.y);
+        last_x_end = Some(pos.x + width);
+    }
+    s
 }

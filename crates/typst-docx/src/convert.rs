@@ -758,11 +758,8 @@ fn handle_block_inner(
         // `wps:txbx` text box does not flow its text in LibreOffice. Rasterize the
         // box to an image instead — a centered inline image renders correctly in
         // every consumer (Word renders the text box fine, but this keeps both).
-        if let Some(run) = mappers::image::laid_out_fallback(child, styles, ctx)? {
-            out.push(Block::Para(Para {
-                props: ParaProps::default(),
-                content: vec![ParaChild::Run(run)],
-            }));
+        if let Some(para) = fallback_para(mappers::image::laid_out_fallback(child, styles, ctx)?) {
+            out.push(para);
         } else {
             ctx.warn_ignored(child.elem().name(), child.span());
         }
@@ -796,15 +793,15 @@ fn handle_block_inner(
                 props: Default::default(),
                 content: runs.into_iter().map(ParaChild::Run).collect(),
             }));
-        } else if let Some(run) = mappers::image::laid_out_fallback(child, styles, ctx)? {
+        } else if let Some(para) =
+            fallback_para(mappers::image::laid_out_fallback(child, styles, ctx)?)
+        {
             // A drawable block with no extractable text — a diagonal/endpoint
             // `#line`, `#polygon`, `#curve`, a `#layout`/`#stack`/`#move`/
             // `#rotate`/`#scale` body, … — rasterizes to an image so the visual
-            // survives instead of being silently dropped.
-            out.push(Block::Para(Para {
-                props: ParaProps::default(),
-                content: vec![ParaChild::Run(run)],
-            }));
+            // survives instead of being silently dropped (with the frame's
+            // recovered text appended as hidden searchable runs).
+            out.push(para);
         } else if !is_invisible_noop(child) {
             ctx.warn_ignored(child.elem().name(), child.span());
         }
@@ -835,17 +832,27 @@ fn handle_layout(
             out.extend(ctx.blocks(&content, styles)?);
         }
         Err(_) => {
-            if let Some(run) =
-                mappers::image::laid_out_fallback(elem.pack_ref(), styles, ctx)?
+            if let Some(para) =
+                fallback_para(mappers::image::laid_out_fallback(elem.pack_ref(), styles, ctx)?)
             {
-                out.push(Block::Para(Para {
-                    props: Default::default(),
-                    content: vec![ParaChild::Run(run)],
-                }));
+                out.push(para);
             }
         }
     }
     Ok(())
+}
+
+/// Wraps rasterization-fallback runs — a drawing plus the hidden, searchable
+/// text recovered from its laid-out frame — in a single paragraph, so the
+/// hidden text sits beside the image. Returns `None` when nothing was produced.
+fn fallback_para(runs: Vec<Run>) -> Option<Block> {
+    if runs.is_empty() {
+        return None;
+    }
+    Some(Block::Para(Para {
+        props: ParaProps::default(),
+        content: runs.into_iter().map(ParaChild::Run).collect(),
+    }))
 }
 
 /// Whether an element is an intentionally invisible no-op or pure layout
@@ -895,14 +902,12 @@ fn handle_block_box(
         Some(BlockBody::Content(content)) => content,
         _ => {
             // A layouter body (`#block(width => ..)`) is an opaque closure with
-            // no extractable content: rasterize the whole box.
-            if let Some(run) =
-                mappers::image::laid_out_fallback(elem.pack_ref(), styles, ctx)?
+            // no extractable content: rasterize the whole box (and recover its
+            // laid-out text as hidden searchable runs beside the image).
+            if let Some(para) =
+                fallback_para(mappers::image::laid_out_fallback(elem.pack_ref(), styles, ctx)?)
             {
-                out.push(Block::Para(Para {
-                    props: Default::default(),
-                    content: vec![ParaChild::Run(run)],
-                }));
+                out.push(para);
             }
             return Ok(());
         }

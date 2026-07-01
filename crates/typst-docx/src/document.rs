@@ -760,7 +760,7 @@ fn background_block(
     ctx.raster_width = Abs::pt(geom.page_w as f64 / 20.0);
     let result = ctx.rasterize(bg, styles, bg.span())?;
     ctx.raster_width = saved_w;
-    let Some((rel, _size)) = result else {
+    let Some((rel, _size, _text)) = result else {
         return Ok(None);
     };
 

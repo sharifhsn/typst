@@ -596,7 +596,46 @@ mild column overlap in tight two-column CVs (a `#place` sidebar flowing into
 the main column) — content fully intact, just imperfectly positioned, exactly
 the accepted trade. The remaining `box`/`block` rasterizations are now almost
 entirely genuine layouter closures (`layout(size => ..)` with `measure()`) and
-`skew` content — the true opaque residue.
+`skew` content — but even *these* need not be text-dead (§7.1i).
+
+### 7.1i The rasterized residue is not opaque: recover its text as hidden runs — IMPLEMENTED
+§7.1h called the surviving layouter/`skew`/scaled-diagram rasterizations "the
+true opaque residue." That was wrong. A rasterized element still lays out to a
+real `Frame`, and that frame's `Text` items carry the exact glyph runs — the
+words are right there, we were just throwing the frame away after rendering it
+to a PNG. So `ctx.rasterize` now also walks the laid-out frame
+(`collect_frame_text` / `frame_to_text`): it accumulates each `Text` item's
+string with its position (folding in every `Group` translation), sorts by
+reading order (y then x), and reconstructs line breaks from y-clusters and word
+spaces from x-gaps. `laid_out_fallback` returns the drawing **plus** that
+recovered text as **hidden `w:vanish` runs** in the same paragraph (and sets the
+drawing's `descr` alt-text to the space-joined transcription).
+
+The image is byte-for-byte the same PNG — **zero visual regression** — but the
+region is no longer dead pixels: the text is searchable (Word Find), selectable,
+copy-pasteable, screen-reader accessible (both the hidden runs and the image alt
+text), and indexable. The hidden block is bracketed with hidden spaces so its
+first/last words keep a boundary against adjacent visible runs (without them a
+consumer concatenating run text glues e.g. `urbane`+`Stoicos` — the one
+tokenization seam the corpus check caught).
+
+This threads through every rasterize call site: the block-level fallbacks and
+`handle_layout`/`handle_block_box` (via a `fallback_para` helper wrapping the
+runs in one paragraph), the inline box path, `rasterize_fallback`, and the
+`#place` body-drawing anchor (drawing + hidden text share the anchored
+paragraph). The vector-`image()` path takes just the drawing (an image has no
+body text).
+
+**Validated — pure gains, corpus-wide.** Isolated oracle A/B (HEAD vs this
+change) flagged 298 docs; a subset-direction check (`is HEAD's text ⊆ the new
+text?`) confirmed **HEAD ⊆ NEW everywhere — zero content loss, every flagged doc
+is strictly additive**. Total recovered: **+37,328 searchable words (+10.7%)**
+across those 298 docs — some more than doubled (`universal-jlu-thesis`
+3122->7788, `fh-joanneum-iit-thesis` 2576->5070, `elegant-culsc-record`
+359->1241). Corpus batch 618 OK / **0 INVALID**, 68/68 docx tests green,
+LibreOffice round-trips cleanly (the `w:vanish` text correctly does not render,
+so the visual is unchanged, while staying in the document model for
+search/accessibility). The residue that "can't become text" now does.
 
 ### 7.2 Radial gradient (scoped out in §4, see the `6bcb673cf` commit)
 OOXML's radial gradient is expressed as an inset (`a:fillToRect`) into the

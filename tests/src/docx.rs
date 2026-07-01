@@ -258,6 +258,23 @@ fn shape_stroke_dash_and_cap_are_carried_natively() {
 }
 
 #[test]
+fn rasterized_content_keeps_its_text_as_hidden_runs() {
+    // Content with no native mapping (here `#skew`) still rasterizes to an image,
+    // but the text laid out inside it must NOT be lost: the frame's glyph runs
+    // are recovered and emitted as hidden (`w:vanish`) runs beside the drawing,
+    // so the region stays searchable/selectable/accessible — the image carries
+    // the exact visual, the hidden text carries the words.
+    let p = parts("#skew(ax: 20deg)[HiddenSkewWord]");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<a:blip"), "skew has no native form, so it rasterizes to an image");
+    assert!(doc.contains("<w:vanish/>"), "the recovered text is emitted as a hidden run");
+    assert!(doc.contains("HiddenSkewWord"), "the rasterized word survives as searchable text");
+    // The image also gets the recovered text as accessibility alt text.
+    assert!(doc.contains("descr=\"HiddenSkewWord\""), "the drawing carries alt text");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn grid_cell_alignment_is_kept() {
     // `#grid` cell alignment must reach `w:jc` (it was only read off `#table`
     // cells before, silently dropping it for grids).
