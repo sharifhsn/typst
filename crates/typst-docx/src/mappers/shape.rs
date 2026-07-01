@@ -428,17 +428,67 @@ fn default_stroke(fill: &Option<Paint>) -> Option<ShapeStroke> {
     if fill.is_some() {
         None
     } else {
-        Some(ShapeStroke { color: [0, 0, 0], w_emu: abs_to_emu(Abs::pt(1.0)) })
+        Some(ShapeStroke {
+            color: [0, 0, 0],
+            w_emu: abs_to_emu(Abs::pt(1.0)),
+            cap: "flat",
+            dash: None,
+        })
     }
 }
 
 fn resolve_stroke(stroke: Stroke, styles: StyleChain) -> Option<ShapeStroke> {
     let fx = stroke.resolve(styles).unwrap_or_default();
     match &fx.paint {
-        Paint::Solid(c) => {
-            Some(ShapeStroke { color: color_to_hex(c), w_emu: abs_to_emu(fx.thickness) })
-        }
+        Paint::Solid(c) => Some(ShapeStroke {
+            color: color_to_hex(c),
+            w_emu: abs_to_emu(fx.thickness),
+            cap: line_cap_to_ooxml(fx.cap),
+            dash: fx.dash.as_ref().map(|d| prst_dash(&d.array, fx.thickness)),
+        }),
         _ => None,
+    }
+}
+
+/// Maps Typst's [`LineCap`] to OOXML's `a:ln` `cap` attribute.
+fn line_cap_to_ooxml(cap: typst_library::visualize::LineCap) -> &'static str {
+    use typst_library::visualize::LineCap;
+    match cap {
+        LineCap::Butt => "flat",
+        LineCap::Round => "rnd",
+        LineCap::Square => "sq",
+    }
+}
+
+/// Maps a *resolved* dash array (plain absolute on/off lengths — by this
+/// point `DashLength::LineWidth` has already been multiplied out, so the
+/// dot-vs-dash distinction `classify_dash` reads directly from the unresolved
+/// source stroke isn't available) to the closest OOXML `a:prstDash` preset — a
+/// small fixed vocabulary, so an arbitrary dash array is approximated rather
+/// than reproduced exactly. An "on" segment at (or barely above) the line's
+/// own thickness reads as a dot (`DashLength::LineWidth` resolves to exactly
+/// 1x); a longer one reads as a dash. This is inherently lossy — Typst's own
+/// `"dashed"` preset (`3pt` on/off, fixed regardless of thickness) and a
+/// custom `dash: "dotted"`-like array both just look like "some on/off array"
+/// once resolved to plain lengths, so a sufficiently thick `"dashed"` stroke
+/// can misclassify as a dot. Kept tight (1.2x) to favor the common case
+/// (thin-to-medium strokes) over the rarer thick-dashed edge case.
+fn prst_dash(array: &[Abs], thickness: Abs) -> &'static str {
+    if array.is_empty() {
+        return "solid";
+    }
+    let (mut has_dot, mut has_dash) = (false, false);
+    for on in array.iter().step_by(2) {
+        if *on <= thickness * 1.2 {
+            has_dot = true;
+        } else {
+            has_dash = true;
+        }
+    }
+    match (has_dot, has_dash) {
+        (true, true) => "dashDot",
+        (true, false) => "sysDot",
+        _ => "dash",
     }
 }
 
@@ -581,9 +631,12 @@ fn resolved_stroke(
     match stroke {
         None => Some(None),
         Some(fx) => match &fx.paint {
-            Paint::Solid(c) => {
-                Some(Some(ShapeStroke { color: color_to_hex(c), w_emu: abs_to_emu(fx.thickness) }))
-            }
+            Paint::Solid(c) => Some(Some(ShapeStroke {
+                color: color_to_hex(c),
+                w_emu: abs_to_emu(fx.thickness),
+                cap: line_cap_to_ooxml(fx.cap),
+                dash: fx.dash.as_ref().map(|d| prst_dash(&d.array, fx.thickness)),
+            })),
             _ => None,
         },
     }

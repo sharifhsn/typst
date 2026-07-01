@@ -443,6 +443,10 @@ pub enum PathSegment {
 pub struct ShapeStroke {
     pub color: [u8; 3],
     pub w_emu: i64,
+    /// OOXML `a:ln`'s `cap` attribute value (`"flat"`/`"rnd"`/`"sq"`).
+    pub cap: &'static str,
+    /// OOXML `a:prstDash`'s `val`, or `None` for a solid line.
+    pub dash: Option<&'static str>,
 }
 
 /// Floating-image placement (`<wp:anchor>`): positionH/V + wrap.

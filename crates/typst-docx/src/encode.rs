@@ -870,10 +870,13 @@ fn write_shape_payload(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec) {
     }
     match &shape.stroke {
         Some(s) => {
-            w.open("a:ln").attr("w", &s.w_emu.to_string()).start_children();
+            w.open("a:ln").attr("w", &s.w_emu.to_string()).attr("cap", s.cap).start_children();
             w.open("a:solidFill").start_children();
             w.open("a:srgbClr").attr("val", &hex(s.color)).empty();
             w.close();
+            if let Some(dash) = s.dash {
+                w.open("a:prstDash").attr("val", dash).empty();
+            }
             w.close(); // a:ln
         }
         None => {

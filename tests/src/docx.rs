@@ -230,6 +230,34 @@ fn linear_gradient_fill_maps_to_native_gradfill() {
 }
 
 #[test]
+fn shape_stroke_dash_and_cap_are_carried_natively() {
+    // A shape's stroke dash pattern and line cap must reach the native
+    // `a:ln`'s `cap` attribute and `a:prstDash` child, not silently flatten to
+    // a plain solid line.
+    let p = parts(
+        "#rect(width: 100pt, height: 40pt, \
+           stroke: (paint: red, thickness: 2pt, dash: \"dashed\", cap: \"round\"))",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("cap=\"rnd\""), "round cap maps to rnd");
+    assert!(doc.contains("<a:prstDash val=\"dash\"/>"), "dashed maps to the dash preset");
+
+    // Non-horizontal, so it maps to a native shape (a horizontal line keeps
+    // its existing paragraph-border mapping, which has no `cap` concept).
+    let dotted = parts(
+        "#line(length: 100pt, angle: 20deg, stroke: (paint: blue, thickness: 1pt, dash: \"dotted\", cap: \"square\"))",
+    );
+    let doc2 = &dotted["word/document.xml"];
+    assert!(doc2.contains("cap=\"sq\""), "square cap maps to sq");
+    assert!(doc2.contains("<a:prstDash val=\"sysDot\"/>"), "dotted maps to a dot preset");
+
+    // A plain solid stroke still carries an explicit cap but no prstDash.
+    let solid = parts("#rect(width: 100pt, height: 40pt, stroke: black)");
+    assert!(!solid["word/document.xml"].contains("<a:prstDash"), "solid line has no dash element");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn grid_cell_alignment_is_kept() {
     // `#grid` cell alignment must reach `w:jc` (it was only read off `#table`
     // cells before, silently dropping it for grids).
