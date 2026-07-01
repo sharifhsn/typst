@@ -37,6 +37,25 @@ pub fn color_to_hex(color: &Color) -> [u8; 3] {
     [r, g, b]
 }
 
+/// A gradient approximated by a single solid colour — its first stop — for a
+/// flat `w:shd` shade (see `handle_block_box` / `inline_frame`). A gradient's
+/// stops are stored in its own interpolation space (Oklab by default);
+/// `color_to_hex` reads a colour's components verbatim, so the stop MUST be
+/// converted to sRGB first (exactly as `linear_gradient_fill` and the SVG
+/// exporter do) — otherwise the Oklab L/a/b triple is reinterpreted as RGB,
+/// yielding a plausible-looking but wrong colour (a pale lilac read as bright
+/// red). `None` for a stopless gradient.
+pub fn gradient_shade_hex(
+    gradient: &typst_library::visualize::Gradient,
+) -> Option<[u8; 3]> {
+    use typst_library::visualize::{ColorSpace, ProcessColorSpace};
+    let srgb = ColorSpace::Process(ProcessColorSpace::Srgb);
+    gradient
+        .stops_ref()
+        .first()
+        .map(|(c, _)| color_to_hex(&c.to_space(&srgb).unwrap_or_else(|_| c.clone())))
+}
+
 /// Formats an `RRGGBB` byte triple as uppercase hex.
 pub fn hex(rgb: [u8; 3]) -> String {
     format!("{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])

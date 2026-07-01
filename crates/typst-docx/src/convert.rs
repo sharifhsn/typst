@@ -917,9 +917,7 @@ fn handle_block_box(
     // is preserved either way.
     let shd_fill = match &fill {
         Some(Paint::Solid(c)) => Some(crate::props::color_to_hex(c)),
-        Some(Paint::Gradient(g)) => {
-            g.stops_ref().first().map(|(c, _)| crate::props::color_to_hex(c))
-        }
+        Some(Paint::Gradient(g)) => crate::props::gradient_shade_hex(g),
         _ => None,
     };
     let pbdr = block_borders(&stroke, styles);

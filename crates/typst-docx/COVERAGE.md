@@ -570,11 +570,16 @@ positioned-but-dead pixel image. Two changes:
    live. Genuinely visual placed content (a bare shape/canvas, lowered to a
    single drawing) still anchors, unchanged.
 2. **Gradient/tiling-filled boxes extract their content** (`handle_block_box`
-   dropped its `representable` fill gate). A `#block`/`#rect` with a gradient
-   or tiling fill and a content body now emits its paragraphs, approximating a
-   gradient by its first stop's colour as a solid `w:shd` shade (a tiling drops
-   to no shade). Only a genuine *layouter* body (`#block(width => ..)`, an
-   opaque closure with no extractable content) still rasterizes.
+   dropped its `representable` fill gate, and the inline `inline_frame` path
+   the same). A `#block`/`#rect`/`#box` with a gradient or tiling fill and a
+   content body now emits its paragraphs, approximating a gradient by its first
+   stop's colour as a solid `w:shd` shade (a tiling drops to no shade). Only a
+   genuine *layouter* body (`#block(width => ..)`, an opaque closure with no
+   extractable content) still rasterizes. The approximation goes through the
+   shared `props::gradient_shade_hex`, which converts the stop to sRGB first —
+   a gradient's stops live in its interpolation space (Oklab by default), so
+   reading a stop's bytes verbatim would reinterpret the L/a/b triple as RGB
+   (a pale lilac coming out bright red).
 
 **Validated — the aggressive bet paid off cleanly.** Corpus-wide: `block`
 2588->1142 (-56%), `box` 3212->2733, `sequence` 586->224, and `context`/

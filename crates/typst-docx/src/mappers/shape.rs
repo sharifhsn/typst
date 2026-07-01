@@ -156,8 +156,14 @@ pub fn inline_frame(
     styles: StyleChain,
 ) -> Option<(Content, Option<[u8; 3]>, Option<crate::dom::ParaBorder>)> {
     let framed = framed_container(child, styles)?;
+    // A gradient fill approximates to its first stop's colour (as the block box
+    // path does, COVERAGE.md §7.1h) so a gradient-filled inline box — e.g. a
+    // code-line highlight from a listing package — becomes run-shaded live text
+    // instead of rasterizing; a tiling has no flat analogue and drops to no
+    // shade.
     let fill = match framed.fill_paint {
         Some(Paint::Solid(c)) => Some(color_to_hex(&c)),
+        Some(Paint::Gradient(g)) => crate::props::gradient_shade_hex(&g),
         _ => None,
     };
     let bdr = framed.stroke.map(|s| {
