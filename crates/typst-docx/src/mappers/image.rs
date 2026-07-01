@@ -224,35 +224,131 @@ pub fn figure(
     Ok(blocks)
 }
 
-/// Lowers a top-level `#place(..)` into a floating drawing (G8).
+/// Lowers a STANDALONE [`FigureCaption`] — one that reached the dispatch
+/// outside its `#figure` (a custom `show figure: it => .. it.caption ..` rule
+/// that emits the caption separately, common in two-column paper templates) —
+/// into a `Caption`-styled paragraph. `FigureCaption::realize` prepends the
+/// supplement + number + separator ("Figure 3: …"); the number is baked as
+/// static text here (rather than the live `SEQ` field the in-`#figure` path
+/// uses) since a caption divorced from its figure has no counter context, but
+/// the text stays live and correct instead of rasterizing to a flat image.
+pub fn caption(
+    elem: &Packed<typst_library::model::FigureCaption>,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Vec<Block>> {
+    let realized = elem.realize(ctx.engine(), styles)?;
+    let runs = ctx.inline_runs(&realized, styles, RunProps::default())?;
+    if runs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut props = ParaProps::default();
+    props.style = Some(CAPTION_STYLE.into());
+    Ok(vec![Block::Para(Para {
+        props,
+        content: runs.into_iter().map(ParaChild::Run).collect(),
+    })])
+}
+
+/// Lowers a top-level `#place(..)` into DOCX blocks (G8).
 ///
-/// The placed body is lowered to a single `Drawing` (image body → the inline
-/// `pic:pic` payload; otherwise the rasterized PNG fallback), then wrapped in a
-/// `<wp:anchor>` whose position follows the place alignment + `dx`/`dy` offsets:
+/// - A body that is a single native/rasterized drawing (an image, a shape
+///   composition, a rasterized canvas) → one `<wp:anchor>`ed drawing whose
+///   position follows the place alignment + `dx`/`dy` offsets.
+/// - A `float: true` body that is NOT a single drawing (a figure body +
+///   caption, a table, flowing text) → those blocks emitted in place, so the
+///   text stays live. `float` is Typst's own "remove from normal flow and
+///   reflow to the top/bottom of the region" — exactly the DOCX figure-flow
+///   model — so this is a semantic mapping, not an approximation, and it
+///   avoids rasterizing the whole floated body to a flat (text-dead) image.
+/// - Any other non-drawing body (a non-float, absolutely-positioned overlay /
+///   watermark / decoration) keeps its position by rasterizing the whole body
+///   and anchoring it.
 ///
-/// - an axis with an absolute `dx`/`dy` → `<wp:posOffset>` in EMU;
-/// - otherwise the alignment component → `<wp:align>` (pure-`%` offsets, which
-///   have no fixed value without layout, fall back to the alignment);
-/// - `float: true` → wrap top-and-bottom; `float: false` → `wrapNone` (overlap).
-///
-/// Returns `None` if the body lays out to nothing (the caller then skips it).
+/// Returns an empty `Vec` if the body lays out to nothing.
 pub fn place(
     elem: &Packed<typst_library::layout::PlaceElem>,
     styles: StyleChain,
     ctx: &mut DocxCtx,
-) -> SourceResult<Option<Block>> {
-    use typst_library::layout::HAlignment;
+) -> SourceResult<Vec<Block>> {
+    let body = &elem.body;
 
-    let Some(mut drawing) = place_body_drawing(&elem.body, styles, ctx)? else {
-        return Ok(None);
-    };
+    // A placed body whose ENTIRE content is a composition of native shapes —
+    // e.g. a decorative background pattern built from many `#polygon`s in a
+    // `#stack` (`place(stack(..polygons))`), the common way a slide theme
+    // draws a full-bleed geometric motif — lowers to one `wpg:wgp` group of
+    // vector shapes (see COVERAGE.md §7.1/§7.1f). Laying the whole body out
+    // under `Target::Paged` resolves each shape's percentage-relative
+    // coordinates against the page and hands `build_shapes_drawing` a frame of
+    // concrete `Geometry::Curve` shapes to group.
+    if let Some(Run::Drawing(mut drawing)) =
+        crate::mappers::shape::transformed(body, styles, ctx)?
+    {
+        set_place_anchor(&mut drawing, elem, styles, ctx);
+        return Ok(vec![para_drawing(drawing)]);
+    }
+
+    // Lower the body like any block once.
+    let mut blocks = ctx.blocks(body, styles)?;
+
+    // A single standalone drawing (a bare image, or a canvas/visual body we
+    // rasterized) → anchor it at the place position. Guarded to SOLELY one
+    // drawing so a richer body (several lowered blocks) isn't silently
+    // truncated to its first drawing.
+    let is_solely_one_drawing = matches!(
+        blocks.as_slice(),
+        [Block::Para(p)] if matches!(p.content.as_slice(), [ParaChild::Run(Run::Drawing(_))])
+    );
+    if is_solely_one_drawing
+        && let Some(mut drawing) = take_first_drawing(&mut blocks)
+    {
+        set_place_anchor(&mut drawing, elem, styles, ctx);
+        return Ok(vec![para_drawing(drawing)]);
+    }
+
+    // Real block content (figure body + caption, table, text). For a FLOAT,
+    // flow it in place — live text, DOCX figure-flow model — instead of
+    // rasterizing the whole body.
+    if elem.float.get(styles) && !blocks.is_empty() {
+        return Ok(blocks);
+    }
+
+    // Non-float positioned content (a watermark/overlay/decoration) keeps its
+    // position: rasterize the whole body and anchor it.
+    match laid_out_fallback(body, styles, ctx)? {
+        Some(Run::Drawing(mut drawing)) => {
+            set_place_anchor(&mut drawing, elem, styles, ctx);
+            Ok(vec![para_drawing(drawing)])
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Wraps a drawing in its own paragraph block.
+fn para_drawing(drawing: Drawing) -> Block {
+    Block::Para(Para {
+        props: ParaProps::default(),
+        content: vec![ParaChild::Run(Run::Drawing(drawing))],
+    })
+}
+
+/// Sets a `<wp:anchor>` on `drawing` following the place alignment + `dx`/`dy`
+/// offsets: an axis with an absolute `dx`/`dy` → `<wp:posOffset>` in EMU;
+/// otherwise the alignment component → `<wp:align>` (pure-`%` offsets, no fixed
+/// value without layout, fall back to the alignment); `float: true` → wrap
+/// top-and-bottom, `float: false` → `wrapNone` (overlap).
+fn set_place_anchor(
+    drawing: &mut Drawing,
+    elem: &Packed<typst_library::layout::PlaceElem>,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) {
+    use typst_library::layout::HAlignment;
 
     let font_size = styles.resolve(TextElem::size);
     let align = elem.alignment.get(styles);
     let float = elem.float.get(styles);
 
-    // Resolve dx/dy: a nonzero absolute (non-`%`) component → EMU offset;
-    // pure-`%` (or zero) → fall back to alignment.
     let dx = elem.dx.get(styles);
     let dy = elem.dy.get(styles);
     let dx_abs = if dx.rel.is_zero() { dx.abs.at(font_size) } else { Abs::zero() };
@@ -260,7 +356,6 @@ pub fn place(
     let dx_emu = (dx_abs != Abs::zero()).then(|| crate::props::abs_to_emu(dx_abs));
     let dy_emu = (dy_abs != Abs::zero()).then(|| crate::props::abs_to_emu(dy_abs));
 
-    // The alignment component, if any (Smart::Auto → none).
     let h_comp = match align {
         Smart::Custom(a) => a.x(),
         Smart::Auto => None,
@@ -270,7 +365,6 @@ pub fn place(
         Smart::Auto => None,
     };
 
-    // Horizontal: offset wins, else alignment component, else default left.
     let h_align: &'static str = match h_comp {
         Some(HAlignment::Center) => "center",
         Some(HAlignment::Right | HAlignment::End) => "right",
@@ -281,7 +375,6 @@ pub fn place(
         None => AnchorPos { rel_from: "margin", align: Some(h_align), offset: None },
     };
 
-    // Vertical: offset wins, else alignment component, else default top.
     let v_align: &'static str = match v_comp {
         Some(VAlignment::Bottom) => "bottom",
         Some(VAlignment::Horizon) => "center",
@@ -301,62 +394,6 @@ pub fn place(
         dist: [0, 0, 0, 0],
         behind: false,
     });
-
-    Ok(Some(Block::Para(Para {
-        props: ParaProps::default(),
-        content: vec![ParaChild::Run(Run::Drawing(drawing))],
-    })))
-}
-
-/// Lowers a `#place` body to a single `Drawing` (a native shape/group, an
-/// image payload, or a rasterized fallback). Returns `None` if it lays out to
-/// nothing.
-fn place_body_drawing(
-    body: &Content,
-    styles: StyleChain,
-    ctx: &mut DocxCtx,
-) -> SourceResult<Option<Drawing>> {
-    // A placed body whose ENTIRE content is a composition of native shapes —
-    // e.g. a decorative background pattern built from many `#polygon`s in a
-    // `#stack` (`place(stack(..polygons))`), the common way a slide theme
-    // draws a full-bleed geometric motif — lowers to one `wpg:wgp` group of
-    // vector shapes, the same recovery `#move`/`#rotate`/`#place`-in-a-box
-    // already get (see COVERAGE.md §7.1). Laying the whole body out under
-    // `Target::Paged` resolves each shape's percentage-relative coordinates
-    // against the page and hands `build_shapes_drawing` a frame of concrete
-    // `Geometry::Curve` shapes to group. `None` (fall through) the moment the
-    // body holds anything that isn't a plain native shape (text, an image, an
-    // unrepresentable fill) — so a placed image or figure keeps its existing
-    // handling below.
-    if let Some(Run::Drawing(drawing)) = crate::mappers::shape::transformed(body, styles, ctx)? {
-        return Ok(Some(drawing));
-    }
-
-    // Lower the body like any block and pull out its first standalone drawing
-    // (covers a bare image, a centered figure-less image, etc.) — but only
-    // trust that extraction when the body produced NOTHING else. Blindly
-    // taking the first drawing regardless of what else `blocks` holds is a
-    // real content-loss bug: a placed body richer than a lone image/shape
-    // (e.g. a decorative pattern whose own children fan out into several
-    // separately-lowered blocks) would silently drop everything past the
-    // first drawing found. Rasterize the WHOLE body instead in that case, so
-    // nothing is lost even though it costs the vector fidelity.
-    let mut blocks = ctx.blocks(body, styles)?;
-    let is_solely_one_drawing = matches!(
-        blocks.as_slice(),
-        [Block::Para(p)] if matches!(p.content.as_slice(), [ParaChild::Run(Run::Drawing(_))])
-    );
-    if is_solely_one_drawing
-        && let Some(drawing) = take_first_drawing(&mut blocks)
-    {
-        return Ok(Some(drawing));
-    }
-    // No native image inside (or richer content that must stay together):
-    // rasterize the whole placed body to a PNG.
-    match laid_out_fallback(body, styles, ctx)? {
-        Some(Run::Drawing(drawing)) => Ok(Some(drawing)),
-        _ => Ok(None),
-    }
 }
 
 /// Builds the caption runs with a `SEQ` field carrying the number (G9).

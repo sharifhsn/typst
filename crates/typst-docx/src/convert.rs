@@ -598,6 +598,12 @@ fn handle_block_inner(
     } else if let Some(elem) = child.to_packed::<FigureElem>() {
         // Figure: caption + body + cross-reference bookmark.
         out.extend(mappers::image::figure(elem, styles, ctx)?);
+    } else if let Some(elem) = child.to_packed::<typst_library::model::FigureCaption>() {
+        // A standalone figure caption — a `show figure` rule that emits
+        // `it.caption` separately from the figure body (common in two-column
+        // paper templates) — realized to a `Caption`-styled paragraph instead
+        // of rasterizing.
+        out.extend(mappers::image::caption(elem, styles, ctx)?);
     } else if let Some(elem) = child.to_packed::<QuoteElem>() {
         use typst_library::foundations::Resolve;
         let block = elem.block.get(styles);
@@ -717,11 +723,9 @@ fn handle_block_inner(
         // A float-flush marker (`place` float ordering) has no DOCX equivalent and
         // carries no content of its own.
     } else if let Some(elem) = child.to_packed::<typst_library::layout::PlaceElem>() {
-        // Top-level `#place(..)` → a floating drawing (G8). The body is lowered
-        // to an image (native or rasterized) wrapped in a `<wp:anchor>`.
-        if let Some(block) = mappers::image::place(elem, styles, ctx)? {
-            out.push(block);
-        }
+        // Top-level `#place(..)` → an anchored drawing, or (for a float with
+        // text-bearing content) the flowed blocks. See `mappers::image::place`.
+        out.extend(mappers::image::place(elem, styles, ctx)?);
     } else if (child.is::<typst_library::layout::BlockElem>() || is_framed_container(child))
         && contains_place(child)
         && let Some(run) = mappers::shape::transformed(child, styles, ctx)?

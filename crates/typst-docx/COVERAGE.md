@@ -515,6 +515,46 @@ hard class as the margin-note docs), correctly left rasterizing. Full test
 suite green, corpus batch 617/627 OK, 0 INVALID, 0 oracle regressions across
 the whole corpus.
 
+### 7.1g Floated `#place` content + standalone figure captions — IMPLEMENTED
+The single biggest CONTENT-loss pattern in academic papers: a two-column
+template's `show figure: it => place(float: true, scope: "parent")[#it.body
+#it.caption]` (and the analogous title-block `place(top+center, float: true,
+scope: "parent")[title, authors, abstract, keywords]`) had its entire body
+rasterized to one flat image by `place_body_drawing` — because the body isn't
+a *single* drawing (it's a figure body + caption, or a whole title block), the
+old logic fell to `laid_out_fallback` and flattened the lot. In pandoc text
+extraction the whole title block came out as a single `[]`.
+
+**Two fixes:**
+1. **Float `#place` → flow as blocks.** `place` now, when the body isn't a
+   single native/rasterized drawing, checks `elem.float`: a float is Typst's
+   own "remove from normal flow, reflow to the region top/bottom" — *exactly*
+   the DOCX figure-flow model — so its blocks are emitted in place (live text),
+   not rasterized. A non-float positioned overlay (watermark/decoration) still
+   rasterizes-and-anchors, preserving its position. `place` was refactored to
+   return `Vec<Block>` (the anchor logic factored into `set_place_anchor`); the
+   shape-composition (§7.1f) and single-drawing anchor paths are unchanged.
+2. **Standalone `FigureCaption` handler.** A `show figure` rule that emits
+   `it.caption` separately from the body leaves a bare `FigureCaption` in the
+   flow with no dispatch arm — it rasterized. Now `mappers::image::caption`
+   realizes it (`FigureCaption::realize` → "Figure 3: …", number baked as
+   static text since a caption divorced from its figure has no live counter
+   context) into a `Caption`-styled paragraph.
+
+**Validated:** corpus-wide `RASTERIZE: caption` 132->0, `sequence` 734->586,
+`styled` 402->374. But the rasterize-count drop *understates* the win: the
+oracle A/B flagged 16 docs, and ALL 16 are pure CONTENT GAINS (every one's
+extracted-text length increased) — twelve two-column paper templates (IEEE,
+IOP, JACoW, ACM-VGTC, ABNT, …) recovered their entire title block + figure
+captions as live, selectable text (e.g. `ioppub` +1103 chars: title, authors
+with ORCID, affiliations, the full abstract, keywords — previously one `[]`
+image). Zero content losses anywhere. The `nums` sub-flags are the documented
+static-number tradeoff (a standalone caption's number is baked text, not a
+live `SEQ` field). Visually (LibreOffice) the flowed two-column body renders
+correctly, and page count *drops* (`ioppub` 6->5) since the title block no
+longer consumes a full rasterized page. Full test suite green, corpus 617/627
+OK, 0 INVALID.
+
 ### 7.2 Radial gradient (scoped out in §4, see the `6bcb673cf` commit)
 OOXML's radial gradient is expressed as an inset (`a:fillToRect`) into the
 *shape's own bounding box* — an ellipse whose size is implied by how far the
