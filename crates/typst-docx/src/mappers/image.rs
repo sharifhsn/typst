@@ -151,8 +151,7 @@ pub fn figure(
         Some(cap) => {
             let position = cap.position.get(styles);
             let runs = caption_runs(elem, cap, styles, ctx)?;
-            let mut props = ParaProps::default();
-            props.style = Some(CAPTION_STYLE.into());
+            let props = ParaProps { style: Some(CAPTION_STYLE.into()), ..Default::default() };
             let para = Para {
                 props,
                 content: runs.into_iter().map(ParaChild::Run).collect(),
@@ -245,8 +244,7 @@ pub fn caption(
     if runs.is_empty() {
         return Ok(Vec::new());
     }
-    let mut props = ParaProps::default();
-    props.style = Some(CAPTION_STYLE.into());
+    let props = ParaProps { style: Some(CAPTION_STYLE.into()), ..Default::default() };
     Ok(vec![Block::Para(Para {
         props,
         content: runs.into_iter().map(ParaChild::Run).collect(),
@@ -445,7 +443,7 @@ fn caption_runs(
 
     // The realized number, used as the SEQ field's cached result so the caption
     // is readable before Word updates fields.
-    let number_runs = match (cap.counter.clone(), cap.numbering.clone(), cap.figure_location.clone())
+    let number_runs = match (cap.counter.clone(), cap.numbering.clone(), cap.figure_location)
     {
         (Some(Some(counter)), Some(Some(numbering)), Some(Some(location))) => {
             let number =
@@ -493,9 +491,17 @@ pub(crate) fn seq_name(elem: &Packed<FigureElem>, styles: StyleChain) -> EcoStri
             }
         }
         Smart::Custom(FigureKind::Name(name)) => {
-            // Use the custom name verbatim as the counter id (sanitized of
-            // spaces, which would break the field-code token).
-            name.replace(" ", "_").into()
+            // The name becomes a Word field-code identifier, so restrict it to
+            // token-safe characters — a stray space/quote/backslash would break
+            // the `SEQ` instruction grammar and make Word show "Error!". Keep
+            // (Unicode) alphanumerics and underscores, map everything else to
+            // `_`, and fall back to the generic counter if nothing usable
+            // remains (e.g. an empty custom name).
+            let id: EcoString = name
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+                .collect();
+            if id.is_empty() { "Figure".into() } else { id }
         }
         Smart::Auto => "Figure".into(),
     }
@@ -562,7 +568,7 @@ fn float_figure_body(
 /// sibling content (e.g. introspection tags) in place so it isn't lost. If the
 /// host paragraph is left empty after extraction, it is dropped. Returns `None`
 /// if no drawing exists (the body has no native image — e.g. a table figure).
-fn take_first_drawing(blocks: &mut Vec<Block>) -> Option<Drawing> {
+fn take_first_drawing(blocks: &mut [Block]) -> Option<Drawing> {
     for block in blocks.iter_mut() {
         if let Block::Para(para) = block {
             // Find the index of the (first) drawing child in this paragraph.

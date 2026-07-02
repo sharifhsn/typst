@@ -689,7 +689,7 @@ pub fn move_text(
     // `resolve_text_props`), so negate; then compose with whatever shift the
     // ambient run properties already carry (e.g. a nested `#move`, or this
     // sitting inside a `#super`/`#sub`).
-    let shift = existing + (-dy.to_pt() * 2.0).round() as i32;
+    let shift = existing.saturating_add((-dy.to_pt() * 2.0).round() as i32);
     p.position_half_pt = Some(shift);
 
     Ok(Some(ctx.inline_runs(&elem.body, styles, p)?))
@@ -1054,15 +1054,21 @@ fn raw_segments_from_curve(
 /// shape's own bounds) and [`build_shapes_drawing`] (each group child's bounds
 /// relative to the whole group).
 fn raw_bounds(raw: &[RawSeg]) -> (Abs, Abs, Abs, Abs) {
-    let mut min_x = Abs::zero();
-    let mut min_y = Abs::zero();
-    let mut max_x = Abs::zero();
-    let mut max_y = Abs::zero();
+    // Seed from the first real coordinate rather than the origin: a path whose
+    // points are all offset from `(0, 0)` (a `#line(start: (10pt, 10pt), …)`, or
+    // a group child positioned away from the group origin) must not have its box
+    // stretched back to include the origin — that inflates the drawing extent
+    // with phantom padding. `normalize_segments` shifts the path by these mins,
+    // so an origin-anchored box left the shape correct-but-padded; a tight box
+    // is both smaller and exactly right.
+    let mut bounds: Option<(Abs, Abs, Abs, Abs)> = None;
     let mut expand = |p: typst_library::layout::Point| {
-        min_x = min_x.min(p.x);
-        min_y = min_y.min(p.y);
-        max_x = max_x.max(p.x);
-        max_y = max_y.max(p.y);
+        bounds = Some(match bounds {
+            None => (p.x, p.y, p.x, p.y),
+            Some((min_x, min_y, max_x, max_y)) => {
+                (min_x.min(p.x), min_y.min(p.y), max_x.max(p.x), max_y.max(p.y))
+            }
+        });
     };
     for seg in raw {
         match seg {
@@ -1075,7 +1081,7 @@ fn raw_bounds(raw: &[RawSeg]) -> (Abs, Abs, Abs, Abs) {
             RawSeg::Close => {}
         }
     }
-    (min_x, min_y, max_x, max_y)
+    bounds.unwrap_or((Abs::zero(), Abs::zero(), Abs::zero(), Abs::zero()))
 }
 
 /// Shifts a path so every coordinate is non-negative (the OOXML `a:custGeom`

@@ -139,7 +139,28 @@ fn cellgrid(
                         let span_end = (x + colspan).min(ncols);
                         let w_dxa: i32 = col_dxa[x..span_end].iter().copied().sum();
 
-                        cells.push(continuation_cell(colspan as u32, Some(w_dxa)));
+                        // A vMerge continuation still carries the merged region's
+                        // SIDE borders on every row (left/right), its BOTTOM only
+                        // on the final row, and no TOP (that edge is interior to
+                        // the merged cell). Deriving them from the origin's
+                        // resolved stroke keeps a rowspan cell's box closed in a
+                        // bordered table; `CellBorders::default()` (all `nil`)
+                        // left the lower rows open on the sides and bottom.
+                        let borders = origin.map_or_else(CellBorders::default, |o| {
+                            let last_row = py + o.rowspan.get().max(1) - 1;
+                            CellBorders {
+                                top: None,
+                                bottom: if y == last_row {
+                                    side_border(&o.stroke.bottom)
+                                } else {
+                                    None
+                                },
+                                left: side_border(&o.stroke.left),
+                                right: side_border(&o.stroke.right),
+                            }
+                        });
+
+                        cells.push(continuation_cell(colspan as u32, Some(w_dxa), borders));
                         x = span_end;
                     } else {
                         // Horizontal merge: absorbed by the origin cell's
@@ -212,12 +233,12 @@ fn build_cell(
 /// A vertical-merge continuation placeholder cell (§7b): real `w:tc` carrying
 /// `w:vMerge` (continue) + the origin's `gridSpan`, content = a single empty
 /// paragraph.
-fn continuation_cell(grid_span: u32, w_dxa: Option<i32>) -> Cell {
+fn continuation_cell(grid_span: u32, w_dxa: Option<i32>, borders: CellBorders) -> Cell {
     Cell {
         w_dxa,
         grid_span: grid_span.max(1),
         v_merge: Some(VMerge::Continue),
-        borders: CellBorders::default(),
+        borders,
         shd_fill: None,
         valign: None,
         blocks: vec![empty_para_block()],
