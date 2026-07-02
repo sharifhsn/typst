@@ -148,6 +148,15 @@ impl CompileConfig {
             PageRanges::new(export_ranges.iter().map(|r| r.0.clone()).collect())
         });
 
+        if output_format == OutputFormat::Docx && pages.is_some() {
+            // Refuse rather than silently export the whole document: a user
+            // selecting pages expects the rest to be absent from the output.
+            bail!(
+                "--pages is not supported for DOCX export";
+                hint: "a Word document flows continuously and has no fixed pages to select from";
+            );
+        }
+
         let tagged = !args.no_pdf_tags && pages.is_none();
         if output_format == OutputFormat::Pdf && pages.is_some() && !args.no_pdf_tags {
             warnings.push(
