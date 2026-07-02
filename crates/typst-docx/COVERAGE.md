@@ -730,3 +730,62 @@ binary shows no content regressions (the shape/border/field fixes change no
 extractable text; `raw_bounds` changes only shape geometry); a multi-shape
 composition renders pixel-identical before/after in LibreOffice; output stays
 reproducible under `SOURCE_DATE_EPOCH`.
+
+## 9. Adversarial (second-model) review — three design challenges, all upheld
+
+An independent adversarial review (a different model, prompted to challenge
+design choices rather than hunt implementation bugs) challenged three
+decisions. All three challenges were verified against Typst's own semantics
+and upheld; the fixes shipped together.
+
+### 9a. `#hide` must redact, not embed
+The exporter deliberately mapped `#hide[..]` to `w:vanish` hidden text
+("invisible but searchable") — but Typst *documents* `hide` as a redaction
+tool ("neither present visually nor accessible to Assistive Technology"), and
+paged export enforces it physically: `Frame::hide` drops every frame item
+except introspection tags, so the text simply does not exist in a PDF. Word
+reveals `w:vanish` text with a single toggle — an answer key or redacted value
+`#hide`-removed by the author would ship recoverable inside the package. Fixed:
+the inline arm now harvests only the body's introspection tags (a label or
+citation inside hidden content still resolves — the same "traces" paged
+export keeps) and emits nothing; deliberately *without* lowering the body,
+since lowering has side effects (a footnote or image inside `#hide` would
+still register into `footnotes.xml`/`word/media` even with its runs
+discarded). The block path already had the right semantics for free (it
+rasterizes, and `Frame::hide` empties the frame before anything is read).
+
+**The oracle flags proved the point**: the A/B flagged 16 docs, all word
+*decreases* — and a PDF-ground-truth count showed every one was **phantom
+text the PDF never displayed** being removed. touying's `#pause`-staged
+reveal text now matches the PDF *exactly* (visible copies kept, hidden
+duplicates gone: "uncover" PDF 3 / old-docx 5 / new-docx 3), and orange-book
+shed 60 copies of a hidden "Main" nav label the PDF shows zero of. The
+"regression" direction was fidelity gain.
+
+### 9b. Sections must split on furniture, not just geometry
+`resolve_sections` merged consecutive page runs whenever the *geometry*
+(size/margins/columns) matched — but Word carries running headers, footers,
+and page numbering on `w:sectPr`, so a mid-document `set page(header: ..)` or
+`set page(numbering: ..)` change with unchanged geometry was silently merged
+away: the new furniture never emitted. `same_geometry` became `same_section`,
+comparing every section-scoped property (header/footer/background content by
+`hash128`, numbering, number placement, header/footer bands, suppression
+flags). `background_color` and `hyphenate` stay excluded — both are
+document-wide in OOXML, so splitting cannot express them. Real-template
+proof: **classicthesis went from 2 sections / 0 header parts to 7 sections /
+3 header parts** — its running heads were entirely missing before; documents
+whose sections were already geometry-driven (drupol) are byte-unchanged.
+
+### 9c. `--pages` must error, not silently export everything
+The CLI accepted `--pages` for DOCX and ignored it — a data-disclosure
+footgun (a user exporting "pages 1–2" ships the whole document). Now a hard
+error at config-build time ("a Word document flows continuously and has no
+fixed pages to select from"). HTML inherits the same silent behavior
+upstream; that is upstream's call to make — a new format should not copy the
+footgun.
+
+**Validation:** 72/72 integration tests (4 new: inline + block `#hide`
+redaction, header-only and numbering-only section splits); corpus 618/9/0
+identical; oracle A/B all-flags-verified-as-gains; `--pages` e2e errors for
+docx and still works for PDF; LibreOffice opens the newly multi-section
+output.
