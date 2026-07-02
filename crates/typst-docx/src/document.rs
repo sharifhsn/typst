@@ -63,6 +63,15 @@ pub fn docx_document(
         .map(|(g, _)| g.clone())
         .unwrap_or_else(|| run_geometry(&[], styles));
 
+    // Per-section `set page(numbering:)`, in section order — the synthetic page
+    // model resolves `loc.page-numbering()` against these (see below).
+    let section_numberings: Vec<Option<typst_library::model::Numbering>> =
+        if sections.is_empty() {
+            vec![first_geom.numbering.clone()]
+        } else {
+            sections.iter().map(|(g, _)| g.numbering.clone()).collect()
+        };
+
     // Walk the native element tree into the typed IR.
     let (
         mut body,
@@ -228,6 +237,20 @@ pub fn docx_document(
     // figure or box still resolve.
     tags.extend(deferred_tags);
 
+    // Synthetic page model: a flowing document has no real pages, but templates
+    // legitimately read paged introspection (`@target(form: "page")`,
+    // `loc.page-numbering()`, `counter(page)`) — returning `None` fails the
+    // whole export for them. Approximate: walk the IR in order and give every
+    // tag the count of explicit page/section breaks before it (Word inserts a
+    // page there too, so the number is exact for break-structured front matter
+    // and a lower bound where text auto-flows). The per-tag section index
+    // resolves `page-numbering()` against that section's real
+    // `set page(numbering:)`.
+    let mut page_model = rustc_hash::FxHashMap::default();
+    let mut page = 1usize;
+    let mut section = 0usize;
+    collect_page_model(&body, &mut page, &mut section, &mut page_model);
+
     // Hoist the document's most common font/size/language into `docDefaults` and
     // strip them from matching runs, so the body inherits (restylable in Word,
     // compact `document.xml`).
@@ -236,6 +259,7 @@ pub fn docx_document(
 
     let mut introspector = DocxIntrospector::new(&tags);
     introspector.set_anchors(crate::bookmark::anchors(&bookmarks));
+    introspector.set_page_model(page_model, page, section_numberings);
 
     Ok(DocxDocument {
         info,
@@ -704,6 +728,14 @@ fn build_section(
         }
         let rels = ctx.part_rels.take().unwrap_or_default();
         ctx.part_rels = saved;
+        // Header content lives outside the body IR, so its introspection tags
+        // would never reach the introspector — harvest them here (a labeled
+        // element in a running head is a real query target; templates read
+        // page furniture via `query(<label>)`). Appended tags sort after the
+        // whole body, which is also where an `.after(here())` furniture query
+        // expects them. Duplicate locations across sections are deduped by the
+        // introspector builder.
+        collect_tags(&blocks, &mut ctx.deferred_tags);
         // Emit the header part whenever a header is explicitly set (even if it
         // lowered to nothing) — matching the prior unconditional behaviour — or
         // when the background produced a drawing.
@@ -718,6 +750,8 @@ fn build_section(
     // -- Explicit footer content -------------------------------------------
     if let Some(content) = &geom.footer {
         let (blocks, rels) = ctx.part_blocks(content, styles)?;
+        // Same as the header above: footer tags must reach the introspector.
+        collect_tags(&blocks, &mut ctx.deferred_tags);
         let part_name = ctx.next_hdrftr_name(false);
         let rel = ctx.add_footer_rel(&part_name);
         sect.footers.push(HdrFtrRef { kind: "default", rel });
@@ -883,6 +917,64 @@ pub(crate) fn collect_tags(blocks: &[Block], out: &mut Vec<Tag>) {
                 }
             }
             Block::SectionBreak(_) => {}
+        }
+    }
+}
+
+/// Builds the synthetic page model: walks the IR in the same order as
+/// [`collect_tags`], counting explicit page breaks (`Run::PageBreak`) and
+/// section breaks (each of which also starts a new page), and records the
+/// (page, section) pair in effect at every `Tag::Start` location. Tags not in
+/// the map (rasterize-deferred, header/footer) are appended after the body, so
+/// their lookups fall back to the final page.
+fn collect_page_model(
+    blocks: &[Block],
+    page: &mut usize,
+    section: &mut usize,
+    map: &mut rustc_hash::FxHashMap<
+        typst_library::introspection::Location,
+        (usize, usize),
+    >,
+) {
+    let record = |tag: &Tag, map: &mut rustc_hash::FxHashMap<_, _>, page: usize, section: usize| {
+        if let Tag::Start(elem, _) = tag
+            && let Some(loc) = elem.location()
+        {
+            map.entry(loc).or_insert((page, section));
+        }
+    };
+    for block in blocks {
+        match block {
+            Block::Tag(tag) => record(tag, map, *page, *section),
+            Block::Para(para) => {
+                for child in &para.content {
+                    match child {
+                        ParaChild::Tag(tag) => record(tag, map, *page, *section),
+                        ParaChild::Run(Run::PageBreak) => *page += 1,
+                        _ => {}
+                    }
+                }
+            }
+            Block::Table(tbl) => {
+                for row in &tbl.rows {
+                    for cell in &row.cells {
+                        collect_page_model(&cell.blocks, page, section, map);
+                    }
+                }
+            }
+            Block::Toc(toc) => {
+                for para in &toc.entries {
+                    for child in &para.content {
+                        if let ParaChild::Tag(tag) = child {
+                            record(tag, map, *page, *section);
+                        }
+                    }
+                }
+            }
+            Block::SectionBreak(_) => {
+                *page += 1;
+                *section += 1;
+            }
         }
     }
 }

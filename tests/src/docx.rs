@@ -1342,6 +1342,52 @@ fn header_only_change_emits_a_section_break() {
 }
 
 #[test]
+fn page_reference_resolves_via_the_synthetic_page_model() {
+    // `@target(form: "page")` needs `page_numbering()` + a page number from the
+    // introspector — both used to be `None` (pageless), failing the whole
+    // export. The synthetic model counts explicit page breaks: the target sits
+    // after one `#pagebreak()`, so its synthetic page is 2 — "ii" under roman
+    // page numbering.
+    let p = parts(
+        "#set page(numbering: \"i\")\nIntro.\n#pagebreak()\n= Target <t>\n\
+         Body.\n#pagebreak()\nSee #ref(<t>, form: \"page\").",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("ii"), "the page reference resolves to the synthetic page");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn footer_labels_reach_the_introspector() {
+    // A labeled element in the page footer is a real query target (templates
+    // read page furniture state via `query(<label>)`), but footer content
+    // lives outside the body IR — its tags must be harvested explicitly.
+    let p = parts(
+        "#set page(footer: [foot <ftr>])\n\
+         Body #context if query(<ftr>).len() > 0 [FOUND] else [MISSING]",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("FOUND"), "the footer label is queryable");
+    assert!(!doc.contains("MISSING"), "the footer label must not be invisible");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn failing_figure_numbering_closure_does_not_abort_the_export() {
+    // A user numbering closure that errors (e.g. reads introspection state that
+    // only exists in a paged model) must not abort the export: the caption's
+    // cached number is best-effort — the SEQ field is the live truth in Word.
+    let p = parts(
+        "#set figure(numbering: _ => (1,).at(9))\n\
+         #figure(rect(), caption: [Survives])",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("Survives"), "the caption text is kept");
+    assert!(doc.contains(" SEQ "), "the live SEQ field is still emitted");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn numbering_only_change_emits_a_section_break() {
     // Front-matter roman numerals switching to arabic (`set page(numbering:)`)
     // is section-scoped in Word (`w:pgNumType`); same-geometry runs must not

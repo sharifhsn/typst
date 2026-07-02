@@ -167,8 +167,11 @@ pub fn figure(
     // figure has one, makes the entry a live link.
     if let Some(cap) = &caption
         && elem.numbering.get_ref(styles).is_some()
+        // Best-effort: a failing user numbering closure (see `caption_runs`)
+        // skips this list-of-figures entry rather than aborting the export.
+        && let Ok(realized) = cap.realize(ctx.engine(), styles)
     {
-        let text = cap.realize(ctx.engine(), styles)?.plain_text();
+        let text = realized.plain_text();
         if !text.is_empty() {
             ctx.toc_figures.push(crate::dom::TocFigure {
                 category: seq_name(elem, styles),
@@ -239,7 +242,12 @@ pub fn caption(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Vec<Block>> {
-    let realized = elem.realize(ctx.engine(), styles)?;
+    // Best-effort: realizing a standalone caption runs the user's numbering
+    // closure, which can fail against the empty first-iteration introspector
+    // (see `caption_runs`) — skip the caption rather than abort the export.
+    let Ok(realized) = elem.realize(ctx.engine(), styles) else {
+        return Ok(Vec::new());
+    };
     let runs = ctx.inline_runs(&realized, styles, RunProps::default())?;
     if runs.is_empty() {
         return Ok(Vec::new());
@@ -446,9 +454,20 @@ fn caption_runs(
     let number_runs = match (cap.counter.clone(), cap.numbering.clone(), cap.figure_location)
     {
         (Some(Some(counter)), Some(Some(numbering)), Some(Some(location))) => {
-            let number =
-                counter.display_at(ctx.engine(), location, styles, &numbering, cap.span())?;
-            ctx.inline_runs(&number, styles, RunProps::default())?
+            // Best-effort: this number is only the SEQ field's *cached* result —
+            // Word recomputes the live value on open/update. A user numbering
+            // closure that reads introspection (querying headings, indexing
+            // counter components) can fail against the empty first-iteration
+            // introspector, or permanently when the state it wants only exists
+            // in a paged model. Under paged layout that failure is a delayed
+            // error that gets retried; propagating it here would hard-abort the
+            // whole export on iteration one. An empty cached number degrades
+            // gracefully instead (the field still renders in Word).
+            match counter.display_at(ctx.engine(), location, styles, &numbering, cap.span())
+            {
+                Ok(number) => ctx.inline_runs(&number, styles, RunProps::default())?,
+                Err(_) => Vec::new(),
+            }
         }
         _ => Vec::new(),
     };

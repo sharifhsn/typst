@@ -24,6 +24,18 @@ use typst_syntax::VirtualPath;
 pub struct DocxIntrospector {
     elements: ElementIntrospector<HtmlPosition>,
     anchors: FxHashMap<Location, EcoString>,
+    /// The synthetic page model: for every tag location, the 1-based count of
+    /// explicit page/section breaks before it plus one, and its section index.
+    /// A flowing document has no real pages, but templates legitimately read
+    /// paged introspection (`@t(form: "page")`, `loc.page-numbering()`,
+    /// `counter(page)`) — this keeps them compiling with plausible values
+    /// (exact where pagination is break-structured, a lower bound where text
+    /// auto-flows) instead of failing the whole export.
+    page_model: FxHashMap<Location, (usize, usize)>,
+    /// Total synthetic pages (1 + explicit break count).
+    total_pages: usize,
+    /// Each section's `set page(numbering:)`, in section order.
+    section_numberings: Vec<Option<Numbering>>,
 }
 
 impl DocxIntrospector {
@@ -31,6 +43,15 @@ impl DocxIntrospector {
     /// walking the IR.
     #[typst_macros::time(name = "introspect docx")]
     pub fn new(tags: &[Tag]) -> DocxIntrospector {
+        if std::env::var_os("DOCX_DEBUG_INTROSPECT").is_some() {
+            let mut hist = std::collections::BTreeMap::new();
+            for tag in tags {
+                if let Tag::Start(elem, _) = tag {
+                    *hist.entry(elem.func().name()).or_insert(0usize) += 1;
+                }
+            }
+            eprintln!("INTROSPECT TAGS: {hist:?}");
+        }
         let mut builder = ElementIntrospectorBuilder::<HtmlPosition>::new();
         let pos = HtmlPosition::new(EcoVec::new());
         for tag in tags {
@@ -39,6 +60,9 @@ impl DocxIntrospector {
         DocxIntrospector {
             elements: builder.finalize(),
             anchors: FxHashMap::default(),
+            page_model: FxHashMap::default(),
+            total_pages: 1,
+            section_numberings: Vec::new(),
         }
     }
 
@@ -50,6 +74,18 @@ impl DocxIntrospector {
     /// Enriches the introspector with the late-assigned bookmark anchors.
     pub fn set_anchors(&mut self, anchors: FxHashMap<Location, EcoString>) {
         self.anchors = anchors;
+    }
+
+    /// Installs the synthetic page model (see the field docs).
+    pub fn set_page_model(
+        &mut self,
+        page_model: FxHashMap<Location, (usize, usize)>,
+        total_pages: usize,
+        section_numberings: Vec<Option<Numbering>>,
+    ) {
+        self.page_model = page_model;
+        self.total_pages = total_pages.max(1);
+        self.section_numberings = section_numberings;
     }
 }
 
@@ -87,19 +123,36 @@ impl Introspector for DocxIntrospector {
     }
 
     fn pages(&self, _: Location) -> Option<NonZeroUsize> {
-        None
+        NonZeroUsize::new(self.total_pages)
     }
 
-    fn page(&self, _: Location) -> Option<NonZeroUsize> {
-        None
+    fn page(&self, location: Location) -> Option<NonZeroUsize> {
+        // Locations outside the model (rasterize-deferred, header/footer tags)
+        // are appended after the body, so the final page is the best guess.
+        let page = self
+            .page_model
+            .get(&location)
+            .map_or(self.total_pages, |&(page, _)| page);
+        NonZeroUsize::new(page.max(1))
     }
 
     fn position(&self, location: Location) -> Option<DocumentPosition> {
         self.elements.position(location).cloned().map(DocumentPosition::Html)
     }
 
-    fn page_numbering(&self, _: Location) -> Option<&Numbering> {
-        None
+    fn page_numbering(&self, location: Location) -> Option<&Numbering> {
+        match self.page_model.get(&location) {
+            // A known location resolves against its own section — faithfully
+            // `None` when that section has no `set page(numbering:)`, exactly
+            // like referencing an unnumbered page in paged export.
+            Some(&(_, section)) => {
+                self.section_numberings.get(section).and_then(|n| n.as_ref())
+            }
+            // An unknown (deferred) location falls back to the first numbered
+            // section, leniently: these targets live inside rasterized or
+            // furniture content whose true section is unknowable.
+            None => self.section_numberings.iter().find_map(|n| n.as_ref()),
+        }
     }
 
     fn page_supplement(&self, _: Location) -> Option<&Content> {
