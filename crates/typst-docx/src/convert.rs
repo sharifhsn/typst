@@ -418,7 +418,7 @@ pub(crate) fn body_is_wrap_figure(body: &Content) -> bool {
     use typst_library::model::FigureElem;
     let mut has_grid = false;
     let mut has_figure = false;
-    body.traverse(&mut |e: Content| {
+    let _ = body.traverse(&mut |e: Content| {
         if e.is::<GridElem>() {
             has_grid = true;
         }
@@ -994,11 +994,10 @@ fn stamp_box_decorations(
         if let Some(f) = shd_fill {
             p.shd_fill.get_or_insert(f);
         }
-        if let Some(b) = pbdr {
-            if p.pbdr.is_none() {
+        if let Some(b) = pbdr
+            && p.pbdr.is_none() {
                 p.pbdr = Some(b.clone());
             }
-        }
         if has_box && multi_para {
             p.keep_lines = true;
             if i != last {

@@ -93,7 +93,10 @@ fn parts(src: &str) -> HashMap<String, String> {
 /// Parses every XML part with the namespace-aware parser, asserting that no
 /// part uses an undeclared namespace prefix.
 fn assert_all_wellformed(parts: &HashMap<String, String>) {
-    for (name, xml) in parts {
+    let mut names: Vec<&String> = parts.keys().collect();
+    names.sort();
+    for name in names {
+        let xml = &parts[name];
         if name.ends_with(".xml") || name.ends_with(".rels") {
             roxmltree::Document::parse(xml)
                 .unwrap_or_else(|e| panic!("{name} is not namespace-well-formed: {e}"));
@@ -666,7 +669,10 @@ fn paragraphs_carry_unique_w14_para_ids() {
     // Collect ids from every part; they must be globally unique (disjoint
     // per-part lanes), which a strict validator requires.
     let mut all = Vec::new();
-    for (name, xml) in &p {
+    let mut names: Vec<&String> = p.keys().collect();
+    names.sort();
+    for name in names {
+        let xml = &p[name];
         if name.ends_with(".xml") {
             all.extend(collect_ids(xml));
         }

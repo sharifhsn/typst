@@ -26,7 +26,6 @@ pub struct DocxDocument {
     /// `word/_rels/footnotes.xml.rels`, not the document's, or Word rejects the
     /// file. Empty when no footnote contains an image/external link.
     pub(crate) footnote_rels: Rels,
-    pub(crate) bookmarks: BookmarkTable,
     pub(crate) max_heading_level: u8,
     /// The document's root text properties, hoisted into `docDefaults`.
     pub(crate) text_defaults: TextDefaults,
@@ -137,6 +136,10 @@ pub struct Para {
 }
 
 /// Paragraph-level content.
+// The `Run` variant carries a `Drawing` and is large, but it is the common case
+// and this IR is transient (built, then immediately serialized), so boxing every
+// run to shrink the enum isn't worth the per-run allocation.
+#[allow(clippy::large_enum_variant)]
 pub enum ParaChild {
     Run(Run),
     /// A display equation `<m:oMathPara>` (serialized XML).
@@ -149,6 +152,10 @@ pub enum ParaChild {
 }
 
 /// A run-level item.
+// The `Drawing` variant is large but by far the common case (every image/shape);
+// this IR is transient (built, then immediately serialized), so boxing isn't
+// worth the per-drawing allocation.
+#[allow(clippy::large_enum_variant)]
 pub enum Run {
     Text { props: RunProps, text: EcoString },
     Break,
@@ -683,7 +690,6 @@ pub struct Footnote {
 
 /// A media part to be embedded in `word/media/`.
 pub struct MediaPart {
-    pub rel: EcoString,
     pub part_name: EcoString,
     pub ext: EcoString,
     pub bytes: Vec<u8>,

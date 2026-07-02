@@ -455,7 +455,6 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             self.media.push(MediaPart {
                 // The rId is per-referencing-part (allocated below), not a
                 // property of the media part itself.
-                rel: EcoString::new(),
                 part_name,
                 ext: ext.into(),
                 bytes: bytes.to_vec(),
@@ -1515,7 +1514,6 @@ fn frame_to_text(frame: &Frame) -> String {
             && (pos.y - ly).abs() > size * 0.6
         {
             s.push('\n');
-            last_x_end = None;
         } else if let Some(xe) = last_x_end
             && pos.x - xe > size * 0.25
             && !s.ends_with(char::is_whitespace)

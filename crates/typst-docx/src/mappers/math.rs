@@ -51,6 +51,9 @@ use crate::ctx::DocxCtx;
 use crate::dom::{Block, Para, ParaChild, ParaProps, Run, RunProps, TabAlign, TabStop};
 
 /// The result of lowering an equation: inline run or block paragraph(s).
+// The inline `Run` is large but the common case; this IR is transient, so boxing
+// to shrink the enum isn't worthwhile (see the `Run`/`ParaChild` note in `dom`).
+#[allow(clippy::large_enum_variant)]
 pub enum EquationOut {
     Inline(Run),
     Block(Vec<Block>),
@@ -862,16 +865,6 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
 // ===========================================================================
 // Glyph classification + operator tables (self-contained; no `MathClass`).
 // ===========================================================================
-
-/// If `item` is a single large operator glyph that takes n-ary limits (∑ ∫ ∏ ⋃
-/// …), returns its character. Detection is purely from the codepoint, which is
-/// also exactly what OMML needs for `m:chr` — so this avoids any dependency on
-/// `unicode-math-class`.
-/// Whether an item is a relation (`=`, `<`, `≤`, `→`, …) — the boundary that
-/// ends an n-ary operator's operand (`∫ f dx` stops before `= …`).
-fn is_relation(item: &MathItem) -> bool {
-    matches!(item, MathItem::Component(c) if c.props.class == Some(MathClass::Relation))
-}
 
 /// The component's run colour, if it carries a non-default solid `text(fill:)`
 /// (e.g. `#text(red)[$x$]`). Default black returns `None` so ordinary math is

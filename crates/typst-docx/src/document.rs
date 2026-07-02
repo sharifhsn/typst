@@ -246,7 +246,6 @@ pub fn docx_document(
         media,
         doc_rels,
         footnote_rels,
-        bookmarks,
         max_heading_level,
         text_defaults,
         uses_fields,
@@ -321,7 +320,6 @@ fn hoist_text_defaults(
     for fnote in footnotes {
         visit_run_props(&mut fnote.blocks, &mut strip);
     }
-    drop(strip);
     defaults
 }
 

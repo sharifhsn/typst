@@ -427,9 +427,11 @@ fn emit_item(
 
     // An empty item still needs a marker paragraph so the bullet/number shows.
     if !numbered {
-        let mut props = ParaProps::default();
-        props.style = Some(LIST_PARAGRAPH.into());
-        props.num = Some((num_id, ilvl));
+        let props = ParaProps {
+            style: Some(LIST_PARAGRAPH.into()),
+            num: Some((num_id, ilvl)),
+            ..Default::default()
+        };
         out.push(Block::Para(Para {
             props,
             content: vec![ParaChild::Run(Run::Text {

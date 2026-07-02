@@ -34,7 +34,6 @@ pub fn heading(
     ctx.note_heading_level(level_u8);
 
     // -- Paragraph properties --------------------------------------------------
-    let mut props = ParaProps::default();
     // Levels 1..=9 map to the built-in `Heading1..Heading9` magic styles; deeper
     // levels fall back to a custom `Heading{level}` style id.
     //
@@ -43,11 +42,14 @@ pub fn heading(
     // w:val="heading {level}"` for 1..=9 (so the Navigation pane / TOC pick them
     // up) and a `w:customStyle="1"` style `basedOn` Heading9 for level >= 10.
     // This mapper only references the style id; it cannot emit the style itself.
-    props.style = Some(ecow::eco_format!("Heading{level}"));
-    // Keep the heading with the paragraph that follows it.
-    props.keep_next = true;
-    // Outline level is 0-based and valid only for 0..=8; clamp deeper headings.
-    props.outline_lvl = Some(level_u8.saturating_sub(1).min(8));
+    let props = ParaProps {
+        style: Some(ecow::eco_format!("Heading{level}")),
+        // Keep the heading with the paragraph that follows it.
+        keep_next: true,
+        // Outline level is 0-based and valid only for 0..=8; clamp deeper headings.
+        outline_lvl: Some(level_u8.saturating_sub(1).min(8)),
+        ..Default::default()
+    };
 
     // -- Heading content -------------------------------------------------------
     let mut content: Vec<ParaChild> = Vec::new();
