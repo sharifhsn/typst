@@ -34,6 +34,20 @@ This repository contains the Typst compiler and its CLI, which is everything you
 need to compile Typst documents locally. For the best writing experience,
 consider signing up to our [collaborative online editor][app] for free.
 
+> [!NOTE]
+> **This is a community fork that adds native Microsoft Word (`.docx`) export.**
+> It compiles Typst straight to editable Office Open XML — real headings, styles,
+> tables, OMML math, footnotes, cross-reference fields and lists — not a flattened
+> image. Try it with `typst compile --format docx file.typ`. It is an
+> **experimental preview** (like Typst's own HTML export); see
+> **[Word export (this fork)](#word-export-this-fork)** below for how to build it,
+> what maps natively, and the honest limitations. A companion
+> [Pandoc-AST target](https://github.com/sharifhsn/typst/tree/claude/typst-pandoc)
+> (Typst → LaTeX / Markdown / EPUB / …) lives on a sibling branch.
+>
+> This fork is **not affiliated with or endorsed by the Typst maintainers**, and
+> the export code is not part of upstream Typst.
+
 ## Example
 A [gentle introduction][tutorial] to Typst is available in our documentation.
 However, if you want to see the power of Typst encapsulated in one image, here
@@ -178,6 +192,55 @@ preview, you can also check out our [free web app][app]. Alternatively, there is
 a community-created language server called 
 [Tinymist](https://myriad-dreamin.github.io/tinymist/) which is integrated into 
 various editor extensions.
+
+## Word export (this fork)
+This fork adds a native Word exporter (`crates/typst-docx`). It walks Typst's
+realized element tree under a dedicated `Docx` target and emits idiomatic Office
+Open XML that opens cleanly in **Microsoft Word** and **LibreOffice** — using
+Word's built-in styles, so the Navigation pane, Styles gallery, and "update
+field" all work.
+
+Because there are no pre-built binaries for the fork yet, build it from source
+(requires a [Rust][rust] toolchain):
+
+```sh
+git clone -b docx-export https://github.com/sharifhsn/typst
+cd typst
+cargo build --release
+# the binary is at target/release/typst
+```
+
+Then export to `.docx` either with an explicit format flag or a `.docx` output
+extension:
+
+```sh
+target/release/typst compile --format docx document.typ
+target/release/typst compile document.typ out.docx
+```
+
+**What maps natively:** paragraphs and inline formatting, `Heading N` styles with
+numbering, bullet/numbered/nested lists, tables (borders, merged cells, shading),
+block quotes, code blocks, links, `@ref` cross-references (as clickable fields),
+footnotes, citations and bibliographies, a table of contents, OMML math
+(fractions, matrices, big operators, aligned equations), page geometry and
+sections, headers/footers, and PNG/JPEG images embedded verbatim. Decorative
+vector shapes (`#rect`, `#line`, `#curve`, `#polygon`, gradients) map to native
+DrawingML.
+
+**What falls back to an embedded image:** graphics with no OOXML equivalent —
+SVG/PDF images, CeTZ/fletcher diagrams, transforms (`#rotate`/`#scale`/`#skew`),
+and radial/conic gradients. The visual is preserved exactly, and the text inside
+is still recovered as hidden, searchable runs.
+
+**Known limitations:** page-number cross-references have no meaning in a flowing
+document, and a small number of templates that assume a fixed paged layout fail
+to export (they compile to PDF fine) — the error points at the template code.
+The full per-feature support matrix and the rationale behind every mapping live
+in [`crates/typst-docx/README.md`](crates/typst-docx/README.md) and
+[`crates/typst-docx/COVERAGE.md`](crates/typst-docx/COVERAGE.md).
+
+Output is byte-for-byte reproducible under `SOURCE_DATE_EPOCH`. This is preview
+software: please report anything that opens wrong or looks off.
 
 ## Community
 The main places where the community gathers are our [Forum][forum] and our

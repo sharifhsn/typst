@@ -669,3 +669,64 @@ in, when the branches meet, is a clean, well-scoped follow-up (a solid-color
 shadow → native `a:outerShdw`, keeping the rasterize path for anything
 `a:effectLst` can't express). WordArt (distorted text on a path) has no Typst
 source concept at all (Typst text is never warped to a path) — not pursued.
+
+## 8. Pre-release hardening review
+
+An adversarial, maintainer-grade review of the highest-risk / least-reviewed
+surfaces (rasterize + hidden-text recovery, shape composition + DrawingML
+encode, dispatch + table + OMML) before the public preview. Four real defects
+fixed, one speculative fix reverted, and the crate brought to a clean build
+under CI's `-Dwarnings`.
+
+### Fixed
+- **Rowspan continuation-cell borders** (`table.rs`): a vertically-merged
+  (`rowspan`) cell's placeholder `w:tc` emitted `CellBorders::default()` = all
+  `w:val="nil"`, so in a *bordered* table the merged cell's lower rows lost their
+  left/right sides and bottom edge (a visibly open box). Now the continuation
+  carries the origin's resolved left/right on every row, its bottom on the final
+  row only, and no top (interior to the merge). The common-case, most-visible
+  find.
+- **`SEQ` field-code identifier sanitization** (`mappers/image.rs`): a custom
+  `#figure(kind: "…")` name flowed into ` SEQ <name> \* ARABIC ` with only
+  spaces escaped, so a `"`/`\`/empty name broke the field grammar and Word
+  showed "Error!". The identifier is now restricted to alphanumerics + `_`, with
+  a `Figure` fallback.
+- **Shape bounding-box tightening** (`mappers/shape.rs::raw_bounds`): the box
+  was seeded at the origin, so a path offset from `(0,0)` (a
+  `#line(start: (10pt,10pt), …)`, or a group child away from the group origin)
+  got an extent stretched back to include the origin — phantom padding, and
+  every group child anchored at `a:off=(0,0)` with an oversized extent. Now
+  seeded from the first real point: single-shape extents are tight (verified a
+  `#line` box shrinking 60×40→50×30pt) and group children carry their true
+  offsets. Renders are pixel-identical (the old oversized box drew the shape at
+  the right place via an un-shifted path); the new structure is simply the clean
+  one Word would author.
+- **`move_text` `w:position` overflow** (`mappers/shape.rs`): `existing + shift`
+  on `i32` → `saturating_add` (a pathological `dy` no longer panics/wraps).
+
+### Reverted (speculative, net-negative — recorded so it isn't retried)
+- **`frame_to_text` super/subscript line-clustering**: a review hypothesis held
+  that the newline threshold (`|Δy| > size*0.6`, on the *current* run's size)
+  would split a small raised superscript onto its own line in recovered hidden
+  text. Changing it to the *max* of the two adjacent sizes was tried, but (a) the
+  original never actually mis-split a real superscript — a typical ~0.35em raise
+  sits just under `size*0.6` — so there was **zero** measurable benefit, and (b)
+  raising the threshold on a big-run→small-run transition *suppressed a genuine*
+  line break, gluing `NAME`+`WHAT` into `NAMEWHAT` in one corpus CV
+  (`vercanard`, the lone doc the oracle A/B flagged). Reverted to the original
+  heuristic; the dead `last_x_end = None` cleanup (a no-op) was kept.
+
+### Clean under `-Dwarnings`
+CI sets `RUSTFLAGS="-Dwarnings"`, so seven pre-existing dead-code warnings in the
+crate (unused constants/fn, never-read `DocxDocument.bookmarks` and
+`MediaPart.rel` fields, a `drop`-of-`Copy`, an ignored `#[must_use]` traverse)
+were release-blocking. Each was confirmed truly dead and removed; the crate now
+compiles warning-clean.
+
+### Validation
+69/69 integration tests; corpus **618 OK / 9 EXPORT_ERR / 0 INVALID** with a
+per-doc outcome set byte-identical to before the pass; oracle A/B vs the pre-pass
+binary shows no content regressions (the shape/border/field fixes change no
+extractable text; `raw_bounds` changes only shape geometry); a multi-shape
+composition renders pixel-identical before/after in LibreOffice; output stays
+reproducible under `SOURCE_DATE_EPOCH`.
