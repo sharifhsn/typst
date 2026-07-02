@@ -645,7 +645,11 @@ pub fn transformed(
     let Some(frame) = ctx.layout_export_frame(child, styles, child.span(), height)? else {
         return Ok(None);
     };
-    build_shapes_drawing(ctx, &frame)
+    let run = build_shapes_drawing(ctx, &frame)?;
+    if run.is_some() {
+        ctx.defer_frame_tags(&frame);
+    }
+    Ok(run)
 }
 
 /// Maps a pure vertical nudge of plain text/inline content — `#move(dy:

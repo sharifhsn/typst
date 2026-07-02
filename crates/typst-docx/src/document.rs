@@ -1,12 +1,13 @@
 //! The DOCX export driver: realizes the native element tree and walks it into
 //! the typed IR.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, NativeElement, Selector, StyleChain};
-use typst_library::introspection::{Introspector, Locator, Tag};
+use typst_library::introspection::{Introspector, Locator, PagedPosition, Tag};
 use typst_library::model::{DocumentInfo, HeadingElem};
 use typst_library::routines::{Arenas, RealizationKind};
 
@@ -227,16 +228,6 @@ pub fn docx_document(
     // sections.
     crate::mappers::outline::fill_tocs(&mut body, &toc_headings, &toc_fallback, &toc_figures);
 
-    // Collect introspection tags from the IR for the introspector.
-    let mut tags = Vec::new();
-    collect_tags(&body, &mut tags);
-    for fnote in &footnotes {
-        collect_tags(&fnote.blocks, &mut tags);
-    }
-    // Tags harvested from content we rasterized — so labels/refs inside a drawn
-    // figure or box still resolve.
-    tags.extend(deferred_tags);
-
     // Synthetic page model: a flowing document has no real pages, but templates
     // legitimately read paged introspection (`@target(form: "page")`,
     // `loc.page-numbering()`, `counter(page)`) — returning `None` fails the
@@ -249,7 +240,26 @@ pub fn docx_document(
     let mut page_model = rustc_hash::FxHashMap::default();
     let mut page = 1usize;
     let mut section = 0usize;
-    collect_page_model(&body, &mut page, &mut section, &mut page_model);
+    let mut seen_content = false;
+    let mut y = 0usize;
+    let mut tags = Vec::new();
+    collect_positioned_tags(
+        &body,
+        &mut page,
+        &mut section,
+        &mut seen_content,
+        &mut y,
+        &mut page_model,
+        &mut tags,
+    );
+    for fnote in &footnotes {
+        let mut footnote_tags = Vec::new();
+        collect_tags(&fnote.blocks, &mut footnote_tags);
+        append_positioned_tags(footnote_tags, page, &mut y, &mut tags);
+    }
+    // Tags harvested from content we rasterized — so labels/refs inside a drawn
+    // figure or box still resolve.
+    append_positioned_tags(deferred_tags, page, &mut y, &mut tags);
 
     // Hoist the document's most common font/size/language into `docDefaults` and
     // strip them from matching runs, so the body inherits (restylable in Word,
@@ -921,60 +931,121 @@ pub(crate) fn collect_tags(blocks: &[Block], out: &mut Vec<Tag>) {
     }
 }
 
-/// Builds the synthetic page model: walks the IR in the same order as
-/// [`collect_tags`], counting explicit page breaks (`Run::PageBreak`) and
-/// section breaks (each of which also starts a new page), and records the
-/// (page, section) pair in effect at every `Tag::Start` location. Tags not in
-/// the map (rasterize-deferred, header/footer) are appended after the body, so
-/// their lookups fall back to the final page.
-fn collect_page_model(
+/// Builds the synthetic page model and positioned tag stream: walks the IR in
+/// the same order as [`collect_tags`], counting explicit page breaks
+/// (`Run::PageBreak`) and non-leading section breaks, and records the (page,
+/// section) pair plus a monotonic synthetic block position for every tag.
+///
+/// DOCX has no layout positions at export time. The y coordinate below is only
+/// an ordering approximation, but it is strictly better than reporting every
+/// location at page origin: context code that asks whether one element is close
+/// to the next can distinguish adjacent blocks from later blocks.
+fn collect_positioned_tags(
     blocks: &[Block],
     page: &mut usize,
     section: &mut usize,
+    seen_content: &mut bool,
+    y: &mut usize,
     map: &mut rustc_hash::FxHashMap<
         typst_library::introspection::Location,
         (usize, usize),
     >,
+    out: &mut Vec<(Tag, PagedPosition)>,
 ) {
-    let record = |tag: &Tag, map: &mut rustc_hash::FxHashMap<_, _>, page: usize, section: usize| {
+    let record = |tag: &Tag,
+                  map: &mut rustc_hash::FxHashMap<_, _>,
+                  out: &mut Vec<(Tag, PagedPosition)>,
+                  page: usize,
+                  section: usize,
+                  y: usize| {
         if let Tag::Start(elem, _) = tag
             && let Some(loc) = elem.location()
         {
             map.entry(loc).or_insert((page, section));
         }
+        out.push((tag.clone(), synthetic_position(page, y)));
     };
     for block in blocks {
         match block {
-            Block::Tag(tag) => record(tag, map, *page, *section),
+            Block::Tag(tag) => record(tag, map, out, *page, *section, *y),
             Block::Para(para) => {
+                let mut visible = false;
                 for child in &para.content {
                     match child {
-                        ParaChild::Tag(tag) => record(tag, map, *page, *section),
-                        ParaChild::Run(Run::PageBreak) => *page += 1,
-                        _ => {}
-                    }
-                }
-            }
-            Block::Table(tbl) => {
-                for row in &tbl.rows {
-                    for cell in &row.cells {
-                        collect_page_model(&cell.blocks, page, section, map);
-                    }
-                }
-            }
-            Block::Toc(toc) => {
-                for para in &toc.entries {
-                    for child in &para.content {
-                        if let ParaChild::Tag(tag) = child {
-                            record(tag, map, *page, *section);
+                        ParaChild::Tag(tag) => record(tag, map, out, *page, *section, *y),
+                        ParaChild::Run(Run::PageBreak) if *seen_content => {
+                            *page += 1;
+                            *y = 0;
+                        }
+                        ParaChild::Run(Run::PageBreak) => {}
+                        _ => {
+                            visible = true;
+                            *seen_content = true;
                         }
                     }
                 }
+                if visible {
+                    *y += 1;
+                }
+            }
+            Block::Table(tbl) => {
+                *seen_content = true;
+                for row in &tbl.rows {
+                    for cell in &row.cells {
+                        collect_positioned_tags(
+                            &cell.blocks,
+                            page,
+                            section,
+                            seen_content,
+                            y,
+                            map,
+                            out,
+                        );
+                    }
+                }
+                *y += 1;
+            }
+            Block::Toc(toc) => {
+                *seen_content = true;
+                for para in &toc.entries {
+                    for child in &para.content {
+                        if let ParaChild::Tag(tag) = child {
+                            record(tag, map, out, *page, *section, *y);
+                        }
+                    }
+                }
+                *y += 1;
             }
             Block::SectionBreak(_) => {
-                *page += 1;
+                if *seen_content {
+                    *page += 1;
+                    *y = 0;
+                }
                 *section += 1;
             }
         }
+    }
+}
+
+fn append_positioned_tags(
+    tags: Vec<Tag>,
+    page: usize,
+    y: &mut usize,
+    out: &mut Vec<(Tag, PagedPosition)>,
+) {
+    for tag in tags {
+        out.push((tag, synthetic_position(page, *y)));
+        *y += 1;
+    }
+}
+
+fn synthetic_position(page: usize, y: usize) -> PagedPosition {
+    use typst_library::layout::{Abs, Point};
+
+    const BLOCK_STEP_PT: f64 = 20.0;
+
+    PagedPosition {
+        page: NonZeroUsize::new(page.max(1)).unwrap(),
+        point: Point::new(Abs::zero(), Abs::pt(y as f64 * BLOCK_STEP_PT)),
     }
 }

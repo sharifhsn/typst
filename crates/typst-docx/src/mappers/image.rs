@@ -290,8 +290,9 @@ pub fn place(
     // under `Target::Paged` resolves each shape's percentage-relative
     // coordinates against the page and hands `build_shapes_drawing` a frame of
     // concrete `Geometry::Curve` shapes to group.
-    if let Some(Run::Drawing(mut drawing)) =
-        crate::mappers::shape::transformed(body, styles, ctx)?
+    if crate::convert::body_shape_only(body, styles)
+        && let Some(Run::Drawing(mut drawing)) =
+            crate::mappers::shape::transformed(body, styles, ctx)?
     {
         set_place_anchor(&mut drawing, elem, styles, ctx);
         return Ok(vec![para_drawing(drawing)]);
@@ -636,13 +637,39 @@ pub fn laid_out_fallback(
     let Some((rel, size, text)) = ctx.rasterize(content, styles, content.span())? else {
         return Ok(Vec::new());
     };
+    Ok(fallback_runs(ctx, rel, size, &text))
+}
+
+/// Same as [`laid_out_fallback`], but hands the laid-out frame's introspection
+/// tags back to the caller instead of deferring them to the end of the
+/// document. Paragraph-level callers use this to keep state/counter updates
+/// ordered at their exact position.
+pub fn laid_out_fallback_with_tags(
+    content: &Content,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<(Vec<typst_library::introspection::Tag>, Vec<Run>)> {
+    let (tags, rasterized) = ctx.rasterize_with_tags(content, styles, content.span())?;
+    let Some((rel, size, text)) = rasterized else {
+        return Ok((tags, Vec::new()));
+    };
+    Ok((tags, fallback_runs(ctx, rel, size, &text)))
+}
+
+/// Builds the drawing + hidden-text run sequence for a rasterized frame. The
+/// image carries the exact visual; alongside it, the text recovered from the
+/// laid-out frame is kept as HIDDEN runs (`w:vanish`), so the rasterized region
+/// stays searchable, selectable, copy-pasteable, and screen-reader accessible
+/// instead of being pure dead pixels. Line breaks in the recovered text become
+/// `<w:br/>`s within the hidden run sequence.
+fn fallback_runs(
+    ctx: &mut DocxCtx,
+    rel: EcoString,
+    size: typst_library::layout::Size,
+    text: &str,
+) -> Vec<Run> {
     let docpr_id = ctx.next_drawing_id();
     let name: EcoString = ecow::eco_format!("Picture {docpr_id}");
-    // The image carries the exact visual; alongside it, keep the text recovered
-    // from the laid-out frame as a HIDDEN run (`w:vanish`), so the rasterized
-    // region stays searchable, selectable, copy-pasteable, and screen-reader
-    // accessible instead of being pure dead pixels. Line breaks in the
-    // recovered text become `<w:br/>`s within the hidden run sequence.
     let mut runs = Vec::with_capacity(2);
     runs.push(Run::Drawing(Drawing {
         rel,
@@ -655,8 +682,8 @@ pub fn laid_out_fallback(
         shape: None,
         group: None,
     }));
-    hidden_text_runs(&text, &mut runs);
-    Ok(runs)
+    hidden_text_runs(text, &mut runs);
+    runs
 }
 
 /// Appends the frame-recovered `text` as hidden (`w:vanish`) runs — the words

@@ -31,6 +31,11 @@ use crate::props;
 
 use typst_library::introspection::Location;
 
+/// What [`DocxCtx::rasterize`] produces for renderable content: the media
+/// relationship id, the drawing size, and the plain text recovered from the
+/// laid-out frame (for hidden searchable runs).
+pub(crate) type Rasterized = Option<(EcoString, typst_library::layout::Size, String)>;
+
 /// The relationship-type URI for an image part.
 pub const REL_IMAGE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
@@ -272,7 +277,21 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         content: &Content,
         styles: StyleChain,
         span: Span,
-    ) -> SourceResult<Option<(EcoString, typst_library::layout::Size, String)>> {
+    ) -> SourceResult<Rasterized> {
+        let (tags, rasterized) = self.rasterize_with_tags(content, styles, span)?;
+        self.deferred_tags.extend(tags);
+        Ok(rasterized)
+    }
+
+    /// Same as [`Self::rasterize`], but returns the frame tags to the caller
+    /// instead of appending them to `deferred_tags` — paragraph-level callers
+    /// use this to keep state/counter updates ordered at their exact position.
+    pub(crate) fn rasterize_with_tags(
+        &mut self,
+        content: &Content,
+        styles: StyleChain,
+        span: Span,
+    ) -> SourceResult<(Vec<Tag>, Rasterized)> {
         use typst_library::foundations::Smart;
         use typst_library::layout::{Abs, Sides};
 
@@ -298,8 +317,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         // the infinite frame (it always holds the laid-out content, even when its
         // *size* is infinite); the page-height retry below is render-only, so tags
         // are collected exactly once.
+        let mut tags = Vec::new();
         if let Some(f) = &inf_frame {
-            collect_frame_tags(f, &mut self.deferred_tags);
+            collect_frame_tags(f, &mut tags);
         }
 
         // Use the infinite frame when it has a usable size. Otherwise — page-
@@ -311,7 +331,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             Some(frame) if usable_size(frame.size()) => frame,
             _ => match self.layout_export_frame(content, styles, span, self.raster_height)? {
                 Some(frame) if usable_size(frame.size()) => frame,
-                _ => return Ok(None),
+                _ => return Ok((tags, None)),
             },
         };
         let size = frame.size();
@@ -342,9 +362,34 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             typst_render::render(&page, &options).encode_png()
         }));
-        let Ok(Ok(png)) = rendered else { return Ok(None) };
+        let Ok(Ok(png)) = rendered else { return Ok((tags, None)) };
 
-        Ok(Some((self.add_image(&png, "png"), size, frame_text)))
+        Ok((tags, Some((self.add_image(&png, "png"), size, frame_text))))
+    }
+
+    /// Forward introspection tags from a laid-out frame whose visual is consumed
+    /// by a non-raster fallback (for example a native DrawingML shape group).
+    pub(crate) fn defer_frame_tags(&mut self, frame: &Frame) {
+        collect_frame_tags(frame, &mut self.deferred_tags);
+    }
+
+    /// Evaluates a realized `#layout(size => ..)` callback with the synthetic
+    /// page-content size. Returns `None` when the callback cannot be evaluated
+    /// outside the paged layouter; callers then fall back to rasterization.
+    pub(crate) fn eval_layout_content(
+        &mut self,
+        elem: &Packed<typst_library::layout::LayoutElem>,
+        styles: StyleChain,
+    ) -> Option<Content> {
+        use comemo::Track;
+        use typst_library::foundations::{Context, dict};
+
+        let context = Context::new(elem.location(), Some(styles));
+        let args = [dict! { "width" => self.raster_width, "height" => self.raster_height }];
+        elem.func
+            .call(self.engine, context.track(), args)
+            .ok()
+            .map(|value| value.display())
     }
 
     /// Lays content out and returns its outer size, without rasterizing or
@@ -796,6 +841,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         // drawing instead of rasterizing (or, before this check existed,
         // rasterizing once per `#place`).
         if crate::convert::contains_place(body)
+            && crate::convert::placed_bodies_shape_only(body, styles)
             && let Some(run) = mappers::shape::transformed(body, styles, self)?
         {
             return Ok(vec![run]);
@@ -832,6 +878,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         use crate::dom::ParaChild;
         // See the identical check in `inline_runs`.
         if crate::convert::contains_place(body)
+            && crate::convert::placed_bodies_shape_only(body, styles)
             && let Some(run) = mappers::shape::transformed(body, styles, self)?
         {
             return Ok(vec![ParaChild::Run(run)]);
@@ -926,6 +973,31 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                         out.extend(runs.into_iter().map(ParaChild::Run));
                     }
                 }
+            } else if child.is::<typst_library::layout::PlaceElem>()
+                || (child
+                    .to_packed::<typst_library::layout::BoxElem>()
+                    .is_some_and(|b| box_is_plain(b, child_styles))
+                    && crate::convert::contains_place(child)
+                    // Only pure layout scaffolding (no visible text): a
+                    // text-bearing place-box keeps its existing live-extraction
+                    // path — rasterizing it here would demote live text to an
+                    // image just to reposition its tags.
+                    && !contains_visible_text(child))
+            {
+                // An inline `#place` — or a plain `#box` holding one — that the
+                // shape-composition path (checked at the top of this function)
+                // declined. It rasterizes exactly as before, but at this
+                // paragraph-child level its harvested frame tags can stay AT
+                // THIS POSITION instead of being deferred to the end of the
+                // document. A placed body is often layout scaffolding whose
+                // only real output is a state/counter update (e.g. the
+                // `drafting` package stores page properties from inside a
+                // `box(place(layout(..)))`), and a later `state.get()` only
+                // sees the update if it precedes the read in tag order.
+                let (tags, runs) =
+                    mappers::image::laid_out_fallback_with_tags(child, child_styles, self)?;
+                out.extend(tags.into_iter().map(ParaChild::Tag));
+                out.extend(runs.into_iter().map(ParaChild::Run));
             } else {
                 let mut runs = Vec::new();
                 self.handle_inline(child, child_styles, &props, &mut runs)?;
@@ -1106,6 +1178,24 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<LinkMarker>() {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
+        } else if let Some(elem) = child.to_packed::<typst_library::layout::LayoutElem>() {
+            // An inline `#layout(size => ..)` is often pure layout-time
+            // scaffolding whose only real output is a state/counter update —
+            // e.g. the `drafting` package's `set-page-properties` stores the
+            // page dimensions via `place(layout(.. state.update ..))`, and its
+            // margin notes then read that state *at their own position*.
+            // Rasterizing the closure would ship its introspection tags through
+            // `deferred_tags` (appended after the whole body), so the state
+            // read — earlier in document order — would still see the initial
+            // value. Evaluating the closure here (with the same synthetic page
+            // size the block-level `handle_layout` uses) keeps any tags at the
+            // exact position paged layout would give them. A closure that
+            // cannot be evaluated standalone falls back to rasterization.
+            if let Some(content) = self.eval_layout_content(elem, styles) {
+                out.extend(self.inline_runs(&content, styles, props.clone())?);
+            } else {
+                self.rasterize_fallback(child, styles, out)?;
+            }
         } else if let Some((body, fill, bdr)) = mappers::shape::inline_frame(child, styles)
             && (fill.is_some() || bdr.is_some())
             && crate::convert::body_extractable(&body)
@@ -1263,6 +1353,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         } else if (child.is::<typst_library::layout::BlockElem>()
             || crate::convert::is_framed_container(child))
             && crate::convert::contains_place(child)
+            && crate::convert::placed_bodies_shape_only(child, styles)
             && let Some(run) = mappers::shape::transformed(child, styles, self)?
         {
             // A box/block/framed container reached as a paragraph's sole
@@ -1388,6 +1479,24 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
 /// Whether a `#box` carries no visual of its own (no fill, no stroke on any
 /// side, no clip) — so it is pure inline layout and its body can be extracted
 /// as runs rather than rasterized to preserve a background/border/clip.
+/// Whether `content` contains any visible text (a non-empty `TextElem`
+/// anywhere inside). Used to tell pure layout scaffolding — a `#box(place(
+/// layout(..)))` whose only real output is a state/counter update — apart from
+/// text-bearing content that should stay on a live-extraction path.
+fn contains_visible_text(content: &Content) -> bool {
+    use std::ops::ControlFlow;
+    content
+        .traverse(&mut |e: Content| {
+            if let Some(text) = e.to_packed::<TextElem>()
+                && !text.text.trim().is_empty()
+            {
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        })
+        .is_break()
+}
+
 fn box_is_plain(
     elem: &typst_library::foundations::Packed<typst_library::layout::BoxElem>,
     styles: StyleChain,

@@ -153,7 +153,7 @@ styles).
 
 ### Templates that assume a paged model
 
-A handful of templates (4 of a 627-document corpus, <1%) **fail to compile**
+One template of a 627-document corpus (with a target-conditional panic in its own code) **fails to compile**
 to docx although they compile to PDF. The error always originates in the
 template's own code, not in OOXML generation — it assumes the paged layout
 model that docx does not have:

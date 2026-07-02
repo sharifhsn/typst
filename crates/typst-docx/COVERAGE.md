@@ -836,10 +836,70 @@ Recovered: versatile-apa, gb-ctr.
 
 **Result: corpus 618 → 623 OK (4 EXPORT_ERR, <1%), 0 invalid.** 75/75 tests
 (3 new: synthetic page ref, footer label query, failing-closure tolerance).
-Remaining tail: tracl (template's own `target` branch — theirs to fix),
-sos-ugent-style (the `drafting` package's own realize-time panic),
-toffee-tufte (a citation inside margin-note content is convergence-unstable),
-ijimai (a show-rule use-count assertion our sub-realizations distort — the
-count moved from 10 to 0 with these changes, still not 1). Each is a bespoke
-package-interaction dive, documented here so the next pass starts from the
-diagnosis.
+Remaining tail at that point: tracl, sos-ugent-style, toffee-tufte, ijimai —
+cleared in §11 below (except tracl).
+
+## 11. The last three: positioned tags, stable shape classification, in-order scaffolding
+
+Three parallel adversarial dives (a different model per doc, each in an
+isolated worktree) root-caused the remaining tail; the portable parts were
+synthesized here — two of the three prototype patches were partially
+**rejected** by corpus gates and reworked (recorded honestly below).
+
+### 11a. Positioned tags + leading-break exclusion (fixes ijimai)
+ijimai's `show par` rule guards on `here().page() > 1` *and* position
+comparisons against a heading. The §10 page model counted the *leading*
+page-setup section break as a physical page (first content on "page 2" →
+rule suppressed → the template's use-count assert saw 0), and positions
+reported a dummy origin for every location (before §10 that made 10
+paragraphs qualify — one flawed model, both wrong counts).
+`collect_positioned_tags` now walks the IR once, producing the tag stream,
+the page model, *and* a synthetic `PagedPosition` per tag (monotonic y in
+block order — an ordering approximation, but strictly better than everything
+at origin); leading breaks no longer advance the page; the introspector
+stores real positions and `position()` returns `DocumentPosition::Paged`.
+
+### 11b. Structural shape-only classification (fixes toffee-tufte)
+The `contains_place → transformed` native-shape shortcut classified a placed
+body by its *laid-out frame*: a sidenote mixing a rule line with a
+`cite(form: "full")` looked shape-only on iterations where the unresolved
+citation rendered empty, and textful once it resolved — the lowering flapped
+between iterations, the cite's tag flickered, and the bibliography never
+converged ("citation could not be located"). `body_shape_only` /
+`placed_bodies_shape_only` now classify *structurally* (only genuinely
+shape-composed bodies may take the vector path — false negatives fall back
+safely, false positives were the instability), and `transformed` forwards the
+consumed frame's introspection tags (previously silently dropped for native
+shape groups). **Rejected from the prototype:** two "keep the body live in
+flow" arms — the corpus proved they dropped placed letter/CV address-block
+content that the rasterize path preserves (briefs −26 words, metronic −49,
+inboisu −6, all present in the PDF).
+
+### 11c. In-order scaffolding tags (fixes sos-ugent-style)
+The `drafting` package initializes its margin-note state via
+`box(place(layout(size => state.update(..))))` and reads it back at each
+note's own position. The scaffolding rasterized, so its `state.update` tag
+went through `deferred_tags` — appended after the whole body — and every
+(earlier) read saw the initial value → the package's own panic. Three pieces:
+inline `#layout(size => ..)` closures are now evaluated in place with the
+synthetic page size (exactly what the block path has done since the `#layout`
+recovery), `rasterize_with_tags` lets paragraph-level callers keep a
+rasterized child's frame tags *at its position* (`ParaChild::Tag` exists at
+that level; run-level contexts still defer), and an `inline_pchildren` arm
+routes inline `#place` — and plain boxes holding one — through that
+in-position path. The box case is gated on `contains_visible_text` being
+false (pure scaffolding only): rasterizing a text-bearing place-box would
+demote live text to an image just to reposition its tags, a downgrade the
+word-count oracle structurally cannot see (it reads hidden text too).
+**Rejected from the prototype:** a plain-box `inline_pchildren` recursion arm
+that re-lowered box bodies at paragraph level — it broke elspub and four
+other docs (net −4; the per-line-equation-label re-realization hazard
+documented in the box/pad tradeoff notes).
+
+**Result: corpus 626/627 OK (1 EXPORT_ERR: tracl, whose own template code
+panics on any target it doesn't know), 0 invalid.** 79 tests (4 new: the two
+dive regression tests plus a state-order and a mixed-placed-label test).
+Oracle A/B vs the pre-dive binary: all flags triaged as fidelity gains —
+rendercv now matches the PDF token-for-token (the old output duplicated its
+contact header), tonguetoquill purely gains, and the `nums` class is the §10
+flat-"1"-to-synthetic-numbers improvement.

@@ -728,6 +728,7 @@ fn handle_block_inner(
         out.extend(mappers::image::place(elem, styles, ctx)?);
     } else if (child.is::<typst_library::layout::BlockElem>() || is_framed_container(child))
         && contains_place(child)
+        && placed_bodies_shape_only(child, styles)
         && let Some(run) = mappers::shape::transformed(child, styles, ctx)?
     {
         // A box/block/framed container whose ENTIRE content is a composition
@@ -821,17 +822,11 @@ fn handle_layout(
     styles: typst_library::foundations::StyleChain,
     out: &mut Vec<Block>,
 ) -> SourceResult<()> {
-    use comemo::Track;
-    use typst_library::foundations::{Context, dict};
-
-    let context = Context::new(elem.location(), Some(styles));
-    let args = [dict! { "width" => ctx.raster_width, "height" => ctx.raster_height }];
-    match elem.func.call(ctx.engine(), context.track(), args) {
-        Ok(value) => {
-            let content = value.display();
+    match ctx.eval_layout_content(elem, styles) {
+        Some(content) => {
             out.extend(ctx.blocks(&content, styles)?);
         }
-        Err(_) => {
+        None => {
             if let Some(para) =
                 fallback_para(mappers::image::laid_out_fallback(elem.pack_ref(), styles, ctx)?)
             {
@@ -1062,6 +1057,117 @@ pub(crate) fn contains_place(child: &Content) -> bool {
         }),
         ControlFlow::Break(())
     )
+}
+
+/// Whether every `#place` body inside `child` is structurally a composition of
+/// native shapes. This keeps the layout-derived shape shortcut deterministic:
+/// a placed text/citation body can render empty before introspection stabilizes,
+/// which makes the laid-out frame look shape-only for one iteration and textful
+/// in the next.
+pub(crate) fn placed_bodies_shape_only(
+    child: &Content,
+    styles: typst_library::foundations::StyleChain,
+) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::layout::PlaceElem;
+
+    child
+        .traverse(&mut |e: Content| {
+            if let Some(place) = e.to_packed::<PlaceElem>()
+                && !body_shape_only(&place.body, styles)
+            {
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        })
+        .is_continue()
+}
+
+/// Whether `body` is structurally limited to elements the native shape-group
+/// mapper can consume. Conservative false negatives are fine: they fall back to
+/// the existing live-content/raster paths. False positives are not fine because
+/// unresolved text/citations can disappear from the probe frame and make lowering
+/// flap across iterations.
+pub(crate) fn body_shape_only(
+    body: &Content,
+    styles: typst_library::foundations::StyleChain,
+) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::foundations::{SequenceElem, StyledElem};
+    use typst_library::introspection::TagElem;
+    use typst_library::layout::{
+        AlignElem, BoxElem, MoveElem, PadElem, PlaceElem, RotateElem, ScaleElem, StackElem,
+    };
+    use typst_library::visualize::{
+        CircleElem, CurveElem, EllipseElem, LineElem, PolygonElem, RectElem, SquareElem,
+    };
+
+    let mut saw_shape = false;
+    let result = body.traverse(&mut |e: Content| {
+        if e.is::<TagElem>() {
+            return ControlFlow::Continue(());
+        }
+
+        if e.is::<LineElem>() || e.is::<CurveElem>() {
+            saw_shape = true;
+            return ControlFlow::Continue(());
+        }
+
+        if let Some(rect) = e.to_packed::<RectElem>() {
+            if rect.body.get_ref(styles).is_some() {
+                return ControlFlow::Break(());
+            }
+            saw_shape = true;
+            return ControlFlow::Continue(());
+        }
+
+        if let Some(square) = e.to_packed::<SquareElem>() {
+            if square.body.get_ref(styles).is_some() {
+                return ControlFlow::Break(());
+            }
+            saw_shape = true;
+            return ControlFlow::Continue(());
+        }
+
+        if let Some(ellipse) = e.to_packed::<EllipseElem>() {
+            if ellipse.body.get_ref(styles).is_some() {
+                return ControlFlow::Break(());
+            }
+            saw_shape = true;
+            return ControlFlow::Continue(());
+        }
+
+        if let Some(circle) = e.to_packed::<CircleElem>() {
+            if circle.body.get_ref(styles).is_some() {
+                return ControlFlow::Break(());
+            }
+            saw_shape = true;
+            return ControlFlow::Continue(());
+        }
+
+        if e.is::<PolygonElem>() {
+            saw_shape = true;
+            return ControlFlow::Continue(());
+        }
+
+        if e.is::<SequenceElem>()
+            || e.is::<StyledElem>()
+            || e.is::<AlignElem>()
+            || e.is::<BoxElem>()
+            || e.is::<MoveElem>()
+            || e.is::<PadElem>()
+            || e.is::<PlaceElem>()
+            || e.is::<RotateElem>()
+            || e.is::<ScaleElem>()
+            || e.is::<StackElem>()
+        {
+            return ControlFlow::Continue(());
+        }
+
+        ControlFlow::Break(())
+    });
+
+    result.is_continue() && saw_shape
 }
 
 /// Maps a BLOCK-LEVEL framed container with *flowing* content to shaded +

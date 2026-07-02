@@ -104,6 +104,18 @@ fn assert_all_wellformed(parts: &HashMap<String, String>) {
     }
 }
 
+fn visible_text(xml: &str) -> String {
+    let doc = roxmltree::Document::parse(xml).expect("document XML should parse");
+    doc.descendants()
+        .filter(|node| {
+            node.tag_name().name() == "t"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+        })
+        .filter_map(|node| node.text())
+        .collect()
+}
+
 #[test]
 fn package_is_wellformed_and_minimal() {
     let p = parts("Hello *world*.");
@@ -1354,6 +1366,80 @@ fn page_reference_resolves_via_the_synthetic_page_model() {
     );
     let doc = &p["word/document.xml"];
     assert!(doc.contains("ii"), "the page reference resolves to the synthetic page");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn leading_page_setup_does_not_advance_the_synthetic_page() {
+    // A top-of-document `set page(..)` produces page-run machinery before the
+    // first real body content. That setup must not count as a physical page,
+    // otherwise the first content page is reported as page 2.
+    let p = parts(
+        "#set page(numbering: \"1\")\n= Target <t>\nUNIQUE-#ref(<t>, form: \"page\")-END",
+    );
+    let doc = &p["word/document.xml"];
+    let text = visible_text(doc);
+    assert!(text.contains("UNIQUE-1-END"), "the first content page stays page 1");
+    assert!(!text.contains("UNIQUE-2-END"), "leading page setup must not advance to page 2");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn synthetic_positions_distinguish_adjacent_blocks() {
+    // Some templates compare `location().position()` values. DOCX positions are
+    // approximate, but they must preserve block order instead of reporting every
+    // location at origin.
+    let p = parts(
+        "= First <first>\n\
+         = Second <second>\n\
+         #context {\n\
+         \tlet a = query(<first>).first().location().position()\n\
+         \tlet b = query(<second>).first().location().position()\n\
+         \tif b.y > a.y [ORDERED] else [ORIGIN]\n\
+         }",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        visible_text(doc).contains("ORDERED"),
+        "later blocks get later synthetic positions"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn scaffolding_state_update_stays_in_document_order() {
+    // The `drafting` package stores page properties via
+    // `box(place(layout(size => state.update(..))))` and its margin notes read
+    // that state at their own (later) position. The update's introspection tag
+    // must land AT the scaffolding's position — deferring it to the end of the
+    // document makes every earlier-or-equal read see the initial value.
+    let p = parts(
+        "#let s = state(\"pgprops\", none)\n\
+         Before.\n\
+         #box(place(layout(size => s.update(size.width))))\n\
+         #context if s.get() != none [INITIALIZED] else [MISSING]",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("INITIALIZED"), "the state update precedes the read");
+    assert!(!doc.contains("MISSING"), "the update tag must not defer to the end");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn labels_inside_mixed_placed_boxes_stay_queryable() {
+    // A placed body mixing shapes with labeled text (a sidenote with a rule
+    // line) must not be claimed by the native shape-composition path: on early
+    // iterations unresolved text can render empty, making the frame look
+    // shape-only and the lowering flap — the label's tag then flickers across
+    // iterations and queries never stabilise.
+    let p = parts(
+        "#box(place(dx: 2pt, rect(width: 4pt, height: 4pt, fill: blue) + \
+         [note <sidenote>]))\n\
+         #context if query(<sidenote>).len() > 0 [FOUND] else [MISSING]",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("FOUND"), "the placed label is queryable");
+    assert!(!doc.contains("MISSING"), "the label tag must be stable");
     assert_all_wellformed(&p);
 }
 

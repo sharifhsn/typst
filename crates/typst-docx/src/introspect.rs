@@ -2,8 +2,9 @@
 //!
 //! DOCX is pageless at export time, so this reuses the target-agnostic
 //! [`ElementIntrospector`] over the introspection [`Tag`]s collected while
-//! walking the IR. Positions are not meaningful for DOCX, so a trivial
-//! [`HtmlPosition`] is used as the position type.
+//! walking the IR. Exact positions are unknowable for a flowing DOCX document,
+//! so positions are synthetic but preserve the lowered IR's page and block
+//! order.
 
 use std::fmt::{self, Debug, Formatter};
 use std::num::NonZeroUsize;
@@ -13,8 +14,8 @@ use rustc_hash::FxHashMap;
 use typst_library::diag::StrResult;
 use typst_library::foundations::{Content, Label, Selector};
 use typst_library::introspection::{
-    DocumentPosition, ElementIntrospector, ElementIntrospectorBuilder, HtmlPosition,
-    Introspector, Location, Tag,
+    DocumentPosition, ElementIntrospector, ElementIntrospectorBuilder, Introspector,
+    Location, PagedPosition, Tag,
 };
 use typst_library::model::Numbering;
 use typst_syntax::VirtualPath;
@@ -22,7 +23,7 @@ use typst_syntax::VirtualPath;
 /// An introspector implementation for DOCX documents.
 #[derive(Clone)]
 pub struct DocxIntrospector {
-    elements: ElementIntrospector<HtmlPosition>,
+    elements: ElementIntrospector<PagedPosition>,
     anchors: FxHashMap<Location, EcoString>,
     /// The synthetic page model: for every tag location, the 1-based count of
     /// explicit page/section breaks before it plus one, and its section index.
@@ -42,20 +43,19 @@ impl DocxIntrospector {
     /// Creates an introspector from the introspection tags collected while
     /// walking the IR.
     #[typst_macros::time(name = "introspect docx")]
-    pub fn new(tags: &[Tag]) -> DocxIntrospector {
+    pub fn new(tags: &[(Tag, PagedPosition)]) -> DocxIntrospector {
         if std::env::var_os("DOCX_DEBUG_INTROSPECT").is_some() {
             let mut hist = std::collections::BTreeMap::new();
-            for tag in tags {
+            for (tag, _) in tags {
                 if let Tag::Start(elem, _) = tag {
                     *hist.entry(elem.func().name()).or_insert(0usize) += 1;
                 }
             }
             eprintln!("INTROSPECT TAGS: {hist:?}");
         }
-        let mut builder = ElementIntrospectorBuilder::<HtmlPosition>::new();
-        let pos = HtmlPosition::new(EcoVec::new());
-        for tag in tags {
-            builder.discover_tag(tag, pos.clone());
+        let mut builder = ElementIntrospectorBuilder::<PagedPosition>::new();
+        for (tag, pos) in tags {
+            builder.discover_tag(tag, *pos);
         }
         DocxIntrospector {
             elements: builder.finalize(),
@@ -67,7 +67,7 @@ impl DocxIntrospector {
     }
 
     /// The underlying element introspector.
-    pub fn elements(&self) -> &ElementIntrospector<HtmlPosition> {
+    pub fn elements(&self) -> &ElementIntrospector<PagedPosition> {
         &self.elements
     }
 
@@ -137,7 +137,7 @@ impl Introspector for DocxIntrospector {
     }
 
     fn position(&self, location: Location) -> Option<DocumentPosition> {
-        self.elements.position(location).cloned().map(DocumentPosition::Html)
+        self.elements.position(location).copied().map(DocumentPosition::Paged)
     }
 
     fn page_numbering(&self, location: Location) -> Option<&Numbering> {
