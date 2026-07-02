@@ -232,9 +232,11 @@ SVG/PDF images, CeTZ/fletcher diagrams, transforms (`#rotate`/`#scale`/`#skew`),
 and radial/conic gradients. The visual is preserved exactly, and the text inside
 is still recovered as hidden, searchable runs.
 
-**Known limitations:** page-number cross-references have no meaning in a flowing
-document, and a small number of templates that assume a fixed paged layout fail
-to export (they compile to PDF fine) — the error points at the template code.
+**Known limitations:** page-number cross-references resolve against a synthetic
+page model (counting explicit page breaks) and are approximate where text
+auto-flows, and a handful of templates (<1%) that assume a fixed paged layout
+fail to export (they compile to PDF fine) — the error points at the template
+code.
 The full per-feature support matrix and the rationale behind every mapping live
 in [`crates/typst-docx/README.md`](crates/typst-docx/README.md) and
 [`crates/typst-docx/COVERAGE.md`](crates/typst-docx/COVERAGE.md).

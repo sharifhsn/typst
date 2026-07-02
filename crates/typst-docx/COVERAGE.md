@@ -789,3 +789,57 @@ redaction, header-only and numbering-only section splits); corpus 618/9/0
 identical; oracle A/B all-flags-verified-as-gains; `--pages` e2e errors for
 docx and still works for PDF; LibreOffice opens the newly multi-section
 output.
+
+## 10. The synthetic page model — clearing the paged-introspection tail
+
+The remaining EXPORT_ERR class was templates that read *paged* introspection a
+flowing document doesn't have. Three mechanisms, found by root-causing each of
+the failing corpus docs individually (the first two hypotheses — anchor
+leniency for unknown locations — turned out to be redundant: the shared
+`ElementIntrospector` already treats an unknown `before()`/`count_before()`
+anchor as end-of-document; both attempted overrides were removed after an
+ablation confirmed they weren't load-bearing):
+
+### 10a. Synthetic page numbers (`DocxIntrospector::set_page_model`)
+`page()`/`pages()`/`page_numbering()` returned `None`, so
+`@target(form: "page")` and `loc.page-numbering()` hard-failed the export.
+Now a walk over the lowered IR (mirroring `collect_tags`) counts explicit
+page breaks (`Run::PageBreak`) and section breaks, assigning every tag
+location a (page, section) pair; `page_numbering` resolves against that
+section's real `set page(numbering:)`. The numbers are exact for
+break-structured front matter and a lower bound where text auto-flows —
+and most of them surface as *cached field values* that Word recomputes live.
+Locations outside the model (rasterize-deferred, header/footer tags) resolve
+to the final page, consistent with their append-at-end position. Recovered:
+shuosc-shu-bachelor-thesis, splines-thesis-starter. Corpus-wide the oracle
+flagged ~20 theses whose TOC/ref page numbers changed — every one previously
+showed a flat wrong "1" for all pages; the synthetic values are strictly
+closer to the PDF (and respect roman front-matter numbering).
+
+### 10b. Header/footer introspection-tag harvest
+Page-furniture content lives outside the body IR, so a labeled element in a
+running header/footer never reached the introspector — and templates *do*
+query furniture (`query(<_ght-footer>.after(here())).first()`). `build_section`
+now harvests tags from lowered header/footer blocks into `deferred_tags`
+(append-at-end is exactly where an `.after()` query wants them; the builder
+dedups duplicate locations across sections). Recovered: easy-hgb-thesis.
+
+### 10c. Tolerate failing user numbering closures
+A `#set figure(numbering: closure)` that reads introspection (querying
+headings, indexing counter components) can fail against the empty
+first-iteration introspector — under paged layout that is a *delayed* error
+that gets retried, but our figure mapper propagated it as a hard abort on
+iteration one, before any introspector was ever built. The caption's cached
+number, the list-of-figures entry text, and the standalone-caption realize
+are now best-effort (the `SEQ` field remains the live truth in Word).
+Recovered: versatile-apa, gb-ctr.
+
+**Result: corpus 618 → 623 OK (4 EXPORT_ERR, <1%), 0 invalid.** 75/75 tests
+(3 new: synthetic page ref, footer label query, failing-closure tolerance).
+Remaining tail: tracl (template's own `target` branch — theirs to fix),
+sos-ugent-style (the `drafting` package's own realize-time panic),
+toffee-tufte (a citation inside margin-note content is convergence-unstable),
+ijimai (a show-rule use-count assertion our sub-realizations distort — the
+count moved from 10 to 0 with these changes, still not 1). Each is a bespoke
+package-interaction dive, documented here so the next pass starts from the
+diagnosis.

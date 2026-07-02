@@ -103,7 +103,7 @@ figure numbering stays consistent.
 | `@ref` to heading / figure / equation / labelled element | ✅ | clickable hyperlink → bookmark |
 | Footnotes | ✅ | `footnotes.xml` |
 | `#link` to a page *coordinate* | ❌ | text kept, link dropped |
-| `@ref` to a **page number** | ❌ | docx has no fixed-page model |
+| `@ref` to a **page number** | ✅ | resolves against a synthetic page model (counting explicit page/section breaks) — exact for break-structured front matter, approximate where text auto-flows |
 
 ### Figures, images & graphics
 
@@ -144,7 +144,6 @@ figure numbering stays consistent.
 |---|---|
 | Fractional spacing (`#v(1fr)`, `#h(1fr)`) | distributes leftover page space — no flowing-document equivalent |
 | Margin notes (`drafting` / `marginalia`) | paged-only; the package panics in a flowing model |
-| Page-number cross-references | docx has no fixed-page model |
 
 Some markers are absorbed without a warning because they carry no lost content:
 `#place(float)` flush ordering (we anchor floats in document order rather than
@@ -154,7 +153,7 @@ styles).
 
 ### Templates that assume a paged model
 
-A small number of templates (~2% of a 627-document corpus) **fail to compile**
+A handful of templates (4 of a 627-document corpus, <1%) **fail to compile**
 to docx although they compile to PDF. The error always originates in the
 template's own code, not in OOXML generation — it assumes the paged layout
 model that docx does not have:
