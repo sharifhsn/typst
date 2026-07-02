@@ -453,10 +453,11 @@ fn resolve_sections(
             i += 1;
         }
         let geom = run_geometry(&pairs[start..i], initial);
-        // Merge into the previous section if the geometry is unchanged; the
-        // pagebreaks between them then fall inside the merged range (→ `<w:br>`).
+        // Merge into the previous section if nothing section-scoped changed;
+        // the pagebreaks between them then fall inside the merged range
+        // (→ `<w:br>`).
         if let Some(last) = sections.last_mut()
-            && same_geometry(&last.0, &geom)
+            && same_section(&last.0, &geom)
         {
             last.1.end = i;
             continue;
@@ -466,9 +467,19 @@ fn resolve_sections(
     sections
 }
 
-/// Whether two sections share the same page geometry (size, orientation,
-/// margins, columns) — the properties a `<w:sectPr>` page break is needed for.
-fn same_geometry(a: &SectGeom, b: &SectGeom) -> bool {
+/// Whether two page runs can share one `<w:sectPr>` — equal on every property
+/// a section break exists to change: the page geometry (size, orientation,
+/// margins, header/footer bands, columns) *and* the section-scoped furniture
+/// (header/footer content, page numbering, background). Comparing only the
+/// geometry would silently merge away a mid-document `set page(header: ..)`
+/// or `set page(numbering: ..)` change — the section carrying the new
+/// furniture would never be emitted. Content fields are compared by hash.
+///
+/// `background_color` and `hyphenate` are deliberately NOT compared: both are
+/// emitted document-wide (`w:background` / `w:autoHyphenation` have no
+/// per-section form), so splitting on them could not express the change.
+fn same_section(a: &SectGeom, b: &SectGeom) -> bool {
+    use typst_utils::hash128;
     a.page_w == b.page_w
         && a.page_h == b.page_h
         && a.landscape == b.landscape
@@ -476,9 +487,19 @@ fn same_geometry(a: &SectGeom, b: &SectGeom) -> bool {
         && a.margin_bottom == b.margin_bottom
         && a.margin_left == b.margin_left
         && a.margin_right == b.margin_right
+        && a.header_band == b.header_band
+        && a.footer_band == b.footer_band
         && a.columns == b.columns
         && a.col_space == b.col_space
         && a.gutter == b.gutter
+        && a.numbering == b.numbering
+        && a.number_in_header == b.number_in_header
+        && a.number_jc == b.number_jc
+        && a.header_suppressed == b.header_suppressed
+        && a.footer_suppressed == b.footer_suppressed
+        && hash128(&a.header) == hash128(&b.header)
+        && hash128(&a.footer) == hash128(&b.footer)
+        && hash128(&a.background) == hash128(&b.background)
 }
 
 /// Resolves one page run's geometry from its group of content pairs.
