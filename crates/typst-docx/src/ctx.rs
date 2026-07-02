@@ -1194,14 +1194,22 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // Same as `GridCell` above, for `#table.cell(..)`.
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<typst_library::layout::HideElem>() {
-            // `#hide[..]` → hidden text (`<w:vanish/>`): invisible but present
-            // (searchable, screen-reader-readable), instead of dropped. Extract
-            // when the body has no layout-bound introspection; otherwise drop it
-            // (it is invisible anyway, so rasterizing would be pointless).
-            if crate::convert::body_extractable(&elem.body) {
-                let hidden = RunProps { vanish: true, ..props.clone() };
-                out.extend(self.inline_runs(&elem.body, styles, hidden)?);
-            }
+            // `#hide[..]`: the content is REMOVED, not embedded. Typst documents
+            // `hide` as a redaction tool ("neither present visually nor
+            // accessible to Assistive Technology"), and paged export honours
+            // that by physically dropping every frame item (`Frame::hide`)
+            // except introspection tags. Match it exactly: harvest the body's
+            // tags (so a label or citation inside hidden content still
+            // resolves — the same "traces" the paged model keeps) and emit
+            // nothing. Lowering the body to `w:vanish` runs instead would ship
+            // the text recoverable inside the package (Word reveals hidden
+            // text with a single toggle) — a redaction leak.
+            let _ = elem.body.traverse(&mut |c: Content| {
+                if let Some(tag) = c.to_packed::<TagElem>() {
+                    self.deferred_tags.push(tag.tag.clone());
+                }
+                std::ops::ControlFlow::<()>::Continue(())
+            });
         } else if let Some(elem) = child.to_packed::<LinkElem>() {
             // In a run-only context (nested formatting, table/footnote bodies) we
             // cannot emit a `<w:hyperlink>` wrapper, so lower the link body to

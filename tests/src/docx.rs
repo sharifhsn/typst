@@ -975,13 +975,29 @@ fn header_link_relationship_lives_in_the_header_part_rels() {
 }
 
 #[test]
-fn hide_becomes_hidden_text() {
-    // `#hide` content → `<w:vanish/>`: invisible in the page but present in the
-    // document (searchable / screen-reader-readable), rather than dropped.
-    let p = parts("Shown #hide[a secret] and more.");
+fn hide_is_redaction_not_hidden_text() {
+    // `#hide` is documented as a redaction tool ("neither present visually nor
+    // accessible to Assistive Technology"), and paged export physically drops
+    // the hidden frame items. The DOCX must match: the content may NOT ship
+    // inside the package in any form — not even as `w:vanish` hidden text,
+    // which Word reveals with a single toggle.
+    let p = parts("Shown #hide[redactedsecret] and more.");
     let doc = &p["word/document.xml"];
-    assert!(doc.contains("w:vanish"), "#hide content becomes hidden text");
-    assert!(doc.contains("a secret"), "the hidden text is preserved");
+    assert!(
+        !doc.contains("redactedsecret"),
+        "hidden content must not be recoverable from the package"
+    );
+    assert!(doc.contains("Shown"), "the visible text stays");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn hide_is_redacted_at_block_level_too() {
+    // The block path (a hidden heading) goes through the rasterize fallback,
+    // where `Frame::hide` empties the frame — nothing may leak there either.
+    let p = parts("Before\n\n#hide[= SecretHeading]\n\nAfter");
+    let doc = &p["word/document.xml"];
+    assert!(!doc.contains("SecretHeading"), "a hidden heading must not leak");
     assert_all_wellformed(&p);
 }
 
@@ -1295,6 +1311,50 @@ fn page_geometry_change_emits_a_section_break() {
     assert!(
         doc.contains("w:orient=\"landscape\""),
         "the flipped section should be landscape"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn header_only_change_emits_a_section_break() {
+    // A mid-document `set page(header: ..)` change with UNCHANGED geometry must
+    // still start a new section — Word carries running headers on `sectPr`, so
+    // merging the runs would silently keep the first header for the whole
+    // document.
+    let p = parts(
+        "#set page(header: [First head])\nBody one.\n\n\
+         #set page(header: [Second head])\nBody two.",
+    );
+    let doc = &p["word/document.xml"];
+    assert_eq!(
+        doc.matches("<w:sectPr>").count(),
+        2,
+        "a header-only change should yield two sections"
+    );
+    let headers: String = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("word/header"))
+        .map(|(_, xml)| xml.as_str())
+        .collect();
+    assert!(headers.contains("First head"), "the first header is emitted");
+    assert!(headers.contains("Second head"), "the second header is emitted");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn numbering_only_change_emits_a_section_break() {
+    // Front-matter roman numerals switching to arabic (`set page(numbering:)`)
+    // is section-scoped in Word (`w:pgNumType`); same-geometry runs must not
+    // merge across it.
+    let p = parts(
+        "#set page(numbering: \"i\")\nFront matter.\n\n\
+         #set page(numbering: \"1\")\nMain matter.",
+    );
+    let doc = &p["word/document.xml"];
+    assert_eq!(
+        doc.matches("<w:sectPr>").count(),
+        2,
+        "a numbering-only change should yield two sections"
     );
     assert_all_wellformed(&p);
 }

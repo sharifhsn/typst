@@ -865,8 +865,9 @@ pub(crate) fn is_invisible_noop(child: &Content) -> bool {
         // Inter-block spacing (a leftover/fractional `#v`) has no flowing-document
         // equivalent, but it carries no content.
         || child.is::<typst_library::layout::VElem>()
-        // `#hide[..]` is invisible by design (extractable bodies are kept as
-        // hidden text elsewhere; a non-extractable one is genuinely nothing).
+        // `#hide[..]` is invisible by design — and documented as a redaction
+        // tool, so its body is dropped entirely (only introspection tags are
+        // kept, matching paged export's `Frame::hide`).
         || child.is::<typst_library::layout::HideElem>()
         // A float-flush marker (`place` float ordering): no DOCX equivalent.
         || child.is::<typst_library::layout::FlushElem>()

@@ -57,7 +57,7 @@ figure numbering stays consistent.
 | Small caps | ✅ | `w:smallCaps` |
 | Text colour, font family, size | ✅ | `w:color`, `w:rFonts`, `w:sz` |
 | Smart quotes | ✅ | resolved to curly quotes |
-| `#hide[…]` | ✅ | `w:vanish` (hidden but kept; searchable / screen-readable) |
+| `#hide[…]` | ✅ | content is **removed** from the file (redaction semantics, like PDF); only introspection traces (labels) are kept |
 
 ### Document structure
 
