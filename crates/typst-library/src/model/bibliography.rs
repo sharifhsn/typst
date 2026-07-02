@@ -809,13 +809,14 @@ impl Works {
     /// recover the cite key behind a realized in-text citation — turning the
     /// already-formatted cite link into a structured citation. Used by the Pandoc
     /// target to emit `Cite` nodes that `pandoc --citeproc` can re-resolve.
+    // Hash order is fine here: consumers key the pairs by their (unique per
+    // location) backlink, so the result is order-insensitive.
+    #[allow(clippy::iter_over_hash_type)]
     pub fn entry_keys(&self) -> Vec<(Location, EcoString)> {
         let mut out = Vec::new();
-        for rendered in self.bibliographies.values() {
-            if let Ok(bib) = rendered {
-                for entry in &bib.entries {
-                    out.push((entry.backlink, entry.key.clone()));
-                }
+        for bib in self.bibliographies.values().flatten() {
+            for entry in &bib.entries {
+                out.push((entry.backlink, entry.key.clone()));
             }
         }
         out
