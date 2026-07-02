@@ -5,6 +5,9 @@ name: Create Release Assets
 on:
   release:
     types: [published]
+  # Allow re-running asset builds for an existing release by dispatching on
+  # its tag (the upload step derives the release from the ref name).
+  workflow_dispatch:
 
 jobs:
   build-binaries:
