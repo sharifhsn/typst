@@ -1014,6 +1014,43 @@ fn hide_is_redacted_at_block_level_too() {
 }
 
 #[test]
+fn blank_raster_is_dropped_not_embedded() {
+    // `#hide` keeps its space in layout, so a skewed hidden box lays out to a
+    // real-sized frame that renders NOTHING. The old path embedded that blank
+    // render as a full-size PNG (phantom space in the flow); the ink crop must
+    // drop it outright.
+    let p = parts("A #skew(ax: 20deg, box(width: 200pt, height: 100pt, hide[gone]))b");
+    let doc = &p["word/document.xml"];
+    assert!(!doc.contains("<a:blip"), "a blank render must not embed an image");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn mostly_blank_raster_is_cropped_to_ink() {
+    // A skewed wide box whose only ink is a small corner square: the raster
+    // must be cropped to (roughly) the square, not shipped at the full
+    // 300x100pt frame size. 300pt = 3_810_000 EMU; the cropped extent should
+    // be a small fraction of that.
+    let p = parts(
+        "#skew(ax: 10deg, box(width: 300pt, height: 100pt, \
+         align(bottom + end, square(size: 10pt, fill: red))))",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<a:blip"), "the skewed box still rasterizes");
+    let cx: i64 = doc
+        .split("<wp:extent cx=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .and_then(|s| s.parse().ok())
+        .expect("drawing has an extent");
+    assert!(
+        cx < 1_000_000,
+        "the raster is cropped to its ink, not the 300pt frame (got {cx} EMU)"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn styled_underline_carries_dash_and_color() {
     // A plain underline stays a single, uncolored line; a styled one carries the
     // dash pattern as `w:val` and the paint as `w:color`.

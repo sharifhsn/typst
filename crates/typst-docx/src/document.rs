@@ -734,7 +734,21 @@ fn build_section(
             blocks.push(block);
         }
         if let Some(content) = &geom.header {
-            blocks.extend(ctx.blocks(content, styles)?);
+            // Bound furniture rasters to the header band, not the page region.
+            // A header composition built from 100%-relative pieces (a slide
+            // theme's navigation bar) cannot resolve under the infinite-height
+            // first pass, and the full-page retry would rasterize it at page
+            // size — a page-sized image in the header then eats every page of
+            // the section. Word furniture physically lives in its margin band,
+            // so that is the honest bound. Intrinsically-sized header content
+            // (a logo image, plain text) resolves in the first pass and never
+            // sees this.
+            let saved_h = ctx.raster_height;
+            ctx.raster_height = typst_library::layout::Abs::pt(geom.margin_top as f64 / 20.0)
+                .max(typst_library::layout::Abs::pt(6.0));
+            let lowered = ctx.blocks(content, styles);
+            ctx.raster_height = saved_h;
+            blocks.extend(lowered?);
         }
         let rels = ctx.part_rels.take().unwrap_or_default();
         ctx.part_rels = saved;
@@ -759,7 +773,13 @@ fn build_section(
 
     // -- Explicit footer content -------------------------------------------
     if let Some(content) = &geom.footer {
-        let (blocks, rels) = ctx.part_blocks(content, styles)?;
+        // Same band bound as the header above, against the bottom margin.
+        let saved_h = ctx.raster_height;
+        ctx.raster_height = typst_library::layout::Abs::pt(geom.margin_bottom as f64 / 20.0)
+            .max(typst_library::layout::Abs::pt(6.0));
+        let lowered = ctx.part_blocks(content, styles);
+        ctx.raster_height = saved_h;
+        let (blocks, rels) = lowered?;
         // Same as the header above: footer tags must reach the introspector.
         collect_tags(&blocks, &mut ctx.deferred_tags);
         let part_name = ctx.next_hdrftr_name(false);
@@ -821,7 +841,10 @@ fn background_block(
 
     let saved_w = ctx.raster_width;
     ctx.raster_width = Abs::pt(geom.page_w as f64 / 20.0);
-    let result = ctx.rasterize(bg, styles, bg.span())?;
+    // Uncropped: this drawing is stretched to the full page below, so the
+    // render must keep its full extent (ink-cropping a corner watermark would
+    // blow it up to full-bleed).
+    let result = ctx.rasterize_uncropped(bg, styles, bg.span())?;
     ctx.raster_width = saved_w;
     let Some((rel, _size, _text)) = result else {
         return Ok(None);

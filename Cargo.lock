@@ -3204,6 +3204,7 @@ dependencies = [
  "flate2",
  "rustc-hash",
  "time",
+ "tiny-skia",
  "typst-layout",
  "typst-library",
  "typst-macros",

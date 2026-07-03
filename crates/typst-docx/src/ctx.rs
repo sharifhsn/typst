@@ -272,6 +272,11 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     /// id, size, and the plain text recovered from the laid-out frame (empty if
     /// none) — the caller can attach that text as hidden runs so the
     /// rasterized region stays searchable/selectable/accessible.
+    ///
+    /// The render is tightened to its ink bounding box (see
+    /// [`Self::rasterize_uncropped`] for the one caller that must not crop): a
+    /// layout region can be far larger than what actually draws in it, and
+    /// embedding the blank expanse would reserve phantom space in the flow.
     pub fn rasterize(
         &mut self,
         content: &Content,
@@ -279,6 +284,21 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         span: Span,
     ) -> SourceResult<Rasterized> {
         let (tags, rasterized) = self.rasterize_with_tags(content, styles, span)?;
+        self.deferred_tags.extend(tags);
+        Ok(rasterized)
+    }
+
+    /// Like [`Self::rasterize`], but keeps the full render even when most of it
+    /// is blank. The page-background caller stretches the image to the whole
+    /// page, so an ink-cropped render would distort (a corner watermark would
+    /// be blown up to full-bleed).
+    pub(crate) fn rasterize_uncropped(
+        &mut self,
+        content: &Content,
+        styles: StyleChain,
+        span: Span,
+    ) -> SourceResult<Rasterized> {
+        let (tags, rasterized) = self.rasterize_impl(content, styles, span, false)?;
         self.deferred_tags.extend(tags);
         Ok(rasterized)
     }
@@ -291,6 +311,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         content: &Content,
         styles: StyleChain,
         span: Span,
+    ) -> SourceResult<(Vec<Tag>, Rasterized)> {
+        self.rasterize_impl(content, styles, span, true)
+    }
+
+    fn rasterize_impl(
+        &mut self,
+        content: &Content,
+        styles: StyleChain,
+        span: Span,
+        crop: bool,
     ) -> SourceResult<(Vec<Tag>, Rasterized)> {
         use typst_library::foundations::Smart;
         use typst_library::layout::{Abs, Sides};
@@ -334,15 +364,45 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 _ => return Ok((tags, None)),
             },
         };
-        let size = frame.size();
         // Recover the rasterized region's text (reading-order reconstructed from
         // the laid-out frame) so the caller can keep it searchable/accessible as
         // hidden runs alongside the image.
         let frame_text = frame_to_text(&frame);
 
+        // A frame's items can draw OUTSIDE its own [0, size] box — `#move`
+        // offsets its child without growing the frame — so rendering only the
+        // frame's own extent produces a blank or clipped image (the pre-crop
+        // code shipped exactly such invisible PNGs, thousands per code-heavy
+        // book). Compute the geometric bounds of everything that draws and
+        // render a canvas that covers them.
+        let mut ink = None;
+        frame_ink_rect(&frame, typst_library::layout::Point::zero(), &mut ink);
+        let Some(ink) = ink else {
+            // Nothing draws at all (e.g. an `#uncover` step whose payload is
+            // hidden): drop the raster; tags were already harvested.
+            return Ok((tags, None));
+        };
+        if !ink.min.x.to_pt().is_finite()
+            || !ink.min.y.to_pt().is_finite()
+            || !ink.max.x.to_pt().is_finite()
+            || !ink.max.y.to_pt().is_finite()
+        {
+            return Ok((tags, None));
+        }
+        // Floor degenerate axes (a hairline) to keep the pixmap constructible.
+        let size = typst_library::layout::Size::new(
+            ink.size().x.max(Abs::pt(0.5)),
+            ink.size().y.max(Abs::pt(0.5)),
+        );
+        let mut canvas = Frame::hard(size);
+        canvas.push_frame(
+            typst_library::layout::Point::new(-ink.min.x, -ink.min.y),
+            frame,
+        );
+
         // Render to a pixmap at 2× for crispness, then PNG-encode.
         let page = typst_layout::Page {
-            frame,
+            frame: canvas,
             bleed: Sides::splat(Abs::zero()),
             fill: Smart::Custom(None),
             numbering: None,
@@ -360,10 +420,29 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         // one image; the introspection tags were already harvested above, so
         // convergence is unaffected.
         let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            typst_render::render(&page, &options).encode_png()
+            typst_render::render(&page, &options)
         }));
-        let Ok(Ok(png)) = rendered else { return Ok((tags, None)) };
+        let Ok(pixmap) = rendered else { return Ok((tags, None)) };
 
+        // Tighten the render to its ink. The layout region can be far larger
+        // than what actually draws in it — page-relative content rasterized
+        // under the full page region (a slide's `#uncover` step whose content
+        // is currently hidden, a placed overlay that resolves to a corner)
+        // renders mostly or entirely blank, and embedding the blank expanse
+        // reserves a full page of phantom space in the flow. A blank render is
+        // dropped outright (its introspection tags were harvested above); a
+        // mostly-blank one is cropped to its ink bounding box, with the
+        // display size scaled to match so the visual keeps its physical scale.
+        let (pixmap, size) = if crop {
+            match crop_to_ink(pixmap, size) {
+                Some(cropped) => cropped,
+                None => return Ok((tags, None)),
+            }
+        } else {
+            (pixmap, size)
+        };
+
+        let Ok(png) = pixmap.encode_png() else { return Ok((tags, None)) };
         Ok((tags, Some((self.add_image(&png, "png"), size, frame_text))))
     }
 
@@ -1609,6 +1688,168 @@ fn collect_frame_text(
 /// yields an opaque `Frame`, not re-realizable blocks) still contribute
 /// searchable/selectable text rather than being a pure image. Returned as a
 /// single string with `\n` line separators; the caller decides visibility.
+/// Crops a rendered pixmap to its ink bounding box — the pixels that actually
+/// carry any alpha. Returns `None` for a fully blank render (nothing drawn),
+/// and the pixmap unchanged when the ink already (nearly) fills it. The
+/// physical size is scaled by the same crop ratio, so the embedded image keeps
+/// its exact rendered scale — only the blank margin is removed.
+/// The geometric bounding box of everything a frame draws, in the frame's own
+/// coordinate space. Items are not confined to the frame's [0, size] box (a
+/// `#move`d child draws offset outside it), so the union is taken over the
+/// items themselves: text runs by their glyph-outline bbox (relative to the
+/// baseline origin), shapes by their stroke-inclusive bbox, images by their
+/// display size, and groups by the transformed AABB of their children's ink.
+fn frame_ink_rect(
+    frame: &Frame,
+    offset: typst_library::layout::Point,
+    out: &mut Option<typst_library::layout::Rect>,
+) {
+    use typst_library::layout::{Point, Rect};
+    fn push(out: &mut Option<Rect>, r: Rect) {
+        // A degenerate or non-finite item rect (an unstroked infinite line, an
+        // empty glyph run) must not poison the union — skip it instead.
+        if !r.min.x.to_pt().is_finite()
+            || !r.min.y.to_pt().is_finite()
+            || !r.max.x.to_pt().is_finite()
+            || !r.max.y.to_pt().is_finite()
+        {
+            return;
+        }
+        *out = Some(match *out {
+            None => r,
+            Some(a) => Rect::new(
+                Point::new(a.min.x.min(r.min.x), a.min.y.min(r.min.y)),
+                Point::new(a.max.x.max(r.max.x), a.max.y.max(r.max.y)),
+            ),
+        });
+    }
+    for (pos, item) in frame.items() {
+        let p = offset + *pos;
+        match item {
+            FrameItem::Text(text) => {
+                // Metrics-based, not glyph-outline-based: `TextItem::bbox()`
+                // relies on per-glyph outline extraction, which can come up
+                // empty (spaces, some CJK faces) and would erase the run from
+                // the ink bounds — collapsing the render canvas and losing the
+                // text entirely. Ascent/descent/advance are always available.
+                let m = text.font.metrics();
+                let ascent = m.ascender.at(text.size);
+                let descent = -m.descender.at(text.size);
+                push(
+                    out,
+                    Rect::new(
+                        p + Point::new(Abs::zero(), -ascent),
+                        p + Point::new(text.width(), descent.max(Abs::zero())),
+                    ),
+                );
+            }
+            FrameItem::Shape(shape, _) => {
+                let b = shape.bbox(true);
+                push(out, Rect::new(p + b.min, p + b.max));
+            }
+            FrameItem::Image(_, size, _) => {
+                push(out, Rect::from_pos_size(p, *size));
+            }
+            FrameItem::Group(group) => {
+                let mut inner = None;
+                frame_ink_rect(&group.frame, Point::zero(), &mut inner);
+                if let Some(b) = inner {
+                    // Transform the child box's corners into the parent space.
+                    let corners = [
+                        b.min,
+                        Point::new(b.max.x, b.min.y),
+                        Point::new(b.min.x, b.max.y),
+                        b.max,
+                    ];
+                    let mut min = Point::splat(Abs::inf());
+                    let mut max = Point::splat(-Abs::inf());
+                    for c in corners {
+                        let t = c.transform(group.transform);
+                        min.x = min.x.min(t.x);
+                        min.y = min.y.min(t.y);
+                        max.x = max.x.max(t.x);
+                        max.y = max.y.max(t.y);
+                    }
+                    push(out, Rect::new(p + min, p + max));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn crop_to_ink(
+    pixmap: tiny_skia::Pixmap,
+    size: typst_library::layout::Size,
+) -> Option<(tiny_skia::Pixmap, typst_library::layout::Size)> {
+    let dbg = std::env::var_os("DOCX_DEBUG_CROP").is_some();
+    let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
+    if w == 0 || h == 0 {
+        if dbg {
+            eprintln!("CROP: zero-dim {w}x{h}");
+        }
+        return None;
+    }
+    // Premultiplied RGBA rows; ink = any nonzero alpha (the render surface is
+    // transparent — see the `fill: Smart::Custom(None)` on the page above).
+    let data = pixmap.data();
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0usize, 0usize);
+    for y in 0..h {
+        let row = &data[y * w * 4..(y + 1) * w * 4];
+        let mut any = false;
+        for (x, px) in row.chunks_exact(4).enumerate() {
+            if px[3] != 0 {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                any = true;
+            }
+        }
+        if any {
+            min_y = min_y.min(y);
+            max_y = y;
+        }
+    }
+    if min_x > max_x {
+        // Fully blank: nothing to embed.
+        if dbg {
+            eprintln!("CROP: blank {w}x{h}");
+        }
+        return None;
+    }
+    // Pad for antialiasing halos, clamped to the pixmap.
+    const PAD: usize = 2;
+    let x0 = min_x.saturating_sub(PAD);
+    let y0 = min_y.saturating_sub(PAD);
+    let x1 = (max_x + PAD + 1).min(w);
+    let y1 = (max_y + PAD + 1).min(h);
+    // Ink (nearly) fills the render: keep it as-is rather than re-crop for a
+    // sliver — the common case (an image, a diagram) stays byte-identical.
+    if (x1 - x0) * 100 >= w * 97 && (y1 - y0) * 100 >= h * 97 {
+        return Some((pixmap, size));
+    }
+    let rect = match tiny_skia::IntRect::from_ltrb(x0 as i32, y0 as i32, x1 as i32, y1 as i32) {
+        Some(r) => r,
+        None => {
+            if dbg {
+                eprintln!("CROP: from_ltrb FAILED {x0},{y0}..{x1},{y1} in {w}x{h}");
+            }
+            return None;
+        }
+    };
+    let cropped = match pixmap.clone_rect(rect) {
+        Some(c) => c,
+        None => {
+            if dbg {
+                eprintln!("CROP: clone_rect FAILED {x0},{y0}..{x1},{y1} in {w}x{h}");
+            }
+            return None;
+        }
+    };
+    let scale_x = (x1 - x0) as f64 / w as f64;
+    let scale_y = (y1 - y0) as f64 / h as f64;
+    Some((cropped, typst_library::layout::Size::new(size.x * scale_x, size.y * scale_y)))
+}
+
 fn frame_to_text(frame: &Frame) -> String {
     use typst_library::layout::Point;
     let mut items: Vec<(Point, EcoString, Abs, Abs)> = Vec::new();

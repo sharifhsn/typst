@@ -903,3 +903,66 @@ Oracle A/B vs the pre-dive binary: all flags triaged as fidelity gains —
 rendercv now matches the PDF token-for-token (the old output duplicated its
 contact header), tonguetoquill purely gains, and the `nums` class is the §10
 flat-"1"-to-synthetic-numbers improvement.
+
+## 12. Ink-bounded rasters — no phantom pages from blank renders
+
+Found by the visual-fidelity oracle at corpus scale (the PDF-vs-DOCX render
+comparison): touying decks rendered to ~5× their page count through
+LibreOffice (`touying` 31→153 pages), with the worst presentations scoring
+0.65–0.75. The dissection: the finite-height rasterize retry renders the FULL
+page content region, and content that draws little or nothing in that region
+(an `#uncover` step whose payload is currently hidden, a slide-furniture
+composition that resolves to a sliver) still shipped as a content-area-sized
+PNG — `touying`'s docx carried 7 near-empty PNGs (177–341 bytes) each
+displayed at 742×474 pt, every one reserving a page of phantom space.
+
+**The fix (`crop_to_ink`, `ctx.rs`):** render to the pixmap first, compute the
+ink bounding box (any nonzero alpha — the render surface is transparent), then:
+a fully blank render is **dropped** (its introspection tags were already
+harvested, so convergence is untouched); a mostly-blank one is **cropped** to
+its ink, with the display size scaled by the same ratio so the visual keeps
+its exact physical scale. Ink that (nearly) fills the render — the common
+image/diagram case — is kept byte-identical (≥97% threshold on both axes), so
+ordinary rasters don't churn.
+
+**The accepted trade:** cropping removes *outer blank margin*, so a lone
+decoration positioned deep inside an otherwise-empty rasterized container
+loses its offset-within-the-box (the inline image now sits at its natural
+size in the flow). Relative positions *between* multiple ink regions are
+preserved — the bbox spans all ink. This is the same content-over-phantom-
+space policy as the §7.1h prefer-text shift. The one caller that must NOT
+crop is the `set page(background:)` path (`rasterize_uncropped`): it
+stretches the drawing to the full page, so an ink-cropped corner watermark
+would be blown up to full-bleed.
+
+### 12a. Two review-fix cycles the oracle caught (the honest record)
+
+The naive pixel-crop shipped two regressions of its own, both caught by the
+word-oracle A/B and fixed before landing:
+
+1. **`#move` content rendered blank → dropped.** `#move` draws its child
+   OUTSIDE the frame's own [0, size] box, and the render canvas covered only
+   the frame's extent — so the pre-crop code had been shipping thousands of
+   fully TRANSPARENT PNGs (a pre-existing invisible-image bug!) whose hidden
+   text papered over the visual loss; blank-dropping deleted both (a
+   code-heavy book lost 84 of its `[N]` array-index marks). Fix:
+   `frame_ink_rect` computes the GEOMETRIC bounds of everything that draws
+   and the canvas covers them (`Frame::hard(ink_size)` + `push_frame(-min)`)
+   — moved content now renders *for the first time*, and the pixel crop runs
+   second. The book recovered byte-exactly, with real renders replacing the
+   transparent rectangles.
+2. **Glyph-outline text bboxes failed on CJK faces → canvas collapsed.**
+   `TextItem::bbox()` is outline-extraction based and can come up empty
+   (spaces, some CJK fonts); a frame whose only *measurable* ink was a
+   zero-height rule collapsed the canvas to a 1-px strip and the (present!)
+   text rendered outside it → blank → dropped, losing hidden text across
+   several Chinese theses. Fix: metrics-based text rects
+   (ascender/descender/advance — always finite), and non-finite item rects
+   are skipped rather than poisoning the union (an unstroked infinite line
+   must not erase the whole raster).
+
+Final adjudication across the maximized 818-doc corpus: batch 816/2/0
+identical to base; every oracle flag proven to be a gain (recovered
+cross-refs, phantom-duplication removal — one book's docx dropped from 2.2× the
+PDF's word count to near-parity), byte-neutral, or pandoc `[]`
+placeholder-noise from correctly-dropped blank images. Zero real content loss.
