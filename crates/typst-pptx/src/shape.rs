@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::dom::{
-    FillSpec, GeomShape, GradientStop, PathGeom, PathSegment, SlideShape, StrokeSpec,
+    FillSpec, GeomShape, GradientStop, PathGeom, PathSegment, StrokeSpec,
 };
 
 use typst_library::layout::{Abs, Point, Transform};
@@ -9,15 +9,6 @@ use typst_library::visualize::{
     Color, ColorSpace, Curve, CurveItem, FixedStroke, Geometry, Gradient, LineCap, Paint,
     ProcessColorSpace, Shape,
 };
-
-/// SPEC contract: lower Typst geometry, solid/linear-gradient fills, fixed
-/// strokes, line caps, and dash patterns to native PPTX DrawingML geometry,
-/// rasterizing only unsupported paint or transform cases.
-///
-/// Foundation scope intentionally emits no vector shapes yet.
-pub(crate) fn emit_shapes() -> Vec<SlideShape> {
-    Vec::new()
-}
 
 /// Lower one laid-out Typst shape to the PPTX slide IR.
 ///

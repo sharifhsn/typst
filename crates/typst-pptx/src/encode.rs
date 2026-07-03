@@ -227,7 +227,7 @@ fn write_geom_shape(w: &mut XmlWriter, geom: &GeomShape, id: u32) {
     write_sp_nv(w, id, &format!("Shape {id}"), false);
     w.open("p:spPr").start_children();
     write_xfrm(w, geom.x_emu, geom.y_emu, geom.w_emu, geom.h_emu, geom.rot_60k);
-    write_geom(w, &geom.geom);
+    write_geom(w, &geom.geom, geom.w_emu, geom.h_emu);
     write_fill(w, geom.fill.as_ref());
     write_stroke(w, geom.stroke.as_ref());
     w.close();
@@ -313,11 +313,11 @@ fn write_xfrm(w: &mut XmlWriter, x: i64, y: i64, cx: i64, cy: i64, rot_60k: i32)
     w.close();
 }
 
-fn write_geom(w: &mut XmlWriter, geom: &PathGeom) {
+fn write_geom(w: &mut XmlWriter, geom: &PathGeom, w_emu: i64, h_emu: i64) {
     match geom {
         PathGeom::Rect => write_prst_geom(w, "rect"),
         PathGeom::Ellipse => write_prst_geom(w, "ellipse"),
-        PathGeom::Custom(segments) => write_custom_geom(w, segments),
+        PathGeom::Custom(segments) => write_custom_geom(w, segments, w_emu, h_emu),
     }
 }
 
@@ -327,7 +327,7 @@ fn write_prst_geom(w: &mut XmlWriter, prst: &'static str) {
     w.close();
 }
 
-fn write_custom_geom(w: &mut XmlWriter, segments: &[PathSegment]) {
+fn write_custom_geom(w: &mut XmlWriter, segments: &[PathSegment], w_emu: i64, h_emu: i64) {
     w.open("a:custGeom").start_children();
     w.leaf("a:avLst");
     w.leaf("a:gdLst");
@@ -340,7 +340,14 @@ fn write_custom_geom(w: &mut XmlWriter, segments: &[PathSegment]) {
         .attr("b", "b")
         .empty();
     w.open("a:pathLst").start_children();
-    w.open("a:path").start_children();
+    // The path's own coordinate space. Without explicit w/h a consumer cannot
+    // normalize the (EMU-valued) points against the shape extent and stretches
+    // the path arbitrarily — LibreOffice blew a 120pt rect up to slide width.
+    // Our points already live in [0, ext], so the space equals the extent.
+    w.open("a:path")
+        .attr("w", &w_emu.max(1).to_string())
+        .attr("h", &h_emu.max(1).to_string())
+        .start_children();
     for segment in segments {
         match *segment {
             PathSegment::MoveTo(x, y) => {
@@ -385,7 +392,10 @@ fn write_fill(w: &mut XmlWriter, fill: Option<&FillSpec>) {
                 w.open("a:gs")
                     .attr("pos", &stop.pos_100k.to_string())
                     .start_children();
-                write_solid_fill(w, stop.color);
+                // CT_GradientStop holds the color element DIRECTLY — wrapping
+                // it in a:solidFill is schema-invalid and consumers drop the
+                // whole fill (the shape rendered invisible in LibreOffice).
+                write_srgb(w, stop.color);
                 w.close();
             }
             w.close();
@@ -422,8 +432,12 @@ fn write_stroke(w: &mut XmlWriter, stroke: Option<&StrokeSpec>) {
 
 fn write_solid_fill(w: &mut XmlWriter, rgb: [u8; 3]) {
     w.open("a:solidFill").start_children();
-    w.open("a:srgbClr").attr("val", &hex(rgb)).empty();
+    write_srgb(w, rgb);
     w.close();
+}
+
+fn write_srgb(w: &mut XmlWriter, rgb: [u8; 3]) {
+    w.open("a:srgbClr").attr("val", &hex(rgb)).empty();
 }
 
 pub fn hex(rgb: [u8; 3]) -> String {

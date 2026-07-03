@@ -4,16 +4,7 @@ use typst_library::foundations::{Content, Smart};
 use typst_library::layout::{Abs, Frame, FrameItem, Point, Rect, Sides, Size};
 use typst_library::visualize::{ExchangeFormat, Image, ImageKind, RasterFormat};
 
-use crate::dom::{MediaId, SlideCtx, SlideShape};
-
-/// SPEC contract: embed raster images verbatim when possible, rasterize SVG/PDF
-/// and unsupported raster formats to PNG, crop blank ink, and deduplicate media
-/// through the shared slide context.
-///
-/// Foundation scope intentionally emits no pictures from the slide walker yet.
-pub(crate) fn emit_images() -> Vec<SlideShape> {
-    Vec::new()
-}
+use crate::dom::{MediaId, SlideCtx};
 
 /// Embed a laid-out image and return the media id, crop offset, and display size.
 ///

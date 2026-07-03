@@ -90,7 +90,18 @@ impl<'a, 'b> Walker<'a, 'b> {
                     {
                         self.walk_frame(&group.frame, group_transform);
                     } else {
-                        self.emit_image_stub(order);
+                        // A clip or a non-similarity transform (skew,
+                        // non-uniform scale) has no PPTX form: render the
+                        // whole group through its own transform and place
+                        // the picture where the ink lands. `item_transform`
+                        // (not `group_transform`) — the group item carries
+                        // its own transform inside.
+                        self.raster_item(
+                            order,
+                            FrameItem::Group(group.clone()),
+                            item_transform,
+                            None,
+                        );
                     }
                 }
                 FrameItem::Text(text) => {
@@ -105,14 +116,29 @@ impl<'a, 'b> Walker<'a, 'b> {
                             link: None,
                         });
                     } else {
-                        self.emit_image_stub(order);
+                        self.raster_item(
+                            order,
+                            FrameItem::Text(text.clone()),
+                            item_transform,
+                            Some(text.text.clone()),
+                        );
                     }
                 }
-                FrameItem::Shape(_, _) => {
-                    self.emit_shape_stub(order);
+                FrameItem::Shape(shape, span) => {
+                    match crate::shape::shape_to_geom(shape, item_transform, 0) {
+                        Some(geom) => self
+                            .shapes
+                            .push(OrderedShape { order, shape: SlideShape::Geom(geom) }),
+                        None => self.raster_item(
+                            order,
+                            FrameItem::Shape(shape.clone(), *span),
+                            item_transform,
+                            None,
+                        ),
+                    }
                 }
-                FrameItem::Image(_, _, _) => {
-                    self.emit_image_stub(order);
+                FrameItem::Image(image, size, span) => {
+                    self.emit_image(order, image, *size, *span, item_transform);
                 }
                 FrameItem::Link(dest, size) => {
                     if let Some(target) = self.destination(dest) {
@@ -133,21 +159,79 @@ impl<'a, 'b> Walker<'a, 'b> {
         order
     }
 
-    fn emit_shape_stub(&mut self, order: usize) {
-        self.shapes.extend(
-            crate::shape::emit_shapes()
-                .into_iter()
-                .map(|shape| OrderedShape { order, shape }),
+    fn emit_image(
+        &mut self,
+        order: usize,
+        image: &typst_library::visualize::Image,
+        size: Size,
+        span: typst_syntax::Span,
+        item_transform: Transform,
+    ) {
+        // A translation-only placement embeds the original bytes verbatim (or
+        // a natural-size render for SVG/PDF kinds); anything rotated, scaled,
+        // or skewed goes through the transform-carrying render fallback.
+        if let Some(sim) = classify_similarity(item_transform)
+            && sim.rot_60k == 0
+            && (sim.scale - 1.0).abs() < 1e-6
+        {
+            if let Some((media, off, sz)) =
+                crate::image::embed_image(self.ctx, image, size)
+            {
+                let pos = Point::zero().transform(item_transform) + off;
+                self.push_pic(order, media, pos, sz, image.alt().map(Into::into));
+                return;
+            }
+        }
+        self.raster_item(
+            order,
+            FrameItem::Image(image.clone(), size, span),
+            item_transform,
+            image.alt().map(Into::into),
         );
     }
 
-    fn emit_image_stub(&mut self, order: usize) {
-        let _ = &mut self.ctx;
-        self.shapes.extend(
-            crate::image::emit_images()
-                .into_iter()
-                .map(|shape| OrderedShape { order, shape }),
-        );
+    /// Renders one frame item through its full accumulated transform and
+    /// places the picture where the ink lands — the render-what-you-see
+    /// fallback for anything without a native PPTX form.
+    fn raster_item(
+        &mut self,
+        order: usize,
+        item: FrameItem,
+        item_transform: Transform,
+        alt: Option<EcoString>,
+    ) {
+        let mut inner = Frame::soft(Size::zero());
+        inner.push(Point::zero(), item);
+        let mut group = typst_library::layout::GroupItem::new(inner);
+        group.transform = item_transform;
+        let mut outer = Frame::soft(Size::zero());
+        outer.push(Point::zero(), FrameItem::Group(group));
+        if let Some((media, off, size)) = crate::image::raster_fallback(self.ctx, outer)
+        {
+            self.push_pic(order, media, off, size, alt);
+        }
+    }
+
+    fn push_pic(
+        &mut self,
+        order: usize,
+        media: crate::dom::MediaId,
+        pos: Point,
+        size: Size,
+        alt: Option<EcoString>,
+    ) {
+        self.shapes.push(OrderedShape {
+            order,
+            shape: SlideShape::Pic(crate::dom::Pic {
+                x_emu: crate::text::emu(pos.x),
+                y_emu: crate::text::emu(pos.y),
+                w_emu: crate::text::extent_emu(size.x),
+                h_emu: crate::text::extent_emu(size.y),
+                rot_60k: 0,
+                media,
+                alt,
+            }),
+        });
     }
 
     fn destination(&self, dest: &Destination) -> Option<LinkTarget> {
