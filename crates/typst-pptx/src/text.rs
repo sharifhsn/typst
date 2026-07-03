@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use ecow::EcoString;
 use typst_library::layout::{Abs, Point};
 use typst_library::text::{FontStyle, TextItem};
-use typst_library::visualize::{ColorSpace, Paint, ProcessColorSpace};
+use typst_library::visualize::Paint;
 
 use crate::dom::{RunLink, SlideShape, TextBox, TextPara, TextRun};
 
@@ -136,7 +136,7 @@ fn build_segment(segment: &[&TextSource<'_>]) -> Option<ClusteredText> {
     let mut runs = Vec::new();
     let spc_100pt = segment_tracking(segment);
     for (idx, source) in segment.iter().enumerate() {
-        let props = run_props(source, spc_100pt)?;
+        let props = run_props(source, spc_100pt);
         if let Some(prev) = idx.checked_sub(1).map(|idx| segment[idx]) {
             synthesize_gap(prev, source, &props, &mut runs);
         }
@@ -164,21 +164,21 @@ fn build_segment(segment: &[&TextSource<'_>]) -> Option<ClusteredText> {
     })
 }
 
-fn run_props(source: &TextSource<'_>, spc_100pt: Option<i32>) -> Option<TextRun> {
+fn run_props(source: &TextSource<'_>, spc_100pt: Option<i32>) -> TextRun {
     let variant = source.item.font.font().info().variant;
-    Some(TextRun {
+    TextRun {
         text: source.item.text.clone(),
         family: EcoString::from(source.item.font.font().info().family.as_str()),
         sz_100pt: (scaled_size(source).to_pt() * 100.0).round() as i32,
         b: variant.weight.to_number() >= 600,
         i: matches!(variant.style, FontStyle::Italic | FontStyle::Oblique),
-        color: solid_rgb(&source.item.fill)?,
+        color: text_color(&source.item.fill),
         spc_100pt,
         link: source.link.as_ref().map(|link| match link {
             LinkTarget::Url(url) => RunLink::Url(url.clone()),
             LinkTarget::Slide(slide) => RunLink::Slide(*slide),
         }),
-    })
+    }
 }
 
 fn push_or_merge_run(runs: &mut Vec<TextRun>, run: TextRun) {
@@ -267,13 +267,23 @@ fn segment_tracking(segment: &[&TextSource<'_>]) -> Option<i32> {
     }
 }
 
-fn solid_rgb(fill: &Paint) -> Option<[u8; 3]> {
-    let Paint::Solid(color) = fill else {
-        return None;
-    };
-    let srgb = color.to_space(&ColorSpace::Process(ProcessColorSpace::Srgb)).ok()?;
-    let [r, g, b, _] = srgb.to_vec4_u8();
-    Some([r, g, b])
+/// A representative solid color for a text run.
+///
+/// A DrawingML text run can only carry a solid color, so a gradient or tiling
+/// text fill is approximated rather than dropped — keeping the text visible
+/// (the earlier behavior discarded the whole cluster on any non-solid glyph).
+/// The first gradient stop reads closest to the intended look for the common
+/// gradient-title case.
+fn text_color(fill: &Paint) -> [u8; 4] {
+    match fill {
+        Paint::Solid(color) => crate::shape::srgb_bytes(color),
+        Paint::Gradient(gradient) => gradient
+            .stops_ref()
+            .first()
+            .map(|(color, _)| crate::shape::srgb_bytes(color))
+            .unwrap_or([0, 0, 0, 255]),
+        Paint::Tiling(_) => [0, 0, 0, 255],
+    }
 }
 
 fn item_end_x(source: &TextSource<'_>) -> Abs {

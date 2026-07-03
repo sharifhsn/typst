@@ -434,14 +434,22 @@ fn write_stroke(w: &mut XmlWriter, stroke: Option<&StrokeSpec>) {
     }
 }
 
-fn write_solid_fill(w: &mut XmlWriter, rgb: [u8; 3]) {
+fn write_solid_fill(w: &mut XmlWriter, rgba: [u8; 4]) {
     w.open("a:solidFill").start_children();
-    write_srgb(w, rgb);
+    write_srgb(w, rgba);
     w.close();
 }
 
-fn write_srgb(w: &mut XmlWriter, rgb: [u8; 3]) {
-    w.open("a:srgbClr").attr("val", &hex(rgb)).empty();
+fn write_srgb(w: &mut XmlWriter, rgba: [u8; 4]) {
+    let [r, g, b, a] = rgba;
+    if a == 255 {
+        w.open("a:srgbClr").attr("val", &hex([r, g, b])).empty();
+    } else {
+        // Straight alpha as a percentage in thousandths (DrawingML CT_Color).
+        w.open("a:srgbClr").attr("val", &hex([r, g, b])).start_children();
+        w.open("a:alpha").attr("val", &(a as u32 * 100_000 / 255).to_string()).empty();
+        w.close();
+    }
 }
 
 pub fn hex(rgb: [u8; 3]) -> String {

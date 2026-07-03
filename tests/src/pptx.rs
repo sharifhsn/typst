@@ -206,6 +206,43 @@ Hello"##,
 }
 
 #[test]
+fn gradient_filled_text_is_kept_as_solid() {
+    // A non-solid text fill must not drop the whole run; it is approximated
+    // with the first gradient stop so the text stays visible.
+    let p = parts(
+        r##"#set text(font: "New Computer Modern", fill: gradient.linear(rgb("#FF0000"), rgb("#0000FF")))
+Gradient"##,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<a:t>Gradient</a:t>"), "gradient text must survive");
+    assert!(slide.contains("val=\"FF0000\""), "approximated with first stop");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn translucent_fill_emits_alpha() {
+    let p = parts(
+        "#set page(width: 200pt, height: 100pt, margin: 0pt)\n\
+         #place(top + left, rect(width: 80pt, height: 40pt, fill: rgb(255, 0, 0, 128)))",
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<a:alpha val=\"50196\"/>"), "50% alpha as thousandths");
+    assert!(slide.contains("val=\"FF0000\""), "opaque channel unchanged");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn out_of_range_page_link_is_dropped() {
+    // A jump to a page that does not exist must not emit a slide relationship
+    // (PowerPoint treats a dangling slide target as a corrupt file).
+    let p = parts("#link((page: 99, x: 0pt, y: 0pt))[Jump]");
+    let rels = &p["ppt/slides/_rels/slide1.xml.rels"];
+    assert!(!rels.contains("slide99.xml"), "no relationship to a missing slide");
+    assert!(!rels.contains("hlinksldjump"), "no dangling slide-jump");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn bold_and_italic_map_to_run_properties() {
     let p = parts(
         r#"#set text(font: "New Computer Modern")

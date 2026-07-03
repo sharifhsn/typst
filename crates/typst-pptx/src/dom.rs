@@ -39,7 +39,8 @@ pub struct TextRun {
     pub sz_100pt: i32,
     pub b: bool,
     pub i: bool,
-    pub color: [u8; 3],
+    /// Text color as straight (non-premultiplied) sRGB + alpha.
+    pub color: [u8; 4],
     pub spc_100pt: Option<i32>,
     pub link: Option<RunLink>,
 }
@@ -98,21 +99,21 @@ pub enum PathSegment {
     Close,
 }
 
-/// A fill specification.
+/// A fill specification. Colors are straight sRGB + alpha (`[r, g, b, a]`).
 pub enum FillSpec {
-    Solid([u8; 3]),
+    Solid([u8; 4]),
     LinearGradient { angle_60k: i32, stops: Vec<GradientStop> },
 }
 
 /// A gradient stop.
 pub struct GradientStop {
     pub pos_100k: i32,
-    pub color: [u8; 3],
+    pub color: [u8; 4],
 }
 
 /// A stroke specification.
 pub struct StrokeSpec {
-    pub color: [u8; 3],
+    pub color: [u8; 4],
     pub w_emu: i64,
     pub cap: &'static str,
     pub dash: Option<&'static str>,

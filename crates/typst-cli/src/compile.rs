@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
-use ecow::{EcoVec, eco_format};
+use ecow::{EcoVec, eco_format, eco_vec};
 use parking_lot::RwLock;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use typst::diag::{
@@ -10,7 +10,7 @@ use typst::diag::{
     bail,
 };
 use typst::foundations::{Datetime, Smart};
-use typst::layout::PageRanges;
+use typst::layout::{Abs, PageRanges};
 use typst::model::Document;
 use typst::syntax::Span;
 use typst_bundle::{Bundle, BundleOptions, VirtualFs};
@@ -352,6 +352,9 @@ fn compile_and_export(
                             warnings.push(warning);
                         }
                     }
+                    if let Some(warning) = mixed_page_size_warning(&document, config) {
+                        warnings.push(warning);
+                    }
                     export_paged(&document, config)
                 }
                 Err(errors) => Err(errors),
@@ -422,6 +425,37 @@ fn target_mismatch_warning(
     Some(SourceDiagnostic::warning(Span::detached(), message).with_hint(hint))
 }
 
+/// PPTX has a single global slide size, so a deck whose exported pages differ
+/// in size will have its off-size slides scaled to the first page's dimensions.
+/// Warn when that happens; `None` for any other format or a uniform deck.
+fn mixed_page_size_warning(
+    document: &PagedDocument,
+    config: &CompileConfig,
+) -> Option<SourceDiagnostic> {
+    if config.output_format != OutputFormat::Pptx {
+        return None;
+    }
+    let mut sizes = document
+        .pages()
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            config.pages.as_ref().is_none_or(|ranges| ranges.includes_page_index(*i))
+        })
+        .map(|(_, page)| page.frame.size());
+    let first = sizes.next()?;
+    let uniform = sizes.all(|size| {
+        (size.x - first.x).abs() < Abs::pt(0.5) && (size.y - first.y).abs() < Abs::pt(0.5)
+    });
+    (!uniform).then(|| {
+        SourceDiagnostic::warning(
+            Span::detached(),
+            "the presentation mixes pages of different sizes",
+        )
+        .with_hint("every slide is sized to the first page; off-size slides are scaled")
+    })
+}
+
 /// Export to DOCX.
 fn export_docx(document: &DocxDocument, config: &CompileConfig) -> SourceResult<()> {
     let options = DocxOptions { pretty: config.pretty };
@@ -484,6 +518,18 @@ fn export_pptx(document: &PagedDocument, config: &CompileConfig) -> SourceResult
         })
         .map(|(_, page)| page.clone())
         .collect::<EcoVec<_>>();
+
+    if exported_pages.is_empty() {
+        // A slide-less presentation has an empty `p:sldIdLst`, which PowerPoint
+        // treats as a corrupt file; refuse rather than write one.
+        return Err(eco_vec![
+            SourceDiagnostic::error(
+                Span::detached(),
+                "the selected --pages range contains no pages to export",
+            )
+            .with_hint("PowerPoint cannot open a presentation with zero slides")
+        ]);
+    }
 
     let filtered = PagedDocument::new(exported_pages, document.info().clone());
     let bytes = typst_pptx::pptx(&filtered, &PptxOptions {})?;

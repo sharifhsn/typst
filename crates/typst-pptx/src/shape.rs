@@ -87,7 +87,7 @@ fn raw_segments_from_curve(curve: &Curve, transform: Transform) -> Vec<RawSeg> {
         .collect()
 }
 
-fn resolved_fill(fill: &Option<Paint>) -> Option<Option<FillSpec>> {
+pub(crate) fn resolved_fill(fill: &Option<Paint>) -> Option<Option<FillSpec>> {
     match fill {
         None => Some(None),
         Some(Paint::Solid(color)) => Some(Some(FillSpec::Solid(srgb_bytes(color)))),
@@ -134,11 +134,10 @@ fn resolved_stroke(
     }
 }
 
-fn srgb_bytes(color: &Color) -> [u8; 3] {
+pub(crate) fn srgb_bytes(color: &Color) -> [u8; 4] {
     let srgb = ColorSpace::Process(ProcessColorSpace::Srgb);
     let color = color.to_space(&srgb).unwrap_or_else(|_| color.clone());
-    let [r, g, b, _] = color.to_vec4_u8();
-    [r, g, b]
+    color.to_vec4_u8()
 }
 
 fn line_cap_to_ooxml(cap: LineCap) -> &'static str {

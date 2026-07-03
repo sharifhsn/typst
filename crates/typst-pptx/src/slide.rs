@@ -236,15 +236,22 @@ impl<'a, 'b> Walker<'a, 'b> {
     fn destination(&self, dest: &Destination) -> Option<LinkTarget> {
         match dest {
             Destination::Url(url) => Some(LinkTarget::Url(EcoString::from(url.as_str()))),
-            Destination::Position(pos) => {
-                Some(LinkTarget::Slide(pos.page.get().saturating_sub(1)))
-            }
+            Destination::Position(pos) => self.slide_target(pos.page.get()),
             Destination::Location(loc) => self
                 .document
                 .introspector()
                 .position(*loc)
-                .map(|pos| LinkTarget::Slide(pos.page.get().saturating_sub(1))),
+                .and_then(|pos| self.slide_target(pos.page.get())),
         }
+    }
+
+    /// A same-deck jump target for a 1-based page number, dropped if it falls
+    /// outside the exported slides — otherwise a `--pages` subset (or a jump
+    /// past the last page) would emit a relationship to a missing slide, which
+    /// PowerPoint treats as a corrupt file.
+    fn slide_target(&self, page_1based: usize) -> Option<LinkTarget> {
+        let index = page_1based.checked_sub(1)?;
+        (index < self.document.pages().len()).then_some(LinkTarget::Slide(index))
     }
 }
 
@@ -336,6 +343,6 @@ fn background(page: &Page) -> Option<FillSpec> {
     // a tiling or non-linear gradient we cannot represent falls back to white.
     match crate::shape::resolved_fill(&fill) {
         Some(spec) => spec,
-        None => Some(FillSpec::Solid([255, 255, 255])),
+        None => Some(FillSpec::Solid([255, 255, 255, 255])),
     }
 }
