@@ -50,6 +50,15 @@ impl DocxDocument {
     pub fn info(&self) -> &DocumentInfo {
         &self.info
     }
+
+    /// The primary section's page size in points (`width`, `height`).
+    ///
+    /// Exposed so the CLI can spot a slide-shaped document being written to
+    /// `.docx` and suggest `.pptx` instead. Stored internally in twips
+    /// (1 pt = 20 twips).
+    pub fn page_size_pt(&self) -> (f64, f64) {
+        (self.sect.page_w as f64 / 20.0, self.sect.page_h as f64 / 20.0)
+    }
 }
 
 impl Document for DocxDocument {

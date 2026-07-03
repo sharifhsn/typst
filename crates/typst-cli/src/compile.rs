@@ -339,8 +339,23 @@ fn compile_and_export(
         | OutputFormat::Png
         | OutputFormat::Svg
         | OutputFormat::Pptx => {
-            let Warned { output, warnings } = typst::compile::<PagedDocument>(world);
-            let result = output.and_then(|document| export_paged(&document, config));
+            let Warned { output, mut warnings } =
+                typst::compile::<PagedDocument>(world);
+            let result = match output {
+                Ok(document) => {
+                    if let Some(page) = document.pages().first() {
+                        let size = page.frame.size();
+                        if let Some(warning) = target_mismatch_warning(
+                            config.output_format,
+                            (size.x.to_pt(), size.y.to_pt()),
+                        ) {
+                            warnings.push(warning);
+                        }
+                    }
+                    export_paged(&document, config)
+                }
+                Err(errors) => Err(errors),
+            };
             Warned { output: result, warnings }
         }
         OutputFormat::Html => {
@@ -357,14 +372,54 @@ fn compile_and_export(
             Warned { output: result, warnings }
         }
         OutputFormat::Docx => {
-            let Warned { output, warnings } = typst::compile::<DocxDocument>(world);
-            let result = output.and_then(|document| export_docx(&document, config));
-            Warned {
-                output: result.map(|()| vec![config.output.clone()]),
-                warnings,
-            }
+            let Warned { output, mut warnings } =
+                typst::compile::<DocxDocument>(world);
+            let result = match output {
+                Ok(document) => {
+                    if let Some(warning) = target_mismatch_warning(
+                        config.output_format,
+                        document.page_size_pt(),
+                    ) {
+                        warnings.push(warning);
+                    }
+                    export_docx(&document, config).map(|()| vec![config.output.clone()])
+                }
+                Err(errors) => Err(errors),
+            };
+            Warned { output: result, warnings }
         }
     }
+}
+
+/// A soft advisory when the output container looks like a mismatch for the
+/// document's page proportions: slide-shaped pages written to `.docx`, or a
+/// page-shaped document written to `.pptx`. Returns `None` for any other
+/// format, or when the proportions already suit the chosen format.
+fn target_mismatch_warning(
+    format: OutputFormat,
+    (width, height): (f64, f64),
+) -> Option<SourceDiagnostic> {
+    // Landscape with a common slide aspect ratio (16:9, 16:10, 4:3, or cinema)
+    // reads as a deck. A4-landscape (√2 ≈ 1.414) matches none of these and is
+    // deliberately treated as a document — it is the usual flyer/handout shape.
+    let slide_shaped = width > height && {
+        let ratio = width / height;
+        [16.0 / 9.0, 16.0 / 10.0, 4.0 / 3.0, 2.35]
+            .iter()
+            .any(|target| (ratio - target).abs() < 0.05)
+    };
+    let (message, hint) = match format {
+        OutputFormat::Docx if slide_shaped => (
+            "the document has slide-shaped pages but is being exported to DOCX",
+            "export to a .pptx file for one editable slide per page",
+        ),
+        OutputFormat::Pptx if !slide_shaped => (
+            "the document has page-shaped proportions but is being exported to PPTX",
+            "export to a .docx file for a reflowable Word document",
+        ),
+        _ => return None,
+    };
+    Some(SourceDiagnostic::warning(Span::detached(), message).with_hint(hint))
 }
 
 /// Export to DOCX.
@@ -817,6 +872,41 @@ impl From<PdfStandard> for typst_pdf::PdfStandard {
             PdfStandard::A_4f => typst_pdf::PdfStandard::A_4f,
             PdfStandard::A_4e => typst_pdf::PdfStandard::A_4e,
             PdfStandard::UA_1 => typst_pdf::PdfStandard::Ua_1,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mismatch(format: OutputFormat, size: (f64, f64)) -> bool {
+        target_mismatch_warning(format, size).is_some()
+    }
+
+    #[test]
+    fn slide_shaped_pages_nudge_docx_to_pptx() {
+        // Common slide ratios written to DOCX warn; the same shape to PPTX does not.
+        for size in [(1280.0, 720.0), (1024.0, 640.0), (960.0, 720.0), (1128.0, 480.0)] {
+            assert!(mismatch(OutputFormat::Docx, size), "{size:?} should warn for DOCX");
+            assert!(!mismatch(OutputFormat::Pptx, size), "{size:?} should suit PPTX");
+        }
+    }
+
+    #[test]
+    fn page_shaped_documents_nudge_pptx_to_docx() {
+        // Portrait A4 and A4-landscape (√2) both read as documents, not slides.
+        for size in [(595.0, 842.0), (842.0, 595.0)] {
+            assert!(mismatch(OutputFormat::Pptx, size), "{size:?} should warn for PPTX");
+            assert!(!mismatch(OutputFormat::Docx, size), "{size:?} should suit DOCX");
+        }
+    }
+
+    #[test]
+    fn other_formats_never_warn() {
+        for format in [OutputFormat::Pdf, OutputFormat::Png, OutputFormat::Svg] {
+            assert!(!mismatch(format, (1280.0, 720.0)));
+            assert!(!mismatch(format, (595.0, 842.0)));
         }
     }
 }
