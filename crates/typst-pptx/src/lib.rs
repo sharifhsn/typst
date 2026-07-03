@@ -1,8 +1,18 @@
 //! Typst's PPTX (Microsoft PowerPoint) exporter.
 //!
-//! This crate is currently the foundation layer: it converts each laid-out
-//! Typst page into one slide IR with a solid background, then assembles a
-//! deterministic, schema-friendly OPC package.
+//! Unlike the Word exporter, which reflows the realized element tree, this
+//! crate consumes the *laid-out* [`PagedDocument`] — one Typst page becomes one
+//! slide, with every element placed at its exact frame position. That makes it
+//! a sibling of the PNG/SVG renderers rather than of the DOCX exporter: there
+//! are no show rules, no convergence, and no engine.
+//!
+//! Each page's frame is walked into a slide IR (`dom`): positioned text boxes
+//! (live, editable DrawingML runs), pictures, native vector shapes
+//! (`a:custGeom`/`prstGeom` with solid, gradient, and translucent fills), and
+//! groups. Anything with no OOXML equivalent is rasterized into a positioned
+//! picture so the visual is preserved. The IR is then serialized into a
+//! deterministic, schema-strict OPC package that opens without repair in
+//! Microsoft PowerPoint and LibreOffice Impress.
 
 #[allow(dead_code)]
 mod dom;

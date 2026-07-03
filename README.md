@@ -35,13 +35,18 @@ need to compile Typst documents locally. For the best writing experience,
 consider signing up to our [collaborative online editor][app] for free.
 
 > [!NOTE]
-> **This is a community fork that adds native Microsoft Word (`.docx`) export.**
-> It compiles Typst straight to editable Office Open XML — real headings, styles,
-> tables, OMML math, footnotes, cross-reference fields and lists — not a flattened
-> image. Try it with `typst compile --format docx file.typ`. It is an
-> **experimental preview** (like Typst's own HTML export); see
-> **[Word export (this fork)](#word-export-this-fork)** below for how to build it,
-> what maps natively, and the honest limitations. A companion
+> **This is a community fork that adds native Microsoft Office export.**
+> It compiles Typst straight to editable Office Open XML.
+> **Word (`.docx`)** — real headings, styles, tables, OMML math, footnotes,
+> cross-reference fields and lists, not a flattened image
+> (`typst compile --format docx file.typ`).
+> **PowerPoint (`.pptx`)** — one page per editable slide with live text, native
+> shapes, gradients and images; best for slide-shaped decks
+> (`typst compile deck.typ deck.pptx`).
+> Both are **experimental previews** (like Typst's own HTML export); see
+> **[Word export](#word-export-this-fork)** and
+> **[PowerPoint export](#powerpoint-export-this-fork)** below for how to build
+> them, what maps natively, and the honest limitations. A companion
 > [Pandoc-AST target](https://github.com/sharifhsn/typst/tree/claude/typst-pandoc)
 > (Typst → LaTeX / Markdown / EPUB / …) lives on a sibling branch.
 >
@@ -243,6 +248,38 @@ in [`crates/typst-docx/README.md`](crates/typst-docx/README.md) and
 
 Output is byte-for-byte reproducible under `SOURCE_DATE_EPOCH`. This is preview
 software: please report anything that opens wrong or looks off.
+
+## PowerPoint export (this fork)
+The same fork also exports **PowerPoint** presentations (`crates/typst-pptx`) —
+**one Typst page per editable slide**. Where the Word exporter reflows semantic
+structure, the PowerPoint exporter takes the already laid-out page and places
+each element at its exact position (it's a sibling of the PNG/SVG renderers), so
+what you see in the PDF is what lands on the slide.
+
+```sh
+target/release/typst compile deck.typ deck.pptx
+target/release/typst compile --format pptx deck.typ
+```
+
+It's built for **slide-shaped documents** — decks made with
+[Touying](https://touying-typ.github.io/) or [Polylux](https://polylux.dev/), or
+any `#set page` in a 16:9 / 16:10 / 4:3 ratio. (Export a page-shaped document to
+`.pptx` and the CLI nudges you toward `.docx`, and the reverse.)
+
+**What maps natively:** live editable text runs (font, size, weight, color,
+spacing, RTL), external and same-deck slide-jump links, native vector shapes
+(`#rect`/`#circle`/`#line`/`#curve`/`#polygon`) with solid, gradient, and
+translucent fills plus stroke dash/cap, solid- or gradient-color slide
+backgrounds, PNG/JPEG images (de-duplicated across slides), and rotated/nested
+group shapes. Anything without a clean equivalent — math, SVG/PDF art, CeTZ
+diagrams, radial gradients — is rasterized to a positioned picture so the visual
+is exact.
+
+**Fidelity:** across 112 real presentation templates, PPTX-vs-PDF visual
+similarity averages **0.995** (median 0.996) with no export failures, and every
+package opens without repair in Microsoft PowerPoint and LibreOffice Impress.
+The per-feature notes and honest limitations are in
+[`crates/typst-pptx/README.md`](crates/typst-pptx/README.md).
 
 ## Community
 The main places where the community gathers are our [Forum][forum] and our
