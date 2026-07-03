@@ -10,7 +10,7 @@ use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
 use typst_layout::PagedDocument;
-use typst_pptx::{pptx, PptxOptions};
+use typst_pptx::{PptxOptions, pptx};
 
 /// A minimal world: the embedded Typst fonts and a single detached source.
 struct TestWorld {
@@ -174,4 +174,90 @@ fn page_fill_becomes_solid_slide_background() {
     assert!(slide.contains("<p:bg>"), "slide should carry a background");
     assert!(slide.contains("val=\"7FDBFF\""), "aqua background should be sRGB");
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn text_run_emits_family_size_and_color() {
+    let p = parts(
+        r##"#set text(font: "New Computer Modern", size: 20pt, fill: rgb("#123456"))
+Hello"##,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<a:t>Hello</a:t>"), "text should be live DrawingML");
+    assert!(slide.contains("typeface=\"New Computer Modern\""));
+    assert!(slide.contains("sz=\"2000\""));
+    assert!(slide.contains("val=\"123456\""));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn bold_and_italic_map_to_run_properties() {
+    let p = parts(
+        r#"#set text(font: "New Computer Modern")
+#text(weight: 700, style: "italic")[Bold Italic]"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<a:t>Bold Italic</a:t>"));
+    assert!(slide.contains(" b=\"1\""), "bold text should emit b=1");
+    assert!(slide.contains(" i=\"1\""), "italic text should emit i=1");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn text_columns_split_into_separate_boxes() {
+    let p = parts(
+        r#"#set page(width: 200pt, height: 100pt, margin: 0pt)
+#place(top + left, dx: 10pt, dy: 50pt)[Left]
+#place(top + left, dx: 130pt, dy: 50pt)[Right]"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<a:t>Left</a:t>"));
+    assert!(slide.contains("<a:t>Right</a:t>"));
+    assert_eq!(slide.matches("txBox=\"1\"").count(), 2);
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn url_link_emits_hlink_click_and_relationship() {
+    let p = parts(r#"#link("https://example.com/")[linked]"#);
+    let slide = &p["ppt/slides/slide1.xml"];
+    let rels = &p["ppt/slides/_rels/slide1.xml.rels"];
+    assert!(slide.contains("<a:t>linked</a:t>"));
+    assert!(slide.contains("<a:hlinkClick"));
+    assert!(slide.contains("r:id=\"rId"));
+    assert!(rels.contains("relationships/hyperlink"));
+    assert!(rels.contains("Target=\"https://example.com/\""));
+    assert!(rels.contains("TargetMode=\"External\""));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn baseline_position_uses_measured_box_top_rule() {
+    let p = parts(
+        r#"#set page(width: 200pt, height: 100pt, margin: 0pt)
+#place(top + left, dy: 50pt)[X]"#,
+    );
+    let y = text_box_y(&p["ppt/slides/slide1.xml"], "X");
+    assert!(
+        (30 * 12700..=50 * 12700).contains(&y),
+        "text box y {y} should be between 30pt and 50pt in EMU"
+    );
+    assert_all_wellformed(&p);
+}
+
+fn text_box_y(slide: &str, needle: &str) -> i64 {
+    let doc = roxmltree::Document::parse(slide).unwrap();
+    for shape in doc.descendants().filter(|node| node.tag_name().name() == "sp") {
+        let has_text = shape
+            .descendants()
+            .any(|node| node.tag_name().name() == "t" && node.text() == Some(needle));
+        if has_text {
+            let off = shape
+                .descendants()
+                .find(|node| node.tag_name().name() == "off")
+                .expect("text box should have a:xfrm/a:off");
+            return off.attribute("y").unwrap().parse().unwrap();
+        }
+    }
+    panic!("missing text box for {needle}");
 }

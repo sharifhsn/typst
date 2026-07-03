@@ -32,6 +32,10 @@ const REL_VIEW_PROPS: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/viewProps";
 const REL_TABLE_STYLES: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/tableStyles";
+const REL_IMAGE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+const REL_HYPERLINK: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
 
 const CT_RELS: &str = "application/vnd.openxmlformats-package.relationships+xml";
 const CT_PRESENTATION: &str =
@@ -312,17 +316,17 @@ pub fn write(document: &PagedDocument, slides: &[SlideIr], ctx: &SlideCtx) -> Ve
     );
 
     for (i, slide) in slides.iter().enumerate() {
-        package.add_xml(
-            &format!("ppt/slides/slide{}.xml", i + 1),
-            CT_SLIDE,
-            crate::encode::slide_xml(slide),
-        );
         let mut slide_rels = Rels::new();
         slide_rels.add(
             REL_SLIDE_LAYOUT,
             "../slideLayouts/slideLayout1.xml",
             RelMode::Internal,
         );
+        let slide_xml = {
+            let mut sink = PackageSlideRels { rels: &mut slide_rels, ctx };
+            crate::encode::slide_xml(slide, &mut sink)
+        };
+        package.add_xml(&format!("ppt/slides/slide{}.xml", i + 1), CT_SLIDE, slide_xml);
         package.add_xml(
             &format!("ppt/slides/_rels/slide{}.xml.rels", i + 1),
             CT_RELS,
@@ -630,5 +634,33 @@ fn media_content_type(ext: &str) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         _ => "application/octet-stream",
+    }
+}
+
+struct PackageSlideRels<'a> {
+    rels: &'a mut Rels,
+    ctx: &'a SlideCtx,
+}
+
+impl crate::encode::SlideRelSink for PackageSlideRels<'_> {
+    fn image_rid(&mut self, media: crate::dom::MediaId) -> EcoString {
+        let Some(media) = self.ctx.media.get(media) else {
+            return EcoString::new();
+        };
+        let part_name = media.part_name.as_str();
+        let target = part_name.strip_prefix("ppt/").unwrap_or(part_name);
+        self.rels.add(REL_IMAGE, &format!("../{target}"), RelMode::Internal)
+    }
+
+    fn hyperlink_rid(&mut self, target: &str) -> EcoString {
+        self.rels.add(REL_HYPERLINK, target, RelMode::External)
+    }
+
+    fn slide_rid(&mut self, slide: usize) -> EcoString {
+        self.rels.add(
+            REL_SLIDE,
+            &format!("slide{}.xml", slide.saturating_add(1)),
+            RelMode::Internal,
+        )
     }
 }
