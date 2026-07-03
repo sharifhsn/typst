@@ -232,6 +232,47 @@ fn url_link_emits_hlink_click_and_relationship() {
 }
 
 #[test]
+fn powerpoint_schema_invariants_hold() {
+    // Real Microsoft PowerPoint (unlike LibreOffice) repairs a file that
+    // violates these; each was a verified ship-blocker.
+    let p = parts("#rect(width: 40pt, height: 20pt, fill: teal)");
+    let theme = &p["ppt/theme/theme1.xml"];
+    // CT_StyleMatrix requires a minimum of THREE entries in each style list.
+    for (list, item) in [
+        ("fillStyleLst", ["solidFill", "gradFill"]),
+        ("bgFillStyleLst", ["solidFill", "gradFill"]),
+    ] {
+        let body = theme.split(&format!("<a:{list}>")).nth(1).unwrap();
+        let body = body.split(&format!("</a:{list}>")).next().unwrap();
+        let n = item.iter().map(|i| body.matches(&format!("<a:{i}")).count()).sum::<usize>();
+        assert!(n >= 3, "{list} has {n} entries; PowerPoint needs >= 3");
+    }
+    let effects = theme.split("<a:effectStyleLst>").nth(1).unwrap();
+    let effects = effects.split("</a:effectStyleLst>").next().unwrap();
+    assert!(
+        effects.matches("<a:effectStyle>").count() >= 3,
+        "effectStyleLst needs >= 3 entries"
+    );
+    // `.rels` parts must NOT be content-type Overrides (the rels Default
+    // covers them); PowerPoint repairs a package that lists them.
+    let ct = &p["[Content_Types].xml"];
+    assert!(
+        !ct.contains(".rels\""),
+        "no .rels part may appear as a content-type Override"
+    );
+    // custGeom's text rectangle must use literal coordinates, not undefined
+    // guide names (`r="r"`).
+    let slide = &p["ppt/slides/slide1.xml"];
+    if slide.contains("<a:custGeom>") {
+        assert!(
+            !slide.contains("r=\"r\"") && !slide.contains("b=\"b\""),
+            "custGeom a:rect must not reference undefined guides"
+        );
+    }
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn baseline_position_uses_measured_box_top_rule() {
     let p = parts(
         r#"#set page(width: 200pt, height: 100pt, margin: 0pt)
