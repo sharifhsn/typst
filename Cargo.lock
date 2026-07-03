@@ -3144,6 +3144,7 @@ dependencies = [
  "typst-layout",
  "typst-macros",
  "typst-pdf",
+ "typst-pptx",
  "typst-render",
  "typst-svg",
  "typst-timing",
@@ -3465,6 +3466,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "typst-pptx"
+version = "0.15.0"
+dependencies = [
+ "ecow",
+ "rustc-hash",
+ "time",
+ "typst-layout",
+ "typst-library",
+ "typst-utils",
+ "zip",
+]
+
+[[package]]
 name = "typst-realize"
 version = "0.15.0"
 dependencies = [
@@ -3581,6 +3595,7 @@ dependencies = [
  "typst-layout",
  "typst-library",
  "typst-pdf",
+ "typst-pptx",
  "typst-render",
  "typst-svg",
  "typst-syntax",

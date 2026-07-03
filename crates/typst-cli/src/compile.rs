@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
-use ecow::eco_format;
+use ecow::{EcoVec, eco_format};
 use parking_lot::RwLock;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use typst::diag::{
@@ -11,6 +11,7 @@ use typst::diag::{
 };
 use typst::foundations::{Datetime, Smart};
 use typst::layout::PageRanges;
+use typst::model::Document;
 use typst::syntax::Span;
 use typst_bundle::{Bundle, BundleOptions, VirtualFs};
 use typst_docx::{DocxDocument, DocxOptions};
@@ -19,6 +20,7 @@ use typst_kit::diagnostics::DiagnosticWorld;
 use typst_kit::timer::Timer;
 use typst_layout::{Page, PagedDocument};
 use typst_pdf::{PdfOptions, PdfStandards, Timestamp};
+use typst_pptx::PptxOptions;
 use typst_render::RenderOptions;
 use typst_svg::SvgOptions;
 use typst_utils::Scalar;
@@ -118,6 +120,7 @@ impl CompileConfig {
                 Some(ext) if ext.eq_ignore_ascii_case("svg") => OutputFormat::Svg,
                 Some(ext) if ext.eq_ignore_ascii_case("html") => OutputFormat::Html,
                 Some(ext) if ext.eq_ignore_ascii_case("docx") => OutputFormat::Docx,
+                Some(ext) if ext.eq_ignore_ascii_case("pptx") => OutputFormat::Pptx,
                 _ => bail!(
                     "could not infer output format for path {}.\n\
                      consider providing the format manually with `--format/-f`",
@@ -139,6 +142,7 @@ impl CompileConfig {
                     OutputFormat::Svg => "svg",
                     OutputFormat::Html => "html",
                     OutputFormat::Docx => "docx",
+                    OutputFormat::Pptx => "pptx",
                     OutputFormat::Bundle => "",
                 },
             ))
@@ -331,7 +335,10 @@ fn compile_and_export(
     config: &mut CompileConfig,
 ) -> Warned<SourceResult<Vec<Output>>> {
     match config.output_format {
-        OutputFormat::Pdf | OutputFormat::Png | OutputFormat::Svg => {
+        OutputFormat::Pdf
+        | OutputFormat::Png
+        | OutputFormat::Svg
+        | OutputFormat::Pptx => {
             let Warned { output, warnings } = typst::compile::<PagedDocument>(world);
             let result = output.and_then(|document| export_paged(&document, config));
             Warned { output: result, warnings }
@@ -402,8 +409,35 @@ fn export_paged(
         OutputFormat::Svg => {
             export_image(document, config, ImageExportFormat::Svg).at(Span::detached())
         }
+        OutputFormat::Pptx => {
+            export_pptx(document, config).map(|()| vec![config.output.clone()])
+        }
         OutputFormat::Html | OutputFormat::Bundle | OutputFormat::Docx => unreachable!(),
     }
+}
+
+/// Export to a PPTX.
+fn export_pptx(document: &PagedDocument, config: &CompileConfig) -> SourceResult<()> {
+    let exported_pages = document
+        .pages()
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            config.pages.as_ref().is_none_or(|exported_page_ranges| {
+                exported_page_ranges.includes_page_index(*i)
+            })
+        })
+        .map(|(_, page)| page.clone())
+        .collect::<EcoVec<_>>();
+
+    let filtered = PagedDocument::new(exported_pages, document.info().clone());
+    let bytes = typst_pptx::pptx(&filtered, &PptxOptions {})?;
+    config
+        .output
+        .write(&bytes)
+        .map_err(|err| eco_format!("failed to write PPTX file ({err})"))
+        .at(Span::detached())?;
+    Ok(())
 }
 
 /// Export to a PDF.

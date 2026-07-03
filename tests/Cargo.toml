@@ -18,6 +18,10 @@ harness = false
 name = "docx"
 path = "src/docx.rs"
 
+[[test]]
+name = "pptx"
+path = "src/pptx.rs"
+
 [dependencies]
 typst = { workspace = true }
 typst-assets = { workspace = true, features = ["fonts"] }
@@ -30,6 +34,7 @@ typst-kit = { workspace = true, features = ["datetime"] }
 typst-layout = { workspace = true }
 typst-library = { workspace = true }
 typst-pdf = { workspace = true }
+typst-pptx = { workspace = true }
 typst-render = { workspace = true }
 typst-svg = { workspace = true }
 typst-syntax = { workspace = true }

@@ -26,6 +26,7 @@ typst-layout = { workspace = true }
 typst-html = { workspace = true }
 typst-macros = { workspace = true }
 typst-pdf = { workspace = true }
+typst-pptx = { workspace = true }
 typst-render = { workspace = true }
 typst-svg = { workspace = true }
 typst-timing = { workspace = true }
