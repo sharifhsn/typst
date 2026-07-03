@@ -177,6 +177,21 @@ fn page_fill_becomes_solid_slide_background() {
 }
 
 #[test]
+fn gradient_page_fill_becomes_gradient_slide_background() {
+    let p = parts(
+        "#set page(fill: gradient.linear(rgb(\"#1A1A2E\"), rgb(\"#16213E\")))\nHello",
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let bg = slide.split("<p:bg>").nth(1).unwrap().split("</p:bg>").next().unwrap();
+    assert!(bg.contains("<a:gradFill"), "gradient page fill should emit a:gradFill");
+    assert!(bg.contains("val=\"1A1A2E\""), "first gradient stop color");
+    assert!(bg.contains("val=\"16213E\""), "last gradient stop color");
+    // The stop color must sit directly in the gs, never wrapped in solidFill.
+    assert!(!bg.contains("<a:solidFill>"), "gradient stops must not wrap solidFill");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn text_run_emits_family_size_and_color() {
     let p = parts(
         r##"#set text(font: "New Computer Modern", size: 20pt, fill: rgb("#123456"))

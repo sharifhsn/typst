@@ -2,9 +2,8 @@ use ecow::EcoString;
 use typst_layout::{Page, PagedDocument};
 use typst_library::layout::{Abs, Frame, FrameItem, Point, Size, Transform};
 use typst_library::model::Destination;
-use typst_library::visualize::{ColorSpace, Paint, ProcessColorSpace};
 
-use crate::dom::{SlideCtx, SlideIr, SlideShape};
+use crate::dom::{FillSpec, SlideCtx, SlideIr, SlideShape};
 use crate::text::{LinkTarget, TextSource};
 
 /// Convert all pages into slide IR.
@@ -30,7 +29,7 @@ fn slide(document: &PagedDocument, page: &Page, ctx: &mut SlideCtx) -> SlideIr {
     ordered.sort_by_key(|entry| entry.order);
 
     SlideIr {
-        bg: solid_background(page),
+        bg: background(page),
         shapes: ordered.into_iter().map(|entry| entry.shape).collect(),
     }
 }
@@ -328,15 +327,15 @@ impl Rect {
     }
 }
 
-fn solid_background(page: &Page) -> Option<[u8; 3]> {
-    match page.fill_or_white() {
-        Some(Paint::Solid(color)) => {
-            let srgb =
-                color.to_space(&ColorSpace::Process(ProcessColorSpace::Srgb)).ok()?;
-            let [r, g, b, _] = srgb.to_vec4_u8();
-            Some([r, g, b])
-        }
-        Some(Paint::Gradient(_) | Paint::Tiling(_)) => Some([255, 255, 255]),
-        None => None,
+fn background(page: &Page) -> Option<FillSpec> {
+    let fill = page.fill_or_white();
+    if fill.is_none() {
+        return None;
+    }
+    // A solid or linear-gradient page fill maps to a native slide background;
+    // a tiling or non-linear gradient we cannot represent falls back to white.
+    match crate::shape::resolved_fill(&fill) {
+        Some(spec) => spec,
+        None => Some(FillSpec::Solid([255, 255, 255])),
     }
 }

@@ -4,7 +4,7 @@ use typst_utils::hash128;
 
 /// A slide-level intermediate representation.
 pub struct SlideIr {
-    pub bg: Option<[u8; 3]>,
+    pub bg: Option<FillSpec>,
     pub shapes: Vec<SlideShape>,
 }
 

@@ -26,8 +26,8 @@ pub(crate) fn slide_xml(slide: &SlideIr, rels: &mut impl SlideRelSink) -> String
         .start_children();
 
     w.open("p:cSld").start_children();
-    if let Some(rgb) = slide.bg {
-        write_background(&mut w, rgb);
+    if let Some(fill) = &slide.bg {
+        write_background(&mut w, fill);
     }
     write_shape_tree(&mut w, slide, rels);
     w.close();
@@ -39,10 +39,10 @@ pub(crate) fn slide_xml(slide: &SlideIr, rels: &mut impl SlideRelSink) -> String
     w.finish()
 }
 
-fn write_background(w: &mut XmlWriter, rgb: [u8; 3]) {
+fn write_background(w: &mut XmlWriter, fill: &FillSpec) {
     w.open("p:bg").start_children();
     w.open("p:bgPr").start_children();
-    write_solid_fill(w, rgb);
+    write_fill(w, Some(fill));
     w.leaf("a:effectLst");
     w.close();
     w.close();
