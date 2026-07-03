@@ -3472,8 +3472,11 @@ dependencies = [
  "ecow",
  "rustc-hash",
  "time",
+ "tiny-skia",
  "typst-layout",
  "typst-library",
+ "typst-render",
+ "typst-syntax",
  "typst-utils",
  "zip",
 ]
