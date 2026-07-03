@@ -333,11 +333,15 @@ fn write_custom_geom(w: &mut XmlWriter, segments: &[PathSegment], w_emu: i64, h_
     w.leaf("a:gdLst");
     w.leaf("a:ahLst");
     w.leaf("a:cxnLst");
+    // The text rectangle in LITERAL coordinates. `r="r" b="b"` reference
+    // guide names that must be defined in `<a:gdLst>` — with an empty gdLst
+    // they are undefined, which PowerPoint *repairs* (LibreOffice tolerates
+    // it). Our path space equals the extent, so the rect is the full box.
     w.open("a:rect")
         .attr("l", "0")
         .attr("t", "0")
-        .attr("r", "r")
-        .attr("b", "b")
+        .attr("r", &w_emu.max(1).to_string())
+        .attr("b", &h_emu.max(1).to_string())
         .empty();
     w.open("a:pathLst").start_children();
     // The path's own coordinate space. Without explicit w/h a consumer cannot
