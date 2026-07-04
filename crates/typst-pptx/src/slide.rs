@@ -84,11 +84,21 @@ impl<'a, 'b> Walker<'a, 'b> {
             match item {
                 FrameItem::Group(group) => {
                     let group_transform = item_transform.pre_concat(group.transform);
-                    if group.clip.is_none()
-                        && classify_similarity(group_transform).is_some()
-                    {
+                    let clip_ok = match &group.clip {
+                        None => true,
+                        // A defensive clip that provably clips nothing (the
+                        // common `#box(clip: true)` card) must not swallow
+                        // its live text into a picture.
+                        Some(clip) => crate::image::clip_is_noop(clip, &group.frame),
+                    };
+                    if clip_ok && classify_similarity(group_transform).is_some() {
                         self.walk_frame(&group.frame, group_transform);
                     } else {
+                        debug_raster(
+                            "group",
+                            if group.clip.is_some() { "clip" } else { "transform" },
+                            frame_text_chars(&group.frame),
+                        );
                         // A clip or a non-similarity transform (skew,
                         // non-uniform scale) has no PPTX form: render the
                         // whole group through its own transform and place
@@ -115,6 +125,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                             link: None,
                         });
                     } else {
+                        debug_raster("text", "transform", text.text.chars().count());
                         self.raster_item(
                             order,
                             FrameItem::Text(text.clone()),
@@ -128,12 +139,15 @@ impl<'a, 'b> Walker<'a, 'b> {
                         Some(geom) => self
                             .shapes
                             .push(OrderedShape { order, shape: SlideShape::Geom(geom) }),
-                        None => self.raster_item(
-                            order,
-                            FrameItem::Shape(shape.clone(), *span),
-                            item_transform,
-                            None,
-                        ),
+                        None => {
+                            debug_raster("shape", "unmappable", 0);
+                            self.raster_item(
+                                order,
+                                FrameItem::Shape(shape.clone(), *span),
+                                item_transform,
+                                None,
+                            )
+                        }
                     }
                 }
                 FrameItem::Image(image, size, span) => {
@@ -181,6 +195,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                 return;
             }
         }
+        debug_raster("image", "transform-or-kind", 0);
         self.raster_item(
             order,
             FrameItem::Image(image.clone(), size, span),
@@ -332,6 +347,30 @@ impl Rect {
             && self.min.y <= other.max.y
             && self.max.y >= other.min.y
     }
+}
+
+/// Logs one rasterization-fallback event when `PPTX_DEBUG_RASTER` is set —
+/// the audit hook for measuring how much content bypasses the native mappers
+/// (mirrors `DOCX_DEBUG_RASTER`). `text_chars` counts the live text characters
+/// swallowed by the raster; a nonzero count on a group is the signal that
+/// editable text was lost to a picture.
+fn debug_raster(kind: &str, reason: &str, text_chars: usize) {
+    if std::env::var_os("PPTX_DEBUG_RASTER").is_some() {
+        eprintln!("RASTERIZE kind={kind} reason={reason} text_chars={text_chars}");
+    }
+}
+
+/// Total text characters in a frame tree (for the raster audit).
+fn frame_text_chars(frame: &Frame) -> usize {
+    let mut n = 0;
+    for (_, item) in frame.items() {
+        match item {
+            FrameItem::Text(text) => n += text.text.chars().count(),
+            FrameItem::Group(group) => n += frame_text_chars(&group.frame),
+            _ => {}
+        }
+    }
+    n
 }
 
 fn background(page: &Page) -> Option<FillSpec> {

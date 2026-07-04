@@ -100,6 +100,108 @@ fn embeddable_bytes(image: &Image) -> Option<(&[u8], &'static str)> {
     }
 }
 
+/// Whether a group's clip provably clips nothing, so its children can be
+/// walked natively instead of rasterizing the whole group (which would bake
+/// its live text into a picture).
+///
+/// Two tiers, both exact:
+/// 1. Geometric fast path — the clip is the plain axis-aligned rectangle at
+///    the frame's own bounds (what `#box(clip: true)` produces) and every
+///    drawn item's ink stays inside it.
+/// 2. Render probe — for every other clip shape (rounded cards, tight rects),
+///    render the frame with and without the clip at the same resolution the
+///    raster fallback would use; byte-identical pixels prove the clip removes
+///    no visible ink.
+///
+/// A false negative only means an unnecessary raster — never a wrongly
+/// unclipped slide.
+pub(crate) fn clip_is_noop(
+    clip: &typst_library::visualize::Curve,
+    frame: &Frame,
+) -> bool {
+    if *clip == typst_library::visualize::Curve::rect(frame.size()) {
+        let mut ink = None;
+        frame_ink_rect(frame, Point::zero(), &mut ink);
+        let fits = match ink {
+            None => return true,
+            Some(rect) => {
+                let eps = Abs::pt(0.05);
+                rect.min.x >= -eps
+                    && rect.min.y >= -eps
+                    && rect.max.x <= frame.size().x + eps
+                    && rect.max.y <= frame.size().y + eps
+            }
+        };
+        if fits {
+            return true;
+        }
+    }
+    // The render probe exists to rescue live TEXT from rasterization; for a
+    // text-free group (progress bars, clipped image cards) the raster loses
+    // nothing editable, so don't pay the double render.
+    frame_has_text(frame) && clip_is_noop_by_render(clip, frame)
+}
+
+/// Whether a frame tree draws any text (early exit).
+fn frame_has_text(frame: &Frame) -> bool {
+    frame.items().any(|(_, item)| match item {
+        FrameItem::Text(_) => true,
+        FrameItem::Group(group) => frame_has_text(&group.frame),
+        _ => false,
+    })
+}
+
+/// Renders `frame` with and without `clip` over the identical canvas and
+/// compares pixels. Equality is judged at the raster fallback's own
+/// resolution, so "no visible difference" means exactly "no difference in
+/// what we would otherwise ship as a picture".
+fn clip_is_noop_by_render(
+    clip: &typst_library::visualize::Curve,
+    frame: &Frame,
+) -> bool {
+    let mut ink = None;
+    frame_ink_rect(frame, Point::zero(), &mut ink);
+    let Some(ink) = ink else { return true };
+    if !finite_rect(ink) {
+        return false;
+    }
+    // Cap probe cost: past ~16 Mpx the double render is not worth avoiding
+    // one embedded picture; keep the raster fallback.
+    let px = (ink.size().x.to_pt() * 2.0) * (ink.size().y.to_pt() * 2.0);
+    if !(0.0..=16_000_000.0).contains(&px) {
+        return false;
+    }
+    let probe = |clip: Option<typst_library::visualize::Curve>| -> Option<Vec<u8>> {
+        let mut group = typst_library::layout::GroupItem::new(frame.clone());
+        group.clip = clip;
+        let size =
+            Size::new(ink.size().x.max(Abs::pt(0.5)), ink.size().y.max(Abs::pt(0.5)));
+        let mut canvas = Frame::hard(size);
+        canvas
+            .push(Point::new(-ink.min.x, -ink.min.y), FrameItem::Group(group));
+        let page = typst_layout::Page {
+            frame: canvas,
+            bleed: Sides::splat(Abs::zero()),
+            fill: Smart::Custom(None),
+            numbering: None,
+            supplement: Content::empty(),
+            number: 1,
+        };
+        let options = typst_render::RenderOptions {
+            pixel_per_pt: 2.0.into(),
+            ..Default::default()
+        };
+        let pixmap =
+            catch_unwind(AssertUnwindSafe(|| typst_render::render(&page, &options)))
+                .ok()?;
+        Some(pixmap.data().to_vec())
+    };
+    match (probe(Some(clip.clone())), probe(None)) {
+        (Some(clipped), Some(unclipped)) => clipped == unclipped,
+        _ => false,
+    }
+}
+
 fn finite_rect(rect: Rect) -> bool {
     rect.min.x.to_pt().is_finite()
         && rect.min.y.to_pt().is_finite()
@@ -108,7 +210,7 @@ fn finite_rect(rect: Rect) -> bool {
 }
 
 /// The geometric bounding box of everything a frame draws, in frame space.
-fn frame_ink_rect(frame: &Frame, offset: Point, out: &mut Option<Rect>) {
+pub(crate) fn frame_ink_rect(frame: &Frame, offset: Point, out: &mut Option<Rect>) {
     fn push(out: &mut Option<Rect>, rect: Rect) {
         if !finite_rect(rect) {
             return;

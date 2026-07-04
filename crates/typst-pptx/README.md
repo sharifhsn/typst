@@ -82,6 +82,16 @@ Fidelity is measured by rendering both the gold PDF and the exported `.pptx`
 presentation templates the mean score is **0.995** (median 0.996), with no
 export failures.
 
+Nativeness is audited separately (a pixel diff can't tell live text from a
+screenshot): comparing live `<a:t>` words against the PDF's text layer, the
+median deck preserves **100%** of its words as editable text (mean 97.5%).
+Rasterization is a last resort in a checkable sense — a clipped group is only
+rasterized after a render probe proves the clip visibly alters pixels
+(otherwise its children are exported natively), so every picture in the output
+is either a source image or a fallback the exporter can prove it needed. Set
+`PPTX_DEBUG_RASTER=1` to log every fallback with its reason and the text
+characters affected.
+
 Integration tests live in [`../../tests/src/pptx.rs`](../../tests/src/pptx.rs), and
 a measured head-to-head against typ2pptx and touying-exporter is in the repo-level
 [`COMPARISON.md`](../../COMPARISON.md).

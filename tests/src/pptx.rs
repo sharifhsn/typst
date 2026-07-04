@@ -232,6 +232,37 @@ fn translucent_fill_emits_alpha() {
 }
 
 #[test]
+fn noop_clip_keeps_text_live() {
+    // A clipped card whose content fits inside the clip must not bake its
+    // text into a picture — the render probe proves the clip is a no-op.
+    let p = parts(
+        "#box(radius: 8pt, clip: true, fill: luma(240), inset: 12pt)[Card text]",
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<a:t>Card text</a:t>"), "clipped card text must stay live");
+    assert!(!slide.contains("<p:pic"), "a no-op clip must not rasterize");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn real_clip_still_rasterizes_exactly() {
+    // Content that genuinely overflows its clip box has no native PPTX form;
+    // the visual must be preserved via the raster fallback.
+    let p = parts(
+        "#box(width: 80pt, height: 30pt, radius: 8pt, clip: true, fill: luma(240))[\n\
+           #box(width: 200pt)[This long text is genuinely cut off by the clip]\n\
+         ]",
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<p:pic"), "a real clip must keep the exact raster");
+    assert!(
+        !slide.contains("<a:t>This long text"),
+        "clipped-off text must not leak as an unclipped live run"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn out_of_range_page_link_is_dropped() {
     // A jump to a page that does not exist must not emit a slide relationship
     // (PowerPoint treats a dangling slide target as a corrupt file).
