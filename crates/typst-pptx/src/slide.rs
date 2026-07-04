@@ -186,14 +186,12 @@ impl<'a, 'b> Walker<'a, 'b> {
         if let Some(sim) = classify_similarity(item_transform)
             && sim.rot_60k == 0
             && (sim.scale - 1.0).abs() < 1e-6
-        {
-            if let Some((media, off, sz)) =
+            && let Some((media, off, sz)) =
                 crate::image::embed_image(self.ctx, image, size)
-            {
-                let pos = Point::zero().transform(item_transform) + off;
-                self.push_pic(order, media, pos, sz, image.alt().map(Into::into));
-                return;
-            }
+        {
+            let pos = Point::zero().transform(item_transform) + off;
+            self.push_pic(order, media, pos, sz, image.alt().map(Into::into));
+            return;
         }
         debug_raster("image", "transform-or-kind", 0);
         self.raster_item(
@@ -286,8 +284,11 @@ fn classify_similarity(transform: Transform) -> Option<Similarity> {
     let kx = transform.kx.get();
     let sy = transform.sy.get();
 
-    let len_x = sx.hypot(ky);
-    let len_y = kx.hypot(sy);
+    // Not f64::hypot / f64::atan2 below: those are platform-dependent libm
+    // calls and would break byte-reproducible output; sqrt is IEEE-exact and
+    // Angle::atan2 is the deterministic wrapper.
+    let len_x = (sx * sx + ky * ky).sqrt();
+    let len_y = (kx * kx + sy * sy).sqrt();
     let dot = sx * kx + ky * sy;
     let det = sx * sy - kx * ky;
     let eps = 1e-9_f64;
@@ -311,7 +312,7 @@ fn classify_similarity(transform: Transform) -> Option<Similarity> {
         return None;
     }
 
-    let theta = ky.atan2(sx).to_degrees();
+    let theta = typst_library::layout::Angle::atan2(ky, sx).to_deg();
     Some(Similarity {
         rot_60k: (theta * 60000.0).round() as i32,
         scale: len_x,
@@ -375,9 +376,7 @@ fn frame_text_chars(frame: &Frame) -> usize {
 
 fn background(page: &Page) -> Option<FillSpec> {
     let fill = page.fill_or_white();
-    if fill.is_none() {
-        return None;
-    }
+    fill.as_ref()?;
     // A solid or linear-gradient page fill maps to a native slide background;
     // a tiling or non-linear gradient we cannot represent falls back to white.
     match crate::shape::resolved_fill(&fill) {
