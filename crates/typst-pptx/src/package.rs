@@ -11,6 +11,7 @@ use typst_library::layout::{Abs, Size};
 use zip::write::{SimpleFileOptions, ZipWriter};
 use zip::{CompressionMethod, DateTime};
 
+use crate::SpeakerNote;
 use crate::dom::{SlideCtx, SlideIr};
 use crate::xml::{self, XmlWriter, escape_attr};
 
@@ -24,6 +25,10 @@ const REL_SLIDE_MASTER: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster";
 const REL_SLIDE_LAYOUT: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout";
+const REL_NOTES_SLIDE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide";
+const REL_NOTES_MASTER: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster";
 const REL_THEME: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
 const REL_PRES_PROPS: &str =
@@ -46,6 +51,10 @@ const CT_SLIDE_MASTER: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml";
 const CT_SLIDE_LAYOUT: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml";
+const CT_NOTES_SLIDE: &str =
+    "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml";
+const CT_NOTES_MASTER: &str =
+    "application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml";
 const CT_THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml";
 const CT_PRES_PROPS: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.presProps+xml";
@@ -248,10 +257,16 @@ impl Package {
 }
 
 /// Write a complete PPTX package.
-pub fn write(document: &PagedDocument, slides: &[SlideIr], ctx: &SlideCtx) -> Vec<u8> {
+pub fn write(
+    document: &PagedDocument,
+    slides: &[SlideIr],
+    ctx: &SlideCtx,
+    notes: &[SpeakerNote],
+) -> Vec<u8> {
     let mut package = Package::new();
     let mut root_rels = Rels::new();
     let mut pres_rels = Rels::new();
+    let notes_by_slide = notes_by_slide(slides.len(), notes);
 
     let slide_master_rid = pres_rels.add(
         REL_SLIDE_MASTER,
@@ -262,6 +277,13 @@ pub fn write(document: &PagedDocument, slides: &[SlideIr], ctx: &SlideCtx) -> Ve
     pres_rels.add(REL_VIEW_PROPS, "viewProps.xml", RelMode::Internal);
     pres_rels.add(REL_THEME, "theme/theme1.xml", RelMode::Internal);
     pres_rels.add(REL_TABLE_STYLES, "tableStyles.xml", RelMode::Internal);
+    let notes_master_rid = (!notes_by_slide.is_empty()).then(|| {
+        pres_rels.add(
+            REL_NOTES_MASTER,
+            "notesMasters/notesMaster1.xml",
+            RelMode::Internal,
+        )
+    });
 
     let slide_rids = (0..slides.len())
         .map(|i| {
@@ -277,7 +299,13 @@ pub fn write(document: &PagedDocument, slides: &[SlideIr], ctx: &SlideCtx) -> Ve
     package.add_xml(
         "ppt/presentation.xml",
         CT_PRESENTATION,
-        presentation_xml(&slide_master_rid, &slide_rids, cx, cy),
+        presentation_xml(
+            &slide_master_rid,
+            notes_master_rid.as_deref(),
+            &slide_rids,
+            cx,
+            cy,
+        ),
     );
     package.add_xml("ppt/_rels/presentation.xml.rels", CT_RELS, pres_rels.to_xml());
 
@@ -332,12 +360,53 @@ pub fn write(document: &PagedDocument, slides: &[SlideIr], ctx: &SlideCtx) -> Ve
             let mut sink = PackageSlideRels { rels: &mut slide_rels, ctx };
             crate::encode::slide_xml(slide, &mut sink)
         };
+        if notes_by_slide.contains_key(&i) {
+            slide_rels.add(
+                REL_NOTES_SLIDE,
+                &format!("../notesSlides/notesSlide{}.xml", i + 1),
+                RelMode::Internal,
+            );
+        }
         package.add_xml(&format!("ppt/slides/slide{}.xml", i + 1), CT_SLIDE, slide_xml);
         package.add_xml(
             &format!("ppt/slides/_rels/slide{}.xml.rels", i + 1),
             CT_RELS,
             slide_rels.to_xml(),
         );
+    }
+
+    if !notes_by_slide.is_empty() {
+        package.add_xml(
+            "ppt/notesMasters/notesMaster1.xml",
+            CT_NOTES_MASTER,
+            notes_master_xml(),
+        );
+        let mut notes_master_rels = Rels::new();
+        notes_master_rels.add(REL_THEME, "../theme/theme1.xml", RelMode::Internal);
+        package.add_xml(
+            "ppt/notesMasters/_rels/notesMaster1.xml.rels",
+            CT_RELS,
+            notes_master_rels.to_xml(),
+        );
+
+        for (i, text) in &notes_by_slide {
+            package.add_xml(
+                &format!("ppt/notesSlides/notesSlide{}.xml", i + 1),
+                CT_NOTES_SLIDE,
+                notes_slide_xml(text),
+            );
+            let mut notes_slide_rels = Rels::new();
+            notes_slide_rels.add(
+                REL_NOTES_MASTER,
+                "../notesMasters/notesMaster1.xml",
+                RelMode::Internal,
+            );
+            package.add_xml(
+                &format!("ppt/notesSlides/_rels/notesSlide{}.xml.rels", i + 1),
+                CT_RELS,
+                notes_slide_rels.to_xml(),
+            );
+        }
     }
 
     for media in &ctx.media {
@@ -350,13 +419,35 @@ pub fn write(document: &PagedDocument, slides: &[SlideIr], ctx: &SlideCtx) -> Ve
     }
 
     package.add_xml("docProps/core.xml", CT_CORE, core_xml());
-    package.add_xml("docProps/app.xml", CT_EXTENDED, app_xml(slides.len()));
+    package.add_xml(
+        "docProps/app.xml",
+        CT_EXTENDED,
+        app_xml(slides.len(), notes_by_slide.len()),
+    );
 
     root_rels.add(REL_OFFICE_DOCUMENT, "ppt/presentation.xml", RelMode::Internal);
     root_rels.add(REL_CORE_PROPS, "docProps/core.xml", RelMode::Internal);
     root_rels.add(REL_EXTENDED_PROPS, "docProps/app.xml", RelMode::Internal);
 
     package.finish(&root_rels)
+}
+
+fn notes_by_slide(slides: usize, notes: &[SpeakerNote]) -> BTreeMap<usize, String> {
+    let mut by_slide = BTreeMap::<usize, String>::new();
+    for note in notes {
+        if note.slide_index >= slides || note.text.is_empty() {
+            continue;
+        }
+
+        by_slide
+            .entry(note.slide_index)
+            .and_modify(|text| {
+                text.push_str("\n\n");
+                text.push_str(&note.text);
+            })
+            .or_insert_with(|| note.text.clone());
+    }
+    by_slide
 }
 
 fn first_page_size(document: &PagedDocument) -> (i64, i64) {
@@ -378,6 +469,7 @@ fn extent_emu(abs: Abs) -> i64 {
 
 fn presentation_xml(
     master_rid: &str,
+    notes_master_rid: Option<&str>,
     slide_rids: &[EcoString],
     cx: i64,
     cy: i64,
@@ -399,6 +491,12 @@ fn presentation_xml(
         .empty();
     w.close();
 
+    if let Some(rid) = notes_master_rid {
+        w.open("p:notesMasterIdLst").start_children();
+        w.open("p:notesMasterId").attr("r:id", rid).empty();
+        w.close();
+    }
+
     w.open("p:sldIdLst").start_children();
     for (i, rid) in slide_rids.iter().enumerate() {
         w.open("p:sldId")
@@ -419,6 +517,150 @@ fn presentation_xml(
         .empty();
     w.close();
     w.finish()
+}
+
+fn notes_master_xml() -> String {
+    let mut w = XmlWriter::new(false);
+    w.open("p:notesMaster")
+        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
+        .attr("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main")
+        .attr(
+            "xmlns:r",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        )
+        .start_children();
+    w.open("p:cSld").attr("name", "Notes Master").start_children();
+    w.open("p:spTree").start_children();
+    write_notes_group_nv(&mut w);
+    w.leaf("p:grpSpPr");
+    write_notes_body_placeholder(&mut w, None);
+    w.close();
+    w.close();
+    w.open("p:clrMap")
+        .attr("bg1", "lt1")
+        .attr("tx1", "dk1")
+        .attr("bg2", "lt2")
+        .attr("tx2", "dk2")
+        .attr("accent1", "accent1")
+        .attr("accent2", "accent2")
+        .attr("accent3", "accent3")
+        .attr("accent4", "accent4")
+        .attr("accent5", "accent5")
+        .attr("accent6", "accent6")
+        .attr("hlink", "hlink")
+        .attr("folHlink", "folHlink")
+        .empty();
+    write_notes_style(&mut w);
+    w.close();
+    w.finish()
+}
+
+fn notes_slide_xml(text: &str) -> String {
+    let mut w = XmlWriter::new(false);
+    w.open("p:notes")
+        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
+        .attr("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main")
+        .attr(
+            "xmlns:r",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        )
+        .start_children();
+    w.open("p:cSld").start_children();
+    w.open("p:spTree").start_children();
+    write_notes_group_nv(&mut w);
+    w.leaf("p:grpSpPr");
+    write_notes_body_placeholder(&mut w, Some(text));
+    w.close();
+    w.close();
+    w.open("p:clrMapOvr").start_children();
+    w.leaf("a:masterClrMapping");
+    w.close();
+    w.close();
+    w.finish()
+}
+
+fn write_notes_group_nv(w: &mut XmlWriter) {
+    w.open("p:nvGrpSpPr").start_children();
+    w.open("p:cNvPr").attr("id", "1").attr("name", "").empty();
+    w.leaf("p:cNvGrpSpPr");
+    w.leaf("p:nvPr");
+    w.close();
+}
+
+fn write_notes_body_placeholder(w: &mut XmlWriter, text: Option<&str>) {
+    w.open("p:sp").start_children();
+    w.open("p:nvSpPr").start_children();
+    w.open("p:cNvPr")
+        .attr("id", "2")
+        .attr("name", "Notes Placeholder 1")
+        .empty();
+    w.open("p:cNvSpPr").start_children();
+    w.open("a:spLocks").attr("noGrp", "1").empty();
+    w.close();
+    w.open("p:nvPr").start_children();
+    w.open("p:ph").attr("type", "body").attr("idx", "1").empty();
+    w.close();
+    w.close();
+
+    w.open("p:spPr").start_children();
+    w.open("a:xfrm").start_children();
+    w.open("a:off").attr("x", "685800").attr("y", "3886200").empty();
+    w.open("a:ext").attr("cx", "5486400").attr("cy", "3657600").empty();
+    w.close();
+    w.open("a:prstGeom").attr("prst", "rect").start_children();
+    w.leaf("a:avLst");
+    w.close();
+    w.leaf("a:noFill");
+    w.open("a:ln").start_children();
+    w.leaf("a:noFill");
+    w.close();
+    w.close();
+
+    w.open("p:txBody").start_children();
+    w.open("a:bodyPr").attr("wrap", "square").empty();
+    w.leaf("a:lstStyle");
+    if let Some(text) = text {
+        write_note_paragraphs(w, text);
+    } else {
+        w.leaf("a:p");
+    }
+    w.close();
+    w.close();
+}
+
+fn write_note_paragraphs(w: &mut XmlWriter, text: &str) {
+    for raw_line in text.split('\n') {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        w.open("a:p").start_children();
+        if !line.is_empty() {
+            w.open("a:r").start_children();
+            w.open("a:rPr").attr("lang", "en-US").attr("sz", "1200").empty();
+            w.open("a:t").start_children();
+            w.text(line);
+            w.close();
+            w.close();
+        }
+        w.open("a:endParaRPr")
+            .attr("lang", "en-US")
+            .attr("sz", "1200")
+            .empty();
+        w.close();
+    }
+}
+
+fn write_notes_style(w: &mut XmlWriter) {
+    w.open("p:notesStyle").start_children();
+    w.open("a:lvl1pPr").attr("algn", "l").start_children();
+    w.open("a:defRPr").attr("sz", "1200").start_children();
+    w.open("a:solidFill").start_children();
+    w.open("a:schemeClr").attr("val", "tx1").empty();
+    w.close();
+    w.open("a:latin").attr("typeface", "Arial").empty();
+    w.open("a:ea").attr("typeface", "Arial").empty();
+    w.open("a:cs").attr("typeface", "Arial").empty();
+    w.close();
+    w.close();
+    w.close();
 }
 
 fn slide_master_xml() -> String {
@@ -597,7 +839,7 @@ fn source_date_epoch_timestamp() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
-fn app_xml(slides: usize) -> String {
+fn app_xml(slides: usize, notes: usize) -> String {
     let mut w = XmlWriter::new(false);
     w.open("Properties")
         .attr(
@@ -612,7 +854,7 @@ fn app_xml(slides: usize) -> String {
     w.elem_text("Application", "Typst");
     w.elem_text("PresentationFormat", "Custom");
     w.elem_text("Slides", &slides.to_string());
-    w.elem_text("Notes", "0");
+    w.elem_text("Notes", &notes.to_string());
     w.elem_text("HiddenSlides", "0");
     w.elem_text("MMClips", "0");
     w.elem_text("ScaleCrop", "false");

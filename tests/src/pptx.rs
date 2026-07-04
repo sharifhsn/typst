@@ -68,7 +68,7 @@ fn pptx_bytes(src: &str) -> Vec<u8> {
     let doc = typst::compile::<PagedDocument>(&world)
         .output
         .expect("compilation failed");
-    pptx(&doc, &PptxOptions {}).expect("pptx export failed")
+    pptx(&doc, &PptxOptions::default()).expect("pptx export failed")
 }
 
 /// Compiles `src` to a PPTX and returns text parts as `name -> text`.
@@ -144,6 +144,63 @@ fn slide_count_matches_page_count() {
     assert_eq!(slide_count(&p["ppt/presentation.xml"]), 3);
     assert!(p.contains_key("ppt/slides/slide3.xml"));
     assert!(p.contains_key("ppt/slides/_rels/slide3.xml.rels"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn pdfpc_metadata_exports_speaker_notes() {
+    // The real `<pdfpc-file>` value is a dict with a `pages` array (the exact
+    // shape `typst query --field value --one "<pdfpc-file>"` emits from touying
+    // `#note(..)`), NOT a bare array — regression guard for that.
+    let p = parts(
+        r#"#set page(width: 200pt, height: 100pt)
+#metadata((
+  pdfpcFormat: 2,
+  disableMarkdown: false,
+  pages: (
+    (idx: 1, note: "First slide note\nsecond line"),
+    (idx: 2, note: "Second <note> & more"),
+  ),
+)) <pdfpc-file>
+Slide one
+#pagebreak()
+Slide two"#,
+    );
+
+    for name in [
+        "ppt/notesMasters/notesMaster1.xml",
+        "ppt/notesMasters/_rels/notesMaster1.xml.rels",
+        "ppt/notesSlides/notesSlide1.xml",
+        "ppt/notesSlides/_rels/notesSlide1.xml.rels",
+        "ppt/notesSlides/notesSlide2.xml",
+        "ppt/notesSlides/_rels/notesSlide2.xml.rels",
+    ] {
+        assert!(p.contains_key(name), "missing {name}");
+    }
+
+    let content_types = &p["[Content_Types].xml"];
+    assert!(content_types.contains("/ppt/notesMasters/notesMaster1.xml"));
+    assert!(content_types.contains("/ppt/notesSlides/notesSlide1.xml"));
+    assert!(content_types.contains("/ppt/notesSlides/notesSlide2.xml"));
+
+    let presentation_rels = &p["ppt/_rels/presentation.xml.rels"];
+    assert!(presentation_rels.contains("notesMasters/notesMaster1.xml"));
+
+    let slide1_rels = &p["ppt/slides/_rels/slide1.xml.rels"];
+    assert!(slide1_rels.contains("../notesSlides/notesSlide1.xml"));
+    let slide2_rels = &p["ppt/slides/_rels/slide2.xml.rels"];
+    assert!(slide2_rels.contains("../notesSlides/notesSlide2.xml"));
+
+    let notes1 = &p["ppt/notesSlides/notesSlide1.xml"];
+    assert!(notes1.contains("<p:ph type=\"body\""));
+    assert!(notes1.contains("<a:t>First slide note</a:t>"));
+    assert!(notes1.contains("<a:t>second line</a:t>"));
+
+    let notes2 = &p["ppt/notesSlides/notesSlide2.xml"];
+    assert!(notes2.contains("<a:t>Second &lt;note&gt; &amp; more</a:t>"));
+
+    let notes1_rels = &p["ppt/notesSlides/_rels/notesSlide1.xml.rels"];
+    assert!(notes1_rels.contains("../notesMasters/notesMaster1.xml"));
     assert_all_wellformed(&p);
 }
 
@@ -235,9 +292,8 @@ fn translucent_fill_emits_alpha() {
 fn noop_clip_keeps_text_live() {
     // A clipped card whose content fits inside the clip must not bake its
     // text into a picture — the render probe proves the clip is a no-op.
-    let p = parts(
-        "#box(radius: 8pt, clip: true, fill: luma(240), inset: 12pt)[Card text]",
-    );
+    let p =
+        parts("#box(radius: 8pt, clip: true, fill: luma(240), inset: 12pt)[Card text]");
     let slide = &p["ppt/slides/slide1.xml"];
     assert!(slide.contains("<a:t>Card text</a:t>"), "clipped card text must stay live");
     assert!(!slide.contains("<p:pic"), "a no-op clip must not rasterize");
@@ -327,7 +383,10 @@ fn powerpoint_schema_invariants_hold() {
     ] {
         let body = theme.split(&format!("<a:{list}>")).nth(1).unwrap();
         let body = body.split(&format!("</a:{list}>")).next().unwrap();
-        let n = item.iter().map(|i| body.matches(&format!("<a:{i}")).count()).sum::<usize>();
+        let n = item
+            .iter()
+            .map(|i| body.matches(&format!("<a:{i}")).count())
+            .sum::<usize>();
         assert!(n >= 3, "{list} has {n} entries; PowerPoint needs >= 3");
     }
     let effects = theme.split("<a:effectStyleLst>").nth(1).unwrap();

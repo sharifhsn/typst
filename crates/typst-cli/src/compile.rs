@@ -21,7 +21,7 @@ use typst_kit::timer::Timer;
 use typst_layout::{Page, PagedDocument};
 use typst_pandoc::{PandocDocument, PandocOptions};
 use typst_pdf::{PdfOptions, PdfStandards, Timestamp};
-use typst_pptx::PptxOptions;
+use typst_pptx::{PptxOptions, SpeakerNote};
 use typst_render::RenderOptions;
 use typst_svg::SvgOptions;
 use typst_utils::Scalar;
@@ -568,17 +568,16 @@ fn export_paged(
 
 /// Export to a PPTX.
 fn export_pptx(document: &PagedDocument, config: &CompileConfig) -> SourceResult<()> {
-    let exported_pages = document
-        .pages()
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| {
-            config.pages.as_ref().is_none_or(|exported_page_ranges| {
-                exported_page_ranges.includes_page_index(*i)
-            })
-        })
-        .map(|(_, page)| page.clone())
-        .collect::<EcoVec<_>>();
+    let mut exported_pages = EcoVec::new();
+    let mut page_to_slide = vec![None; document.pages().len()];
+    for (i, page) in document.pages().iter().enumerate() {
+        if config.pages.as_ref().is_none_or(|exported_page_ranges| {
+            exported_page_ranges.includes_page_index(i)
+        }) {
+            page_to_slide[i] = Some(exported_pages.len());
+            exported_pages.push(page.clone());
+        }
+    }
 
     if exported_pages.is_empty() {
         // A slide-less presentation has an empty `p:sldIdLst`, which PowerPoint
@@ -593,7 +592,15 @@ fn export_pptx(document: &PagedDocument, config: &CompileConfig) -> SourceResult
     }
 
     let filtered = PagedDocument::new(exported_pages, document.info().clone());
-    let bytes = typst_pptx::pptx(&filtered, &PptxOptions {})?;
+    let speaker_notes = typst_pptx::speaker_notes(document)
+        .into_iter()
+        .filter_map(|note| {
+            let slide_index = page_to_slide.get(note.slide_index).copied().flatten()?;
+            Some(SpeakerNote { slide_index, text: note.text })
+        })
+        .collect();
+    let bytes =
+        typst_pptx::pptx(&filtered, &PptxOptions { speaker_notes: Some(speaker_notes) })?;
     config
         .output
         .write(&bytes)
