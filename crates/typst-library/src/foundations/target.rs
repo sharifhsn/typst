@@ -75,6 +75,8 @@ pub enum Target {
     Bundle,
     /// The target that is used for DOCX (Microsoft Word) export.
     Docx,
+    /// The target that is used for Pandoc (JSON AST) export.
+    Pandoc,
 }
 
 impl Target {

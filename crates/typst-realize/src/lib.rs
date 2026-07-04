@@ -33,7 +33,7 @@ use typst_library::model::{
     ListItemLike, ListLike, ParElem, ParbreakElem, RefElem, TermsElem,
 };
 use typst_library::routines::{Arenas, FragmentKind, Pair, RealizationKind};
-use typst_library::text::{LinebreakElem, SmartQuoteElem, SpaceElem, TextElem};
+use typst_library::text::{LinebreakElem, RawElem, SmartQuoteElem, SpaceElem, TextElem};
 use typst_syntax::Span;
 use typst_utils::{ListSet, SliceExt, SmallBitSet};
 
@@ -633,7 +633,7 @@ fn visit_styled<'a>(
             match s.kind {
                 RealizationKind::Bundle => {}
                 RealizationKind::Document { .. } => match outer.get(TargetElem::target) {
-                    Target::Paged | Target::Docx => {
+                    Target::Paged | Target::Docx | Target::Pandoc => {
                         // When there are page styles, we "break free" from our show
                         // rule cage.
                         pagebreak = true;
@@ -1073,6 +1073,19 @@ static PAR: GroupingRule = GroupingRule {
                     .is_some_and(|eq| !eq.block.get(StyleChain::default())))
         {
             GroupingEffect::Trigger
+        } else if let Some(raw) = content.to_packed::<RawElem>() {
+            // The Pandoc target does NOT register `RAW_RULE` (its mapper emits an
+            // idiomatic `Code`/`CodeBlock` node directly), so an *inline* raw
+            // (`` `code` ``) reaches grouping native. Treat it as inline so it
+            // stays within its paragraph and the spaces around it survive — the
+            // same rationale as the link/ref/footnote arm above. A *block* raw
+            // (a fenced code block) must still interrupt: it is its own block, and
+            // pulling it into a paragraph would mis-emit it as inline `Code`.
+            if raw.block.get(StyleChain::default()) {
+                GroupingEffect::Interrupt
+            } else {
+                GroupingEffect::Trigger
+            }
         } else if elem == SpaceElem::ELEM {
             GroupingEffect::Inner
         } else if let Some(elem) = content.to_packed::<HtmlElem>() {

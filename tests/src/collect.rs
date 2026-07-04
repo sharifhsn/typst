@@ -298,8 +298,10 @@ impl From<Target> for TestTarget {
             Target::Paged => TestTarget::Paged,
             Target::Html => TestTarget::Html,
             Target::Bundle => TestTarget::Bundle,
-            // DOCX is not exercised as a render target in the suite.
+            // DOCX and Pandoc are not exercised as render targets in the suite
+            // (they have their own crate-level integration tests).
             Target::Docx => unreachable!("docx is not a test target"),
+            Target::Pandoc => unreachable!("pandoc is not a test target"),
         }
     }
 }
