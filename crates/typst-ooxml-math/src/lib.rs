@@ -328,7 +328,16 @@ fn convert_fraction(node: Node) -> Atom {
             Atom::loose(format!("{}\\/{}", paren_if_loose(&num), paren_if_loose(&den)))
         }
         FracType::Bar => {
-            Atom::tight(format!("frac({}, {})", trim_arg(&num), trim_arg(&den)))
+            let (n, d) = (trim_arg(&num), trim_arg(&den));
+            // Simple single-token operands read better as `a/b` than
+            // `frac(a, b)` — the form a Typst author actually writes. Emit it
+            // `loose` so it is parenthesized when used as a script base
+            // (`(1/3)^2`); `frac(..)` stays for anything with structure.
+            if is_single_token(&n) && is_single_token(&d) {
+                Atom::loose(format!("{n}/{d}"))
+            } else {
+                Atom::tight(format!("frac({n}, {d})"))
+            }
         }
     }
 }
@@ -762,14 +771,24 @@ fn is_balanced_wrapped(s: &str) -> bool {
 /// matching how a user writes `f(x), g(y)` and `x'`.
 fn join_atoms(atoms: &[Atom]) -> String {
     let mut out = String::new();
+    // A `+`/`-` in prefix position (start, or after an opener/relation) is a
+    // sign, not a binary operator, so the next atom attaches tight: `-1`, not
+    // `- 1`; `frac(1, -2)`, not `frac(1, - 2)`.
+    let mut attach_tight = false;
     for a in atoms {
         let text = a.text.as_str();
         if text.is_empty() {
             continue;
         }
-        if !out.is_empty() && !binds_tight_left(text) {
+        if !out.is_empty() && !binds_tight_left(text) && !attach_tight {
             out.push(' ');
         }
+        attach_tight = matches!(text, "-" | "+")
+            && out
+                .trim_end()
+                .chars()
+                .last()
+                .is_none_or(|c| "([{,;=<>".contains(c));
         out.push_str(text);
     }
     out

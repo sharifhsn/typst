@@ -63,7 +63,24 @@ fn superscript_is_bare_not_upright() {
 
 #[test]
 fn fraction() {
-    assert_eq!(omml_to_typst(OMML_FRAC), "frac(a, b)");
+    // Simple single-token operands read as `a/b` (what a Typst author writes),
+    // not the verbose `frac(a, b)`.
+    assert_eq!(omml_to_typst(OMML_FRAC), "a/b");
+}
+
+#[test]
+fn fraction_keeps_frac_for_compound_operands() {
+    // A structured numerator/denominator must stay `frac(..)`, which is safe
+    // in any position; `/` is reserved for atomic operands.
+    let omml = r#"<m:oMath><m:f><m:num><m:r><m:t>𝑎+𝑏</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:oMath>"#;
+    assert_eq!(omml_to_typst(omml), "frac(a + b, 2)");
+}
+
+#[test]
+fn unary_sign_attaches_tight() {
+    // A leading `-` is a sign, not a binary operator: `-x`, not `- x`.
+    let omml = r#"<m:oMath><m:r><m:t>-</m:t></m:r><m:r><m:t>𝑥</m:t></m:r></m:oMath>"#;
+    assert_eq!(omml_to_typst(omml), "-x");
 }
 
 #[test]
