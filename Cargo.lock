@@ -3438,6 +3438,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "typst-ooxml-math"
+version = "0.15.0"
+dependencies = [
+ "roxmltree 0.21.1",
+]
+
+[[package]]
 name = "typst-pdf"
 version = "0.15.0"
 dependencies = [

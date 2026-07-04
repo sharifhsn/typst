@@ -1,0 +1,27 @@
+[package]
+name = "typst-ooxml-math"
+description = "Convert OOXML math (OMML) into idiomatic Typst math source."
+version = { workspace = true }
+rust-version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+readme = { workspace = true }
+
+[lib]
+name = "typst_ooxml_math"
+path = "src/lib.rs"
+
+[[bin]]
+name = "omml2typst"
+path = "src/bin/omml2typst.rs"
+
+[dependencies]
+roxmltree = { workspace = true }
+
+[lints]
+workspace = true
