@@ -82,4 +82,6 @@ Fidelity is measured by rendering both the gold PDF and the exported `.pptx`
 presentation templates the mean score is **0.995** (median 0.996), with no
 export failures.
 
-Integration tests live in [`../../tests/src/pptx.rs`](../../tests/src/pptx.rs).
+Integration tests live in [`../../tests/src/pptx.rs`](../../tests/src/pptx.rs), and
+a measured head-to-head against typ2pptx and touying-exporter is in the repo-level
+[`COMPARISON.md`](../../COMPARISON.md).

@@ -244,7 +244,8 @@ fail to export (they compile to PDF fine) — the error points at the template
 code.
 The full per-feature support matrix and the rationale behind every mapping live
 in [`crates/typst-docx/README.md`](crates/typst-docx/README.md) and
-[`crates/typst-docx/COVERAGE.md`](crates/typst-docx/COVERAGE.md).
+[`crates/typst-docx/COVERAGE.md`](crates/typst-docx/COVERAGE.md); a measured
+comparison against typ2docx and pandoc is in [`COMPARISON.md`](COMPARISON.md).
 
 Output is byte-for-byte reproducible under `SOURCE_DATE_EPOCH`. This is preview
 software: please report anything that opens wrong or looks off.
@@ -279,7 +280,9 @@ is exact.
 similarity averages **0.995** (median 0.996) with no export failures, and every
 package opens without repair in Microsoft PowerPoint and LibreOffice Impress.
 The per-feature notes and honest limitations are in
-[`crates/typst-pptx/README.md`](crates/typst-pptx/README.md).
+[`crates/typst-pptx/README.md`](crates/typst-pptx/README.md), and a measured
+head-to-head against the existing conversion tools (typ2pptx, typ2docx,
+touying-exporter, pandoc) is in [`COMPARISON.md`](COMPARISON.md).
 
 ## Community
 The main places where the community gathers are our [Forum][forum] and our
