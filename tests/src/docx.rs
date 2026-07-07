@@ -860,6 +860,55 @@ fn paragraphs_carry_unique_w14_para_ids() {
 }
 
 #[test]
+fn multi_slot_page_numbering_emits_page_of_numpages() {
+    // `numbering: "1 of 1"` is the "page X of Y" idiom: the first counting slot
+    // is the current page (a `PAGE` field), the second the document total (a
+    // `NUMPAGES` field), with the literal " of " between them — not a bare PAGE
+    // that silently drops the total.
+    let p = parts("#set page(numbering: \"1 of 1\")\nBody.");
+    let footer = p
+        .iter()
+        .find(|(name, _)| name.starts_with("word/footer"))
+        .map(|(_, xml)| xml.as_str())
+        .expect("a numbered footer part");
+    assert!(footer.contains("PAGE "), "current page is a PAGE field");
+    assert!(footer.contains("NUMPAGES "), "the total is a NUMPAGES field");
+    assert!(footer.contains("> of <") || footer.contains("of"), "keeps the ' of ' literal");
+    let page_at = footer.find("PAGE ").unwrap();
+    let num_at = footer.find("NUMPAGES ").unwrap();
+    assert!(page_at < num_at, "PAGE (current) precedes NUMPAGES (total)");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn roman_multi_slot_numbering_switches_both_fields() {
+    // A roman "i of i" must render the total in roman too, so both fields carry
+    // the `\* roman` format switch (NUMPAGES otherwise defaults to arabic).
+    let p = parts("#set page(numbering: \"i of i\")\nBody.");
+    let footer = p
+        .iter()
+        .find(|(name, _)| name.starts_with("word/footer"))
+        .map(|(_, xml)| xml.as_str())
+        .expect("a numbered footer part");
+    assert_eq!(footer.matches("\\* roman").count(), 2, "PAGE and NUMPAGES both roman");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn single_slot_numbering_stays_a_bare_page_field() {
+    // A plain `numbering: "1"` must not gain a spurious NUMPAGES.
+    let p = parts("#set page(numbering: \"1\")\nBody.");
+    let footer = p
+        .iter()
+        .find(|(name, _)| name.starts_with("word/footer"))
+        .map(|(_, xml)| xml.as_str())
+        .expect("a numbered footer part");
+    assert!(footer.contains("PAGE "), "has the PAGE field");
+    assert!(!footer.contains("NUMPAGES"), "no total for a single-slot numbering");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn document_default_font_size_are_hoisted_into_doc_defaults() {
     // The document's most common font/size is hoisted into `docDefaults`; body
     // runs that match inherit it (no per-run `rFonts`/`sz`), so editing the Normal

@@ -798,10 +798,11 @@ fn build_section(
             let part_name = ctx.next_hdrftr_name(true);
             let rel = ctx.add_header_rel(&part_name);
             sect.headers.push(HdrFtrRef { kind: "default", rel });
+            let para = page_number_para(ctx, geom.numbering.as_ref(), "Header", geom.number_jc);
             header_parts.push(HdrFtrPart {
                 part_name,
                 is_header: true,
-                blocks: vec![page_number_para("Header", geom.number_jc)],
+                blocks: vec![para],
                 rels: crate::package::Rels::new(),
             });
             ctx.mark_field();
@@ -812,10 +813,11 @@ fn build_section(
             let part_name = ctx.next_hdrftr_name(false);
             let rel = ctx.add_footer_rel(&part_name);
             sect.footers.push(HdrFtrRef { kind: "default", rel });
+            let para = page_number_para(ctx, geom.numbering.as_ref(), "Footer", geom.number_jc);
             footer_parts.push(HdrFtrPart {
                 part_name,
                 is_header: false,
-                blocks: vec![page_number_para("Footer", geom.number_jc)],
+                blocks: vec![para],
                 rels: crate::package::Rels::new(),
             });
             ctx.mark_field();
@@ -880,22 +882,32 @@ fn background_block(
 }
 
 /// Classifies a page-numbering pattern's first counting symbol into a Word
-/// `w:pgNumType/@w:fmt`. Renders the symbol via the engine (avoiding a direct
-/// `codex` dependency) and matches the glyph for 1 and 4.
+/// `w:pgNumType/@w:fmt`.
 fn numbering_fmt(
     ctx: &mut DocxCtx,
     numbering: &typst_library::model::Numbering,
+) -> &'static str {
+    numbering_fmt_kth(ctx, numbering, 0)
+}
+
+/// Classifies the `k`-th counting symbol of a page-numbering pattern into a Word
+/// format token. Renders the symbol via the engine (avoiding a direct `codex`
+/// dependency) and matches the glyph for 1 and 4.
+fn numbering_fmt_kth(
+    ctx: &mut DocxCtx,
+    numbering: &typst_library::model::Numbering,
+    k: usize,
 ) -> &'static str {
     use typst_library::model::Numbering;
     let Numbering::Pattern(pattern) = numbering else {
         return "decimal";
     };
-    if pattern.pieces() == 0 {
+    if k >= pattern.pieces() {
         return "decimal";
     }
     let span = typst_syntax::Span::detached();
-    let one = pattern.apply_kth(ctx.engine(), span, 0, 1);
-    let four = pattern.apply_kth(ctx.engine(), span, 0, 4);
+    let one = pattern.apply_kth(ctx.engine(), span, k, 1);
+    let four = pattern.apply_kth(ctx.engine(), span, k, 4);
     // `apply_kth` includes the trailing suffix; compare on a prefix basis.
     let g1 = one.trim_end_matches(|c: char| !c.is_alphanumeric());
     let g4 = four.trim_end_matches(|c: char| !c.is_alphanumeric());
@@ -910,19 +922,74 @@ fn numbering_fmt(
     }
 }
 
-/// Builds a single-paragraph header/footer carrying a live `{ PAGE }` field.
-fn page_number_para(style: &str, jc: Option<crate::dom::Jc>) -> Block {
+/// The Word field format switch (`\* <fmt>`) for a page-number field rendered in
+/// the given `w:pgNumType` format, or `None` for plain decimal (Word's default,
+/// which `pgNumType` already applies to `PAGE`).
+fn field_format_switch(fmt: &str) -> Option<&'static str> {
+    match fmt {
+        "lowerRoman" => Some("roman"),
+        "upperRoman" => Some("ROMAN"),
+        "lowerLetter" => Some("alphabetic"),
+        "upperLetter" => Some("ALPHABETIC"),
+        _ => None,
+    }
+}
+
+/// Builds a single-paragraph header/footer carrying the page numbering as live
+/// fields. A pattern with two or more counting slots (`"1 of 1"`, `"1 / 1"`) is
+/// the "page X of Y" idiom: the first slot is the current page (`PAGE`), the
+/// rest the document total (`NUMPAGES`); the pattern's literal text between and
+/// around the slots is emitted verbatim, and each field carries a `\* <fmt>`
+/// switch so a roman/alphabetic numbering renders its total in the same system.
+/// Any other numbering (single slot, or a numbering *function*) → a bare `PAGE`.
+fn page_number_para(
+    ctx: &mut DocxCtx,
+    numbering: Option<&typst_library::model::Numbering>,
+    style: &str,
+    jc: Option<crate::dom::Jc>,
+) -> Block {
+    use typst_library::model::Numbering;
     let props = ParaProps {
         style: Some(style.into()),
         jc: jc.or(Some(crate::dom::Jc::Center)),
         ..Default::default()
     };
-    let field = Field {
-        instr: " PAGE ".into(),
-        result: vec![Run::Text { props: RunProps::default(), text: "1".into() }],
-        dirty: false,
+
+    let page_field = |instr: ecow::EcoString| {
+        ParaChild::Run(Run::Field(Field {
+            instr,
+            result: vec![Run::Text { props: RunProps::default(), text: "1".into() }],
+            dirty: false,
+        }))
     };
-    Block::Para(Para { props, content: vec![ParaChild::Run(Run::Field(field))] })
+    let literal = |text: ecow::EcoString| {
+        ParaChild::Run(Run::Text { props: RunProps::default(), text })
+    };
+
+    let content = match numbering {
+        Some(num @ Numbering::Pattern(pattern)) if pattern.pieces() >= 2 => {
+            let mut runs = Vec::new();
+            for k in 0..pattern.pieces() {
+                let prefix = pattern.pieces[k].0.clone();
+                if !prefix.is_empty() {
+                    runs.push(literal(prefix));
+                }
+                let base = if k == 0 { "PAGE" } else { "NUMPAGES" };
+                let instr = match field_format_switch(numbering_fmt_kth(ctx, num, k)) {
+                    Some(sw) => ecow::eco_format!(" {base} \\* {sw} "),
+                    None => ecow::eco_format!(" {base} "),
+                };
+                runs.push(page_field(instr));
+            }
+            if !pattern.suffix.is_empty() {
+                runs.push(literal(pattern.suffix.clone()));
+            }
+            runs
+        }
+        _ => vec![page_field(" PAGE ".into())],
+    };
+
+    Block::Para(Para { props, content })
 }
 
 /// Recursively collects introspection tags from the IR.
