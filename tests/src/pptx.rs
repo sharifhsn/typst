@@ -304,6 +304,78 @@ Gradient"##,
 }
 
 #[test]
+fn wrapped_paragraph_merges_into_one_flowing_text_box() {
+    let p = parts(
+        r#"#set page(width: 220pt, height: 140pt, margin: 0pt)
+#set text(size: 12pt)
+#place(top + left, dx: 20pt, dy: 20pt)[
+  #box(width: 95pt)[This paragraph wraps across several visual lines with #strong[bold text] inside for run splitting.]
+]"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert_eq!(text_shape_count(slide), 1, "wrapped paragraph should be one box");
+    assert_eq!(
+        drawingml_paragraph_count(slide),
+        1,
+        "wrapped paragraph should be one a:p"
+    );
+    assert!(slide.contains("wrap=\"square\""), "merged paragraph should wrap");
+    assert!(
+        slide.matches("<a:r>").count() >= 2,
+        "paragraph should preserve multiple runs"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn bullet_list_uses_native_buchar_without_literal_marker_text() {
+    let p = parts(
+        r#"#set page(width: 240pt, height: 140pt, margin: 0pt)
+#set text(size: 12pt)
+- First native bullet
+- Second native bullet"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert_eq!(text_shape_count(slide), 1, "bullet list should be one box");
+    assert_eq!(slide.matches("<a:buChar char=\"•\"/>").count(), 2);
+    assert_no_text_node_contains(slide, "•");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn enum_list_uses_native_autonumbering_without_literal_marker_text() {
+    let p = parts(
+        r#"#set page(width: 240pt, height: 140pt, margin: 0pt)
+#set text(size: 12pt)
++ First native enum
++ Second native enum"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert_eq!(text_shape_count(slide), 1, "enum list should be one box");
+    assert!(slide.contains("<a:buAutoNum type=\"arabicPeriod\" startAt=\"1\"/>"));
+    assert!(slide.contains("<a:buAutoNum type=\"arabicPeriod\" startAt=\"2\"/>"));
+    assert_no_text_node_contains(slide, "1.");
+    assert_no_text_node_contains(slide, "2.");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn top_heading_is_bound_to_title_placeholder() {
+    let p = parts(
+        r#"#set page(width: 320pt, height: 180pt, margin: 18pt)
+= Native Title
+Body text."#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let layout = &p["ppt/slideLayouts/slideLayout1.xml"];
+    let master = &p["ppt/slideMasters/slideMaster1.xml"];
+    assert!(has_title_placeholder(slide), "slide title shape should be a title ph");
+    assert!(has_title_placeholder(layout), "layout should inherit a title ph");
+    assert!(has_title_placeholder(master), "master should inherit a title ph");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn translucent_fill_emits_alpha() {
     let p = parts(
         "#set page(width: 200pt, height: 100pt, margin: 0pt)\n\
@@ -529,6 +601,45 @@ fn text_box_y(slide: &str, needle: &str) -> i64 {
         }
     }
     panic!("missing text box for {needle}");
+}
+
+fn text_shape_count(slide: &str) -> usize {
+    let doc = roxmltree::Document::parse(slide).unwrap();
+    doc.descendants()
+        .filter(|node| node.tag_name().name() == "sp")
+        .filter(|shape| {
+            shape.descendants().any(|node| node.tag_name().name() == "txBody")
+        })
+        .count()
+}
+
+fn drawingml_paragraph_count(slide: &str) -> usize {
+    let doc = roxmltree::Document::parse(slide).unwrap();
+    doc.descendants()
+        .filter(|node| {
+            node.tag_name().name() == "p"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/drawingml/2006/main")
+        })
+        .count()
+}
+
+fn assert_no_text_node_contains(slide: &str, marker: &str) {
+    let doc = roxmltree::Document::parse(slide).unwrap();
+    for node in doc.descendants().filter(|node| node.tag_name().name() == "t") {
+        assert!(
+            !node.text().unwrap_or_default().contains(marker),
+            "literal marker {marker:?} leaked into text node {:?}",
+            node.text()
+        );
+    }
+}
+
+fn has_title_placeholder(xml: &str) -> bool {
+    let doc = roxmltree::Document::parse(xml).unwrap();
+    doc.descendants().any(|node| {
+        node.tag_name().name() == "ph" && node.attribute("type") == Some("title")
+    })
 }
 
 fn tiny_png() -> Vec<u8> {

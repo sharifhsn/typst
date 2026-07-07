@@ -1,8 +1,9 @@
 use ecow::EcoString;
 
 use crate::dom::{
-    FillSpec, GeomShape, GroupShape, MediaId, PathGeom, PathSegment, Pic, PicGeom,
-    RunLink, SlideIr, SlideShape, StrokeSpec, TextBox, TextPara, TextRun,
+    BulletKind, FillSpec, GeomShape, GroupShape, MediaId, PathGeom, PathSegment, Pic,
+    PicGeom, Placeholder, RunLink, SlideIr, SlideShape, StrokeSpec, TextBox, TextPara,
+    TextRun, TextWrap,
 };
 use crate::xml::XmlWriter;
 
@@ -61,13 +62,6 @@ fn write_shape_tree(w: &mut XmlWriter, slide: &SlideIr, rels: &mut impl SlideRel
     w.close();
 }
 
-pub fn write_empty_shape_tree(w: &mut XmlWriter) {
-    w.open("p:spTree").start_children();
-    write_group_nv(w, 1, "");
-    w.leaf("p:grpSpPr");
-    w.close();
-}
-
 fn write_shape(
     w: &mut XmlWriter,
     shape: &SlideShape,
@@ -89,7 +83,9 @@ fn write_text_box(
     rels: &mut impl SlideRelSink,
 ) {
     w.open("p:sp").start_children();
-    write_sp_nv(w, id, &format!("TextBox {id}"), true);
+    let is_title = matches!(text.placeholder, Some(Placeholder::Title));
+    let name = if is_title { format!("Title {id}") } else { format!("TextBox {id}") };
+    write_sp_nv(w, id, &name, !is_title, text.placeholder);
     w.open("p:spPr").start_children();
     write_xfrm(w, text.x_emu, text.y_emu, text.w_emu, text.h_emu, text.rot_60k);
     write_prst_geom(w, "rect");
@@ -100,7 +96,7 @@ fn write_text_box(
     w.close();
 
     w.open("p:txBody").start_children();
-    write_body_pr(w);
+    write_body_pr(w, text.wrap);
     w.leaf("a:lstStyle");
     for para in &text.paras {
         write_para(w, para, rels);
@@ -109,14 +105,20 @@ fn write_text_box(
     w.close();
 }
 
-fn write_body_pr(w: &mut XmlWriter) {
+fn write_body_pr(w: &mut XmlWriter, wrap: TextWrap) {
     w.open("a:bodyPr")
         .attr("lIns", "0")
         .attr("tIns", "0")
         .attr("rIns", "0")
         .attr("bIns", "0")
         .attr("anchor", "t")
-        .attr("wrap", "none")
+        .attr(
+            "wrap",
+            match wrap {
+                TextWrap::None => "none",
+                TextWrap::Square => "square",
+            },
+        )
         .attr("horzOverflow", "overflow")
         .attr("vertOverflow", "overflow")
         .start_children();
@@ -130,16 +132,43 @@ fn write_para(w: &mut XmlWriter, para: &TextPara, rels: &mut impl SlideRelSink) 
     if para.rtl {
         w.attr("rtl", "1");
     }
+    if let Some(bullet) = &para.bullet {
+        w.attr("lvl", &bullet.lvl.to_string())
+            .attr("marL", &bullet.mar_l_emu.to_string())
+            .attr("indent", &bullet.indent_emu.to_string());
+    }
     w.start_children();
     w.open("a:lnSpc").start_children();
-    w.open("a:spcPct").attr("val", "100000").empty();
+    match para.line_spacing_100pt {
+        // The measured pitch, absolute: a percentage would compound with the
+        // font's own line height and overflow the box.
+        Some(pts) => w.open("a:spcPts").attr("val", &pts.to_string()).empty(),
+        None => w.open("a:spcPct").attr("val", "100000").empty(),
+    }
     w.close();
+    if let Some(bullet) = &para.bullet {
+        write_bullet(w, bullet);
+    }
     w.close();
 
     for run in &para.runs {
         write_text_run(w, run, rels);
     }
     w.close();
+}
+
+fn write_bullet(w: &mut XmlWriter, bullet: &crate::dom::ParaBullet) {
+    match &bullet.kind {
+        BulletKind::Char(ch) => {
+            w.open("a:buChar").attr("char", ch).empty();
+        }
+        BulletKind::AutoNum { ty, start_at } => {
+            w.open("a:buAutoNum")
+                .attr("type", ty)
+                .attr("startAt", &start_at.to_string())
+                .empty();
+        }
+    }
 }
 
 fn write_text_run(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink) {
@@ -242,7 +271,7 @@ fn write_pic_geom(w: &mut XmlWriter, geom: &PicGeom) {
 
 fn write_geom_shape(w: &mut XmlWriter, geom: &GeomShape, id: u32) {
     w.open("p:sp").start_children();
-    write_sp_nv(w, id, &format!("Shape {id}"), false);
+    write_sp_nv(w, id, &format!("Shape {id}"), false, None);
     w.open("p:spPr").start_children();
     write_xfrm(w, geom.x_emu, geom.y_emu, geom.w_emu, geom.h_emu, geom.rot_60k);
     write_geom(w, &geom.geom, geom.w_emu, geom.h_emu);
@@ -288,18 +317,40 @@ fn write_group_shape(
     w.close();
 }
 
-fn write_sp_nv(w: &mut XmlWriter, id: u32, name: &str, text_box: bool) {
+fn write_sp_nv(
+    w: &mut XmlWriter,
+    id: u32,
+    name: &str,
+    text_box: bool,
+    placeholder: Option<Placeholder>,
+) {
     w.open("p:nvSpPr").start_children();
     w.open("p:cNvPr")
         .attr("id", &id.to_string())
         .attr("name", name)
         .empty();
     w.open("p:cNvSpPr");
-    if text_box {
+    if text_box && placeholder.is_none() {
         w.attr("txBox", "1");
     }
-    w.empty();
-    w.leaf("p:nvPr");
+    if placeholder.is_some() {
+        w.start_children();
+        w.open("a:spLocks").attr("noGrp", "1").empty();
+        w.close();
+    } else {
+        w.empty();
+    }
+    if let Some(placeholder) = placeholder {
+        w.open("p:nvPr").start_children();
+        match placeholder {
+            Placeholder::Title => {
+                w.open("p:ph").attr("type", "title").attr("idx", "0").empty();
+            }
+        }
+        w.close();
+    } else {
+        w.leaf("p:nvPr");
+    }
     w.close();
 }
 

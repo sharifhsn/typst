@@ -23,16 +23,39 @@ pub struct TextBox {
     pub w_emu: i64,
     pub h_emu: i64,
     pub rot_60k: i32,
+    pub wrap: TextWrap,
+    pub placeholder: Option<Placeholder>,
     pub paras: Vec<TextPara>,
 }
 
+/// Text wrapping behavior for a DrawingML text body.
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub enum TextWrap {
+    None,
+    Square,
+}
+
+/// Placeholder type attached to a slide text shape.
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub enum Placeholder {
+    Title,
+}
+
 /// A text paragraph.
+#[derive(Clone)]
 pub struct TextPara {
     pub runs: Vec<TextRun>,
     pub rtl: bool,
+    /// Absolute line pitch (baseline-to-baseline) in 1/100 pt (`a:spcPts`).
+    /// A percentage (`a:spcPct`) would multiply the FONT's single spacing -
+    /// which already includes its internal leading - inflating the measured
+    /// pitch and overflowing the box. `None` = explicit single spacing.
+    pub line_spacing_100pt: Option<i32>,
+    pub bullet: Option<ParaBullet>,
 }
 
 /// A text run.
+#[derive(Clone)]
 pub struct TextRun {
     pub text: EcoString,
     pub family: EcoString,
@@ -45,7 +68,24 @@ pub struct TextRun {
     pub link: Option<RunLink>,
 }
 
+/// Native bullet or autonumbering properties for a paragraph.
+#[derive(Clone)]
+pub struct ParaBullet {
+    pub lvl: u8,
+    pub mar_l_emu: i64,
+    pub indent_emu: i64,
+    pub kind: BulletKind,
+}
+
+/// Bullet marker kind.
+#[derive(Clone)]
+pub enum BulletKind {
+    Char(EcoString),
+    AutoNum { ty: &'static str, start_at: u32 },
+}
+
 /// A run hyperlink target.
+#[derive(Clone)]
 pub enum RunLink {
     Url(EcoString),
     Slide(usize),
