@@ -462,6 +462,31 @@ fn bare_nary_operator_and_operand_boundary() {
 }
 
 #[test]
+fn spaced_scripted_nary_operators_are_siblings() {
+    // Two *scripted* big operators separated only by spacing must stay siblings,
+    // not nest the second inside the first's operand (which rendered garbled).
+    // The scripted `product_(i)` / `union.big_(j)` are `Scripts` items, so the
+    // boundary check has to see through the script wrapper, not just bare glyphs.
+    let p = parts("$ product_(i=1)^n a_i quad union.big_(j=1)^m b_j $");
+    let doc = &p["word/document.xml"];
+    assert_eq!(doc.matches("<m:nary>").count(), 2, "two n-ary operators");
+    let first_close = doc.find("</m:nary>").unwrap();
+    let second_open = doc.match_indices("<m:nary>").nth(1).unwrap().0;
+    assert!(
+        second_open > first_close,
+        "the second operator must not be nested inside the first's operand"
+    );
+    // A nested sum (no separator) must still nest: the inner operator is the
+    // very first operand item.
+    let q = parts("$ sum_(i) sum_(j) a_(i j) $");
+    let d2 = &q["word/document.xml"];
+    let fc = d2.find("</m:nary>").unwrap();
+    let so = d2.match_indices("<m:nary>").nth(1).unwrap().0;
+    assert!(so < fc, "adjacent sums still nest");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn colored_math_carries_its_color() {
     // `#text(red)[$x$]` inside an equation must color the math run (a `w:rPr`
     // colour on the math `m:r`), not render black.

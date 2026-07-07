@@ -884,8 +884,14 @@ fn component_color(comp: &MathComponent) -> Option<[u8; 3]> {
 /// `start`. The operand binds the items that follow the operator up to — but not
 /// including — the next *relation* (`=`, `<`, …) or *binary operator* (`+`, `−`,
 /// `±`). Stopping at a binary operator keeps `∑_i a_i + ∑_j b_j` as two sibling
-/// sums (instead of nesting the second inside the first's operand), while a
-/// following n-ary operator is NOT a boundary, so `∑_i ∑_j a` still nests.
+/// sums (instead of nesting the second inside the first's operand).
+///
+/// A following n-ary operator ends the operand too, but only *after* at least
+/// one operand item — so `∑_i ∑_j a` still nests (the inner ∑ is the very first
+/// operand item), while `∏_i a_i quad ⋃_j b_j` keeps the two big operators as
+/// siblings instead of swallowing the second into the first's operand. Ordinary
+/// following content (e.g. the `dx` of `∫ f dx`) is not an n-ary, so it stays in
+/// the operand as before.
 fn operand_end(items: &[MathItem], start: usize) -> usize {
     let mut j = start;
     while j < items.len() {
@@ -894,9 +900,27 @@ fn operand_end(items: &[MathItem], start: usize) -> usize {
         {
             break;
         }
+        if j > start && item_starts_nary(&items[j]) {
+            break;
+        }
         j += 1;
     }
     j
+}
+
+/// Whether `item` begins an n-ary operator scope — a bare large-operator glyph,
+/// or a `Scripts` whose base is one (`∑_i`, `∫_a^b`). Mirrors the detection in
+/// `emit_items`, so `operand_end` treats a following *scripted* operator as a
+/// sibling boundary too, not only a bare glyph.
+fn item_starts_nary(item: &MathItem) -> bool {
+    if nary_operator_char(item).is_some() {
+        return true;
+    }
+    matches!(item, MathItem::Component(comp)
+        if matches!(&comp.kind, MathKind::Scripts(scripts)
+            if nary_operator_char(&scripts.base).is_some()
+                && scripts.top_left.is_none()
+                && scripts.bottom_left.is_none()))
 }
 
 fn nary_operator_char(item: &MathItem) -> Option<char> {
