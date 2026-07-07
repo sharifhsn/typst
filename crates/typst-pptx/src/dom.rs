@@ -60,6 +60,17 @@ pub struct Pic {
     pub rot_60k: i32,
     pub media: MediaId,
     pub alt: Option<EcoString>,
+    pub geom: PicGeom,
+    /// Source-rectangle crop `[left, top, right, bottom]` in 1/1000 % (OOXML
+    /// `a:srcRect`), for a cover-fitted image whose overflow the clip hides.
+    pub src_rect: Option<[i32; 4]>,
+}
+
+/// A preset geometry for a picture.
+pub enum PicGeom {
+    Rect,
+    RoundRect { adj_100k: i32 },
+    Ellipse,
 }
 
 /// A positioned vector shape.

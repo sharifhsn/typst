@@ -1,6 +1,7 @@
 //! Structural and well-formedness tests for the PPTX exporter foundation.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::io::Read;
 
 use typst::diag::{FileError, FileResult};
@@ -71,6 +72,21 @@ fn pptx_bytes(src: &str) -> Vec<u8> {
     pptx(&doc, &PptxOptions::default()).expect("pptx export failed")
 }
 
+/// Compiles `src` to a PPTX and returns all package parts as `name -> bytes`.
+fn binary_parts(src: &str) -> HashMap<String, Vec<u8>> {
+    let bytes = pptx_bytes(src);
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut map = HashMap::new();
+    for i in 0..zip.len() {
+        let mut f = zip.by_index(i).unwrap();
+        let name = f.name().to_string();
+        let mut bytes = vec![];
+        f.read_to_end(&mut bytes).unwrap();
+        map.insert(name, bytes);
+    }
+    map
+}
+
 /// Compiles `src` to a PPTX and returns text parts as `name -> text`.
 fn parts(src: &str) -> HashMap<String, String> {
     let bytes = pptx_bytes(src);
@@ -85,6 +101,17 @@ fn parts(src: &str) -> HashMap<String, String> {
         }
     }
     map
+}
+
+fn text_parts_from_binary(parts: &HashMap<String, Vec<u8>>) -> HashMap<String, String> {
+    parts
+        .iter()
+        .filter_map(|(name, bytes)| {
+            std::str::from_utf8(bytes)
+                .ok()
+                .map(|text| (name.clone(), text.into()))
+        })
+        .collect()
 }
 
 /// Parses every XML part with the namespace-aware parser.
@@ -319,6 +346,65 @@ fn real_clip_still_rasterizes_exactly() {
 }
 
 #[test]
+fn rounded_clip_single_image_becomes_native_round_rect_picture() {
+    let png = tiny_png();
+    let src = format!(
+        "#set page(width: 100pt, height: 70pt, margin: 0pt)\n\
+         #box(width: 60pt, height: 40pt, radius: 10pt, clip: true,\n\
+         image({}, width: 100%, height: 100%, fit: \"stretch\"))",
+        bytes_literal(&png),
+    );
+
+    let p = binary_parts(&src);
+    let slide = std::str::from_utf8(&p["ppt/slides/slide1.xml"]).unwrap();
+    assert!(slide.contains("<p:pic"), "image should remain a native picture");
+    assert!(
+        slide.contains("prst=\"roundRect\""),
+        "picture should carry roundRect geometry"
+    );
+    assert!(
+        slide.contains("<a:gd name=\"adj\" fmla=\"val 25000\"/>"),
+        "10pt radius over 40pt short side should become adj=25000"
+    );
+
+    let mut media: Vec<_> =
+        p.iter().filter(|(name, _)| name.starts_with("ppt/media/")).collect();
+    media.sort_by(|a, b| a.0.cmp(b.0));
+    assert_eq!(media.len(), 1, "should not add a rendered fallback image");
+    assert_eq!(media[0].1, &png, "media part should be the original PNG bytes");
+    assert_all_wellformed(&text_parts_from_binary(&p));
+}
+
+#[test]
+fn rounded_cover_image_crops_the_overflow_with_src_rect() {
+    // A square image `fit: "cover"` into a 60x40 box scales to 60x60 and
+    // overflows top and bottom. The rounded picture must carry the original
+    // bytes and crop the overflow with `a:srcRect` (rather than rasterize the
+    // visible slice), so 10pt of overflow on each 60pt edge = 16.667%.
+    let png = tiny_png();
+    let src = format!(
+        "#set page(width: 100pt, height: 70pt, margin: 0pt)\n\
+         #box(width: 60pt, height: 40pt, radius: 10pt, clip: true,\n\
+         image({}, width: 100%, height: 100%, fit: \"cover\"))",
+        bytes_literal(&png),
+    );
+
+    let p = binary_parts(&src);
+    let slide = std::str::from_utf8(&p["ppt/slides/slide1.xml"]).unwrap();
+    assert!(slide.contains("prst=\"roundRect\""), "cover picture stays a roundRect");
+    assert!(
+        slide.contains("<a:srcRect l=\"0\" t=\"16667\" r=\"0\" b=\"16667\"/>"),
+        "the vertical cover overflow should be cropped, got: {slide}"
+    );
+
+    let media: Vec<_> =
+        p.iter().filter(|(name, _)| name.starts_with("ppt/media/")).collect();
+    assert_eq!(media.len(), 1, "cover crop must not add a rendered fallback image");
+    assert_eq!(media[0].1, &png, "media part must be the original PNG bytes");
+    assert_all_wellformed(&text_parts_from_binary(&p));
+}
+
+#[test]
 fn out_of_range_page_link_is_dropped() {
     // A jump to a page that does not exist must not emit a slide relationship
     // (PowerPoint treats a dangling slide target as a corrupt file).
@@ -443,4 +529,22 @@ fn text_box_y(slide: &str, needle: &str) -> i64 {
         }
     }
     panic!("missing text box for {needle}");
+}
+
+fn tiny_png() -> Vec<u8> {
+    let mut pixmap = tiny_skia::Pixmap::new(2, 2).unwrap();
+    pixmap.fill(tiny_skia::Color::from_rgba8(210, 80, 40, 255));
+    pixmap.encode_png().unwrap()
+}
+
+fn bytes_literal(bytes: &[u8]) -> String {
+    let mut out = String::from("bytes((");
+    for (i, byte) in bytes.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        write!(&mut out, "{byte}").unwrap();
+    }
+    out.push_str("))");
+    out
 }

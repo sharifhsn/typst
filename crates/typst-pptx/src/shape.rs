@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
 use crate::dom::{
-    FillSpec, GeomShape, GradientStop, PathGeom, PathSegment, StrokeSpec,
+    FillSpec, GeomShape, GradientStop, PathGeom, PathSegment, PicGeom, StrokeSpec,
 };
 
-use typst_library::layout::{Abs, Point, Transform};
+use typst_library::layout::{Abs, Point, Size, Transform};
 use typst_library::visualize::{
     Color, ColorSpace, Curve, CurveItem, FixedStroke, Geometry, Gradient, LineCap, Paint,
     ProcessColorSpace, Shape,
@@ -36,6 +36,111 @@ pub(crate) fn shape_to_geom(
         fill,
         stroke,
     })
+}
+
+/// Classify a clip curve that can be represented as a preset picture geometry.
+///
+/// This is intentionally narrower than general shape lowering: it only accepts
+/// the full-frame mask geometries that can be applied to the picture itself.
+pub(crate) fn clip_to_pic_geom(clip: &Curve, size: Size) -> Option<PicGeom> {
+    if !size.x.to_pt().is_finite()
+        || !size.y.to_pt().is_finite()
+        || size.x.to_pt() <= 0.0
+        || size.y.to_pt() <= 0.0
+    {
+        return None;
+    }
+
+    if *clip == Curve::ellipse(size) {
+        return Some(PicGeom::Ellipse);
+    }
+
+    let radius = rounded_rect_radius(clip, size)?;
+    Some(PicGeom::RoundRect { adj_100k: round_rect_adj(radius, size) })
+}
+
+fn round_rect_adj(radius: Abs, size: Size) -> i32 {
+    let shorter = size.x.min(size.y).to_pt();
+    if shorter <= 0.0 {
+        return 0;
+    }
+
+    ((radius.to_pt() / shorter) * 100_000.0).round().clamp(0.0, 50_000.0) as i32
+}
+
+fn rounded_rect_radius(clip: &Curve, size: Size) -> Option<Abs> {
+    let [
+        CurveItem::Move(m0),
+        CurveItem::Cubic(c10, c20, e0),
+        CurveItem::Line(l1),
+        CurveItem::Cubic(c11, c21, e1),
+        CurveItem::Line(l2),
+        CurveItem::Cubic(c12, c22, e2),
+        CurveItem::Line(l3),
+        CurveItem::Cubic(c13, c23, e3),
+        CurveItem::Close,
+    ] = clip.0.as_slice()
+    else {
+        return None;
+    };
+
+    let w = size.x.to_pt();
+    let h = size.y.to_pt();
+    let r = m0.y.to_pt();
+    const EPS: f64 = 0.01;
+    if r <= EPS || r > w.min(h) / 2.0 + EPS || !near(m0.x.to_pt(), 0.0) {
+        return None;
+    }
+
+    for (point, expected) in [
+        (*m0, (0.0, r)),
+        (*e0, (r, 0.0)),
+        (*l1, (w - r, 0.0)),
+        (*e1, (w, r)),
+        (*l2, (w, h - r)),
+        (*e2, (w - r, h)),
+        (*l3, (r, h)),
+        (*e3, (0.0, h - r)),
+    ] {
+        if !point_near(point, expected) {
+            return None;
+        }
+    }
+
+    // The 8 endpoints above already pin a rounded rectangle of radius r, and
+    // the segment pattern already forced the corners to be cubics (not chamfer
+    // lines). Only sanity-check that each corner's control points bulge inside
+    // that corner's box — i.e. a convex arc — without matching Typst's exact
+    // bezier kappa, which PowerPoint's roundRect arc need not reproduce anyway.
+    for (c1, c2, start, end) in [
+        (*c10, *c20, (0.0, r), (r, 0.0)),
+        (*c11, *c21, (w - r, 0.0), (w, r)),
+        (*c12, *c22, (w, h - r), (w - r, h)),
+        (*c13, *c23, (r, h), (0.0, h - r)),
+    ] {
+        if !control_in_corner(c1, start, end) || !control_in_corner(c2, start, end) {
+            return None;
+        }
+    }
+
+    Some(Abs::pt(r.min(w.min(h) / 2.0)))
+}
+
+/// Whether a corner-arc control point lies inside the box spanned by the arc's
+/// two endpoints (padded), the signature of a convex quarter-arc.
+fn control_in_corner(c: Point, start: (f64, f64), end: (f64, f64)) -> bool {
+    const PAD: f64 = 0.5;
+    let (x, y) = (c.x.to_pt(), c.y.to_pt());
+    (start.0.min(end.0) - PAD..=start.0.max(end.0) + PAD).contains(&x)
+        && (start.1.min(end.1) - PAD..=start.1.max(end.1) + PAD).contains(&y)
+}
+
+fn point_near(point: Point, expected: (f64, f64)) -> bool {
+    near(point.x.to_pt(), expected.0) && near(point.y.to_pt(), expected.1)
+}
+
+fn near(actual: f64, expected: f64) -> bool {
+    (actual - expected).abs() <= 0.01
 }
 
 /// A 2D affine transform's uniform scale factor, if it is a similarity:

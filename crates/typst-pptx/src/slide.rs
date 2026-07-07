@@ -2,8 +2,9 @@ use ecow::EcoString;
 use typst_layout::{Page, PagedDocument};
 use typst_library::layout::{Abs, Frame, FrameItem, Point, Size, Transform};
 use typst_library::model::Destination;
+use typst_library::visualize::{Paint, Shape};
 
-use crate::dom::{FillSpec, SlideCtx, SlideIr, SlideShape};
+use crate::dom::{FillSpec, PicGeom, SlideCtx, SlideIr, SlideShape};
 use crate::text::{LinkTarget, TextSource};
 
 /// Convert all pages into slide IR.
@@ -93,6 +94,16 @@ impl<'a, 'b> Walker<'a, 'b> {
                     };
                     if clip_ok && classify_similarity(group_transform).is_some() {
                         self.walk_frame(&group.frame, group_transform);
+                    } else if let Some(clip) = &group.clip
+                        && let Some(geom) =
+                            crate::shape::clip_to_pic_geom(clip, group.frame.size())
+                        && self.try_emit_clipped_image(
+                            order,
+                            &group.frame,
+                            group_transform,
+                            geom,
+                        )
+                    {
                     } else {
                         debug_raster(
                             "group",
@@ -218,10 +229,55 @@ impl<'a, 'b> Walker<'a, 'b> {
         group.transform = item_transform;
         let mut outer = Frame::soft(Size::zero());
         outer.push(Point::zero(), FrameItem::Group(group));
-        if let Some((media, off, size)) = crate::image::raster_fallback(self.ctx, outer)
-        {
+        if let Some((media, off, size)) = crate::image::raster_fallback(self.ctx, outer) {
             self.push_pic(order, media, off, size, alt);
         }
+    }
+
+    fn try_emit_clipped_image(
+        &mut self,
+        order: usize,
+        frame: &'a Frame,
+        group_transform: Transform,
+        geom: PicGeom,
+    ) -> bool {
+        let Some((pos, image, size)) = single_frame_image(frame) else {
+            return false;
+        };
+        // Only translation is representable as a `p:pic` placement.
+        let Some(sim) = classify_similarity(group_transform) else {
+            return false;
+        };
+        if sim.rot_60k != 0 || (sim.scale - 1.0).abs() > 1e-6 {
+            return false;
+        }
+        // The image must COVER the whole frame; the visible frame is the crop
+        // the clip reveals. A gap (image smaller than the frame on any side)
+        // would expose background we can't represent, so fall back to raster.
+        let Some(src_rect) = cover_src_rect(pos, size, frame.size()) else {
+            return false;
+        };
+        // Embed the original bytes and place the picture at the frame's bounds
+        // (in outer coordinates); the geom rounds it and the srcRect crops the
+        // cover overflow.
+        let Some((media, off, _sz)) =
+            crate::image::embed_original_image(self.ctx, image, size)
+        else {
+            return false;
+        };
+        if !point_is_zero(off) {
+            return false;
+        }
+        let pic_pos = Point::zero().transform(group_transform);
+        self.push_pic_with_geom(
+            order,
+            media,
+            pic_pos,
+            frame.size(),
+            image.alt().map(Into::into),
+            (geom, (src_rect != [0; 4]).then_some(src_rect)),
+        );
+        true
     }
 
     fn push_pic(
@@ -232,6 +288,20 @@ impl<'a, 'b> Walker<'a, 'b> {
         size: Size,
         alt: Option<EcoString>,
     ) {
+        self.push_pic_with_geom(order, media, pos, size, alt, (PicGeom::Rect, None));
+    }
+
+    /// `shape` is the preset geometry paired with an optional `a:srcRect` crop.
+    fn push_pic_with_geom(
+        &mut self,
+        order: usize,
+        media: crate::dom::MediaId,
+        pos: Point,
+        size: Size,
+        alt: Option<EcoString>,
+        shape: (PicGeom, Option<[i32; 4]>),
+    ) {
+        let (geom, src_rect) = shape;
         self.shapes.push(OrderedShape {
             order,
             shape: SlideShape::Pic(crate::dom::Pic {
@@ -242,6 +312,8 @@ impl<'a, 'b> Walker<'a, 'b> {
                 rot_60k: 0,
                 media,
                 alt,
+                geom,
+                src_rect,
             }),
         });
     }
@@ -266,6 +338,97 @@ impl<'a, 'b> Walker<'a, 'b> {
         let index = page_1based.checked_sub(1)?;
         (index < self.document.pages().len()).then_some(LinkTarget::Slide(index))
     }
+}
+
+fn single_frame_image(
+    frame: &Frame,
+) -> Option<(Point, &typst_library::visualize::Image, Size)> {
+    let mut image = None;
+    for (pos, item) in frame.items() {
+        match item {
+            FrameItem::Image(value, size, _) => {
+                if image.is_some() {
+                    return None;
+                }
+                image = Some((*pos, value, *size));
+            }
+            // A clipped image is wrapped in one or more plain pass-through
+            // groups (Typst nests content + introspection tags): recurse into a
+            // group that doesn't clip and only translates, mapping the found
+            // image's position back into this frame's coordinates.
+            FrameItem::Group(group) => {
+                // Recurse through a wrapper group that only translates and whose
+                // clip (if any) is a plain bounding rectangle — a no-op the
+                // image fills exactly. `#box(radius:.., clip: true, image)`
+                // nests a rounded-clip group (captured by the outer geom) around
+                // an inner rect-clip group holding the image.
+                let clip_ok = match &group.clip {
+                    None => true,
+                    Some(c) => {
+                        *c == typst_library::visualize::Curve::rect(group.frame.size())
+                    }
+                };
+                if !clip_ok || image.is_some() {
+                    return None;
+                }
+                let sim = classify_similarity(group.transform)?;
+                if sim.rot_60k != 0 || (sim.scale - 1.0).abs() > 1e-6 {
+                    return None;
+                }
+                let (ipos, value, size) = single_frame_image(&group.frame)?;
+                let tpos = ipos.transform(group.transform);
+                image = Some((Point::new(pos.x + tpos.x, pos.y + tpos.y), value, size));
+            }
+            FrameItem::Shape(shape, _) if shape_draws_no_ink(shape) => {}
+            FrameItem::Link(_, _) | FrameItem::Tag(_) => {}
+            _ => return None,
+        }
+    }
+    image
+}
+
+/// The `a:srcRect` crop `[l, t, r, b]` (1/1000 %) that reveals `frame` out of an
+/// image placed at `pos` with `size`, or `None` if the image does not fully
+/// cover the frame (a gap would expose background the clip can't represent).
+fn cover_src_rect(pos: Point, size: Size, frame: Size) -> Option<[i32; 4]> {
+    let (ix, iy) = (pos.x.to_pt(), pos.y.to_pt());
+    let (iw, ih) = (size.x.to_pt(), size.y.to_pt());
+    let (fw, fh) = (frame.x.to_pt(), frame.y.to_pt());
+    const EPS: f64 = 0.05;
+    if iw <= EPS || ih <= EPS {
+        return None;
+    }
+    // The image must extend past every edge of the frame (cover, not contain).
+    if ix > EPS || iy > EPS || ix + iw < fw - EPS || iy + ih < fh - EPS {
+        return None;
+    }
+    let frac = |amount: f64, span: f64| {
+        ((amount.max(0.0) / span) * 100_000.0).round().clamp(0.0, 99_000.0) as i32
+    };
+    Some([frac(-ix, iw), frac(-iy, ih), frac(ix + iw - fw, iw), frac(iy + ih - fh, ih)])
+}
+
+fn shape_draws_no_ink(shape: &Shape) -> bool {
+    let fill_draws = shape.fill.as_ref().is_some_and(paint_draws_ink);
+    let stroke_draws = shape.stroke.as_ref().is_some_and(|stroke| {
+        stroke.thickness.to_pt() > 0.0 && paint_draws_ink(&stroke.paint)
+    });
+    !fill_draws && !stroke_draws
+}
+
+fn paint_draws_ink(paint: &Paint) -> bool {
+    match paint {
+        Paint::Solid(color) => crate::shape::srgb_bytes(color)[3] != 0,
+        Paint::Gradient(_) | Paint::Tiling(_) => true,
+    }
+}
+
+fn point_is_zero(point: Point) -> bool {
+    near_abs(point.x, Abs::zero()) && near_abs(point.y, Abs::zero())
+}
+
+fn near_abs(a: Abs, b: Abs) -> bool {
+    (a - b).abs().to_pt() <= 0.01
 }
 
 fn attach_links(text: &mut [TextSource<'_>], links: &[LinkRect]) {

@@ -1,8 +1,8 @@
 use ecow::EcoString;
 
 use crate::dom::{
-    FillSpec, GeomShape, GroupShape, MediaId, PathGeom, PathSegment, Pic, RunLink,
-    SlideIr, SlideShape, StrokeSpec, TextBox, TextPara, TextRun,
+    FillSpec, GeomShape, GroupShape, MediaId, PathGeom, PathSegment, Pic, PicGeom,
+    RunLink, SlideIr, SlideShape, StrokeSpec, TextBox, TextPara, TextRun,
 };
 use crate::xml::XmlWriter;
 
@@ -210,6 +210,14 @@ fn write_pic(w: &mut XmlWriter, pic: &Pic, id: u32, rels: &mut impl SlideRelSink
 
     w.open("p:blipFill").start_children();
     w.open("a:blip").attr("r:embed", &rid).empty();
+    if let Some([l, t, r, b]) = pic.src_rect {
+        w.open("a:srcRect")
+            .attr("l", &l.to_string())
+            .attr("t", &t.to_string())
+            .attr("r", &r.to_string())
+            .attr("b", &b.to_string())
+            .empty();
+    }
     w.open("a:stretch").start_children();
     w.leaf("a:fillRect");
     w.close();
@@ -217,9 +225,19 @@ fn write_pic(w: &mut XmlWriter, pic: &Pic, id: u32, rels: &mut impl SlideRelSink
 
     w.open("p:spPr").start_children();
     write_xfrm(w, pic.x_emu, pic.y_emu, pic.w_emu, pic.h_emu, pic.rot_60k);
-    write_prst_geom(w, "rect");
+    write_pic_geom(w, &pic.geom);
     w.close();
     w.close();
+}
+
+fn write_pic_geom(w: &mut XmlWriter, geom: &PicGeom) {
+    match geom {
+        PicGeom::Rect => write_prst_geom(w, "rect"),
+        PicGeom::RoundRect { adj_100k } => {
+            write_prst_geom_with_adj(w, "roundRect", *adj_100k)
+        }
+        PicGeom::Ellipse => write_prst_geom(w, "ellipse"),
+    }
 }
 
 fn write_geom_shape(w: &mut XmlWriter, geom: &GeomShape, id: u32) {
@@ -327,7 +345,23 @@ fn write_prst_geom(w: &mut XmlWriter, prst: &'static str) {
     w.close();
 }
 
-fn write_custom_geom(w: &mut XmlWriter, segments: &[PathSegment], w_emu: i64, h_emu: i64) {
+fn write_prst_geom_with_adj(w: &mut XmlWriter, prst: &'static str, adj: i32) {
+    w.open("a:prstGeom").attr("prst", prst).start_children();
+    w.open("a:avLst").start_children();
+    w.open("a:gd")
+        .attr("name", "adj")
+        .attr("fmla", &format!("val {}", adj.clamp(0, 50_000)))
+        .empty();
+    w.close();
+    w.close();
+}
+
+fn write_custom_geom(
+    w: &mut XmlWriter,
+    segments: &[PathSegment],
+    w_emu: i64,
+    h_emu: i64,
+) {
     w.open("a:custGeom").start_children();
     w.leaf("a:avLst");
     w.leaf("a:gdLst");
@@ -447,7 +481,9 @@ fn write_srgb(w: &mut XmlWriter, rgba: [u8; 4]) {
     } else {
         // Straight alpha as a percentage in thousandths (DrawingML CT_Color).
         w.open("a:srgbClr").attr("val", &hex([r, g, b])).start_children();
-        w.open("a:alpha").attr("val", &(a as u32 * 100_000 / 255).to_string()).empty();
+        w.open("a:alpha")
+            .attr("val", &(a as u32 * 100_000 / 255).to_string())
+            .empty();
         w.close();
     }
 }

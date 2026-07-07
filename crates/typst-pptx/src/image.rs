@@ -28,6 +28,16 @@ pub(crate) fn embed_image(
     raster_fallback(ctx, frame)
 }
 
+/// Embed an exchange-format raster image without re-rendering it.
+pub(crate) fn embed_original_image(
+    ctx: &mut SlideCtx,
+    image: &Image,
+    size: Size,
+) -> Option<(MediaId, Point, Size)> {
+    let (bytes, ext) = embeddable_bytes(image)?;
+    Some((ctx.add_media(bytes, ext), Point::zero(), size))
+}
+
 /// Rasterize an already laid-out frame to a cropped PNG media part.
 ///
 /// The returned offset is relative to the input frame's origin and includes both
@@ -155,10 +165,7 @@ fn frame_has_text(frame: &Frame) -> bool {
 /// compares pixels. Equality is judged at the raster fallback's own
 /// resolution, so "no visible difference" means exactly "no difference in
 /// what we would otherwise ship as a picture".
-fn clip_is_noop_by_render(
-    clip: &typst_library::visualize::Curve,
-    frame: &Frame,
-) -> bool {
+fn clip_is_noop_by_render(clip: &typst_library::visualize::Curve, frame: &Frame) -> bool {
     let mut ink = None;
     frame_ink_rect(frame, Point::zero(), &mut ink);
     let Some(ink) = ink else { return true };
@@ -177,8 +184,7 @@ fn clip_is_noop_by_render(
         let size =
             Size::new(ink.size().x.max(Abs::pt(0.5)), ink.size().y.max(Abs::pt(0.5)));
         let mut canvas = Frame::hard(size);
-        canvas
-            .push(Point::new(-ink.min.x, -ink.min.y), FrameItem::Group(group));
+        canvas.push(Point::new(-ink.min.x, -ink.min.y), FrameItem::Group(group));
         let page = typst_layout::Page {
             frame: canvas,
             bleed: Sides::splat(Abs::zero()),
