@@ -25,8 +25,9 @@ use typst_library::visualize::{ImageElem, Paint};
 use typst_syntax::{FileId, Span};
 
 use crate::dom::{
-    Block, BookmarkTable, Footnote, ListSpec, MediaPart, NumberingTable, ParaProps, Run,
-    RunProps, TocFigure, TocHeading, Underline, VertAlign,
+    Block, BookmarkTable, Footnote, HeadingStyleSample, ListSpec, MediaPart,
+    NumberingTable, ParaProps, Run, RunProps, TocFigure, TocHeading, Underline,
+    VertAlign,
 };
 use crate::mappers;
 use crate::package::{RelMode, Rels};
@@ -102,6 +103,10 @@ pub struct DocxCtx<'a, 'e> {
     /// Headings recorded in document order as they are converted, used to
     /// populate any table of contents once each heading's real bookmark exists.
     pub(crate) toc_headings: Vec<TocHeading>,
+
+    /// Resolved heading style samples by emitted heading. The document pass
+    /// majority-votes these into `HeadingN` style definitions.
+    pub(crate) heading_style_samples: Vec<HeadingStyleSample>,
 
     /// Captioned figures/tables recorded in document order, used to populate any
     /// list of figures/tables once each figure's real bookmark exists.
@@ -179,6 +184,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             bookmarks: BookmarkTable::default(),
             deferred_tags: Vec::new(),
             toc_headings: Vec::new(),
+            heading_style_samples: Vec::new(),
             toc_figures: Vec::new(),
             // A sane finite default (~A4 text width); overridden from the real
             // page geometry by `docx_document` before any conversion happens.
@@ -793,6 +799,12 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         self.max_heading_level = self.max_heading_level.max(level);
     }
 
+    /// Records the resolved run properties that should define this heading level.
+    pub fn note_heading_style(&mut self, level: u8, props: RunProps) {
+        self.heading_style_samples
+            .push(HeadingStyleSample { level, rpr: style_owned_heading_props(props) });
+    }
+
     // -- Property resolvers -------------------------------------------------
 
     /// Resolves a `TextElem`'s effective run properties.
@@ -812,18 +824,13 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         let size = props::pt_to_half_pt(styles.resolve(TextElem::size).to_pt());
         p.size_half_pt = Some(size);
 
-        // Colour. Black is Word's own default (in `docDefaults`), so omit it and
-        // inherit — this both keeps the body compact and lets a run carrying the
-        // `Hyperlink` character style keep that style's blue (emitting black would
-        // override it back to invisible body text). An explicitly non-black fill
-        // (e.g. `#text(red)` or `#show link: set text(red)`) still wins.
+        // Colour. Record the resolved value, including black. The document pass
+        // strips it only when it matches the governing style/default; this lets a
+        // black run remain black when `Normal` is non-black.
         if let typst_library::visualize::Paint::Solid(color) =
             styles.get_ref(TextElem::fill)
         {
-            let hex = props::color_to_hex(color);
-            if hex != [0, 0, 0] {
-                p.color = Some(hex);
-            }
+            p.color = Some(props::color_to_hex(color));
         }
 
         // Font (first family). The most common one is later hoisted into
@@ -1750,6 +1757,17 @@ fn apply_highlight(props: &mut RunProps, fill: Option<Paint>) {
     } else {
         props.highlight = None;
         props.shd_fill = Some(rgb);
+    }
+}
+
+fn style_owned_heading_props(props: RunProps) -> RunProps {
+    RunProps {
+        font: props.font,
+        bold: props.bold,
+        italic: props.italic,
+        color: props.color,
+        size_half_pt: props.size_half_pt,
+        ..RunProps::default()
     }
 }
 

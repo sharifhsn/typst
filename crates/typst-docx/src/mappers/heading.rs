@@ -32,6 +32,7 @@ pub fn heading(
 
     // Record the deepest level so `styles.xml` can generate `Heading1..N`.
     ctx.note_heading_level(level_u8);
+    ctx.note_heading_style(level_u8, ctx.resolve_text_props(styles, RunProps::default()));
 
     // -- Paragraph properties --------------------------------------------------
     // Levels 1..=9 map to the built-in `Heading1..Heading9` magic styles; deeper

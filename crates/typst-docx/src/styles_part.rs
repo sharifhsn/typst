@@ -3,13 +3,15 @@
 
 use typst_library::model::DocumentInfo;
 
+use crate::dom::{HeadingStyle, RunProps, Spacing, TextDefaults};
 use crate::props;
 use crate::xml::{self, XmlWriter};
 
 /// Builds the `styles.xml` part.
 pub fn build(
     info: &DocumentInfo,
-    defaults: &crate::dom::TextDefaults,
+    defaults: &TextDefaults,
+    heading_styles: &[HeadingStyle],
     max_heading_level: u8,
     pretty: bool,
 ) -> String {
@@ -56,8 +58,10 @@ pub fn build(
     // block every Word document carries.
     w.raw(include_str!("latent_styles.xml"));
 
-    // Normal (default paragraph style).
-    style(&mut w, "Normal", "Normal", None, true, false);
+    // Normal (default paragraph style). Repeat the document defaults here so
+    // editing Normal in Word restyles the body even when the consumer ignores
+    // `docDefaults`.
+    normal_style(&mut w, defaults);
 
     // The three implicit defaults every Word document defines: the default
     // character style (base of all character styles), the default table style
@@ -77,6 +81,14 @@ pub fn build(
         let id = format!("Heading{level}");
         let char_id = format!("Heading{level}Char");
         let name = format!("heading {level}");
+        let style = heading_styles.iter().find(|style| style.level == level);
+        let fallback;
+        let rpr = if let Some(style) = style {
+            &style.rpr
+        } else {
+            fallback = RunProps { bold: true, ..RunProps::default() };
+            &fallback
+        };
         w.open("w:style")
             .attr("w:type", "paragraph")
             .attr("w:styleId", &id)
@@ -90,10 +102,11 @@ pub fn build(
         w.open("w:outlineLvl")
             .attr(xml::W_VAL, &(level - 1).to_string())
             .empty();
+        if let Some(spacing) = style.and_then(|style| style.spacing.as_ref()) {
+            write_spacing(&mut w, spacing);
+        }
         w.close();
-        w.open(xml::W_RPR).start_children();
-        w.leaf(xml::W_B);
-        w.close();
+        rpr.write_rpr(&mut w);
         w.close(); // style
 
         // The linked character style carries the same run formatting.
@@ -106,9 +119,7 @@ pub fn build(
             .empty();
         w.open("w:basedOn").attr(xml::W_VAL, "DefaultParagraphFont").empty();
         w.open("w:link").attr(xml::W_VAL, &id).empty();
-        w.open(xml::W_RPR).start_children();
-        w.leaf(xml::W_B);
-        w.close();
+        rpr.write_rpr(&mut w);
         w.close(); // style
     }
 
@@ -172,6 +183,50 @@ pub fn build(
 
     w.close(); // w:styles
     w.finish()
+}
+
+/// Emits the default paragraph style with the document's root run properties.
+fn normal_style(w: &mut XmlWriter, defaults: &TextDefaults) {
+    w.open("w:style")
+        .attr("w:type", "paragraph")
+        .attr("w:styleId", "Normal")
+        .attr("w:default", "1")
+        .start_children();
+    w.open("w:name").attr(xml::W_VAL, "Normal").empty();
+    defaults_run_props(defaults).write_rpr(w);
+    w.close();
+}
+
+fn defaults_run_props(defaults: &TextDefaults) -> RunProps {
+    RunProps {
+        font: defaults.font.clone(),
+        color: defaults.color,
+        size_half_pt: Some(defaults.size_half_pt),
+        lang: defaults.lang.clone(),
+        ..RunProps::default()
+    }
+}
+
+fn write_spacing(w: &mut XmlWriter, sp: &Spacing) {
+    w.open(xml::W_SPACING);
+    if let Some(before) = sp.before {
+        w.attr("w:before", &before.to_string());
+    }
+    if let Some(after) = sp.after {
+        w.attr("w:after", &after.to_string());
+    }
+    if let Some(line) = sp.line {
+        w.attr("w:line", &line.to_string());
+        let rule = if sp.line_rule_auto {
+            "auto"
+        } else if sp.line_rule_at_least {
+            "atLeast"
+        } else {
+            "exact"
+        };
+        w.attr("w:lineRule", rule);
+    }
+    w.empty();
 }
 
 /// Emits a simple paragraph style.
