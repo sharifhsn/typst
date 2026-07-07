@@ -674,7 +674,7 @@ fn slide_master_xml() -> String {
         )
         .start_children();
     w.open("p:cSld").start_children();
-    crate::encode::write_empty_shape_tree(&mut w);
+    write_title_placeholder_shape_tree(&mut w);
     w.close();
     w.open("p:clrMap")
         .attr("bg1", "lt1")
@@ -710,17 +710,59 @@ fn slide_layout_xml() -> String {
             "xmlns:r",
             "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
         )
-        .attr("type", "blank")
+        .attr("type", "titleOnly")
         .attr("preserve", "1")
         .start_children();
-    w.open("p:cSld").attr("name", "Blank").start_children();
-    crate::encode::write_empty_shape_tree(&mut w);
+    w.open("p:cSld").attr("name", "Title Only").start_children();
+    write_title_placeholder_shape_tree(&mut w);
     w.close();
     w.open("p:clrMapOvr").start_children();
     w.leaf("a:masterClrMapping");
     w.close();
     w.close();
     w.finish()
+}
+
+fn write_title_placeholder_shape_tree(w: &mut XmlWriter) {
+    w.open("p:spTree").start_children();
+    w.open("p:nvGrpSpPr").start_children();
+    w.open("p:cNvPr").attr("id", "1").attr("name", "").empty();
+    w.leaf("p:cNvGrpSpPr");
+    w.leaf("p:nvPr");
+    w.close();
+    w.leaf("p:grpSpPr");
+    write_title_placeholder(w);
+    w.close();
+}
+
+fn write_title_placeholder(w: &mut XmlWriter) {
+    w.open("p:sp").start_children();
+    w.open("p:nvSpPr").start_children();
+    w.open("p:cNvPr")
+        .attr("id", "2")
+        .attr("name", "Title Placeholder 1")
+        .empty();
+    w.open("p:cNvSpPr").start_children();
+    w.open("a:spLocks").attr("noGrp", "1").empty();
+    w.close();
+    w.open("p:nvPr").start_children();
+    w.open("p:ph").attr("type", "title").attr("idx", "0").empty();
+    w.close();
+    w.close();
+
+    w.open("p:spPr").start_children();
+    w.open("a:xfrm").start_children();
+    w.open("a:off").attr("x", "685800").attr("y", "457200").empty();
+    w.open("a:ext").attr("cx", "7772400").attr("cy", "1143000").empty();
+    w.close();
+    w.close();
+
+    w.open("p:txBody").start_children();
+    w.open("a:bodyPr").attr("wrap", "square").empty();
+    w.leaf("a:lstStyle");
+    w.leaf("a:p");
+    w.close();
+    w.close();
 }
 
 fn write_text_styles(w: &mut XmlWriter) {
