@@ -3493,6 +3493,7 @@ dependencies = [
  "rustc-hash",
  "time",
  "tiny-skia",
+ "typst-docx",
  "typst-layout",
  "typst-library",
  "typst-render",

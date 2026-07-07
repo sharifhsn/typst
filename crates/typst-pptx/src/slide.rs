@@ -1,10 +1,14 @@
 use ecow::EcoString;
+use rustc_hash::FxHashMap;
 use typst_layout::{Page, PagedDocument};
+use typst_library::foundations::{NativeElement, StyleChain};
+use typst_library::introspection::{Introspector, Location, Tag};
 use typst_library::layout::{Abs, Frame, FrameItem, Point, Size, Transform};
+use typst_library::math::EquationElem;
 use typst_library::model::Destination;
 use typst_library::visualize::{Paint, Shape};
 
-use crate::dom::{FillSpec, PicGeom, SlideCtx, SlideIr, SlideShape};
+use crate::dom::{FillSpec, MathBox, PicGeom, SlideCtx, SlideIr, SlideShape};
 use crate::text::{LinkTarget, TextSource};
 
 /// Convert all pages into slide IR.
@@ -42,6 +46,8 @@ struct Walker<'a, 'b> {
     shapes: Vec<OrderedShape>,
     text: Vec<TextSource<'a>>,
     links: Vec<LinkRect>,
+    equations: FxHashMap<Location, MathSource>,
+    active_math: Vec<ActiveMath>,
 }
 
 struct OrderedShape {
@@ -52,6 +58,18 @@ struct OrderedShape {
 struct LinkRect {
     rect: Rect,
     target: LinkTarget,
+}
+
+struct MathSource {
+    omml: String,
+    fallback: EcoString,
+}
+
+struct ActiveMath {
+    loc: Location,
+    order: usize,
+    bounds: Option<Rect>,
+    fallback: EcoString,
 }
 
 #[derive(Copy, Clone)]
@@ -75,6 +93,8 @@ impl<'a, 'b> Walker<'a, 'b> {
             shapes: Vec::new(),
             text: Vec::new(),
             links: Vec::new(),
+            equations: display_equations(document),
+            active_math: Vec::new(),
         }
     }
 
@@ -82,6 +102,11 @@ impl<'a, 'b> Walker<'a, 'b> {
         for (pos, item) in frame.items() {
             let order = self.reserve_order();
             let item_transform = transform.pre_concat(Transform::translate(pos.x, pos.y));
+            if !matches!(item, FrameItem::Tag(_))
+                && self.capture_math_item(item, item_transform)
+            {
+                continue;
+            }
             match item {
                 FrameItem::Group(group) => {
                     let group_transform = item_transform.pre_concat(group.transform);
@@ -172,7 +197,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                         });
                     }
                 }
-                FrameItem::Tag(_) => {}
+                FrameItem::Tag(tag) => self.handle_tag(tag, order),
             }
         }
     }
@@ -181,6 +206,108 @@ impl<'a, 'b> Walker<'a, 'b> {
         let order = self.next_order;
         self.next_order += 1;
         order
+    }
+
+    fn handle_tag(&mut self, tag: &Tag, order: usize) {
+        match tag {
+            Tag::Start(..) => {
+                let loc = tag.location();
+                if self.equations.contains_key(&loc) {
+                    self.active_math.push(ActiveMath {
+                        loc,
+                        order,
+                        bounds: None,
+                        fallback: EcoString::new(),
+                    });
+                }
+            }
+            Tag::End(loc, ..) => {
+                let Some(index) =
+                    self.active_math.iter().rposition(|active| active.loc == *loc)
+                else {
+                    return;
+                };
+                let active = self.active_math.remove(index);
+                self.emit_math_box(active);
+            }
+        }
+    }
+
+    fn capture_math_item(
+        &mut self,
+        item: &'a FrameItem,
+        item_transform: Transform,
+    ) -> bool {
+        if self.active_math.is_empty() {
+            return false;
+        }
+
+        match item {
+            FrameItem::Group(group) => {
+                let group_transform = item_transform.pre_concat(group.transform);
+                self.add_math_bounds(transformed_rect(
+                    group_transform,
+                    group.frame.size(),
+                ));
+                append_frame_text(
+                    &group.frame,
+                    &mut self.active_math.last_mut().unwrap().fallback,
+                );
+            }
+            FrameItem::Text(text) => {
+                self.add_math_bounds(text_item_rect(text, item_transform));
+                self.active_math.last_mut().unwrap().fallback.push_str(&text.text);
+            }
+            FrameItem::Shape(shape, _) => {
+                self.add_math_bounds(transformed_layout_rect(
+                    item_transform,
+                    shape.bbox(true),
+                ));
+            }
+            FrameItem::Image(_, size, _) | FrameItem::Link(_, size) => {
+                self.add_math_bounds(transformed_rect(item_transform, *size));
+            }
+            FrameItem::Tag(_) => {}
+        }
+
+        true
+    }
+
+    fn add_math_bounds(&mut self, rect: Rect) {
+        let active = self.active_math.last_mut().expect("active math exists");
+        active.bounds = Some(match active.bounds {
+            Some(bounds) => bounds.union(rect),
+            None => rect,
+        });
+    }
+
+    fn emit_math_box(&mut self, active: ActiveMath) {
+        let Some(source) = self.equations.get(&active.loc) else {
+            return;
+        };
+        let Some(bounds) = active.bounds else {
+            return;
+        };
+
+        let size = bounds.size();
+        let fallback = if active.fallback.is_empty() {
+            source.fallback.clone()
+        } else {
+            active.fallback
+        };
+
+        self.shapes.push(OrderedShape {
+            order: active.order,
+            shape: SlideShape::MathBox(MathBox {
+                x_emu: crate::text::emu(bounds.min.x),
+                y_emu: crate::text::emu(bounds.min.y),
+                w_emu: crate::text::extent_emu(size.x),
+                h_emu: crate::text::extent_emu(size.y),
+                rot_60k: 0,
+                omml: source.omml.clone(),
+                fallback,
+            }),
+        });
     }
 
     fn emit_image(
@@ -387,6 +514,29 @@ fn single_frame_image(
     image
 }
 
+fn display_equations(document: &PagedDocument) -> FxHashMap<Location, MathSource> {
+    let styles = StyleChain::default();
+    document
+        .introspector()
+        .query(&EquationElem::ELEM.select())
+        .into_iter()
+        .filter_map(|content| {
+            let elem = content.to_packed::<EquationElem>()?;
+            if !elem.block.get(styles) {
+                return None;
+            }
+            let loc = elem.location()?;
+            let omml = typst_docx::equation_omml_fragment(elem)?;
+            let fallback = elem
+                .alt
+                .get_cloned(styles)
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| elem.body.plain_text());
+            Some((loc, MathSource { omml, fallback }))
+        })
+        .collect()
+}
+
 /// The `a:srcRect` crop `[l, t, r, b]` (1/1000 %) that reveals `frame` out of an
 /// image placed at `pos` with `size`, or `None` if the image does not fully
 /// cover the frame (a gap would expose background the clip can't represent).
@@ -491,9 +641,27 @@ fn text_rect(text: &typst_library::text::TextItem, baseline: Point, scale: f64) 
     }
 }
 
+fn text_item_rect(text: &typst_library::text::TextItem, transform: Transform) -> Rect {
+    let size = text.size;
+    let descent = (-text.font.metrics().descender).at(size);
+    let min = Point::new(Abs::zero(), -size);
+    let max = Point::new(text.width(), descent);
+    transformed_corners(transform, min, max)
+}
+
 fn transformed_rect(transform: Transform, size: Size) -> Rect {
-    let points =
-        [Point::zero(), Point::with_x(size.x), Point::with_y(size.y), size.to_point()];
+    transformed_corners(transform, Point::zero(), size.to_point())
+}
+
+fn transformed_layout_rect(
+    transform: Transform,
+    rect: typst_library::layout::Rect,
+) -> Rect {
+    transformed_corners(transform, rect.min, rect.max)
+}
+
+fn transformed_corners(transform: Transform, min: Point, max: Point) -> Rect {
+    let points = [min, Point::new(max.x, min.y), Point::new(min.x, max.y), max];
     let mut min = Point::splat(Abs::inf());
     let mut max = Point::splat(-Abs::inf());
     for point in points {
@@ -504,7 +672,31 @@ fn transformed_rect(transform: Transform, size: Size) -> Rect {
     Rect { min, max }
 }
 
+fn append_frame_text(frame: &Frame, out: &mut EcoString) {
+    for (_, item) in frame.items() {
+        match item {
+            FrameItem::Text(text) => out.push_str(&text.text),
+            FrameItem::Group(group) => append_frame_text(&group.frame, out),
+            _ => {}
+        }
+    }
+}
+
 impl Rect {
+    fn union(self, other: Rect) -> Self {
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+        }
+    }
+
+    fn size(self) -> Size {
+        Size::new(
+            (self.max.x - self.min.x).max(Abs::pt(0.1)),
+            (self.max.y - self.min.y).max(Abs::pt(0.1)),
+        )
+    }
+
     fn overlaps(self, other: Rect) -> bool {
         self.min.x <= other.max.x
             && self.max.x >= other.min.x

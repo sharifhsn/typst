@@ -11,6 +11,7 @@ pub struct SlideIr {
 /// A drawable slide item in painter's order.
 pub enum SlideShape {
     TextBox(TextBox),
+    MathBox(MathBox),
     Pic(Pic),
     Geom(GeomShape),
     Group(GroupShape),
@@ -39,6 +40,17 @@ pub enum TextWrap {
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub enum Placeholder {
     Title,
+}
+
+/// A positioned native Office math object with a plain DrawingML fallback.
+pub struct MathBox {
+    pub x_emu: i64,
+    pub y_emu: i64,
+    pub w_emu: i64,
+    pub h_emu: i64,
+    pub rot_60k: i32,
+    pub omml: String,
+    pub fallback: EcoString,
 }
 
 /// A text paragraph.

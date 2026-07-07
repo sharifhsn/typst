@@ -24,4 +24,5 @@ pub use self::document::{docx_document, docx_document_with_paged_introspector};
 pub use self::dom::DocxDocument;
 pub use self::encode::{DocxOptions, docx};
 pub use self::introspect::DocxIntrospector;
+pub use self::mappers::math::equation_omml_fragment;
 pub use self::rules::register;
