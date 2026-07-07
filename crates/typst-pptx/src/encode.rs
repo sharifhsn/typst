@@ -1,8 +1,8 @@
 use ecow::EcoString;
 
 use crate::dom::{
-    FillSpec, GeomShape, GroupShape, MediaId, PathGeom, PathSegment, Pic, PicGeom,
-    RunLink, SlideIr, SlideShape, StrokeSpec, TextBox, TextPara, TextRun,
+    FillSpec, GeomShape, GroupShape, MathBox, MediaId, PathGeom, PathSegment, Pic,
+    PicGeom, RunLink, SlideIr, SlideShape, StrokeSpec, TextBox, TextPara, TextRun,
 };
 use crate::xml::XmlWriter;
 
@@ -22,8 +22,14 @@ pub(crate) fn slide_xml(slide: &SlideIr, rels: &mut impl SlideRelSink) -> String
         .attr(
             "xmlns:r",
             "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-        )
-        .start_children();
+        );
+    if slide_contains_math(slide) {
+        w.attr("xmlns:mc", "http://schemas.openxmlformats.org/markup-compatibility/2006")
+            .attr("xmlns:m", "http://schemas.openxmlformats.org/officeDocument/2006/math")
+            .attr("xmlns:a14", "http://schemas.microsoft.com/office/drawing/2010/main")
+            .attr("mc:Ignorable", "a14");
+    }
+    w.start_children();
 
     w.open("p:cSld").start_children();
     if let Some(fill) = &slide.bg {
@@ -76,6 +82,7 @@ fn write_shape(
 ) {
     match shape {
         SlideShape::TextBox(text) => write_text_box(w, text, ids.next(), rels),
+        SlideShape::MathBox(math) => write_math_box(w, math, ids.next(), rels),
         SlideShape::Pic(pic) => write_pic(w, pic, ids.next(), rels),
         SlideShape::Geom(geom) => write_geom_shape(w, geom, ids.next()),
         SlideShape::Group(group) => write_group_shape(w, group, ids, rels),
@@ -109,6 +116,48 @@ fn write_text_box(
     w.close();
 }
 
+fn write_math_box(
+    w: &mut XmlWriter,
+    math: &MathBox,
+    id: u32,
+    rels: &mut impl SlideRelSink,
+) {
+    w.open("p:sp").start_children();
+    write_sp_nv(w, id, &format!("Math {id}"), true);
+    w.open("p:spPr").start_children();
+    write_xfrm(w, math.x_emu, math.y_emu, math.w_emu, math.h_emu, math.rot_60k);
+    write_prst_geom(w, "rect");
+    w.leaf("a:noFill");
+    w.open("a:ln").start_children();
+    w.leaf("a:noFill");
+    w.close();
+    w.close();
+
+    w.open("p:txBody").start_children();
+    write_body_pr(w);
+    w.leaf("a:lstStyle");
+    w.open("a:p").start_children();
+    write_para_props(w, false);
+    w.open("mc:AlternateContent").start_children();
+    w.open("mc:Choice").attr("Requires", "a14").start_children();
+    w.open("a14:m").start_children();
+    w.open("m:oMathPara").start_children();
+    w.open("m:oMathParaPr").start_children();
+    w.open("m:jc").attr("m:val", "center").empty();
+    w.close();
+    w.raw(&math.omml);
+    w.close();
+    w.close();
+    w.close();
+    w.open("mc:Fallback").start_children();
+    write_text_run(w, &math_fallback_run(math), rels);
+    w.close();
+    w.close();
+    w.close();
+    w.close();
+    w.close();
+}
+
 fn write_body_pr(w: &mut XmlWriter) {
     w.open("a:bodyPr")
         .attr("lIns", "0")
@@ -126,8 +175,17 @@ fn write_body_pr(w: &mut XmlWriter) {
 
 fn write_para(w: &mut XmlWriter, para: &TextPara, rels: &mut impl SlideRelSink) {
     w.open("a:p").start_children();
-    w.open("a:pPr").attr("algn", if para.rtl { "r" } else { "l" });
-    if para.rtl {
+    write_para_props(w, para.rtl);
+
+    for run in &para.runs {
+        write_text_run(w, run, rels);
+    }
+    w.close();
+}
+
+fn write_para_props(w: &mut XmlWriter, rtl: bool) {
+    w.open("a:pPr").attr("algn", if rtl { "r" } else { "l" });
+    if rtl {
         w.attr("rtl", "1");
     }
     w.start_children();
@@ -135,11 +193,31 @@ fn write_para(w: &mut XmlWriter, para: &TextPara, rels: &mut impl SlideRelSink) 
     w.open("a:spcPct").attr("val", "100000").empty();
     w.close();
     w.close();
+}
 
-    for run in &para.runs {
-        write_text_run(w, run, rels);
+fn math_fallback_run(math: &MathBox) -> TextRun {
+    TextRun {
+        text: math.fallback.clone(),
+        family: EcoString::from("New Computer Modern Math"),
+        sz_100pt: 1800,
+        b: false,
+        i: false,
+        color: [0, 0, 0, 255],
+        spc_100pt: None,
+        link: None,
     }
-    w.close();
+}
+
+fn slide_contains_math(slide: &SlideIr) -> bool {
+    slide.shapes.iter().any(shape_contains_math)
+}
+
+fn shape_contains_math(shape: &SlideShape) -> bool {
+    match shape {
+        SlideShape::MathBox(_) => true,
+        SlideShape::Group(group) => group.children.iter().any(shape_contains_math),
+        SlideShape::TextBox(_) | SlideShape::Pic(_) | SlideShape::Geom(_) => false,
+    }
 }
 
 fn write_text_run(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink) {

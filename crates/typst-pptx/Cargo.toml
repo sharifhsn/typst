@@ -13,6 +13,7 @@ keywords = { workspace = true }
 readme = { workspace = true }
 
 [dependencies]
+typst-docx = { workspace = true }
 typst-layout = { workspace = true }
 typst-library = { workspace = true }
 typst-render = { workspace = true }

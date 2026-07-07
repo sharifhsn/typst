@@ -290,6 +290,74 @@ Hello"##,
 }
 
 #[test]
+fn block_equation_exports_native_omml_with_fallback() {
+    let p = parts(
+        r#"#set page(width: 240pt, height: 120pt, margin: 12pt)
+$ sum_(i=1)^n i = (n(n+1))/2 $"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let doc = roxmltree::Document::parse(slide).unwrap();
+
+    let has_alternate = doc.descendants().any(|node| {
+        node.tag_name().name() == "AlternateContent"
+            && node.tag_name().namespace()
+                == Some("http://schemas.openxmlformats.org/markup-compatibility/2006")
+    });
+    assert!(has_alternate, "math should be wrapped in mc:AlternateContent");
+
+    let choice = doc
+        .descendants()
+        .find(|node| {
+            node.tag_name().name() == "Choice"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/markup-compatibility/2006")
+        })
+        .expect("math should have an mc:Choice");
+    assert_eq!(choice.attribute("Requires"), Some("a14"));
+
+    assert!(
+        doc.descendants().any(|node| {
+            node.tag_name().name() == "m"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.microsoft.com/office/drawing/2010/main")
+        }),
+        "choice should contain a14:m"
+    );
+    assert!(
+        doc.descendants().any(|node| {
+            node.tag_name().name() == "oMath"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/officeDocument/2006/math")
+        }),
+        "choice should contain m:oMath"
+    );
+    assert!(
+        doc.descendants().any(|node| {
+            node.tag_name().name() == "Fallback"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/markup-compatibility/2006")
+        }),
+        "math should carry an mc:Fallback"
+    );
+    assert!(
+        slide.contains("<a:t>") && slide.contains("</a:t>"),
+        "fallback should contain normal DrawingML text"
+    );
+    assert!(!slide.contains("<p:pic"), "display math should not rasterize");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn non_math_slides_do_not_gain_math_namespaces() {
+    let p = parts("Plain text only.");
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(!slide.contains("markup-compatibility/2006"));
+    assert!(!slide.contains("officeDocument/2006/math"));
+    assert!(!slide.contains("drawing/2010/main"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn gradient_filled_text_is_kept_as_solid() {
     // A non-solid text fill must not drop the whole run; it is approximated
     // with the first gradient stop so the text stays visible.
