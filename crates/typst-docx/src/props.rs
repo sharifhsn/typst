@@ -3,6 +3,7 @@
 
 use typst_library::layout::Abs;
 use typst_library::visualize::Color;
+use typst_ooxml_core::{color as ooxml_color, units};
 
 use crate::dom::{Indent, Jc, ParaBorders, ParaProps, RunProps, Spacing, VertAlign};
 use crate::xml::{self, XmlWriter};
@@ -13,28 +14,27 @@ use crate::xml::{self, XmlWriter};
 
 /// Points → half-points (the unit of `w:sz`).
 pub fn pt_to_half_pt(pt: f64) -> u32 {
-    (pt * 2.0).round().max(0.0) as u32
+    units::pt_to_half_point(pt)
 }
 
 /// Points → eighths of a point (the unit of a border's `w:sz`).
 pub fn pt_to_eighth_pt(pt: f64) -> u32 {
-    (pt * 8.0).round().max(0.0) as u32
+    units::pt_to_eighth_point(pt)
 }
 
 /// An absolute length → twips (twentieths of a point), the `w:pgSz`/`w:ind` unit.
 pub fn abs_to_twip(abs: Abs) -> i32 {
-    (abs.to_pt() * 20.0).round() as i32
+    units::abs_to_twip(abs)
 }
 
 /// An absolute length → EMU (914400 per inch = 12700 per point), the DrawingML unit.
 pub fn abs_to_emu(abs: Abs) -> i64 {
-    (abs.to_pt() * 12700.0).round() as i64
+    units::abs_to_emu(abs)
 }
 
 /// A color → `RRGGBB` hex.
 pub fn color_to_hex(color: &Color) -> [u8; 3] {
-    let [r, g, b, _] = color.to_vec4_u8();
-    [r, g, b]
+    ooxml_color::raw_rgb(color)
 }
 
 /// A gradient approximated by a single solid colour — its first stop — for a
@@ -58,7 +58,7 @@ pub fn gradient_shade_hex(
 
 /// Formats an `RRGGBB` byte triple as uppercase hex.
 pub fn hex(rgb: [u8; 3]) -> String {
-    format!("{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])
+    ooxml_color::hex_rgb(rgb)
 }
 
 // ---------------------------------------------------------------------------

@@ -3210,6 +3210,7 @@ dependencies = [
  "typst-layout",
  "typst-library",
  "typst-macros",
+ "typst-ooxml-core",
  "typst-render",
  "typst-svg",
  "typst-syntax",
@@ -3440,6 +3441,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "typst-ooxml-core"
+version = "0.15.0"
+dependencies = [
+ "ecow",
+ "rustc-hash",
+ "typst-library",
+ "zip",
+]
+
+[[package]]
 name = "typst-pandoc"
 version = "0.15.0"
 dependencies = [
@@ -3493,9 +3504,9 @@ dependencies = [
  "rustc-hash",
  "time",
  "tiny-skia",
- "typst-docx",
  "typst-layout",
  "typst-library",
+ "typst-ooxml-core",
  "typst-render",
  "typst-syntax",
  "typst-utils",

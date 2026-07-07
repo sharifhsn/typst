@@ -22,6 +22,7 @@ use typst_library::text::{
     SmartQuotes, SpaceElem, SubElem, SuperElem, TextElem,
 };
 use typst_library::visualize::{ImageElem, Paint};
+use typst_ooxml_core::ns;
 use typst_syntax::{FileId, Span};
 
 use crate::dom::{
@@ -47,17 +48,13 @@ struct RawRange {
 }
 
 /// The relationship-type URI for an image part.
-pub const REL_IMAGE: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+pub const REL_IMAGE: &str = ns::rel::IMAGE;
 /// The relationship-type URI for an external hyperlink.
-pub const REL_HYPERLINK: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
+pub const REL_HYPERLINK: &str = ns::rel::HYPERLINK;
 /// The relationship-type URI for a header part.
-pub const REL_HEADER: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header";
+pub const REL_HEADER: &str = ns::rel::HEADER;
 /// The relationship-type URI for a footer part.
-pub const REL_FOOTER: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer";
+pub const REL_FOOTER: &str = ns::rel::FOOTER;
 
 /// The mutable package state accumulated during the post-realize walk.
 pub struct DocxCtx<'a, 'e> {

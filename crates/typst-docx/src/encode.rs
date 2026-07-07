@@ -4,13 +4,14 @@ use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::Smart;
 use typst_library::model::DocumentInfo;
+use typst_ooxml_core::ns;
 
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, DocxDocument,
     Drawing, Field, Footnote, GroupSpec, HdrFtrPart, Para, ParaChild, PathSegment, Row,
     Run, SectPr, SectType, ShapeFill, ShapeGeom, ShapeSpec, Tbl, Toc, VAlign, VMerge,
 };
-use crate::package::{Package, RelMode, Rels};
+use crate::package::{DOCX_PACKAGE_OPTIONS, Package, RelMode, Rels};
 use crate::styles_part;
 use crate::xml::{self, XmlWriter};
 
@@ -22,52 +23,32 @@ pub struct DocxOptions {
 }
 
 // Relationship-type URIs.
-const REL_OFFICE_DOCUMENT: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
-const REL_CORE_PROPS: &str = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
-const REL_EXTENDED_PROPS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties";
-const REL_STYLES: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles";
-const REL_NUMBERING: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering";
-const REL_FOOTNOTES: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes";
-const REL_ENDNOTES: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes";
-const REL_SETTINGS: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings";
-const REL_THEME: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
-const REL_FONT_TABLE: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable";
-const REL_WEB_SETTINGS: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/webSettings";
+const REL_OFFICE_DOCUMENT: &str = ns::rel::OFFICE_DOCUMENT;
+const REL_CORE_PROPS: &str = ns::rel::CORE_PROPS;
+const REL_EXTENDED_PROPS: &str = ns::rel::EXTENDED_PROPS;
+const REL_STYLES: &str = ns::rel::STYLES;
+const REL_NUMBERING: &str = ns::rel::NUMBERING;
+const REL_FOOTNOTES: &str = ns::rel::FOOTNOTES;
+const REL_ENDNOTES: &str = ns::rel::ENDNOTES;
+const REL_SETTINGS: &str = ns::rel::SETTINGS;
+const REL_THEME: &str = ns::rel::THEME;
+const REL_FONT_TABLE: &str = ns::rel::FONT_TABLE;
+const REL_WEB_SETTINGS: &str = ns::rel::WEB_SETTINGS;
 
 // Content types.
-const CT_DOCUMENT: &str =
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
-const CT_STYLES: &str =
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml";
-const CT_NUMBERING: &str =
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml";
-const CT_FOOTNOTES: &str =
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml";
-const CT_ENDNOTES: &str =
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml";
-const CT_SETTINGS: &str =
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml";
-const CT_CORE: &str = "application/vnd.openxmlformats-package.core-properties+xml";
-const CT_EXTENDED: &str =
-    "application/vnd.openxmlformats-officedocument.extended-properties+xml";
-const CT_HEADER: &str =
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml";
-const CT_FOOTER: &str =
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml";
-const CT_THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml";
-const CT_FONT_TABLE: &str =
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml";
-const CT_WEB_SETTINGS: &str =
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml";
+const CT_DOCUMENT: &str = ns::ct::WORD_DOCUMENT;
+const CT_STYLES: &str = ns::ct::WORD_STYLES;
+const CT_NUMBERING: &str = ns::ct::WORD_NUMBERING;
+const CT_FOOTNOTES: &str = ns::ct::WORD_FOOTNOTES;
+const CT_ENDNOTES: &str = ns::ct::WORD_ENDNOTES;
+const CT_SETTINGS: &str = ns::ct::WORD_SETTINGS;
+const CT_CORE: &str = ns::ct::CORE_PROPS;
+const CT_EXTENDED: &str = ns::ct::EXTENDED_PROPS;
+const CT_HEADER: &str = ns::ct::WORD_HEADER;
+const CT_FOOTER: &str = ns::ct::WORD_FOOTER;
+const CT_THEME: &str = ns::ct::THEME;
+const CT_FONT_TABLE: &str = ns::ct::WORD_FONT_TABLE;
+const CT_WEB_SETTINGS: &str = ns::ct::WORD_WEB_SETTINGS;
 
 fn push_font(fonts: &mut Vec<String>, font: &str) {
     if !fonts.iter().any(|existing| existing == font) {
@@ -79,7 +60,7 @@ fn push_font(fonts: &mut Vec<String>, font: &str) {
 #[typst_macros::time(name = "docx encode")]
 pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<u8>> {
     let pretty = options.pretty;
-    let mut package = Package::new();
+    let mut package = Package::new(DOCX_PACKAGE_OPTIONS);
     let mut root_rels = Rels::new();
 
     // The document's own relationships (images/hyperlinks accumulated during
@@ -245,37 +226,25 @@ fn media_content_type(ext: &str) -> &'static str {
 /// consumers (Microsoft Word, LibreOffice) refuse to load the whole document.
 /// Declaring an unused namespace is harmless, so all parts get the full set.
 fn decl_ooxml_namespaces(w: &mut XmlWriter) {
-    w.attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
-        .attr(
-            "xmlns:r",
-            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-        )
-        .attr("xmlns:m", "http://schemas.openxmlformats.org/officeDocument/2006/math")
-        .attr(
-            "xmlns:wp",
-            "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
-        )
-        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
-        .attr("xmlns:pic", "http://schemas.openxmlformats.org/drawingml/2006/picture")
-        .attr("xmlns:mc", "http://schemas.openxmlformats.org/markup-compatibility/2006")
+    w.attr("xmlns:w", ns::W)
+        .attr("xmlns:r", ns::R)
+        .attr("xmlns:m", ns::M)
+        .attr("xmlns:wp", ns::WP)
+        .attr("xmlns:a", ns::A)
+        .attr("xmlns:pic", ns::PIC)
+        .attr("xmlns:mc", ns::MC)
         // `mc:Ignorable="w14 wp14"` (below) names these prefixes, so they MUST be
         // declared or the Markup-Compatibility markup is invalid: Word then
         // refuses to open the file ("unreadable content", offers to repair) on
         // EVERY document. LibreOffice silently tolerates the dangling prefixes,
         // which is why this hid until tested in real Word.
-        .attr("xmlns:w14", "http://schemas.microsoft.com/office/word/2010/wordml")
-        .attr(
-            "xmlns:wp14",
-            "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
-        )
+        .attr("xmlns:w14", ns::W14)
+        .attr("xmlns:wp14", ns::WP14)
         // `wps` is named by `mc:Choice Requires="wps"` around a text box, so the
         // prefix must be in scope at the root; `v` is the legacy VML used in the
         // matching `mc:Fallback`.
-        .attr(
-            "xmlns:wps",
-            "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
-        )
-        .attr("xmlns:v", "urn:schemas-microsoft-com:vml");
+        .attr("xmlns:wps", ns::WPS)
+        .attr("xmlns:v", ns::V);
 }
 
 fn build_document(document: &DocxDocument, pretty: bool) -> String {
@@ -652,7 +621,7 @@ fn write_inline_envelope(w: &mut XmlWriter, d: &Drawing) {
     w.empty();
     w.open("wp:cNvGraphicFramePr").start_children();
     w.open("a:graphicFrameLocks")
-        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
+        .attr("xmlns:a", ns::A)
         .attr("noChangeAspect", "1")
         .empty();
     w.close(); // wp:cNvGraphicFramePr
@@ -707,7 +676,7 @@ fn write_anchor_envelope(w: &mut XmlWriter, d: &Drawing, a: &Anchor) {
     w.empty();
     w.open("wp:cNvGraphicFramePr").start_children();
     w.open("a:graphicFrameLocks")
-        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
+        .attr("xmlns:a", ns::A)
         .attr("noChangeAspect", "1")
         .empty();
     w.close(); // wp:cNvGraphicFramePr
@@ -743,15 +712,9 @@ fn write_pic_payload(w: &mut XmlWriter, d: &Drawing) {
         write_shape_payload(w, d, shape);
         return;
     }
-    w.open("a:graphic")
-        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
-        .start_children();
-    w.open("a:graphicData")
-        .attr("uri", "http://schemas.openxmlformats.org/drawingml/2006/picture")
-        .start_children();
-    w.open("pic:pic")
-        .attr("xmlns:pic", "http://schemas.openxmlformats.org/drawingml/2006/picture")
-        .start_children();
+    w.open("a:graphic").attr("xmlns:a", ns::A).start_children();
+    w.open("a:graphicData").attr("uri", ns::PIC).start_children();
+    w.open("pic:pic").attr("xmlns:pic", ns::PIC).start_children();
     // pic:nvPicPr
     w.open("pic:nvPicPr").start_children();
     w.open("pic:cNvPr")
@@ -790,11 +753,11 @@ fn write_pic_payload(w: &mut XmlWriter, d: &Drawing) {
 
 /// The `WordprocessingShape` namespace URI, shared by every `wps:*` element
 /// (a lone shape's payload, and each child of a group).
-const WPS_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
+const WPS_NS: &str = ns::WPS;
 
 /// Emits a vector DrawingML shape (`wps:wsp`) payload in place of `pic:pic`.
 fn write_shape_payload(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec) {
-    const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    const A: &str = ns::A;
     w.open("a:graphic").attr("xmlns:a", A).start_children();
     w.open("a:graphicData").attr("uri", WPS_NS).start_children();
     write_wsp(w, 0, 0, d.w_emu, d.h_emu, shape);
@@ -807,8 +770,8 @@ fn write_shape_payload(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec) {
 /// shapes/lines/curves — as one editable, grouped drawing instead of a single
 /// rasterized image.
 fn write_group_payload(w: &mut XmlWriter, d: &Drawing, group: &GroupSpec) {
-    const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
-    const WPG: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup";
+    const A: &str = ns::A;
+    const WPG: &str = ns::WPG;
     let (cx, cy) = (d.w_emu.to_string(), d.h_emu.to_string());
 
     w.open("a:graphic").attr("xmlns:a", A).start_children();
@@ -1327,12 +1290,12 @@ fn build_hdrftr(part: &HdrFtrPart, base: u32, pretty: bool) -> String {
 fn build_settings(document: &DocxDocument, pretty: bool) -> String {
     let mut w = XmlWriter::new(pretty);
     w.open("w:settings")
-        .attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
-        .attr("xmlns:m", "http://schemas.openxmlformats.org/officeDocument/2006/math")
-        .attr("xmlns:o", "urn:schemas-microsoft-com:office:office")
-        .attr("xmlns:v", "urn:schemas-microsoft-com:vml")
-        .attr("xmlns:w14", "http://schemas.microsoft.com/office/word/2010/wordml")
-        .attr("xmlns:mc", "http://schemas.openxmlformats.org/markup-compatibility/2006")
+        .attr("xmlns:w", ns::W)
+        .attr("xmlns:m", ns::M)
+        .attr("xmlns:o", ns::O)
+        .attr("xmlns:v", ns::V)
+        .attr("xmlns:w14", ns::W14)
+        .attr("xmlns:mc", ns::MC)
         .attr("mc:Ignorable", "w14")
         .start_children();
     // The settings Word itself writes, in canonical schema order.
@@ -1471,9 +1434,7 @@ fn doc_fingerprint(document: &DocxDocument) -> u32 {
 
 fn build_numbering(document: &DocxDocument, pretty: bool) -> String {
     let mut w = XmlWriter::new(pretty);
-    w.open("w:numbering")
-        .attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
-        .start_children();
+    w.open("w:numbering").attr("xmlns:w", ns::W).start_children();
 
     for abs in &document.numbering.abstracts {
         w.open("w:abstractNum")
@@ -1600,14 +1561,11 @@ fn write_footnote(w: &mut XmlWriter, footnote: &Footnote) {
 fn build_core(info: &DocumentInfo, pretty: bool) -> String {
     let mut w = XmlWriter::new(pretty);
     w.open("cp:coreProperties")
-        .attr(
-            "xmlns:cp",
-            "http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
-        )
-        .attr("xmlns:dc", "http://purl.org/dc/elements/1.1/")
-        .attr("xmlns:dcterms", "http://purl.org/dc/terms/")
-        .attr("xmlns:dcmitype", "http://purl.org/dc/dcmitype/")
-        .attr("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
+        .attr("xmlns:cp", ns::CP)
+        .attr("xmlns:dc", ns::DC)
+        .attr("xmlns:dcterms", ns::DCTERMS)
+        .attr("xmlns:dcmitype", ns::DCMITYPE)
+        .attr("xmlns:xsi", ns::XSI)
         .start_children();
 
     if let Some(title) = &info.title {
@@ -1650,10 +1608,7 @@ fn build_core(info: &DocumentInfo, pretty: bool) -> String {
 fn build_app(pretty: bool) -> String {
     let mut w = XmlWriter::new(pretty);
     w.open("Properties")
-        .attr(
-            "xmlns",
-            "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties",
-        )
+        .attr("xmlns", ns::EXTENDED_PROPS)
         .start_children();
     // The standard extended properties Word writes, in its usual field order. The
     // document statistics (Pages/Words/Characters/Lines/Paragraphs) are recomputed

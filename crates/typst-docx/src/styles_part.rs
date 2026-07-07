@@ -6,6 +6,7 @@ use typst_library::model::DocumentInfo;
 use crate::dom::{HeadingStyle, RunProps, Spacing, TextDefaults};
 use crate::props;
 use crate::xml::{self, XmlWriter};
+use typst_ooxml_core::ns;
 
 /// Builds the `styles.xml` part.
 pub fn build(
@@ -16,9 +17,7 @@ pub fn build(
     pretty: bool,
 ) -> String {
     let mut w = XmlWriter::new(pretty);
-    w.open(xml::W_STYLES)
-        .attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
-        .start_children();
+    w.open(xml::W_STYLES).attr("xmlns:w", ns::W).start_children();
 
     // docDefaults: the document's root font / size / colour / language, which the
     // whole body inherits (each run only overrides what differs). Editing the

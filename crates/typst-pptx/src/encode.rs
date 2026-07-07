@@ -1,4 +1,6 @@
 use ecow::EcoString;
+use typst_ooxml_core::color as ooxml_color;
+use typst_ooxml_core::ns;
 
 use crate::dom::{
     BulletKind, FillSpec, GeomShape, GroupShape, MathBox, MediaId, PathGeom, PathSegment,
@@ -18,16 +20,13 @@ pub(crate) trait SlideRelSink {
 pub(crate) fn slide_xml(slide: &SlideIr, rels: &mut impl SlideRelSink) -> String {
     let mut w = XmlWriter::new(false);
     w.open("p:sld")
-        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
-        .attr("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main")
-        .attr(
-            "xmlns:r",
-            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-        );
+        .attr("xmlns:a", ns::A)
+        .attr("xmlns:p", ns::P)
+        .attr("xmlns:r", ns::R);
     if slide_contains_math(slide) {
-        w.attr("xmlns:mc", "http://schemas.openxmlformats.org/markup-compatibility/2006")
-            .attr("xmlns:m", "http://schemas.openxmlformats.org/officeDocument/2006/math")
-            .attr("xmlns:a14", "http://schemas.microsoft.com/office/drawing/2010/main")
+        w.attr("xmlns:mc", ns::MC)
+            .attr("xmlns:m", ns::M)
+            .attr("xmlns:a14", ns::A14)
             .attr("mc:Ignorable", "a14");
     }
     w.start_children();
@@ -611,14 +610,14 @@ fn write_srgb(w: &mut XmlWriter, rgba: [u8; 4]) {
         // Straight alpha as a percentage in thousandths (DrawingML CT_Color).
         w.open("a:srgbClr").attr("val", &hex([r, g, b])).start_children();
         w.open("a:alpha")
-            .attr("val", &(a as u32 * 100_000 / 255).to_string())
+            .attr("val", &ooxml_color::alpha_to_100k(a).to_string())
             .empty();
         w.close();
     }
 }
 
 pub fn hex(rgb: [u8; 3]) -> String {
-    format!("{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])
+    ooxml_color::hex_rgb(rgb)
 }
 
 struct Ids {

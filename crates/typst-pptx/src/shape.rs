@@ -6,9 +6,9 @@ use crate::dom::{
 
 use typst_library::layout::{Abs, Point, Size, Transform};
 use typst_library::visualize::{
-    Color, ColorSpace, Curve, CurveItem, FixedStroke, Geometry, Gradient, LineCap, Paint,
-    ProcessColorSpace, Shape,
+    Color, Curve, CurveItem, FixedStroke, Geometry, Gradient, LineCap, Paint, Shape,
 };
+use typst_ooxml_core::color as ooxml_color;
 
 /// Lower one laid-out Typst shape to the PPTX slide IR.
 ///
@@ -240,9 +240,7 @@ fn resolved_stroke(
 }
 
 pub(crate) fn srgb_bytes(color: &Color) -> [u8; 4] {
-    let srgb = ColorSpace::Process(ProcessColorSpace::Srgb);
-    let color = color.to_space(&srgb).unwrap_or_else(|_| color.clone());
-    color.to_vec4_u8()
+    ooxml_color::srgb_rgba(color)
 }
 
 fn line_cap_to_ooxml(cap: LineCap) -> &'static str {

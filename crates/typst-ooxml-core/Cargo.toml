@@ -1,6 +1,6 @@
 [package]
-name = "typst-pptx"
-description = "Typst's PPTX (Microsoft PowerPoint) exporter."
+name = "typst-ooxml-core"
+description = "Shared OOXML primitives for Typst's Office exporters."
 version = { workspace = true }
 rust-version = { workspace = true }
 authors = { workspace = true }
@@ -10,19 +10,11 @@ repository = { workspace = true }
 license = { workspace = true }
 categories = { workspace = true }
 keywords = { workspace = true }
-readme = { workspace = true }
 
 [dependencies]
-typst-ooxml-core = { workspace = true }
-typst-layout = { workspace = true }
-typst-library = { workspace = true }
-typst-render = { workspace = true }
-typst-syntax = { workspace = true }
-typst-utils = { workspace = true }
 ecow = { workspace = true }
 rustc-hash = { workspace = true }
-tiny-skia = { workspace = true }
-time = { workspace = true }
+typst-library = { workspace = true }
 zip = { workspace = true }
 
 [lints]

@@ -1,260 +1,57 @@
 //! OPC (Open Packaging Conventions) zip package assembly.
 
 use std::collections::BTreeMap;
-use std::io::{Cursor, Write};
 
-use ecow::{EcoString, eco_format};
-use rustc_hash::FxHashMap;
+use ecow::EcoString;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use typst_layout::PagedDocument;
 use typst_library::layout::{Abs, Size};
-use zip::write::{SimpleFileOptions, ZipWriter};
-use zip::{CompressionMethod, DateTime};
+use typst_ooxml_core::ns;
+use typst_ooxml_core::opc::{Package, PackageOptions, RelMode, Rels};
 
 use crate::SpeakerNote;
 use crate::dom::{SlideCtx, SlideIr};
-use crate::xml::{self, XmlWriter, escape_attr};
+use crate::xml::{self, XmlWriter};
 
-const REL_OFFICE_DOCUMENT: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
-const REL_CORE_PROPS: &str = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
-const REL_EXTENDED_PROPS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties";
-const REL_SLIDE: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
-const REL_SLIDE_MASTER: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster";
-const REL_SLIDE_LAYOUT: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout";
-const REL_NOTES_SLIDE: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide";
-const REL_NOTES_MASTER: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster";
-const REL_THEME: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
-const REL_PRES_PROPS: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/presProps";
-const REL_VIEW_PROPS: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/viewProps";
-const REL_TABLE_STYLES: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/tableStyles";
-const REL_IMAGE: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
-const REL_HYPERLINK: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
+const REL_OFFICE_DOCUMENT: &str = ns::rel::OFFICE_DOCUMENT;
+const REL_CORE_PROPS: &str = ns::rel::CORE_PROPS;
+const REL_EXTENDED_PROPS: &str = ns::rel::EXTENDED_PROPS;
+const REL_SLIDE: &str = ns::rel::SLIDE;
+const REL_SLIDE_MASTER: &str = ns::rel::SLIDE_MASTER;
+const REL_SLIDE_LAYOUT: &str = ns::rel::SLIDE_LAYOUT;
+const REL_NOTES_SLIDE: &str = ns::rel::NOTES_SLIDE;
+const REL_NOTES_MASTER: &str = ns::rel::NOTES_MASTER;
+const REL_THEME: &str = ns::rel::THEME;
+const REL_PRES_PROPS: &str = ns::rel::PRES_PROPS;
+const REL_VIEW_PROPS: &str = ns::rel::VIEW_PROPS;
+const REL_TABLE_STYLES: &str = ns::rel::TABLE_STYLES;
+const REL_IMAGE: &str = ns::rel::IMAGE;
+const REL_HYPERLINK: &str = ns::rel::HYPERLINK;
 
-const CT_RELS: &str = "application/vnd.openxmlformats-package.relationships+xml";
-const CT_PRESENTATION: &str =
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";
-const CT_SLIDE: &str =
-    "application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
-const CT_SLIDE_MASTER: &str =
-    "application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml";
-const CT_SLIDE_LAYOUT: &str =
-    "application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml";
-const CT_NOTES_SLIDE: &str =
-    "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml";
-const CT_NOTES_MASTER: &str =
-    "application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml";
-const CT_THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml";
-const CT_PRES_PROPS: &str =
-    "application/vnd.openxmlformats-officedocument.presentationml.presProps+xml";
-const CT_VIEW_PROPS: &str =
-    "application/vnd.openxmlformats-officedocument.presentationml.viewProps+xml";
-const CT_TABLE_STYLES: &str =
-    "application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml";
-const CT_CORE: &str = "application/vnd.openxmlformats-package.core-properties+xml";
-const CT_EXTENDED: &str =
-    "application/vnd.openxmlformats-officedocument.extended-properties+xml";
+const CT_RELS: &str = ns::ct::RELS;
+const CT_PRESENTATION: &str = ns::ct::PRESENTATION;
+const CT_SLIDE: &str = ns::ct::SLIDE;
+const CT_SLIDE_MASTER: &str = ns::ct::SLIDE_MASTER;
+const CT_SLIDE_LAYOUT: &str = ns::ct::SLIDE_LAYOUT;
+const CT_NOTES_SLIDE: &str = ns::ct::NOTES_SLIDE;
+const CT_NOTES_MASTER: &str = ns::ct::NOTES_MASTER;
+const CT_THEME: &str = ns::ct::THEME;
+const CT_PRES_PROPS: &str = ns::ct::PRES_PROPS;
+const CT_VIEW_PROPS: &str = ns::ct::VIEW_PROPS;
+const CT_TABLE_STYLES: &str = ns::ct::TABLE_STYLES;
+const CT_CORE: &str = ns::ct::CORE_PROPS;
+const CT_EXTENDED: &str = ns::ct::EXTENDED_PROPS;
 
-/// Relationship target mode.
-#[derive(Copy, Clone, Eq, PartialEq)]
-enum RelMode {
-    Internal,
-    External,
-}
-
-#[derive(Clone)]
-struct RelEntry {
-    id: EcoString,
-    type_uri: EcoString,
-    target: EcoString,
-    mode: RelMode,
-}
-
-/// A relationships container for one source part.
-#[derive(Clone)]
-struct Rels {
-    next: u32,
-    entries: Vec<RelEntry>,
-    by_target: FxHashMap<EcoString, EcoString>,
-}
-
-impl Rels {
-    fn new() -> Self {
-        Self {
-            next: 1,
-            entries: Vec::new(),
-            by_target: FxHashMap::default(),
-        }
-    }
-
-    fn add(&mut self, type_uri: &str, target: &str, mode: RelMode) -> EcoString {
-        let key: EcoString = eco_format!("{type_uri}\u{0}{target}");
-        if let Some(existing) = self.by_target.get(&key) {
-            return existing.clone();
-        }
-
-        let id: EcoString = eco_format!("rId{}", self.next);
-        self.next += 1;
-        self.entries.push(RelEntry {
-            id: id.clone(),
-            type_uri: type_uri.into(),
-            target: target.into(),
-            mode,
-        });
-        self.by_target.insert(key, id.clone());
-        id
-    }
-
-    fn to_xml(&self) -> String {
-        let mut s = String::from(xml::XML_DECL);
-        s.push_str(
-            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
-        );
-        for e in &self.entries {
-            s.push_str("<Relationship Id=\"");
-            s.push_str(&e.id);
-            s.push_str("\" Type=\"");
-            s.push_str(&escape_attr(&e.type_uri));
-            s.push_str("\" Target=\"");
-            s.push_str(&escape_attr(&e.target));
-            s.push('"');
-            if e.mode == RelMode::External {
-                s.push_str(" TargetMode=\"External\"");
-            }
-            s.push_str("/>");
-        }
-        s.push_str("</Relationships>");
-        s
-    }
-}
-
-impl Default for Rels {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Copy, Clone)]
-enum Compress {
-    Deflate,
-    Store,
-}
-
-struct Package {
-    parts: Vec<(String, Vec<u8>, Compress)>,
-    defaults: BTreeMap<String, &'static str>,
-    overrides: Vec<(String, &'static str)>,
-}
-
-impl Package {
-    fn new() -> Self {
-        let mut defaults = BTreeMap::new();
-        defaults.insert("gif".to_string(), "image/gif");
-        defaults.insert("jpeg".to_string(), "image/jpeg");
-        defaults.insert("jpg".to_string(), "image/jpeg");
-        defaults.insert("png".to_string(), "image/png");
-        defaults.insert("rels".to_string(), CT_RELS);
-        defaults.insert("xml".to_string(), "application/xml");
-        Self { parts: Vec::new(), defaults, overrides: Vec::new() }
-    }
-
-    fn add_xml(&mut self, part_name: &str, content_type: &'static str, body: String) {
-        // `.rels` parts are covered by the `Default Extension="rels"`; real
-        // OOXML packages never list them as content-type Overrides, and
-        // PowerPoint *repairs* a file that does (LibreOffice tolerates it).
-        // Only register an Override for genuine content parts.
-        if !part_name.ends_with(".rels") {
-            self.overrides.push((format!("/{part_name}"), content_type));
-        }
-        self.parts
-            .push((part_name.to_string(), body.into_bytes(), Compress::Deflate));
-    }
-
-    fn add_media(
-        &mut self,
-        part_name: &str,
-        ext: &str,
-        content_type: &'static str,
-        bytes: Vec<u8>,
-    ) {
-        self.defaults.entry(ext.to_ascii_lowercase()).or_insert(content_type);
-        self.parts.push((part_name.to_string(), bytes, Compress::Store));
-    }
-
-    fn content_types_xml(&self) -> String {
-        let mut s = String::from(xml::XML_DECL);
-        s.push_str(
-            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
-        );
-        for (ext, ct) in &self.defaults {
-            s.push_str("<Default Extension=\"");
-            s.push_str(&escape_attr(ext));
-            s.push_str("\" ContentType=\"");
-            s.push_str(ct);
-            s.push_str("\"/>");
-        }
-        for (part, ct) in &self.overrides {
-            s.push_str("<Override PartName=\"");
-            s.push_str(&escape_attr(part));
-            s.push_str("\" ContentType=\"");
-            s.push_str(ct);
-            s.push_str("\"/>");
-        }
-        s.push_str("</Types>");
-        s
-    }
-
-    fn finish(mut self, root_rels: &Rels) -> Vec<u8> {
-        let content_types = self.content_types_xml();
-        let root_rels_xml = root_rels.to_xml();
-
-        let cursor = Cursor::new(Vec::new());
-        let mut zip = ZipWriter::new(cursor);
-        let mtime = DateTime::default();
-
-        let write_one = |zip: &mut ZipWriter<Cursor<Vec<u8>>>,
-                         name: &str,
-                         bytes: &[u8],
-                         c: Compress| {
-            let method = match c {
-                Compress::Deflate => CompressionMethod::Deflated,
-                Compress::Store => CompressionMethod::Stored,
-            };
-            let opts = SimpleFileOptions::default()
-                .compression_method(method)
-                .last_modified_time(mtime)
-                .unix_permissions(0o644);
-            zip.start_file(name, opts).expect("zip start_file");
-            zip.write_all(bytes).expect("zip write_all");
-        };
-
-        write_one(
-            &mut zip,
-            "[Content_Types].xml",
-            content_types.as_bytes(),
-            Compress::Deflate,
-        );
-        write_one(&mut zip, "_rels/.rels", root_rels_xml.as_bytes(), Compress::Deflate);
-
-        let parts = std::mem::take(&mut self.parts);
-        for (name, bytes, c) in &parts {
-            write_one(&mut zip, name, bytes, *c);
-        }
-
-        zip.finish().expect("zip finish").into_inner()
-    }
-}
+const PPTX_MEDIA_DEFAULTS: &[(&str, &str)] = &[
+    ("gif", "image/gif"),
+    ("jpeg", "image/jpeg"),
+    ("jpg", "image/jpeg"),
+    ("png", "image/png"),
+];
+const PPTX_PACKAGE_OPTIONS: PackageOptions = PackageOptions {
+    rels_overrides: false,
+    media_defaults: PPTX_MEDIA_DEFAULTS,
+};
 
 /// Write a complete PPTX package.
 pub fn write(
@@ -263,7 +60,7 @@ pub fn write(
     ctx: &SlideCtx,
     notes: &[SpeakerNote],
 ) -> Vec<u8> {
-    let mut package = Package::new();
+    let mut package = Package::new(PPTX_PACKAGE_OPTIONS);
     let mut root_rels = Rels::new();
     let mut pres_rels = Rels::new();
     let notes_by_slide = notes_by_slide(slides.len(), notes);
@@ -476,12 +273,9 @@ fn presentation_xml(
 ) -> String {
     let mut w = XmlWriter::new(false);
     w.open("p:presentation")
-        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
-        .attr("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main")
-        .attr(
-            "xmlns:r",
-            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-        )
+        .attr("xmlns:a", ns::A)
+        .attr("xmlns:p", ns::P)
+        .attr("xmlns:r", ns::R)
         .start_children();
 
     w.open("p:sldMasterIdLst").start_children();
@@ -522,12 +316,9 @@ fn presentation_xml(
 fn notes_master_xml() -> String {
     let mut w = XmlWriter::new(false);
     w.open("p:notesMaster")
-        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
-        .attr("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main")
-        .attr(
-            "xmlns:r",
-            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-        )
+        .attr("xmlns:a", ns::A)
+        .attr("xmlns:p", ns::P)
+        .attr("xmlns:r", ns::R)
         .start_children();
     w.open("p:cSld").attr("name", "Notes Master").start_children();
     w.open("p:spTree").start_children();
@@ -558,12 +349,9 @@ fn notes_master_xml() -> String {
 fn notes_slide_xml(text: &str) -> String {
     let mut w = XmlWriter::new(false);
     w.open("p:notes")
-        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
-        .attr("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main")
-        .attr(
-            "xmlns:r",
-            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-        )
+        .attr("xmlns:a", ns::A)
+        .attr("xmlns:p", ns::P)
+        .attr("xmlns:r", ns::R)
         .start_children();
     w.open("p:cSld").start_children();
     w.open("p:spTree").start_children();
@@ -666,12 +454,9 @@ fn write_notes_style(w: &mut XmlWriter) {
 fn slide_master_xml() -> String {
     let mut w = XmlWriter::new(false);
     w.open("p:sldMaster")
-        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
-        .attr("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main")
-        .attr(
-            "xmlns:r",
-            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-        )
+        .attr("xmlns:a", ns::A)
+        .attr("xmlns:p", ns::P)
+        .attr("xmlns:r", ns::R)
         .start_children();
     w.open("p:cSld").start_children();
     write_title_placeholder_shape_tree(&mut w);
@@ -704,12 +489,9 @@ fn slide_master_xml() -> String {
 fn slide_layout_xml() -> String {
     let mut w = XmlWriter::new(false);
     w.open("p:sldLayout")
-        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
-        .attr("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main")
-        .attr(
-            "xmlns:r",
-            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-        )
+        .attr("xmlns:a", ns::A)
+        .attr("xmlns:p", ns::P)
+        .attr("xmlns:r", ns::R)
         .attr("type", "titleOnly")
         .attr("preserve", "1")
         .start_children();
@@ -816,17 +598,15 @@ fn theme_xml() -> String {
 
 fn pres_props_xml() -> String {
     let mut w = XmlWriter::new(false);
-    w.open("p:presentationPr")
-        .attr("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main")
-        .empty();
+    w.open("p:presentationPr").attr("xmlns:p", ns::P).empty();
     w.finish()
 }
 
 fn view_props_xml() -> String {
     let mut w = XmlWriter::new(false);
     w.open("p:viewPr")
-        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
-        .attr("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main")
+        .attr("xmlns:a", ns::A)
+        .attr("xmlns:p", ns::P)
         .start_children();
     w.open("p:normalViewPr").start_children();
     w.open("p:restoredLeft").attr("sz", "15620").empty();
@@ -839,7 +619,7 @@ fn view_props_xml() -> String {
 fn table_styles_xml() -> String {
     let mut w = XmlWriter::new(false);
     w.open("a:tblStyleLst")
-        .attr("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main")
+        .attr("xmlns:a", ns::A)
         .attr("def", "{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}")
         .empty();
     w.finish()
@@ -849,14 +629,11 @@ fn core_xml() -> String {
     let ts = source_date_epoch_timestamp();
     let mut w = XmlWriter::new(false);
     w.open("cp:coreProperties")
-        .attr(
-            "xmlns:cp",
-            "http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
-        )
-        .attr("xmlns:dc", "http://purl.org/dc/elements/1.1/")
-        .attr("xmlns:dcterms", "http://purl.org/dc/terms/")
-        .attr("xmlns:dcmitype", "http://purl.org/dc/dcmitype/")
-        .attr("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
+        .attr("xmlns:cp", ns::CP)
+        .attr("xmlns:dc", ns::DC)
+        .attr("xmlns:dcterms", ns::DCTERMS)
+        .attr("xmlns:dcmitype", ns::DCMITYPE)
+        .attr("xmlns:xsi", ns::XSI)
         .start_children();
     w.elem_text("dc:creator", "Typst");
     w.elem_text("cp:lastModifiedBy", "Typst");
@@ -884,14 +661,8 @@ fn source_date_epoch_timestamp() -> String {
 fn app_xml(slides: usize, notes: usize) -> String {
     let mut w = XmlWriter::new(false);
     w.open("Properties")
-        .attr(
-            "xmlns",
-            "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties",
-        )
-        .attr(
-            "xmlns:vt",
-            "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes",
-        )
+        .attr("xmlns", ns::EXTENDED_PROPS)
+        .attr("xmlns:vt", ns::DOC_PROPS_VTYPES)
         .start_children();
     w.elem_text("Application", "Typst");
     w.elem_text("PresentationFormat", "Custom");

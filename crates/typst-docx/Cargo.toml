@@ -17,6 +17,7 @@ typst-library = { workspace = true }
 typst-layout = { workspace = true }
 typst-render = { workspace = true }
 typst-macros = { workspace = true }
+typst-ooxml-core = { workspace = true }
 typst-syntax = { workspace = true }
 typst-timing = { workspace = true }
 typst-utils = { workspace = true }

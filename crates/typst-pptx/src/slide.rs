@@ -526,7 +526,7 @@ fn display_equations(document: &PagedDocument) -> FxHashMap<Location, MathSource
                 return None;
             }
             let loc = elem.location()?;
-            let omml = typst_docx::equation_omml_fragment(elem)?;
+            let omml = typst_ooxml_core::omml::equation_omml_fragment(elem)?;
             let fallback = elem
                 .alt
                 .get_cloned(styles)
