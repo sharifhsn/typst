@@ -50,7 +50,7 @@ use typst_library::diag::{
 };
 use typst_library::engine::{Engine, Route, Sink, Traced};
 use typst_library::foundations::{
-    NativeRuleMap, Output, StyleChain, Styles, Target, TargetElem, Value,
+    Content, NativeRuleMap, Output, StyleChain, Styles, Target, TargetElem, Value,
 };
 use typst_library::introspection::{
     EmptyIntrospector, ITER_NAMES, Introspector, MAX_ITERS,
@@ -76,8 +76,44 @@ where
     T: Output,
 {
     let mut sink = Sink::new();
-    let output = compile_impl::<T>(world.track(), Traced::default().track(), &mut sink)
-        .map_err(deduplicate);
+    let output = compile_impl_with::<T, _>(
+        world.track(),
+        Traced::default().track(),
+        &mut sink,
+        None,
+        T::create,
+    )
+    .map_err(deduplicate);
+    Warned { output, warnings: sink.warnings() }
+}
+
+/// Compiles sources into an output with a custom output creator and an optional
+/// initial introspector.
+///
+/// This is useful for exporters that need to realize one target while answering
+/// introspection from a precomputed fixed point of another target. The normal
+/// introspection loop still runs; the supplied introspector is only used for
+/// the first iteration, after which the previous output's introspector takes
+/// over as usual.
+#[typst_macros::time]
+pub fn compile_with<T, F>(
+    world: &dyn World,
+    initial_introspector: Option<&dyn Introspector>,
+    create: F,
+) -> Warned<SourceResult<T>>
+where
+    T: Output,
+    F: FnMut(&mut Engine, &Content, StyleChain) -> SourceResult<T>,
+{
+    let mut sink = Sink::new();
+    let output = compile_impl_with::<T, _>(
+        world.track(),
+        Traced::default().track(),
+        &mut sink,
+        initial_introspector,
+        create,
+    )
+    .map_err(deduplicate);
     Warned { output, warnings: sink.warnings() }
 }
 
@@ -90,17 +126,23 @@ where
 {
     let mut sink = Sink::new();
     let traced = Traced::new(span);
-    compile_impl::<T>(world.track(), traced.track(), &mut sink).ok();
+    compile_impl_with::<T, _>(world.track(), traced.track(), &mut sink, None, T::create)
+        .ok();
     sink.values()
 }
 
-/// The internal implementation of `compile` with a bit lower-level interface
-/// that is also used by `trace`.
-fn compile_impl<T: Output>(
+/// The shared implementation of [`compile`], [`compile_with`], and [`trace`].
+fn compile_impl_with<T, F>(
     world: Tracked<dyn World + '_>,
     traced: Tracked<Traced>,
     sink: &mut Sink,
-) -> SourceResult<T> {
+    initial_introspector: Option<&dyn Introspector>,
+    mut create: F,
+) -> SourceResult<T>
+where
+    T: Output,
+    F: FnMut(&mut Engine, &Content, StyleChain) -> SourceResult<T>,
+{
     let library = world.library();
     match T::target() {
         Target::Paged => {}
@@ -139,9 +181,10 @@ fn compile_impl<T: Output>(
     // If that doesn't happen within five attempts, we give up.
     loop {
         let _scope = TimingScope::new(ITER_NAMES[history.len()]);
-        let introspector = history
+        let introspector: &dyn Introspector = history
             .last()
             .map(|doc| doc.introspector())
+            .or(initial_introspector)
             .unwrap_or(&empty_introspector);
         let constraint = comemo::Constraint::new();
 
@@ -155,7 +198,7 @@ fn compile_impl<T: Output>(
             route: Route::default(),
         };
 
-        document = T::create(&mut engine, &content, styles)?;
+        document = create(&mut engine, &content, styles)?;
 
         if timed!("check stabilized", constraint.validate(document.introspector())) {
             sink.extend_from_sink(subsink);

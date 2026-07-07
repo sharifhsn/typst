@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use ecow::{EcoString, eco_format};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use typst_library::WorldExt;
 use typst_library::diag::{SourceResult, warning};
 use typst_library::engine::Engine;
@@ -98,6 +98,9 @@ pub struct DocxCtx<'a, 'e> {
     /// [`Self::rasterize`]), so labels/refs inside an element that we rendered to
     /// an image remain present in the introspector.
     pub(crate) deferred_tags: Vec<Tag>,
+    /// DOCX locations from page furniture (headers/footers) that may need to be
+    /// aliased back to their repeated paged-layout locations.
+    pub(crate) real_alias_locations: FxHashSet<Location>,
 
     /// Headings recorded in document order as they are converted, used to
     /// populate any table of contents once each heading's real bookmark exists.
@@ -178,6 +181,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             uses_math: false,
             bookmarks: BookmarkTable::default(),
             deferred_tags: Vec::new(),
+            real_alias_locations: FxHashSet::default(),
             toc_headings: Vec::new(),
             toc_figures: Vec::new(),
             // A sane finite default (~A4 text width); overridden from the real

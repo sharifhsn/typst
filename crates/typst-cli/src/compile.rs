@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::path::Path;
+use std::sync::Arc;
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use ecow::{EcoVec, eco_format, eco_vec};
@@ -377,16 +378,39 @@ fn compile_and_export(
             Warned { output: result, warnings }
         }
         OutputFormat::Docx => {
-            let Warned { output, mut warnings } = typst::compile::<DocxDocument>(world);
-            let result = match output {
-                Ok(document) => {
-                    if let Some(warning) = target_mismatch_warning(
-                        config.output_format,
-                        document.page_size_pt(),
-                    ) {
-                        warnings.push(warning);
+            let Warned { output: paged, mut warnings } =
+                typst::compile::<PagedDocument>(world);
+            let result = match paged {
+                Ok(paged_document) => {
+                    let primary = Arc::clone(paged_document.introspector());
+                    let seed = Arc::clone(&primary);
+                    let Warned { output, warnings: docx_warnings } =
+                        typst::compile_with::<DocxDocument, _>(
+                            world,
+                            Some(seed.as_ref()),
+                            move |engine, content, styles| {
+                                typst_docx::docx_document_with_paged_introspector(
+                                    engine,
+                                    content,
+                                    styles,
+                                    Arc::clone(&primary),
+                                )
+                            },
+                        );
+                    warnings.extend(docx_warnings);
+                    match output {
+                        Ok(document) => {
+                            if let Some(warning) = target_mismatch_warning(
+                                config.output_format,
+                                document.page_size_pt(),
+                            ) {
+                                warnings.push(warning);
+                            }
+                            export_docx(&document, config)
+                                .map(|()| vec![config.output.clone()])
+                        }
+                        Err(errors) => Err(errors),
                     }
-                    export_docx(&document, config).map(|()| vec![config.output.clone()])
                 }
                 Err(errors) => Err(errors),
             };

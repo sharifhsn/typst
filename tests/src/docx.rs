@@ -9,14 +9,17 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::Arc;
 
 use typst::diag::{FileError, FileResult};
-use typst::foundations::{Bytes, Datetime, Duration};
+use typst::foundations::{Bytes, Datetime, Duration, Label};
+use typst::introspection::Introspector;
 use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
-use typst::utils::LazyHash;
+use typst::utils::{LazyHash, PicoStr};
 use typst::{Library, LibraryExt, World};
 use typst_docx::{DocxDocument, DocxOptions, docx};
+use typst_layout::PagedDocument;
 
 /// A minimal world: the embedded Typst fonts and a single detached source.
 struct TestWorld {
@@ -24,19 +27,39 @@ struct TestWorld {
     book: LazyHash<FontBook>,
     fonts: Vec<Font>,
     main: Source,
+    files: HashMap<FileId, Bytes>,
 }
 
 impl TestWorld {
     fn new(text: &str) -> Self {
+        Self::with_files(text, &[])
+    }
+
+    /// Serves the given `(path, bytes)` pairs as files resolvable from the
+    /// detached main source (for example, `bibliography("refs.bib")`).
+    fn with_files(text: &str, files: &[(&str, &[u8])]) -> Self {
         let fonts: Vec<Font> = typst_assets::fonts()
             .flat_map(|data| Font::iter(Bytes::new(data)))
             .collect();
         let book = FontBook::from_fonts(&fonts);
+        let main = Source::detached(text);
+        let files = files
+            .iter()
+            .map(|(path, bytes)| {
+                let id = typst::syntax::RootedPath::new(
+                    typst::syntax::VirtualRoot::Project,
+                    typst::syntax::VirtualPath::new(path).unwrap(),
+                )
+                .intern();
+                (id, Bytes::new(bytes.to_vec()))
+            })
+            .collect();
         Self {
             library: LazyHash::new(Library::builder().build()),
             book: LazyHash::new(book),
             fonts,
-            main: Source::detached(text),
+            main,
+            files,
         }
     }
 }
@@ -58,8 +81,11 @@ impl World for TestWorld {
             Err(FileError::NotFound(Default::default()))
         }
     }
-    fn file(&self, _: FileId) -> FileResult<Bytes> {
-        Err(FileError::NotFound(Default::default()))
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        self.files
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| FileError::NotFound(Default::default()))
     }
     fn font(&self, index: usize) -> Option<Font> {
         self.fonts.get(index).cloned()
@@ -71,10 +97,11 @@ impl World for TestWorld {
 
 /// Compiles `src` to a DOCX and returns its parts as `name -> text`.
 fn parts(src: &str) -> HashMap<String, String> {
-    let world = TestWorld::new(src);
-    let doc = typst::compile::<DocxDocument>(&world)
-        .output
-        .expect("compilation failed");
+    parts_with_files(src, &[])
+}
+
+fn parts_with_files(src: &str, files: &[(&str, &[u8])]) -> HashMap<String, String> {
+    let doc = compile_docx(src, files);
     let bytes = docx(&doc, &DocxOptions { pretty: false }).expect("docx export failed");
 
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
@@ -88,6 +115,57 @@ fn parts(src: &str) -> HashMap<String, String> {
         }
     }
     map
+}
+
+fn compile_docx(src: &str, files: &[(&str, &[u8])]) -> DocxDocument {
+    let world = TestWorld::with_files(src, files);
+    compile_docx_with_world(&world)
+}
+
+fn compile_docx_with_world(world: &TestWorld) -> DocxDocument {
+    let paged = typst::compile::<PagedDocument>(world)
+        .output
+        .expect("paged compilation failed");
+    let primary = Arc::clone(paged.introspector());
+    let seed = Arc::clone(&primary);
+    typst::compile_with::<DocxDocument, _>(
+        world,
+        Some(seed.as_ref()),
+        move |engine, content, styles| {
+            typst_docx::docx_document_with_paged_introspector(
+                engine,
+                content,
+                styles,
+                Arc::clone(&primary),
+            )
+        },
+    )
+    .output
+    .expect("docx compilation failed")
+}
+
+fn compile_paged_and_docx(src: &str) -> (PagedDocument, DocxDocument) {
+    let world = TestWorld::new(src);
+    let paged = typst::compile::<PagedDocument>(&world)
+        .output
+        .expect("paged compilation failed");
+    let primary = Arc::clone(paged.introspector());
+    let seed = Arc::clone(&primary);
+    let doc = typst::compile_with::<DocxDocument, _>(
+        &world,
+        Some(seed.as_ref()),
+        move |engine, content, styles| {
+            typst_docx::docx_document_with_paged_introspector(
+                engine,
+                content,
+                styles,
+                Arc::clone(&primary),
+            )
+        },
+    )
+    .output
+    .expect("docx compilation failed");
+    (paged, doc)
 }
 
 /// Parses every XML part with the namespace-aware parser, asserting that no
@@ -117,6 +195,21 @@ fn visible_text(xml: &str) -> String {
         .filter_map(|node| node.text())
         .collect()
 }
+
+const REFS_BIB: &[u8] = br#"@article{alpha,
+  title = {Alpha Source},
+  author = {Able, Alice},
+  year = {2020},
+  journal = {Journal of Sources},
+}
+
+@article{beta,
+  title = {Beta Source},
+  author = {Baker, Bob},
+  year = {2021},
+  journal = {Journal of Sources},
+}
+"#;
 
 fn run_text_and_child(doc_xml: &str, child: &str) -> Vec<(String, bool)> {
     let doc = roxmltree::Document::parse(doc_xml).expect("document XML should parse");
@@ -1629,6 +1722,100 @@ fn page_reference_resolves_via_the_synthetic_page_model() {
 }
 
 #[test]
+fn docx_locations_match_paged_locations_for_source_elements() {
+    // The real paged introspector can only back DOCX realization if source-
+    // derived locations line up across the Paged and Docx targets. Check both
+    // layers directly: the paged introspector and the DOCX synthetic fallback
+    // should assign the same `Location` to ordinary source labels.
+    let (paged, docx) = compile_paged_and_docx(
+        "= Intro <intro>\n\nBody.\n#pagebreak()\n= Second <second>\nMore.",
+    );
+
+    for name in ["intro", "second"] {
+        let label = Label::new(PicoStr::intern(name)).unwrap();
+        let paged_loc = paged
+            .introspector()
+            .query_label(label)
+            .expect("label exists in paged document")
+            .location()
+            .expect("paged label has a location");
+        let docx_loc = docx
+            .introspector()
+            .elements()
+            .query_label(label)
+            .expect("label exists in docx realization")
+            .location()
+            .expect("docx label has a location");
+        assert_eq!(docx_loc, paged_loc, "location mismatch for <{name}>");
+    }
+}
+
+#[test]
+fn body_here_page_uses_real_paged_page() {
+    let p = parts(
+        "#set page(numbering: \"1\")\n\
+         First page.\n#pagebreak()\n\
+         #context [BODY-#here().page()-END]",
+    );
+    let text = visible_text(&p["word/document.xml"]);
+    assert!(text.contains("BODY-2-END"), "body `here().page()` uses page 2");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn header_here_page_uses_real_paged_page() {
+    // Paged layout discovers tags in page furniture. Because repeated header
+    // content deduplicates by location, the shared header part should bake the
+    // first real paged occurrence, not the synthetic fallback's final-page
+    // guess.
+    let p = parts(
+        "#set page(header: context [HEAD-#here().page()-END])\n\
+         First page.\n#pagebreak()\nSecond page.",
+    );
+    let header = p
+        .iter()
+        .find(|(name, _)| name.starts_with("word/header"))
+        .map(|(_, xml)| xml)
+        .expect("a header part should exist");
+    let text = visible_text(header);
+    assert!(text.contains("HEAD-1-END"), "header uses the first real page");
+    assert!(
+        !text.contains("HEAD-2-END"),
+        "header must not fall back to the synthetic final page"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn citations_and_bibliography_converge_against_paged_introspection() {
+    let p = parts_with_files(
+        "First @beta and then @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")",
+        &[("refs.bib", REFS_BIB)],
+    );
+    let text = visible_text(&p["word/document.xml"]);
+    assert!(text.contains("[1]"), "first citation number is present: {text}");
+    assert!(text.contains("[2]"), "second citation number is present: {text}");
+    assert!(text.contains("Beta Source"), "first cited bibliography entry is present");
+    assert!(text.contains("Alpha Source"), "second cited bibliography entry is present");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn page_refs_follow_real_numbering_across_sections() {
+    let p = parts(
+        "#set page(numbering: \"i\")\n\
+         Front <front>\n#pagebreak()\n\
+         #set page(numbering: \"1\")\n#counter(page).update(1)\n\
+         Main <main>\n\n\
+         #context [FRONT-#ref(<front>, form: \"page\") MAIN-#ref(<main>, form: \"page\")]",
+    );
+    let text = visible_text(&p["word/document.xml"]).replace('\u{a0}', " ");
+    assert!(text.contains("FRONT-page i"), "front matter keeps roman numbering: {text}");
+    assert!(text.contains("MAIN-page 1"), "main matter resets to arabic 1: {text}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn leading_page_setup_does_not_advance_the_synthetic_page() {
     // A top-of-document `set page(..)` produces page-run machinery before the
     // first real body content. That setup must not count as a physical page,
@@ -1637,10 +1824,13 @@ fn leading_page_setup_does_not_advance_the_synthetic_page() {
         "#set page(numbering: \"1\")\n= Target <t>\nUNIQUE-#ref(<t>, form: \"page\")-END",
     );
     let doc = &p["word/document.xml"];
-    let text = visible_text(doc);
-    assert!(text.contains("UNIQUE-1-END"), "the first content page stays page 1");
+    let text = visible_text(doc).replace('\u{a0}', " ");
     assert!(
-        !text.contains("UNIQUE-2-END"),
+        text.contains("UNIQUE-page 1-END"),
+        "the first content page stays page 1: {text}"
+    );
+    assert!(
+        !text.contains("UNIQUE-page 2-END"),
         "leading page setup must not advance to page 2"
     );
     assert_all_wellformed(&p);
@@ -1726,7 +1916,7 @@ fn failing_figure_numbering_closure_does_not_abort_the_export() {
     // only exists in a paged model) must not abort the export: the caption's
     // cached number is best-effort — the SEQ field is the live truth in Word.
     let p = parts(
-        "#set figure(numbering: _ => (1,).at(9))\n\
+        "#set figure(numbering: _ => if target() == \"docx\" { (1,).at(9) } else { \"1\" })\n\
          #figure(rect(), caption: [Survives])",
     );
     let doc = &p["word/document.xml"];

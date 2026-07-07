@@ -8,9 +8,10 @@
 
 use std::fmt::{self, Debug, Formatter};
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use ecow::{EcoString, EcoVec};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use typst_library::diag::StrResult;
 use typst_library::foundations::{Content, Label, Selector};
 use typst_library::introspection::{
@@ -23,7 +24,20 @@ use typst_syntax::VirtualPath;
 /// An introspector implementation for DOCX documents.
 #[derive(Clone)]
 pub struct DocxIntrospector {
+    /// The target-agnostic element introspector built from the DOCX realization.
+    ///
+    /// This remains as a fallback for DOCX-only target branches and for content
+    /// whose location is not present in the paged document.
     elements: ElementIntrospector<PagedPosition>,
+    /// The fixed-point introspector from paged layout. This is the primary
+    /// source for queries, positions, page numbers, page numbering, and
+    /// bibliography/citation convergence whenever it has an answer.
+    real: Option<Arc<typst_layout::PagedIntrospector>>,
+    /// Maps locations produced by the DOCX realization to equivalent locations
+    /// in the paged realization. This covers repeated page furniture in
+    /// particular: DOCX lowers one header/footer part, while paged layout lays
+    /// that same source content out once per page with distinct locations.
+    real_aliases: FxHashMap<Location, Location>,
     anchors: FxHashMap<Location, EcoString>,
     /// The synthetic page model: for every tag location, the 1-based count of
     /// explicit page/section breaks before it plus one, and its section index.
@@ -41,9 +55,14 @@ pub struct DocxIntrospector {
 
 impl DocxIntrospector {
     /// Creates an introspector from the introspection tags collected while
-    /// walking the IR.
+    /// walking the IR, optionally layered over the fixed-point paged
+    /// introspector.
     #[typst_macros::time(name = "introspect docx")]
-    pub fn new(tags: &[(Tag, PagedPosition)]) -> DocxIntrospector {
+    pub fn new(
+        tags: &[(Tag, PagedPosition)],
+        real: Option<Arc<typst_layout::PagedIntrospector>>,
+        real_alias_candidates: FxHashSet<Location>,
+    ) -> DocxIntrospector {
         if std::env::var_os("DOCX_DEBUG_INTROSPECT").is_some() {
             let mut hist = std::collections::BTreeMap::new();
             for (tag, _) in tags {
@@ -54,11 +73,24 @@ impl DocxIntrospector {
             eprintln!("INTROSPECT TAGS: {hist:?}");
         }
         let mut builder = ElementIntrospectorBuilder::<PagedPosition>::new();
+        let mut real_aliases = FxHashMap::default();
         for (tag, pos) in tags {
             builder.discover_tag(tag, *pos);
+            if let Some(real) = &real
+                && let Tag::End(loc, key, flags) = tag
+                && flags.introspectable
+                && real_alias_candidates.contains(loc)
+                && real.position(*loc).is_none()
+                && let Some(real_loc) = real.locator(*key, *loc)
+                && real.position(real_loc).is_some()
+            {
+                real_aliases.insert(*loc, real_loc);
+            }
         }
         DocxIntrospector {
             elements: builder.finalize(),
+            real,
+            real_aliases,
             anchors: FxHashMap::default(),
             page_model: FxHashMap::default(),
             total_pages: 1,
@@ -87,46 +119,101 @@ impl DocxIntrospector {
         self.total_pages = total_pages.max(1);
         self.section_numberings = section_numberings;
     }
+
+    fn real_location(&self, location: Location) -> Option<Location> {
+        let real = self.real.as_ref()?;
+        if real.position(location).is_some() {
+            Some(location)
+        } else {
+            self.real_aliases.get(&location).copied()
+        }
+    }
 }
 
 impl Introspector for DocxIntrospector {
     fn query(&self, selector: &Selector) -> EcoVec<Content> {
+        if let Some(real) = &self.real {
+            let result = real.query(selector);
+            if !result.is_empty() {
+                return result;
+            }
+        }
         self.elements.query(selector)
     }
 
     fn query_first(&self, selector: &Selector) -> Option<Content> {
-        self.elements.query_first(selector)
+        self.real
+            .as_ref()
+            .and_then(|real| real.query_first(selector))
+            .or_else(|| self.elements.query_first(selector))
     }
 
     fn query_unique(&self, selector: &Selector) -> StrResult<Content> {
+        if let Some(real) = &self.real
+            && !real.query(selector).is_empty()
+        {
+            return real.query_unique(selector);
+        }
         self.elements.query_unique(selector)
     }
 
     fn query_label(&self, label: Label) -> StrResult<&Content> {
+        if let Some(real) = &self.real
+            && let Ok(content) = real.query_label(label)
+        {
+            return Ok(content);
+        }
         self.elements.query_label(label)
     }
 
     fn query_labelled(&self) -> EcoVec<Content> {
+        if let Some(real) = &self.real {
+            let result = real.query_labelled();
+            if !result.is_empty() {
+                return result;
+            }
+        }
         self.elements.query_labelled()
     }
 
     fn query_count_before(&self, selector: &Selector, end: Location) -> usize {
+        if let Some(real) = &self.real
+            && let Some(real_end) = self.real_location(end)
+        {
+            return real.query_count_before(selector, real_end);
+        }
         self.elements.query_count_before(selector, end)
     }
 
     fn label_count(&self, label: Label) -> usize {
-        self.elements.label_count(label)
+        self.real
+            .as_ref()
+            .map(|real| real.label_count(label))
+            .filter(|&count| count > 0)
+            .unwrap_or_else(|| self.elements.label_count(label))
     }
 
     fn locator(&self, key: u128, base: Location) -> Option<Location> {
-        self.elements.locator(key, base)
+        self.real
+            .as_ref()
+            .and_then(|real| real.locator(key, base))
+            .or_else(|| self.elements.locator(key, base))
     }
 
-    fn pages(&self, _: Location) -> Option<NonZeroUsize> {
-        NonZeroUsize::new(self.total_pages)
+    fn pages(&self, location: Location) -> Option<NonZeroUsize> {
+        self.real
+            .as_ref()
+            .and_then(|real| real.pages(location))
+            .or_else(|| NonZeroUsize::new(self.total_pages))
     }
 
     fn page(&self, location: Location) -> Option<NonZeroUsize> {
+        if let Some(real) = &self.real
+            && let Some(real_loc) = self.real_location(location)
+            && let Some(page) = real.page(real_loc)
+        {
+            return Some(page);
+        }
         // Locations outside the model (rasterize-deferred, header/footer tags)
         // are appended after the body, so the final page is the best guess.
         let page = self
@@ -137,10 +224,22 @@ impl Introspector for DocxIntrospector {
     }
 
     fn position(&self, location: Location) -> Option<DocumentPosition> {
+        if let Some(real) = &self.real
+            && let Some(real_loc) = self.real_location(location)
+            && let Some(pos) = real.position(real_loc)
+        {
+            return Some(DocumentPosition::Paged(pos));
+        }
         self.elements.position(location).copied().map(DocumentPosition::Paged)
     }
 
     fn page_numbering(&self, location: Location) -> Option<&Numbering> {
+        if let Some(real) = &self.real
+            && let Some(real_loc) = self.real_location(location)
+            && let Some(numbering) = real.page_numbering(real_loc)
+        {
+            return Some(numbering);
+        }
         match self.page_model.get(&location) {
             // A known location resolves against its own section — faithfully
             // `None` when that section has no `set page(numbering:)`, exactly
@@ -155,20 +254,31 @@ impl Introspector for DocxIntrospector {
         }
     }
 
-    fn page_supplement(&self, _: Location) -> Option<&Content> {
-        None
+    fn page_supplement(&self, location: Location) -> Option<&Content> {
+        self.real.as_ref().and_then(|real| {
+            let real_loc = self.real_location(location)?;
+            real.page_supplement(real_loc)
+        })
     }
 
     fn anchor(&self, location: Location) -> Option<&EcoString> {
-        self.anchors.get(&location)
+        self.anchors
+            .get(&location)
+            .or_else(|| self.real.as_ref().and_then(|real| real.anchor(location)))
     }
 
-    fn document(&self, _: Location) -> Option<Location> {
-        None
+    fn document(&self, location: Location) -> Option<Location> {
+        self.real.as_ref().and_then(|real| {
+            let real_loc = self.real_location(location)?;
+            real.document(real_loc)
+        })
     }
 
-    fn path(&self, _: Location) -> Option<&VirtualPath> {
-        None
+    fn path(&self, location: Location) -> Option<&VirtualPath> {
+        self.real.as_ref().and_then(|real| {
+            let real_loc = self.real_location(location)?;
+            real.path(real_loc)
+        })
     }
 }
 

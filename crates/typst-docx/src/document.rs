@@ -24,11 +24,36 @@ use crate::props;
 /// First performs root-level realization, then walks the resulting native
 /// elements into the typed DOCX IR. The OPC zip is written separately by
 /// [`crate::docx`].
-#[typst_macros::time(name = "docx document")]
 pub fn docx_document(
     engine: &mut Engine,
     content: &Content,
     styles: StyleChain,
+) -> SourceResult<DocxDocument> {
+    docx_document_impl(engine, content, styles, None)
+}
+
+/// Produces a DOCX document backed by the fixed-point paged introspector.
+///
+/// The DOCX realization still runs under `Target::Docx`, but introspection
+/// queries during convergence can be seeded from the paged document and the
+/// final DOCX introspector delegates to that paged source first. The synthetic
+/// DOCX model remains as a fallback for locations that only exist in the DOCX
+/// realization.
+pub fn docx_document_with_paged_introspector(
+    engine: &mut Engine,
+    content: &Content,
+    styles: StyleChain,
+    paged_introspector: Arc<typst_layout::PagedIntrospector>,
+) -> SourceResult<DocxDocument> {
+    docx_document_impl(engine, content, styles, Some(paged_introspector))
+}
+
+#[typst_macros::time(name = "docx document")]
+fn docx_document_impl(
+    engine: &mut Engine,
+    content: &Content,
+    styles: StyleChain,
+    paged_introspector: Option<Arc<typst_layout::PagedIntrospector>>,
 ) -> SourceResult<DocxDocument> {
     // Mark the external styles as document-level "outside".
     let styles = styles.to_map().outside();
@@ -89,6 +114,7 @@ pub fn docx_document(
         uses_fields,
         uses_math,
         deferred_tags,
+        real_alias_locations,
         toc_headings,
         toc_figures,
     ) = {
@@ -193,6 +219,7 @@ pub fn docx_document(
                 ctx.uses_fields,
                 ctx.uses_math,
                 std::mem::take(&mut ctx.deferred_tags),
+                std::mem::take(&mut ctx.real_alias_locations),
                 std::mem::take(&mut ctx.toc_headings),
                 std::mem::take(&mut ctx.toc_figures),
             )
@@ -292,7 +319,8 @@ pub fn docx_document(
         &mut footnotes,
     );
 
-    let mut introspector = DocxIntrospector::new(&tags);
+    let mut introspector =
+        DocxIntrospector::new(&tags, paged_introspector, real_alias_locations);
     introspector.set_anchors(crate::bookmark::anchors(&bookmarks));
     introspector.set_page_model(page_model, page, section_numberings);
 
@@ -793,7 +821,10 @@ fn build_section(
         // whole body, which is also where an `.after(here())` furniture query
         // expects them. Duplicate locations across sections are deduped by the
         // introspector builder.
-        collect_tags(&blocks, &mut ctx.deferred_tags);
+        let mut tags = Vec::new();
+        collect_tags(&blocks, &mut tags);
+        ctx.real_alias_locations.extend(tags.iter().map(Tag::location));
+        ctx.deferred_tags.extend(tags);
         // Emit the header part whenever a header is explicitly set (even if it
         // lowered to nothing) — matching the prior unconditional behaviour — or
         // when the background produced a drawing.
@@ -816,7 +847,10 @@ fn build_section(
         ctx.raster_height = saved_h;
         let (blocks, rels) = lowered?;
         // Same as the header above: footer tags must reach the introspector.
-        collect_tags(&blocks, &mut ctx.deferred_tags);
+        let mut tags = Vec::new();
+        collect_tags(&blocks, &mut tags);
+        ctx.real_alias_locations.extend(tags.iter().map(Tag::location));
+        ctx.deferred_tags.extend(tags);
         let part_name = ctx.next_hdrftr_name(false);
         let rel = ctx.add_footer_rel(&part_name);
         sect.footers.push(HdrFtrRef { kind: "default", rel });

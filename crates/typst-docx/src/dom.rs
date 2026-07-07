@@ -51,6 +51,12 @@ impl DocxDocument {
         &self.info
     }
 
+    /// Provides the DOCX introspector, including DOCX bookmark anchors and the
+    /// synthetic fallback layer.
+    pub fn introspector(&self) -> &Arc<DocxIntrospector> {
+        &self.introspector
+    }
+
     /// The primary section's page size in points (`width`, `height`).
     ///
     /// Exposed so the CLI can spot a slide-shaped document being written to
