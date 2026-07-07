@@ -133,61 +133,69 @@ pub fn docx_document(
             // tagged `w:noProof` by matching their source span, not the mono font.
             ctx.record_raw_ranges(content);
 
-        // Build the body and the (final) section properties. A single-section
-        // document converts all `pairs` at once (unchanged behaviour, so leading
-        // pagebreaks etc. are preserved exactly); a multi-section document
-        // converts each section's content separately and joins them with
-        // `Block::SectionBreak`s carrying the earlier sections' `sectPr`.
-        let (body, sect, header_parts, footer_parts) = if sections.len() <= 1 {
-            let body = crate::convert::run(&mut ctx, &pairs)?;
-            let (sect, h, f) = build_section(&mut ctx, &first_geom, styles)?;
-            (body, sect, h, f)
-        } else {
-            // Each section builds its OWN header/footer parts (a landscape
-            // appendix may carry a different running head). Per-section header
-            // content can re-lower code that queries page state we don't have
-            // (`here().page-numbering()` → `none`) — but that is now a *delayed*
-            // error absorbed by the conversion-sink isolation above, so it no
-            // longer fails the export. A hard error still falls back to a
-            // geometry-only sectPr for that section.
-            let mut header_parts = Vec::new();
-            let mut footer_parts = Vec::new();
-            let mut body = Vec::new();
-            let mut final_sect = None;
-            let last = sections.len() - 1;
-            for (idx, (geom, range)) in sections.iter().enumerate() {
-                let mut blocks = crate::convert::run(&mut ctx, &pairs[range.clone()])?;
-                body.append(&mut blocks);
-                let (s, mut h, mut f) = build_section(&mut ctx, geom, styles)
-                    .unwrap_or_else(|_| (sectpr_geometry(geom), Vec::new(), Vec::new()));
-                header_parts.append(&mut h);
-                footer_parts.append(&mut f);
-                if idx == last {
-                    final_sect = Some(s);
-                } else {
-                    body.push(Block::SectionBreak(s));
+            // Build the body and the (final) section properties. A single-section
+            // document converts all `pairs` at once (unchanged behaviour, so leading
+            // pagebreaks etc. are preserved exactly); a multi-section document
+            // converts each section's content separately and joins them with
+            // `Block::SectionBreak`s carrying the earlier sections' `sectPr`.
+            let (body, sect, header_parts, footer_parts) = if sections.len() <= 1 {
+                let body = crate::convert::run(&mut ctx, &pairs)?;
+                let (sect, h, f) = build_section(&mut ctx, &first_geom, styles)?;
+                (body, sect, h, f)
+            } else {
+                // Each section builds its OWN header/footer parts (a landscape
+                // appendix may carry a different running head). Per-section header
+                // content can re-lower code that queries page state we don't have
+                // (`here().page-numbering()` → `none`) — but that is now a *delayed*
+                // error absorbed by the conversion-sink isolation above, so it no
+                // longer fails the export. A hard error still falls back to a
+                // geometry-only sectPr for that section.
+                let mut header_parts = Vec::new();
+                let mut footer_parts = Vec::new();
+                let mut body = Vec::new();
+                let mut final_sect = None;
+                let last = sections.len() - 1;
+                for (idx, (geom, range)) in sections.iter().enumerate() {
+                    let mut blocks =
+                        crate::convert::run(&mut ctx, &pairs[range.clone()])?;
+                    body.append(&mut blocks);
+                    let (s, mut h, mut f) = build_section(&mut ctx, geom, styles)
+                        .unwrap_or_else(|_| {
+                            (sectpr_geometry(geom), Vec::new(), Vec::new())
+                        });
+                    header_parts.append(&mut h);
+                    footer_parts.append(&mut f);
+                    if idx == last {
+                        final_sect = Some(s);
+                    } else {
+                        body.push(Block::SectionBreak(s));
+                    }
                 }
-            }
-            (body, final_sect.expect("at least one section"), header_parts, footer_parts)
-        };
-        (
-            body,
-            sect,
-            header_parts,
-            footer_parts,
-            std::mem::take(&mut ctx.footnotes),
-            std::mem::take(&mut ctx.numbering),
-            std::mem::take(&mut ctx.media),
-            std::mem::take(&mut ctx.doc_rels),
-            std::mem::take(&mut ctx.footnote_rels),
-            std::mem::take(&mut ctx.bookmarks),
-            ctx.max_heading_level,
-            ctx.uses_fields,
-            ctx.uses_math,
-            std::mem::take(&mut ctx.deferred_tags),
-            std::mem::take(&mut ctx.toc_headings),
-            std::mem::take(&mut ctx.toc_figures),
-        )
+                (
+                    body,
+                    final_sect.expect("at least one section"),
+                    header_parts,
+                    footer_parts,
+                )
+            };
+            (
+                body,
+                sect,
+                header_parts,
+                footer_parts,
+                std::mem::take(&mut ctx.footnotes),
+                std::mem::take(&mut ctx.numbering),
+                std::mem::take(&mut ctx.media),
+                std::mem::take(&mut ctx.doc_rels),
+                std::mem::take(&mut ctx.footnote_rels),
+                std::mem::take(&mut ctx.bookmarks),
+                ctx.max_heading_level,
+                ctx.uses_fields,
+                ctx.uses_math,
+                std::mem::take(&mut ctx.deferred_tags),
+                std::mem::take(&mut ctx.toc_headings),
+                std::mem::take(&mut ctx.toc_figures),
+            )
         };
         // Forward conversion warnings to the real sink (delayed errors stay
         // isolated in `conv_sink` and are dropped).
@@ -220,7 +228,11 @@ pub fn docx_document(
                     text.push(' ');
                 }
                 text.push_str(&h.body.plain_text());
-                (!text.is_empty()).then(|| TocHeading { level, anchor: None, text: text.into() })
+                (!text.is_empty()).then(|| TocHeading {
+                    level,
+                    anchor: None,
+                    text: text.into(),
+                })
             })
             .collect()
     } else {
@@ -230,7 +242,12 @@ pub fn docx_document(
     // Now that every heading/figure's real bookmark is known, populate the
     // table(s) of contents and list(s) of figures in document order, across all
     // sections.
-    crate::mappers::outline::fill_tocs(&mut body, &toc_headings, &toc_fallback, &toc_figures);
+    crate::mappers::outline::fill_tocs(
+        &mut body,
+        &toc_headings,
+        &toc_fallback,
+        &toc_figures,
+    );
 
     // Synthetic page model: a flowing document has no real pages, but templates
     // legitimately read paged introspection (`@target(form: "page")`,
@@ -268,8 +285,12 @@ pub fn docx_document(
     // Hoist the document's most common font/size/language into `docDefaults` and
     // strip them from matching runs, so the body inherits (restylable in Word,
     // compact `document.xml`).
-    let text_defaults =
-        hoist_text_defaults(&mut body, &mut header_parts, &mut footer_parts, &mut footnotes);
+    let text_defaults = hoist_text_defaults(
+        &mut body,
+        &mut header_parts,
+        &mut footer_parts,
+        &mut footnotes,
+    );
 
     let mut introspector = DocxIntrospector::new(&tags);
     introspector.set_anchors(crate::bookmark::anchors(&bookmarks));
@@ -331,7 +352,11 @@ fn hoist_text_defaults(
     };
     let defaults = crate::dom::TextDefaults {
         font: mode(fonts),
-        size_half_pt: sizes.into_iter().max_by_key(|(_, n)| *n).map(|(k, _)| k).unwrap_or(22),
+        size_half_pt: sizes
+            .into_iter()
+            .max_by_key(|(_, n)| *n)
+            .map(|(k, _)| k)
+            .unwrap_or(22),
         color: None,
         lang: mode(langs),
     };
@@ -592,10 +617,15 @@ fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGe
     // `header-ascent`/`footer-descent` are measured from the inner margin edge;
     // the band offset is `margin - ascent`, clamped into `(0, margin)`.
     let header_ascent = sc.resolve(PageElem::header_ascent).relative_to(sides.top);
-    let footer_descent =
-        sc.resolve(PageElem::footer_descent).relative_to(sides.bottom);
-    let header_band = clamp_band(props::abs_to_twip(sides.top - header_ascent), props::abs_to_twip(sides.top));
-    let footer_band = clamp_band(props::abs_to_twip(sides.bottom - footer_descent), props::abs_to_twip(sides.bottom));
+    let footer_descent = sc.resolve(PageElem::footer_descent).relative_to(sides.bottom);
+    let header_band = clamp_band(
+        props::abs_to_twip(sides.top - header_ascent),
+        props::abs_to_twip(sides.top),
+    );
+    let footer_band = clamp_band(
+        props::abs_to_twip(sides.bottom - footer_descent),
+        props::abs_to_twip(sides.bottom),
+    );
 
     // Binding allowance → gutter (informational; default LTR binding = left).
     let gutter = 0;
@@ -619,8 +649,7 @@ fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGe
         Smart::Custom(None) => (None, true),
         Smart::Auto => (None, false),
     };
-    let background =
-        sc.get_ref(PageElem::background).clone().filter(|c| !c.is_empty());
+    let background = sc.get_ref(PageElem::background).clone().filter(|c| !c.is_empty());
     // A flat solid page-colour maps natively; `auto` (none), an explicit `none`,
     // or a gradient/tiling paint have no `w:background` form and are left unset
     // (a gradient page fill still reaches Word via `background:` if the author
@@ -748,8 +777,9 @@ fn build_section(
             // (a logo image, plain text) resolves in the first pass and never
             // sees this.
             let saved_h = ctx.raster_height;
-            ctx.raster_height = typst_library::layout::Abs::pt(geom.margin_top as f64 / 20.0)
-                .max(typst_library::layout::Abs::pt(6.0));
+            ctx.raster_height =
+                typst_library::layout::Abs::pt(geom.margin_top as f64 / 20.0)
+                    .max(typst_library::layout::Abs::pt(6.0));
             let lowered = ctx.blocks(content, styles);
             ctx.raster_height = saved_h;
             blocks.extend(lowered?);
@@ -779,8 +809,9 @@ fn build_section(
     if let Some(content) = &geom.footer {
         // Same band bound as the header above, against the bottom margin.
         let saved_h = ctx.raster_height;
-        ctx.raster_height = typst_library::layout::Abs::pt(geom.margin_bottom as f64 / 20.0)
-            .max(typst_library::layout::Abs::pt(6.0));
+        ctx.raster_height =
+            typst_library::layout::Abs::pt(geom.margin_bottom as f64 / 20.0)
+                .max(typst_library::layout::Abs::pt(6.0));
         let lowered = ctx.part_blocks(content, styles);
         ctx.raster_height = saved_h;
         let (blocks, rels) = lowered?;
@@ -798,7 +829,8 @@ fn build_section(
             let part_name = ctx.next_hdrftr_name(true);
             let rel = ctx.add_header_rel(&part_name);
             sect.headers.push(HdrFtrRef { kind: "default", rel });
-            let para = page_number_para(ctx, geom.numbering.as_ref(), "Header", geom.number_jc);
+            let para =
+                page_number_para(ctx, geom.numbering.as_ref(), "Header", geom.number_jc);
             header_parts.push(HdrFtrPart {
                 part_name,
                 is_header: true,
@@ -813,7 +845,8 @@ fn build_section(
             let part_name = ctx.next_hdrftr_name(false);
             let rel = ctx.add_footer_rel(&part_name);
             sect.footers.push(HdrFtrRef { kind: "default", rel });
-            let para = page_number_para(ctx, geom.numbering.as_ref(), "Footer", geom.number_jc);
+            let para =
+                page_number_para(ctx, geom.numbering.as_ref(), "Footer", geom.number_jc);
             footer_parts.push(HdrFtrPart {
                 part_name,
                 is_header: false,
@@ -839,7 +872,9 @@ fn background_block(
     geom: &SectGeom,
     styles: StyleChain,
 ) -> SourceResult<Option<crate::dom::Block>> {
-    use crate::dom::{Anchor, AnchorPos, AnchorWrap, Block, Drawing, Para, ParaChild, Run};
+    use crate::dom::{
+        Anchor, AnchorPos, AnchorWrap, Block, Drawing, Para, ParaChild, Run,
+    };
     use typst_library::layout::Abs;
 
     // EMU per twip = 914400 / 1440.

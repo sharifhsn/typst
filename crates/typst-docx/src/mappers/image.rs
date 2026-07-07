@@ -151,7 +151,10 @@ pub fn figure(
         Some(cap) => {
             let position = cap.position.get(styles);
             let runs = caption_runs(elem, cap, styles, ctx)?;
-            let props = ParaProps { style: Some(CAPTION_STYLE.into()), ..Default::default() };
+            let props = ParaProps {
+                style: Some(CAPTION_STYLE.into()),
+                ..Default::default()
+            };
             let para = Para {
                 props,
                 content: runs.into_iter().map(ParaChild::Run).collect(),
@@ -252,7 +255,10 @@ pub fn caption(
     if runs.is_empty() {
         return Ok(Vec::new());
     }
-    let props = ParaProps { style: Some(CAPTION_STYLE.into()), ..Default::default() };
+    let props = ParaProps {
+        style: Some(CAPTION_STYLE.into()),
+        ..Default::default()
+    };
     Ok(vec![Block::Para(Para {
         props,
         content: runs.into_iter().map(ParaChild::Run).collect(),
@@ -309,9 +315,7 @@ pub fn place(
         blocks.as_slice(),
         [Block::Para(p)] if matches!(p.content.as_slice(), [ParaChild::Run(Run::Drawing(_))])
     );
-    if is_solely_one_drawing
-        && let Some(mut drawing) = take_first_drawing(&mut blocks)
-    {
+    if is_solely_one_drawing && let Some(mut drawing) = take_first_drawing(&mut blocks) {
         set_place_anchor(&mut drawing, elem, styles, ctx);
         return Ok(vec![para_drawing(drawing)]);
     }
@@ -392,7 +396,11 @@ fn set_place_anchor(
     };
     let pos_h = match dx_emu {
         Some(off) => AnchorPos { rel_from: "margin", align: None, offset: Some(off) },
-        None => AnchorPos { rel_from: "margin", align: Some(h_align), offset: None },
+        None => AnchorPos {
+            rel_from: "margin",
+            align: Some(h_align),
+            offset: None,
+        },
     };
 
     let v_align: &'static str = match v_comp {
@@ -402,7 +410,11 @@ fn set_place_anchor(
     };
     let pos_v = match dy_emu {
         Some(off) => AnchorPos { rel_from: "margin", align: None, offset: Some(off) },
-        None => AnchorPos { rel_from: "margin", align: Some(v_align), offset: None },
+        None => AnchorPos {
+            rel_from: "margin",
+            align: Some(v_align),
+            offset: None,
+        },
     };
 
     let wrap = if float { AnchorWrap::TopAndBottom } else { AnchorWrap::None };
@@ -452,26 +464,33 @@ fn caption_runs(
 
     // The realized number, used as the SEQ field's cached result so the caption
     // is readable before Word updates fields.
-    let number_runs = match (cap.counter.clone(), cap.numbering.clone(), cap.figure_location)
-    {
-        (Some(Some(counter)), Some(Some(numbering)), Some(Some(location))) => {
-            // Best-effort: this number is only the SEQ field's *cached* result —
-            // Word recomputes the live value on open/update. A user numbering
-            // closure that reads introspection (querying headings, indexing
-            // counter components) can fail against the empty first-iteration
-            // introspector, or permanently when the state it wants only exists
-            // in a paged model. Under paged layout that failure is a delayed
-            // error that gets retried; propagating it here would hard-abort the
-            // whole export on iteration one. An empty cached number degrades
-            // gracefully instead (the field still renders in Word).
-            match counter.display_at(ctx.engine(), location, styles, &numbering, cap.span())
-            {
-                Ok(number) => ctx.inline_runs(&number, styles, RunProps::default())?,
-                Err(_) => Vec::new(),
+    let number_runs =
+        match (cap.counter.clone(), cap.numbering.clone(), cap.figure_location) {
+            (Some(Some(counter)), Some(Some(numbering)), Some(Some(location))) => {
+                // Best-effort: this number is only the SEQ field's *cached* result —
+                // Word recomputes the live value on open/update. A user numbering
+                // closure that reads introspection (querying headings, indexing
+                // counter components) can fail against the empty first-iteration
+                // introspector, or permanently when the state it wants only exists
+                // in a paged model. Under paged layout that failure is a delayed
+                // error that gets retried; propagating it here would hard-abort the
+                // whole export on iteration one. An empty cached number degrades
+                // gracefully instead (the field still renders in Word).
+                match counter.display_at(
+                    ctx.engine(),
+                    location,
+                    styles,
+                    &numbering,
+                    cap.span(),
+                ) {
+                    Ok(number) => {
+                        ctx.inline_runs(&number, styles, RunProps::default())?
+                    }
+                    Err(_) => Vec::new(),
+                }
             }
-        }
-        _ => Vec::new(),
-    };
+            _ => Vec::new(),
+        };
 
     // The SEQ complex field. Word recomputes the number on open / field update.
     let seq = seq_name(elem, styles);
@@ -566,8 +585,16 @@ fn float_figure_body(
     let dist = EMU_PER_PT_I * 9; // ~9pt clearance around the float.
     drawing.anchor = Some(Anchor {
         z: ctx.next_z(),
-        pos_h: AnchorPos { rel_from: "margin", align: Some("center"), offset: None },
-        pos_v: AnchorPos { rel_from: "margin", align: Some(v_align), offset: None },
+        pos_h: AnchorPos {
+            rel_from: "margin",
+            align: Some("center"),
+            offset: None,
+        },
+        pos_v: AnchorPos {
+            rel_from: "margin",
+            align: Some(v_align),
+            offset: None,
+        },
         wrap: AnchorWrap::TopAndBottom,
         dist: [0, 0, dist, dist],
         behind: false,
@@ -675,7 +702,8 @@ fn fallback_runs(
         rel,
         w_emu: crate::props::abs_to_emu(size.x),
         h_emu: crate::props::abs_to_emu(size.y),
-        alt: Some(text.replace('\n', " ").into()).filter(|s: &EcoString| !s.trim().is_empty()),
+        alt: Some(text.replace('\n', " ").into())
+            .filter(|s: &EcoString| !s.trim().is_empty()),
         docpr_id,
         name,
         anchor: None,
@@ -744,8 +772,7 @@ fn embeddable_bytes(image: &Image) -> Option<(Vec<u8>, EcoString)> {
             // crate is not a direct dependency of `typst-docx`. Add it (or
             // route through a small helper exposed by `typst-library`) and
             // return `(png_bytes, "png")` here.
-            RasterFormat::Exchange(ExchangeFormat::Webp)
-            | RasterFormat::Pixel(_) => None,
+            RasterFormat::Exchange(ExchangeFormat::Webp) | RasterFormat::Pixel(_) => None,
         },
         // Vector sources (SVG / PDF) must be rasterized to PNG. See
         // `laid_out_fallback`'s INTEGRATION-NEEDED note (needs `typst-render`).

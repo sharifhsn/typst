@@ -81,7 +81,8 @@ pub fn equation(
     };
 
     let arenas = Arenas::default();
-    let item = resolve_equation(elem, ctx.engine(), Locator::synthesize(loc), &arenas, styles)?;
+    let item =
+        resolve_equation(elem, ctx.engine(), Locator::synthesize(loc), &arenas, styles)?;
 
     // Walk the IR into an `<m:oMath>…</m:oMath>` fragment. `ctx` is reborrowed
     // for the emitter and released when the block ends.
@@ -119,7 +120,9 @@ pub fn equation(
     if let Some(number) = equation_number(elem, styles, ctx)? {
         content.push(ParaChild::Run(Run::Tab));
         content.extend(number.into_iter().map(ParaChild::Run));
-        props.tabs.push(TabStop { val: TabAlign::End, leader: None, pos: 8640 });
+        props
+            .tabs
+            .push(TabStop { val: TabAlign::End, leader: None, pos: 8640 });
     }
 
     Ok(EquationOut::Block(vec![Block::Para(Para { props, content })]))
@@ -140,8 +143,13 @@ fn equation_number(
 
     let span = elem.span();
     let number = {
-        let result = Counter::of(EquationElem::ELEM)
-            .display_at(ctx.engine(), loc, styles, &numbering, span);
+        let result = Counter::of(EquationElem::ELEM).display_at(
+            ctx.engine(),
+            loc,
+            styles,
+            &numbering,
+            span,
+        );
         ctx.engine().delay(result).spanned(span)
     };
 
@@ -466,7 +474,10 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
 
     /// Emits the base with its left (pre) and right (post) sub/superscripts,
     /// returning the serialized fragment.
-    fn scripts_attach_horizontal(&mut self, scripts: &ScriptsItem) -> SourceResult<String> {
+    fn scripts_attach_horizontal(
+        &mut self,
+        scripts: &ScriptsItem,
+    ) -> SourceResult<String> {
         let base = self.render(&scripts.base)?;
         let tr = self.render_opt(scripts.top_right.as_ref())?;
         let br = self.render_opt(scripts.bottom_right.as_ref())?;
@@ -574,7 +585,8 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
         self.buf.open("m:chr").attr("m:val", &chr.to_string()).empty();
         // Limit location: under/over for ∑∏⋃… (or when the source used
         // under/over), sub/sup for integrals.
-        let lim = if lim_under_over && !is_integral_char(chr) { "undOvr" } else { "subSup" };
+        let lim =
+            if lim_under_over && !is_integral_char(chr) { "undOvr" } else { "subSup" };
         self.buf.open("m:limLoc").attr("m:val", lim).empty();
         self.buf.open("m:grow").attr("m:val", "1").empty();
         if lower.is_none() {
@@ -959,7 +971,7 @@ fn is_nary_operator(c: char) -> bool {
             | '⨀'   // n-ary circled dot U+2A00
             | '⨁'   // n-ary circled plus U+2A01
             | '⨂'   // n-ary circled times U+2A02
-            | '⫿'   // n-ary triple vertical bar U+2AFF
+            | '⫿' // n-ary triple vertical bar U+2AFF
         )
 }
 
@@ -1024,20 +1036,20 @@ fn accent_char(item: &MathItem) -> Option<char> {
 fn to_combining(c: char) -> char {
     match c {
         // Spacing → combining for the common math accents.
-        '`' => '\u{0300}',         // grave
-        '´' => '\u{0301}',         // acute
-        '^' => '\u{0302}',         // circumflex / hat
-        '~' => '\u{0303}',         // tilde
+        '`' => '\u{0300}',              // grave
+        '´' => '\u{0301}',              // acute
+        '^' => '\u{0302}',              // circumflex / hat
+        '~' => '\u{0303}',              // tilde
         '¯' | '\u{02C9}' => '\u{0304}', // macron / bar (+ modifier macron)
-        '\u{02D8}' => '\u{0306}',  // breve
-        '\u{02D9}' => '\u{0307}',  // dot above
-        '¨' => '\u{0308}',         // diaeresis / ddot
+        '\u{02D8}' => '\u{0306}',       // breve
+        '\u{02D9}' => '\u{0307}',       // dot above
+        '¨' => '\u{0308}',              // diaeresis / ddot
         '°' | '\u{02DA}' => '\u{030A}', // ring above
-        '\u{02DD}' => '\u{030B}',  // double acute
-        'ˇ' => '\u{030C}',         // caron / check
-        '→' => '\u{20D7}',         // rightwards arrow → combining (vec)
-        '←' => '\u{20D6}',         // leftwards arrow → combining
-        '↔' => '\u{20E1}',         // left-right arrow → combining
+        '\u{02DD}' => '\u{030B}',       // double acute
+        'ˇ' => '\u{030C}',              // caron / check
+        '→' => '\u{20D7}',              // rightwards arrow → combining (vec)
+        '←' => '\u{20D6}',              // leftwards arrow → combining
+        '↔' => '\u{20E1}',              // left-right arrow → combining
         // Already a combining mark, or a dedicated accent codepoint: keep it.
         _ => c,
     }
@@ -1065,11 +1077,19 @@ struct Omml {
 
 impl Omml {
     fn new() -> Self {
-        Self { buf: String::new(), stack: Vec::new(), open_tag: false }
+        Self {
+            buf: String::new(),
+            stack: Vec::new(),
+            open_tag: false,
+        }
     }
 
     fn into_string(self) -> String {
-        debug_assert!(self.stack.is_empty(), "Omml: unbalanced elements: {:?}", self.stack);
+        debug_assert!(
+            self.stack.is_empty(),
+            "Omml: unbalanced elements: {:?}",
+            self.stack
+        );
         debug_assert!(!self.open_tag, "Omml: dangling open tag");
         self.buf
     }

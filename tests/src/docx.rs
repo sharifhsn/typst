@@ -873,7 +873,10 @@ fn multi_slot_page_numbering_emits_page_of_numpages() {
         .expect("a numbered footer part");
     assert!(footer.contains("PAGE "), "current page is a PAGE field");
     assert!(footer.contains("NUMPAGES "), "the total is a NUMPAGES field");
-    assert!(footer.contains("> of <") || footer.contains("of"), "keeps the ' of ' literal");
+    assert!(
+        footer.contains("> of <") || footer.contains("of"),
+        "keeps the ' of ' literal"
+    );
     let page_at = footer.find("PAGE ").unwrap();
     let num_at = footer.find("NUMPAGES ").unwrap();
     assert!(page_at < num_at, "PAGE (current) precedes NUMPAGES (total)");

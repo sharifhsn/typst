@@ -65,22 +65,14 @@ pub fn link(
             // `TargetMode="External"` (handled by `add_external_rel`).
             let rel = ctx.add_external_rel(url.into_inner().as_str());
             let runs = ctx.inline_runs(&elem.body, styles, link_props)?;
-            Ok(vec![ParaChild::Hyperlink {
-                rel: Some(rel),
-                anchor: None,
-                runs,
-            }])
+            Ok(vec![ParaChild::Hyperlink { rel: Some(rel), anchor: None, runs }])
         }
         Destination::Location(loc) => {
             // Internal hyperlink to a bookmark — no relationship, just an
             // anchor naming the target bookmark.
             let (_id, name) = ctx.add_bookmark(loc);
             let runs = ctx.inline_runs(&elem.body, styles, link_props)?;
-            Ok(vec![ParaChild::Hyperlink {
-                rel: None,
-                anchor: Some(name),
-                runs,
-            }])
+            Ok(vec![ParaChild::Hyperlink { rel: None, anchor: Some(name), runs }])
         }
         Destination::Position(_) => {
             // Positional (page + x/y) links have no DOCX equivalent; emit the

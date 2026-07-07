@@ -18,14 +18,14 @@
 //! placeholder, matching what every real-world emitter ships.
 
 use ecow::{EcoString, eco_format};
-use typst_library::foundations::{Element, Packed, Repr, Selector, StyleChain};
 use typst_library::diag::SourceResult;
+use typst_library::foundations::{Element, Packed, Repr, Selector, StyleChain};
 use typst_library::model::{HeadingElem, OutlineElem};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, Field, Para, ParaChild, ParaProps, Run, RunProps, TabAlign, TabLeader, TabStop, Toc,
-    TocFigure, TocHeading,
+    Block, Field, Para, ParaChild, ParaProps, Run, RunProps, TabAlign, TabLeader,
+    TabStop, Toc, TocFigure, TocHeading,
 };
 
 /// The default outline depth used for the `\o "1-N"` switch when the outline
@@ -244,9 +244,7 @@ fn leaf_element(selector: &Selector) -> Option<Element> {
         Selector::Elem(element, _) => Some(*element),
         // `figure.where(kind: table)` lowers to an `And`/`Elem` combination;
         // recurse into the first sub-selector that names an element.
-        Selector::And(subs) | Selector::Or(subs) => {
-            subs.iter().find_map(leaf_element)
-        }
+        Selector::And(subs) | Selector::Or(subs) => subs.iter().find_map(leaf_element),
         Selector::Before { selector, .. }
         | Selector::After { selector, .. }
         | Selector::Within { selector, .. } => leaf_element(selector),
@@ -261,11 +259,7 @@ fn figure_category(selector: &Selector) -> EcoString {
     // the `Selector::Elem` dictionary. We look for a constrained kind whose
     // value is the `table` (or `image`) element and map it to Word's caption
     // label. Without an explicit kind, the category is "Figure".
-    if selector_targets_table(selector) {
-        "Table".into()
-    } else {
-        "Figure".into()
-    }
+    if selector_targets_table(selector) { "Table".into() } else { "Figure".into() }
 }
 
 /// Whether the selector constrains figures to `kind: table`.

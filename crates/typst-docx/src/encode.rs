@@ -6,9 +6,9 @@ use typst_library::foundations::Smart;
 use typst_library::model::DocumentInfo;
 
 use crate::dom::{
-    Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, Drawing, DocxDocument,
-    Field, Footnote, GroupSpec, HdrFtrPart, Para, ParaChild, PathSegment, Row, Run, SectPr,
-    SectType, ShapeFill, ShapeGeom, ShapeSpec, Tbl, Toc, VAlign, VMerge,
+    Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, DocxDocument,
+    Drawing, Field, Footnote, GroupSpec, HdrFtrPart, Para, ParaChild, PathSegment, Row,
+    Run, SectPr, SectType, ShapeFill, ShapeGeom, ShapeSpec, Tbl, Toc, VAlign, VMerge,
 };
 use crate::package::{Package, RelMode, Rels};
 use crate::styles_part;
@@ -24,10 +24,8 @@ pub struct DocxOptions {
 // Relationship-type URIs.
 const REL_OFFICE_DOCUMENT: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
-const REL_CORE_PROPS: &str =
-    "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
-const REL_EXTENDED_PROPS: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties";
+const REL_CORE_PROPS: &str = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
+const REL_EXTENDED_PROPS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties";
 const REL_STYLES: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles";
 const REL_NUMBERING: &str =
@@ -58,8 +56,7 @@ const CT_ENDNOTES: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml";
 const CT_SETTINGS: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml";
-const CT_CORE: &str =
-    "application/vnd.openxmlformats-package.core-properties+xml";
+const CT_CORE: &str = "application/vnd.openxmlformats-package.core-properties+xml";
 const CT_EXTENDED: &str =
     "application/vnd.openxmlformats-officedocument.extended-properties+xml";
 const CT_HEADER: &str =
@@ -239,7 +236,10 @@ fn media_content_type(ext: &str) -> &'static str {
 /// Declaring an unused namespace is harmless, so all parts get the full set.
 fn decl_ooxml_namespaces(w: &mut XmlWriter) {
     w.attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
-        .attr("xmlns:r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
+        .attr(
+            "xmlns:r",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        )
         .attr("xmlns:m", "http://schemas.openxmlformats.org/officeDocument/2006/math")
         .attr(
             "xmlns:wp",
@@ -277,9 +277,7 @@ fn build_document(document: &DocxDocument, pretty: bool) -> String {
     // A flat page-colour (`set page(fill:)`) is a document-level element — one
     // per package, a sibling of `w:body` — mirroring Word's own "Page Color".
     if let Some(c) = document.background_color {
-        w.open("w:background")
-            .attr("w:color", &crate::props::hex(c))
-            .empty();
+        w.open("w:background").attr("w:color", &crate::props::hex(c)).empty();
     }
 
     w.open(xml::W_BODY).start_children();
@@ -441,7 +439,9 @@ fn write_cell(w: &mut XmlWriter, cell: &Cell) {
             .empty();
     }
     if cell.grid_span > 1 {
-        w.open("w:gridSpan").attr("w:val", &cell.grid_span.to_string()).empty();
+        w.open("w:gridSpan")
+            .attr("w:val", &cell.grid_span.to_string())
+            .empty();
     }
     match cell.v_merge {
         Some(VMerge::Restart) => {
@@ -554,7 +554,12 @@ fn write_drawing(w: &mut XmlWriter, d: &Drawing) {
 /// Emits the legacy VML fallback (`<w:pict><v:rect><v:textbox>…`) for a text box,
 /// carrying the same fill/stroke/inset and the same editable paragraphs as the
 /// modern `wps` form, sized in points (VML's unit).
-fn write_vml_textbox(w: &mut XmlWriter, d: &Drawing, shape: &ShapeSpec, tb: &crate::dom::TextBox) {
+fn write_vml_textbox(
+    w: &mut XmlWriter,
+    d: &Drawing,
+    shape: &ShapeSpec,
+    tb: &crate::dom::TextBox,
+) {
     let pt = |emu: i64| format!("{:.2}", emu as f64 / 12700.0);
     let hex = |c: [u8; 3]| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
 
@@ -739,7 +744,9 @@ fn write_pic_payload(w: &mut XmlWriter, d: &Drawing) {
         .start_children();
     // pic:nvPicPr
     w.open("pic:nvPicPr").start_children();
-    w.open("pic:cNvPr").attr("id", &d.docpr_id.to_string()).attr("name", &d.name);
+    w.open("pic:cNvPr")
+        .attr("id", &d.docpr_id.to_string())
+        .attr("name", &d.name);
     if let Some(alt) = &d.alt {
         w.attr("descr", alt);
     }
@@ -796,7 +803,10 @@ fn write_group_payload(w: &mut XmlWriter, d: &Drawing, group: &GroupSpec) {
 
     w.open("a:graphic").attr("xmlns:a", A).start_children();
     w.open("a:graphicData").attr("uri", WPG).start_children();
-    w.open("wpg:wgp").attr("xmlns:wpg", WPG).attr("xmlns:wps", WPS_NS).start_children();
+    w.open("wpg:wgp")
+        .attr("xmlns:wpg", WPG)
+        .attr("xmlns:wps", WPS_NS)
+        .start_children();
     w.open("wpg:cNvGrpSpPr").empty();
     w.open("wpg:grpSpPr").start_children();
     w.open("a:xfrm").start_children();
@@ -825,7 +835,14 @@ fn write_group_payload(w: &mut XmlWriter, d: &Drawing, group: &GroupSpec) {
 /// ([`write_group_payload`]) — positioned at `(off_x, off_y)` within whatever
 /// coordinate space the caller established (the drawing's own top-left corner
 /// for a lone shape; the group's local child space for a group member).
-fn write_wsp(w: &mut XmlWriter, off_x: i64, off_y: i64, w_emu: i64, h_emu: i64, shape: &ShapeSpec) {
+fn write_wsp(
+    w: &mut XmlWriter,
+    off_x: i64,
+    off_y: i64,
+    w_emu: i64,
+    h_emu: i64,
+    shape: &ShapeSpec,
+) {
     let hex = |c: [u8; 3]| format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
 
     w.open("wps:wsp").attr("xmlns:wps", WPS_NS).start_children();
@@ -833,8 +850,14 @@ fn write_wsp(w: &mut XmlWriter, off_x: i64, off_y: i64, w_emu: i64, h_emu: i64, 
     w.open("wps:spPr").start_children();
 
     w.open("a:xfrm").start_children();
-    w.open("a:off").attr("x", &off_x.to_string()).attr("y", &off_y.to_string()).empty();
-    w.open("a:ext").attr("cx", &w_emu.to_string()).attr("cy", &h_emu.to_string()).empty();
+    w.open("a:off")
+        .attr("x", &off_x.to_string())
+        .attr("y", &off_y.to_string())
+        .empty();
+    w.open("a:ext")
+        .attr("cx", &w_emu.to_string())
+        .attr("cy", &h_emu.to_string())
+        .empty();
     w.close(); // a:xfrm
 
     match &shape.geom {
@@ -863,7 +886,10 @@ fn write_wsp(w: &mut XmlWriter, off_x: i64, off_y: i64, w_emu: i64, h_emu: i64, 
             w.open("a:pathLst").start_children();
             w.open("a:path").attr("w", &cx).attr("h", &cy).start_children();
             let pt = |w: &mut XmlWriter, x: i64, y: i64| {
-                w.open("a:pt").attr("x", &x.to_string()).attr("y", &y.to_string()).empty();
+                w.open("a:pt")
+                    .attr("x", &x.to_string())
+                    .attr("y", &y.to_string())
+                    .empty();
             };
             for seg in segments {
                 match *seg {
@@ -910,7 +936,10 @@ fn write_wsp(w: &mut XmlWriter, off_x: i64, off_y: i64, w_emu: i64, h_emu: i64, 
                 w.close(); // a:gs
             }
             w.close(); // a:gsLst
-            w.open("a:lin").attr("ang", &angle_60000ths.to_string()).attr("scaled", "1").empty();
+            w.open("a:lin")
+                .attr("ang", &angle_60000ths.to_string())
+                .attr("scaled", "1")
+                .empty();
             w.close(); // a:gradFill
         }
         None => {
@@ -919,7 +948,10 @@ fn write_wsp(w: &mut XmlWriter, off_x: i64, off_y: i64, w_emu: i64, h_emu: i64, 
     }
     match &shape.stroke {
         Some(s) => {
-            w.open("a:ln").attr("w", &s.w_emu.to_string()).attr("cap", s.cap).start_children();
+            w.open("a:ln")
+                .attr("w", &s.w_emu.to_string())
+                .attr("cap", s.cap)
+                .start_children();
             w.open("a:solidFill").start_children();
             w.open("a:srgbClr").attr("val", &hex(s.color)).empty();
             w.close();
@@ -1098,7 +1130,9 @@ fn write_toc(w: &mut XmlWriter, toc: &Toc) {
         w.open("w:sdt").start_children();
         w.open("w:sdtPr").start_children();
         w.open("w:docPartObj").start_children();
-        w.open("w:docPartGallery").attr(xml::W_VAL, "Table of Contents").empty();
+        w.open("w:docPartGallery")
+            .attr(xml::W_VAL, "Table of Contents")
+            .empty();
         w.leaf("w:docPartUnique");
         w.close(); // w:docPartObj
         w.close(); // w:sdtPr
@@ -1195,7 +1229,8 @@ fn write_sectpr(w: &mut XmlWriter, sect: &SectPr) {
         w.open("w:type").attr("w:val", v).empty();
     }
 
-    let pg = w.open("w:pgSz")
+    let pg = w
+        .open("w:pgSz")
         .attr("w:w", &sect.page_w.to_string())
         .attr("w:h", &sect.page_h.to_string());
     if sect.landscape {
@@ -1292,7 +1327,10 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
         .start_children();
     // The settings Word itself writes, in canonical schema order.
     w.open("w:zoom").attr("w:percent", "100").empty();
-    w.open("w:proofState").attr("w:spelling", "clean").attr("w:grammar", "clean").empty();
+    w.open("w:proofState")
+        .attr("w:spelling", "clean")
+        .attr("w:grammar", "clean")
+        .empty();
     w.open("w:defaultTabStop").attr(xml::W_VAL, "720").empty();
     // A bare element (no `w:val`) — Word's own CT_OnOff-by-presence convention —
     // between defaultTabStop and characterSpacingControl, the schema position
@@ -1300,13 +1338,17 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
     if document.hyphenate {
         w.leaf("w:autoHyphenation");
     }
-    w.open("w:characterSpacingControl").attr(xml::W_VAL, "doNotCompress").empty();
+    w.open("w:characterSpacingControl")
+        .attr(xml::W_VAL, "doNotCompress")
+        .empty();
     if document.uses_fields {
         w.open("w:updateFields").attr(xml::W_VAL, "true").empty();
     }
     // Header drawing-canvas defaults (the header sibling of shapeDefaults).
-    w.raw("<w:hdrShapeDefaults><o:shapedefaults v:ext=\"edit\" spidmax=\"1026\"/>\
-           </w:hdrShapeDefaults>");
+    w.raw(
+        "<w:hdrShapeDefaults><o:shapedefaults v:ext=\"edit\" spidmax=\"1026\"/>\
+           </w:hdrShapeDefaults>",
+    );
     // Footnote/endnote separator references (Word writes both in every document,
     // pointing at the separator definitions in footnotes.xml / endnotes.xml).
     w.open("w:footnotePr").start_children();
@@ -1380,9 +1422,11 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
         .attr("w:followedHyperlink", "followedHyperlink")
         .empty();
     // VML shape defaults (what Word writes for drawing-canvas bookkeeping).
-    w.raw("<w:shapeDefaults><o:shapedefaults v:ext=\"edit\" spidmax=\"1026\"/>\
+    w.raw(
+        "<w:shapeDefaults><o:shapedefaults v:ext=\"edit\" spidmax=\"1026\"/>\
            <o:shapelayout v:ext=\"edit\"><o:idmap v:ext=\"edit\" data=\"1\"/>\
-           </o:shapelayout></w:shapeDefaults>");
+           </o:shapelayout></w:shapeDefaults>",
+    );
     w.open("w:decimalSymbol").attr(xml::W_VAL, ".").empty();
     w.open("w:listSeparator").attr(xml::W_VAL, ",").empty();
     // The per-document id Word stamps (in the w14 extension namespace, declared +
@@ -1425,7 +1469,9 @@ fn build_numbering(document: &DocxDocument, pretty: bool) -> String {
         w.open("w:abstractNum")
             .attr("w:abstractNumId", &abs.id.to_string())
             .start_children();
-        w.open("w:multiLevelType").attr(xml::W_VAL, abs.multilevel.as_str()).empty();
+        w.open("w:multiLevelType")
+            .attr(xml::W_VAL, abs.multilevel.as_str())
+            .empty();
         for (i, level) in abs.levels.iter().enumerate() {
             w.open("w:lvl").attr("w:ilvl", &i.to_string()).start_children();
             w.open("w:start").attr(xml::W_VAL, &level.start.to_string()).empty();
@@ -1453,8 +1499,12 @@ fn build_numbering(document: &DocxDocument, pretty: bool) -> String {
     }
 
     for num in &document.numbering.nums {
-        w.open("w:num").attr("w:numId", &num.num_id.to_string()).start_children();
-        w.open("w:abstractNumId").attr(xml::W_VAL, &num.abstract_id.to_string()).empty();
+        w.open("w:num")
+            .attr("w:numId", &num.num_id.to_string())
+            .start_children();
+        w.open("w:abstractNumId")
+            .attr(xml::W_VAL, &num.abstract_id.to_string())
+            .empty();
         if let Some(start) = num.start_override {
             w.open("w:lvlOverride").attr("w:ilvl", "0").start_children();
             w.open("w:startOverride").attr(xml::W_VAL, &start.to_string()).empty();
@@ -1520,7 +1570,9 @@ fn write_separator(w: &mut XmlWriter, elem: &'static str, id: i32, kind: &'stati
 }
 
 fn write_footnote(w: &mut XmlWriter, footnote: &Footnote) {
-    w.open("w:footnote").attr("w:id", &footnote.id.to_string()).start_children();
+    w.open("w:footnote")
+        .attr("w:id", &footnote.id.to_string())
+        .start_children();
     let mut ended_para = false;
     for block in &footnote.blocks {
         ended_para = write_block(w, block);
@@ -1538,7 +1590,10 @@ fn write_footnote(w: &mut XmlWriter, footnote: &Footnote) {
 fn build_core(info: &DocumentInfo, pretty: bool) -> String {
     let mut w = XmlWriter::new(pretty);
     w.open("cp:coreProperties")
-        .attr("xmlns:cp", "http://schemas.openxmlformats.org/package/2006/metadata/core-properties")
+        .attr(
+            "xmlns:cp",
+            "http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
+        )
         .attr("xmlns:dc", "http://purl.org/dc/elements/1.1/")
         .attr("xmlns:dcterms", "http://purl.org/dc/terms/")
         .attr("xmlns:dcmitype", "http://purl.org/dc/dcmitype/")
@@ -1564,18 +1619,19 @@ fn build_core(info: &DocumentInfo, pretty: bool) -> String {
     // A freshly generated document is revision 1.
     w.elem_text("cp:revision", "1");
     if let Smart::Custom(Some(date)) = &info.date
-        && let Some(s) = w3cdtf(date) {
-            w.open("dcterms:created")
-                .attr("xsi:type", "dcterms:W3CDTF")
-                .start_children();
-            w.text(&s);
-            w.close();
-            w.open("dcterms:modified")
-                .attr("xsi:type", "dcterms:W3CDTF")
-                .start_children();
-            w.text(&s);
-            w.close();
-        }
+        && let Some(s) = w3cdtf(date)
+    {
+        w.open("dcterms:created")
+            .attr("xsi:type", "dcterms:W3CDTF")
+            .start_children();
+        w.text(&s);
+        w.close();
+        w.open("dcterms:modified")
+            .attr("xsi:type", "dcterms:W3CDTF")
+            .start_children();
+        w.text(&s);
+        w.close();
+    }
 
     w.close();
     w.finish()
@@ -1584,7 +1640,10 @@ fn build_core(info: &DocumentInfo, pretty: bool) -> String {
 fn build_app(pretty: bool) -> String {
     let mut w = XmlWriter::new(pretty);
     w.open("Properties")
-        .attr("xmlns", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties")
+        .attr(
+            "xmlns",
+            "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties",
+        )
         .start_children();
     // The standard extended properties Word writes, in its usual field order. The
     // document statistics (Pages/Words/Characters/Lines/Paragraphs) are recomputed

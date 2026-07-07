@@ -15,10 +15,7 @@ pub fn build(
 ) -> String {
     let mut w = XmlWriter::new(pretty);
     w.open(xml::W_STYLES)
-        .attr(
-            "xmlns:w",
-            "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
-        )
+        .attr("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
         .start_children();
 
     // docDefaults: the document's root font / size / colour / language, which the
@@ -36,8 +33,12 @@ pub fn build(
             .attr("w:eastAsia", font)
             .empty();
     }
-    w.open(xml::W_SZ).attr(xml::W_VAL, &defaults.size_half_pt.to_string()).empty();
-    w.open(xml::W_SZCS).attr(xml::W_VAL, &defaults.size_half_pt.to_string()).empty();
+    w.open(xml::W_SZ)
+        .attr(xml::W_VAL, &defaults.size_half_pt.to_string())
+        .empty();
+    w.open(xml::W_SZCS)
+        .attr(xml::W_VAL, &defaults.size_half_pt.to_string())
+        .empty();
     if let Some(c) = defaults.color {
         w.open("w:color").attr(xml::W_VAL, &props::hex(c)).empty();
     }
@@ -86,7 +87,9 @@ pub fn build(
         w.open("w:link").attr(xml::W_VAL, &char_id).empty();
         w.open(xml::W_PPR).start_children();
         w.leaf("w:keepNext");
-        w.open("w:outlineLvl").attr(xml::W_VAL, &(level - 1).to_string()).empty();
+        w.open("w:outlineLvl")
+            .attr(xml::W_VAL, &(level - 1).to_string())
+            .empty();
         w.close();
         w.open(xml::W_RPR).start_children();
         w.leaf(xml::W_B);
@@ -98,7 +101,9 @@ pub fn build(
             .attr("w:type", "character")
             .attr("w:styleId", &char_id)
             .start_children();
-        w.open("w:name").attr(xml::W_VAL, &format!("Heading {level} Char")).empty();
+        w.open("w:name")
+            .attr(xml::W_VAL, &format!("Heading {level} Char"))
+            .empty();
         w.open("w:basedOn").attr(xml::W_VAL, "DefaultParagraphFont").empty();
         w.open("w:link").attr(xml::W_VAL, &id).empty();
         w.open(xml::W_RPR).start_children();

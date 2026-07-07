@@ -2,7 +2,8 @@
 //! element/attribute name constants.
 
 /// The XML declaration every OPC part must begin with.
-pub const XML_DECL: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
+pub const XML_DECL: &str =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
 
 /// Streaming XML writer: open/close tags balance by construction; text and
 /// attribute values are escaped.
@@ -22,7 +23,14 @@ impl XmlWriter {
     pub fn new(pretty: bool) -> Self {
         let mut buf = String::with_capacity(1024);
         buf.push_str(XML_DECL);
-        Self { buf, stack: Vec::new(), open_tag: false, pretty, indent: 0, para_seq: 0 }
+        Self {
+            buf,
+            stack: Vec::new(),
+            open_tag: false,
+            pretty,
+            indent: 0,
+            para_seq: 0,
+        }
     }
 
     /// Seeds this part's paragraph-id counter. Each package part (document,

@@ -26,9 +26,7 @@ use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Content, Context, Depth, Packed, Resolve, StyleChain};
 use typst_library::layout::Abs;
-use typst_library::model::{
-    EnumElem, EnumItem, ListElem, Numbering, TermsElem,
-};
+use typst_library::model::{EnumElem, EnumItem, ListElem, Numbering, TermsElem};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
@@ -87,7 +85,11 @@ fn bullet_spec() -> ListSpec {
             bullet_font: None,
         })
         .collect();
-    ListSpec { levels, multilevel: MultiLevelType::HybridMultilevel, restart_at_1: false }
+    ListSpec {
+        levels,
+        multilevel: MultiLevelType::HybridMultilevel,
+        restart_at_1: false,
+    }
 }
 
 // ===========================================================================
@@ -251,15 +253,14 @@ fn enum_static_fallback(
         // layout pipeline does), so a NESTED enum sees the full ancestry — for its
         // indent level and for `full: true` numbers like `1.2.`. Without it every
         // nested enum collapses to level 0 with a flat number.
-        let item_body =
-            item.body.clone().set(EnumElem::parents, core::iter::once(number).collect());
+        let item_body = item
+            .body
+            .clone()
+            .set(EnumElem::parents, core::iter::once(number).collect());
         emit_static_marker_item(ctx, &item_body, styles, marker, ind, &mut out)?;
 
-        number = if reversed {
-            number.saturating_sub(1)
-        } else {
-            number.saturating_add(1)
-        };
+        number =
+            if reversed { number.saturating_sub(1) } else { number.saturating_add(1) };
     }
     Ok(out)
 }

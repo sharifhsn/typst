@@ -130,9 +130,10 @@ fn body_blocks(
     // not already carry an explicit style (e.g. a list item keeps its style).
     for block in &mut blocks {
         if let Block::Para(para) = block
-            && para.props.style.is_none() {
-                para.props.style = Some(FOOTNOTE_TEXT_STYLE.into());
-            }
+            && para.props.style.is_none()
+        {
+            para.props.style = Some(FOOTNOTE_TEXT_STYLE.into());
+        }
     }
 
     // Prepend the auto-number mark (`<w:footnoteRef/>`, styled

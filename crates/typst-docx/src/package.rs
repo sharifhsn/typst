@@ -38,7 +38,11 @@ pub struct Rels {
 
 impl Rels {
     pub fn new() -> Self {
-        Self { next: 1, entries: Vec::new(), by_target: FxHashMap::default() }
+        Self {
+            next: 1,
+            entries: Vec::new(),
+            by_target: FxHashMap::default(),
+        }
     }
 
     /// Allocates (or reuses) a relationship; returns the rId string (`"rId7"`).
@@ -121,7 +125,8 @@ impl Package {
     /// Adds an XML text part (Deflate). Registers its `Override` content type.
     pub fn add_xml(&mut self, part_name: &str, content_type: &'static str, body: String) {
         self.overrides.push((format!("/{part_name}"), content_type));
-        self.parts.push((part_name.to_string(), body.into_bytes(), Compress::Deflate));
+        self.parts
+            .push((part_name.to_string(), body.into_bytes(), Compress::Deflate));
     }
 
     /// Adds a media/binary part (Store). Registers a `Default` for its extension.
@@ -171,19 +176,21 @@ impl Package {
         // Fixed timestamp for determinism.
         let mtime = DateTime::default();
 
-        let write_one =
-            |zip: &mut ZipWriter<Cursor<Vec<u8>>>, name: &str, bytes: &[u8], c: Compress| {
-                let method = match c {
-                    Compress::Deflate => CompressionMethod::Deflated,
-                    Compress::Store => CompressionMethod::Stored,
-                };
-                let opts = SimpleFileOptions::default()
-                    .compression_method(method)
-                    .last_modified_time(mtime)
-                    .unix_permissions(0o644);
-                zip.start_file(name, opts).expect("zip start_file");
-                zip.write_all(bytes).expect("zip write_all");
+        let write_one = |zip: &mut ZipWriter<Cursor<Vec<u8>>>,
+                         name: &str,
+                         bytes: &[u8],
+                         c: Compress| {
+            let method = match c {
+                Compress::Deflate => CompressionMethod::Deflated,
+                Compress::Store => CompressionMethod::Stored,
             };
+            let opts = SimpleFileOptions::default()
+                .compression_method(method)
+                .last_modified_time(mtime)
+                .unix_permissions(0o644);
+            zip.start_file(name, opts).expect("zip start_file");
+            zip.write_all(bytes).expect("zip write_all");
+        };
 
         write_one(
             &mut zip,
@@ -191,12 +198,7 @@ impl Package {
             content_types.as_bytes(),
             Compress::Deflate,
         );
-        write_one(
-            &mut zip,
-            "_rels/.rels",
-            root_rels_xml.as_bytes(),
-            Compress::Deflate,
-        );
+        write_one(&mut zip, "_rels/.rels", root_rels_xml.as_bytes(), Compress::Deflate);
 
         // Take ownership of parts so the closure borrow above is released.
         let parts = std::mem::take(&mut self.parts);

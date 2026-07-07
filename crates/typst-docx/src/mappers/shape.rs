@@ -271,7 +271,8 @@ fn resolve_insets(
     size: typst_library::layout::Size,
 ) -> [i64; 4] {
     let resolve = |opt: Option<Rel<Length>>, base: Abs| -> i64 {
-        opt.map(|r| abs_to_emu(r.resolve(styles).relative_to(base))).unwrap_or(0)
+        opt.map(|r| abs_to_emu(r.resolve(styles).relative_to(base)))
+            .unwrap_or(0)
     };
     [
         resolve(inset.left, size.x),
@@ -296,7 +297,8 @@ fn build(
         let (w, h) =
             explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
         let fill = fill_color(e.fill.get_ref(styles))?;
-        let stroke = sides_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
+        let stroke =
+            sides_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Rect, fill, stroke, txbx: None }))
     } else if let Some(e) = child.to_packed::<SquareElem>() {
         if e.body.get_ref(styles).is_some() {
@@ -305,7 +307,8 @@ fn build(
         let (w, h) =
             explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
         let fill = fill_color(e.fill.get_ref(styles))?;
-        let stroke = sides_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
+        let stroke =
+            sides_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Rect, fill, stroke, txbx: None }))
     } else if let Some(e) = child.to_packed::<EllipseElem>() {
         if e.body.get_ref(styles).is_some() {
@@ -314,7 +317,8 @@ fn build(
         let (w, h) =
             explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
         let fill = fill_color(e.fill.get_ref(styles))?;
-        let stroke = single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
+        let stroke =
+            single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Ellipse, fill, stroke, txbx: None }))
     } else if let Some(e) = child.to_packed::<CircleElem>() {
         if e.body.get_ref(styles).is_some() {
@@ -323,7 +327,8 @@ fn build(
         let (w, h) =
             explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
         let fill = fill_color(e.fill.get_ref(styles))?;
-        let stroke = single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
+        let stroke =
+            single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Ellipse, fill, stroke, txbx: None }))
     } else if let Some(e) = child.to_packed::<PolygonElem>() {
         use typst_library::foundations::Resolve;
@@ -358,8 +363,18 @@ fn build(
         raw.push(RawSeg::Close);
         let (segments, w, h) = normalize_segments(raw)?;
         let fill = fill_color(e.fill.get_ref(styles))?;
-        let stroke = single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
-        Some((w, h, ShapeSpec { geom: ShapeGeom::Path(segments), fill, stroke, txbx: None }))
+        let stroke =
+            single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
+        Some((
+            w,
+            h,
+            ShapeSpec {
+                geom: ShapeGeom::Path(segments),
+                fill,
+                stroke,
+                txbx: None,
+            },
+        ))
     } else {
         None
     }
@@ -612,7 +627,8 @@ pub fn move_(
     // back empty.
     let size = Size::new(ctx.raster_width, ctx.raster_height);
     let height = ctx.raster_height;
-    let Some(mut frame) = ctx.layout_export_frame(&elem.body, styles, elem.span(), height)?
+    let Some(mut frame) =
+        ctx.layout_export_frame(&elem.body, styles, elem.span(), height)?
     else {
         return Ok(None);
     };
@@ -642,7 +658,8 @@ pub fn transformed(
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
     let height = ctx.raster_height;
-    let Some(frame) = ctx.layout_export_frame(child, styles, child.span(), height)? else {
+    let Some(frame) = ctx.layout_export_frame(child, styles, child.span(), height)?
+    else {
         return Ok(None);
     };
     let run = build_shapes_drawing(ctx, &frame)?;
@@ -751,7 +768,8 @@ fn layout_shape_frame(
     ) -> SourceResult<typst_library::layout::Frame>,
 ) -> SourceResult<typst_library::layout::Frame> {
     use typst_library::layout::{Axes, Region, Size};
-    let region = Region::new(Size::new(ctx.raster_width, ctx.raster_height), Axes::splat(false));
+    let region =
+        Region::new(Size::new(ctx.raster_width, ctx.raster_height), Axes::splat(false));
     let locator = ctx.next_locator(span);
     layout(ctx.engine(), locator, region)
 }
@@ -798,7 +816,8 @@ fn similarity_scale(t: &typst_library::layout::Transform) -> Option<f64> {
     let col2 = kx * kx + sy * sy;
     let dot = sx * kx + ky * sy;
     const EPS: f64 = 1e-4;
-    if col1 <= EPS || (col1 - col2).abs() > EPS * col1.max(col2) || dot.abs() > EPS * col1 {
+    if col1 <= EPS || (col1 - col2).abs() > EPS * col1.max(col2) || dot.abs() > EPS * col1
+    {
         return None;
     }
     Some(col1.sqrt())
@@ -878,7 +897,9 @@ fn geometry_to_raw(
         // ends (the local origin and the local `delta`) go through the same
         // `transform`, or the line's true start/end (and hence its bounding
         // box) comes out wrong.
-        Geometry::Line(delta) => vec![RawSeg::Move(at(Point::zero())), RawSeg::Line(at(*delta))],
+        Geometry::Line(delta) => {
+            vec![RawSeg::Move(at(Point::zero())), RawSeg::Line(at(*delta))]
+        }
         Geometry::Rect(size) => vec![
             RawSeg::Move(at(Point::zero())),
             RawSeg::Line(at(Point::new(size.x, Abs::zero()))),
@@ -919,7 +940,12 @@ fn build_shapes_drawing(
             docpr_id,
             name,
             anchor: None,
-            shape: Some(ShapeSpec { geom: ShapeGeom::Path(segments), fill, stroke, txbx: None }),
+            shape: Some(ShapeSpec {
+                geom: ShapeGeom::Path(segments),
+                fill,
+                stroke,
+                txbx: None,
+            }),
             group: None,
         })));
     }
@@ -942,7 +968,8 @@ fn build_shapes_drawing(
     {
         return Ok(None);
     }
-    let (group_w_emu, group_h_emu) = (abs_to_emu(group_w).max(1), abs_to_emu(group_h).max(1));
+    let (group_w_emu, group_h_emu) =
+        (abs_to_emu(group_w).max(1), abs_to_emu(group_h).max(1));
 
     let mut children = Vec::with_capacity(shapes.len());
     for (shape, (min_x, min_y, _, _)) in shapes.into_iter().zip(bounds) {
@@ -953,7 +980,12 @@ fn build_shapes_drawing(
             y_emu: abs_to_emu(min_y - group_min_y),
             w_emu: abs_to_emu(w).max(1),
             h_emu: abs_to_emu(h).max(1),
-            shape: ShapeSpec { geom: ShapeGeom::Path(segments), fill, stroke, txbx: None },
+            shape: ShapeSpec {
+                geom: ShapeGeom::Path(segments),
+                fill,
+                stroke,
+                txbx: None,
+            },
         });
     }
     if children.len() < 2 {
@@ -1043,9 +1075,11 @@ fn raw_segments_from_curve(
         .map(|item| match item {
             CurveItem::Move(p) => RawSeg::Move(p.transform(transform)),
             CurveItem::Line(p) => RawSeg::Line(p.transform(transform)),
-            CurveItem::Cubic(c1, c2, end) => {
-                RawSeg::Cubic(c1.transform(transform), c2.transform(transform), end.transform(transform))
-            }
+            CurveItem::Cubic(c1, c2, end) => RawSeg::Cubic(
+                c1.transform(transform),
+                c2.transform(transform),
+                end.transform(transform),
+            ),
             CurveItem::Close => RawSeg::Close,
         })
         .collect()
