@@ -29,6 +29,8 @@ pub struct DocxDocument {
     pub(crate) max_heading_level: u8,
     /// The document's root text properties, hoisted into `docDefaults`.
     pub(crate) text_defaults: TextDefaults,
+    /// Document-derived heading style definitions (`Heading1..HeadingN`).
+    pub(crate) heading_styles: Vec<HeadingStyle>,
     pub(crate) uses_fields: bool,
     pub(crate) uses_math: bool,
     pub(crate) introspector: Arc<DocxIntrospector>,
@@ -220,7 +222,7 @@ pub struct TextDefaults {
     pub font: Option<EcoString>,
     /// Default size in half-points.
     pub size_half_pt: u32,
-    /// Default text colour; `None` = black/auto (omitted, Word's own default).
+    /// Default text colour; `None` = not representable as a single solid colour.
     pub color: Option<[u8; 3]>,
     /// BCP-47 language tag for spell-check (e.g. `en-US`).
     pub lang: Option<EcoString>,
@@ -236,6 +238,23 @@ impl Default for TextDefaults {
             lang: None,
         }
     }
+}
+
+/// A document-derived heading style definition.
+#[derive(Clone)]
+pub struct HeadingStyle {
+    pub level: u8,
+    /// Run properties owned by the style. Kept to the subset that can be safely
+    /// inherited by text runs: font, size, bold, italic and colour.
+    pub rpr: RunProps,
+    /// Paragraph spacing owned by the style when all headings at this level agree.
+    pub spacing: Option<Spacing>,
+}
+
+/// One resolved heading style sample recorded while lowering a heading.
+pub(crate) struct HeadingStyleSample {
+    pub level: u8,
+    pub rpr: RunProps,
 }
 
 /// Flattened character formatting → `<w:rPr>`.

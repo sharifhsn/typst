@@ -13,8 +13,9 @@ use typst_library::routines::{Arenas, RealizationKind};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, DocxDocument, Field, HdrFtrPart, HdrFtrRef, Para, ParaChild, ParaProps,
-    PgNumType, Run, RunProps, SectPr, TocHeading,
+    Block, DocxDocument, Field, HdrFtrPart, HdrFtrRef, HeadingStyle, HeadingStyleSample,
+    Para, ParaChild, ParaProps, PgNumType, Run, RunProps, SectPr, Spacing, TextDefaults,
+    TocHeading,
 };
 use crate::introspect::DocxIntrospector;
 use crate::props;
@@ -102,15 +103,16 @@ fn docx_document_impl(
     let (
         mut body,
         sect,
-        mut header_parts,
-        mut footer_parts,
-        mut footnotes,
+        header_parts,
+        footer_parts,
+        footnotes,
         numbering,
         media,
         doc_rels,
         footnote_rels,
         bookmarks,
         max_heading_level,
+        heading_style_samples,
         uses_fields,
         uses_math,
         deferred_tags,
@@ -216,6 +218,7 @@ fn docx_document_impl(
                 std::mem::take(&mut ctx.footnote_rels),
                 std::mem::take(&mut ctx.bookmarks),
                 ctx.max_heading_level,
+                std::mem::take(&mut ctx.heading_style_samples),
                 ctx.uses_fields,
                 ctx.uses_math,
                 std::mem::take(&mut ctx.deferred_tags),
@@ -309,15 +312,30 @@ fn docx_document_impl(
     // figure or box still resolve.
     append_positioned_tags(deferred_tags, page, &mut y, &mut tags);
 
-    // Hoist the document's most common font/size/language into `docDefaults` and
-    // strip them from matching runs, so the body inherits (restylable in Word,
-    // compact `document.xml`).
-    let text_defaults = hoist_text_defaults(
-        &mut body,
-        &mut header_parts,
-        &mut footer_parts,
-        &mut footnotes,
-    );
+    // Derive `docDefaults`/Normal from what the document's runs ACTUALLY use
+    // (majority vote), not from the root StyleChain: real templates apply their
+    // `set text(..)` inside a `#show: template.with(..)` wrapper, so the root
+    // chain sees only Typst's built-ins — voting keeps the emitted default
+    // values identical to what the runs carry (and the paragraph-mark metrics
+    // stable). The root chain is only the fallback when a property never
+    // appears. Then derive the used heading styles from the resolved heading
+    // chains and strip only the direct properties the governing style now owns.
+    let text_defaults = {
+        let root_styles = typst_library::foundations::Styles::root(&pairs, styles);
+        let chain = text_defaults_from_styles(StyleChain::new(&root_styles));
+        let mut votes = DefaultVotes::default();
+        collect_default_votes(&body, &mut votes);
+        TextDefaults {
+            font: weighted_mode(votes.fonts).or(chain.font),
+            size_half_pt: weighted_mode(votes.sizes).unwrap_or(chain.size_half_pt),
+            color: weighted_mode(votes.colors).or(chain.color),
+            lang: weighted_mode(votes.langs).or(chain.lang),
+        }
+    };
+    let mut heading_styles =
+        derive_heading_styles(max_heading_level, &heading_style_samples, &body);
+    demote_unrepresentable_heading_booleans(&mut heading_styles, &mut body);
+    apply_style_inheritance(&text_defaults, &heading_styles, &mut body);
 
     let mut introspector =
         DocxIntrospector::new(&tags, paged_introspector, real_alias_locations);
@@ -335,6 +353,7 @@ fn docx_document_impl(
         footnote_rels,
         max_heading_level,
         text_defaults,
+        heading_styles,
         uses_fields,
         uses_math,
         introspector: Arc::new(introspector),
@@ -345,90 +364,258 @@ fn docx_document_impl(
     })
 }
 
-/// Computes the document's most common run properties — font, size and language —
-/// over the body, returns them as the [`TextDefaults`] to hoist into
-/// `docDefaults`, and strips them from every run that matches across all the
-/// block groups (body, headers/footers, footnotes). The body then inherits its
-/// font/size/language from `docDefaults` (so editing the `Normal` style or the
-/// theme font in Word restyles the whole document) and each run's `<w:rPr>`
-/// carries only deviations, keeping `document.xml` compact.
-fn hoist_text_defaults(
-    body: &mut [Block],
-    headers: &mut [HdrFtrPart],
-    footers: &mut [HdrFtrPart],
-    footnotes: &mut [crate::dom::Footnote],
-) -> crate::dom::TextDefaults {
-    use rustc_hash::FxHashMap;
+/// Resolves the root text properties that define `docDefaults` and `Normal`.
+fn text_defaults_from_styles(styles: StyleChain) -> TextDefaults {
+    use typst_library::text::TextElem;
+    use typst_library::visualize::Paint;
 
-    // The dominant text — the body — decides the defaults.
-    let mut fonts: FxHashMap<ecow::EcoString, u32> = FxHashMap::default();
-    let mut sizes: FxHashMap<u32, u32> = FxHashMap::default();
-    let mut langs: FxHashMap<ecow::EcoString, u32> = FxHashMap::default();
-    visit_run_props(body, &mut |p| {
-        if let Some(f) = &p.font {
-            *fonts.entry(f.clone()).or_default() += 1;
-        }
-        if let Some(s) = p.size_half_pt {
-            *sizes.entry(s).or_default() += 1;
-        }
-        if let Some(l) = &p.lang {
-            *langs.entry(l.clone()).or_default() += 1;
-        }
+    let font = styles
+        .get_ref(TextElem::font)
+        .into_iter()
+        .next()
+        .map(|font| font.as_str().into());
+    let size_half_pt = props::pt_to_half_pt(styles.resolve(TextElem::size).to_pt());
+    let color = match styles.get_ref(TextElem::fill) {
+        Paint::Solid(color) => Some(props::color_to_hex(color)),
+        _ => None,
+    };
+    let lang_value = styles.get(TextElem::lang);
+    let code = lang_value.as_str();
+    let lang = Some(match styles.get(TextElem::region) {
+        Some(region) => ecow::eco_format!("{code}-{}", region.as_str()),
+        None => code.into(),
     });
-    let mode = |m: FxHashMap<ecow::EcoString, u32>| {
-        m.into_iter().max_by_key(|(_, n)| *n).map(|(k, _)| k)
-    };
-    let defaults = crate::dom::TextDefaults {
-        font: mode(fonts),
-        size_half_pt: sizes
-            .into_iter()
-            .max_by_key(|(_, n)| *n)
-            .map(|(k, _)| k)
-            .unwrap_or(22),
-        color: None,
-        lang: mode(langs),
-    };
 
-    // Strip the defaults from every matching run so it inherits from docDefaults.
-    let mut strip = |p: &mut crate::dom::RunProps| {
-        if p.font == defaults.font {
-            p.font = None;
-        }
-        if p.size_half_pt == Some(defaults.size_half_pt) {
-            p.size_half_pt = None;
-        }
-        if p.lang == defaults.lang {
-            p.lang = None;
-        }
-    };
-    visit_run_props(body, &mut strip);
-    for h in headers {
-        visit_run_props(&mut h.blocks, &mut strip);
-    }
-    for f in footers {
-        visit_run_props(&mut f.blocks, &mut strip);
-    }
-    for fnote in footnotes {
-        visit_run_props(&mut fnote.blocks, &mut strip);
-    }
-    defaults
+    TextDefaults { font, size_half_pt, color, lang }
 }
 
-/// Visits every text run's [`RunProps`] in `blocks`, recursing through table
-/// cells and table-of-contents entries.
-fn visit_run_props(blocks: &mut [Block], f: &mut dyn FnMut(&mut crate::dom::RunProps)) {
-    use crate::dom::{ParaChild, Run};
-    fn visit_children(
-        children: &mut [ParaChild],
-        f: &mut dyn FnMut(&mut crate::dom::RunProps),
-    ) {
-        for c in children {
-            match c {
-                ParaChild::Run(Run::Text { props, .. }) => f(props),
+/// Derives the used `HeadingN` styles from resolved heading style-chain samples.
+fn derive_heading_styles(
+    max_heading_level: u8,
+    samples: &[HeadingStyleSample],
+    body: &[Block],
+) -> Vec<HeadingStyle> {
+    let mut styles = Vec::new();
+    for level in 1..=max_heading_level {
+        let level_samples: Vec<&RunProps> = samples
+            .iter()
+            .filter(|sample| sample.level == level)
+            .map(|sample| &sample.rpr)
+            .collect();
+        let rpr = if level_samples.is_empty() {
+            RunProps { bold: true, ..RunProps::default() }
+        } else {
+            RunProps {
+                font: mode(level_samples.iter().map(|p| p.font.clone())).unwrap_or(None),
+                bold: mode_bool(level_samples.iter().map(|p| p.bold)),
+                italic: mode_bool(level_samples.iter().map(|p| p.italic)),
+                color: mode(level_samples.iter().map(|p| p.color)).unwrap_or(None),
+                size_half_pt: mode(level_samples.iter().map(|p| p.size_half_pt))
+                    .unwrap_or(None),
+                ..RunProps::default()
+            }
+        };
+        styles.push(HeadingStyle {
+            level,
+            rpr,
+            spacing: uniform_heading_spacing(level, body),
+        });
+    }
+    styles
+}
+
+fn mode<T: Ord + Clone>(values: impl Iterator<Item = T>) -> Option<T> {
+    let mut counts = std::collections::BTreeMap::<T, usize>::new();
+    for value in values {
+        *counts.entry(value).or_default() += 1;
+    }
+
+    let mut best = None;
+    for (value, count) in counts {
+        if best.as_ref().is_none_or(|(_, best_count)| count > *best_count) {
+            best = Some((value, count));
+        }
+    }
+    best.map(|(value, _)| value)
+}
+
+fn mode_bool(values: impl Iterator<Item = bool>) -> bool {
+    let mut true_count = 0usize;
+    let mut false_count = 0usize;
+    for value in values {
+        if value {
+            true_count += 1;
+        } else {
+            false_count += 1;
+        }
+    }
+    true_count >= false_count
+}
+
+fn uniform_heading_spacing(level: u8, body: &[Block]) -> Option<Spacing> {
+    let style_id = ecow::eco_format!("Heading{level}");
+    let mut seen = None::<Option<Spacing>>;
+    for block in body {
+        let Block::Para(para) = block else { continue };
+        if para.props.style.as_ref() != Some(&style_id) {
+            continue;
+        }
+        let spacing = para.props.spacing.clone();
+        if let Some(seen_spacing) = &seen {
+            if *seen_spacing != spacing {
+                return None;
+            }
+        } else {
+            seen = Some(spacing);
+        }
+    }
+    seen.flatten()
+}
+
+/// Drops `bold`/`italic` from a heading style when any run under a heading of
+/// that level resolves them OFF. The boolean run model cannot emit
+/// `w:b w:val="0"`, so a style-owned bold would silently re-bold a
+/// deliberately regular span (`= Heading with #text(weight: "regular")[x]`);
+/// demoting the style keeps bold as per-run direct formatting for that level.
+fn demote_unrepresentable_heading_booleans(
+    heading_styles: &mut [HeadingStyle],
+    body: &mut [Block],
+) {
+    for style in heading_styles {
+        let mut any_bold_off = false;
+        let mut any_italic_off = false;
+        for block in body.iter_mut() {
+            let Block::Para(para) = block else { continue };
+            if heading_level(&para.props.style) != Some(style.level) {
+                continue;
+            }
+            visit_para_run_props(para, &mut |props| {
+                any_bold_off |= !props.bold;
+                any_italic_off |= !props.italic;
+            });
+        }
+        if any_bold_off {
+            style.rpr.bold = false;
+        }
+        if any_italic_off {
+            style.rpr.italic = false;
+        }
+    }
+}
+
+/// Strips direct properties now supplied by `Normal` or a `HeadingN` style.
+fn apply_style_inheritance(
+    defaults: &TextDefaults,
+    heading_styles: &[HeadingStyle],
+    body: &mut [Block],
+) {
+    for block in body {
+        let Block::Para(para) = block else { continue };
+        if let Some(level) = heading_level(&para.props.style)
+            && let Some(style) = heading_styles.iter().find(|style| style.level == level)
+        {
+            strip_heading_paragraph(para, style);
+        }
+        visit_para_run_props(para, &mut |props| strip_text_defaults(props, defaults));
+    }
+}
+
+fn heading_level(style: &Option<ecow::EcoString>) -> Option<u8> {
+    let rest = style.as_deref()?.strip_prefix("Heading")?;
+    let level = rest.parse::<u8>().ok()?;
+    (level > 0).then_some(level)
+}
+
+fn strip_heading_paragraph(para: &mut Para, style: &HeadingStyle) {
+    if para.props.keep_next {
+        para.props.keep_next = false;
+    }
+    if para.props.outline_lvl == Some(style.level.saturating_sub(1).min(8)) {
+        para.props.outline_lvl = None;
+    }
+    if para.props.spacing == style.spacing {
+        para.props.spacing = None;
+    }
+    visit_para_run_props(para, &mut |props| strip_heading_run_props(props, &style.rpr));
+}
+
+fn strip_heading_run_props(props: &mut RunProps, style: &RunProps) {
+    if props.font == style.font {
+        props.font = None;
+    }
+    if props.size_half_pt == style.size_half_pt {
+        props.size_half_pt = None;
+    }
+    if props.color == style.color {
+        props.color = None;
+    }
+    if style.bold && props.bold == style.bold {
+        props.bold = false;
+    }
+    if style.italic && props.italic == style.italic {
+        props.italic = false;
+    }
+}
+
+fn strip_text_defaults(props: &mut RunProps, defaults: &TextDefaults) {
+    if props.font == defaults.font {
+        props.font = None;
+    }
+    if props.size_half_pt == Some(defaults.size_half_pt) {
+        props.size_half_pt = None;
+    }
+    if props.color == defaults.color {
+        props.color = None;
+    }
+    if props.lang == defaults.lang {
+        props.lang = None;
+    }
+}
+
+/// Accumulated (value, text-length) votes for the document defaults.
+#[derive(Default)]
+struct DefaultVotes {
+    fonts: std::collections::BTreeMap<ecow::EcoString, usize>,
+    sizes: std::collections::BTreeMap<u32, usize>,
+    colors: std::collections::BTreeMap<[u8; 3], usize>,
+    langs: std::collections::BTreeMap<ecow::EcoString, usize>,
+}
+
+/// Votes for `docDefaults` from BODY PROSE only, weighted by text length:
+/// heading paragraphs and code (`no_proof`) runs are excluded — a heading-only
+/// or code-heavy document must not define Normal — and length-weighting keeps
+/// a short deviating span from tying with (and alphabetically beating) the
+/// running text. TOC entries are generated content and are skipped.
+fn collect_default_votes(blocks: &[Block], votes: &mut DefaultVotes) {
+    fn vote_run(votes: &mut DefaultVotes, props: &RunProps, text: &str) {
+        if props.no_proof {
+            return;
+        }
+        let weight = text.chars().count().max(1);
+        if let Some(f) = &props.font {
+            *votes.fonts.entry(f.clone()).or_default() += weight;
+        }
+        if let Some(s) = props.size_half_pt {
+            *votes.sizes.entry(s).or_default() += weight;
+        }
+        if let Some(c) = props.color {
+            *votes.colors.entry(c).or_default() += weight;
+        }
+        if let Some(l) = &props.lang {
+            *votes.langs.entry(l.clone()).or_default() += weight;
+        }
+    }
+    fn vote_para(votes: &mut DefaultVotes, para: &Para) {
+        if heading_level(&para.props.style).is_some() {
+            return;
+        }
+        for child in &para.content {
+            match child {
+                ParaChild::Run(Run::Text { props, text }) => vote_run(votes, props, text),
                 ParaChild::Hyperlink { runs, .. } => {
-                    for r in runs {
-                        if let Run::Text { props, .. } = r {
-                            f(props);
+                    for run in runs {
+                        if let Run::Text { props, text } = run {
+                            vote_run(votes, props, text);
                         }
                     }
                 }
@@ -438,25 +625,46 @@ fn visit_run_props(blocks: &mut [Block], f: &mut dyn FnMut(&mut crate::dom::RunP
     }
     for b in blocks {
         match b {
-            Block::Para(para) => visit_children(&mut para.content, f),
+            Block::Para(para) => vote_para(votes, para),
             Block::Table(t) => {
-                for row in &mut t.rows {
-                    for cell in &mut row.cells {
-                        visit_run_props(&mut cell.blocks, f);
+                for row in &t.rows {
+                    for cell in &row.cells {
+                        collect_default_votes(&cell.blocks, votes);
                     }
                 }
             }
-            Block::Toc(t) => {
-                for para in &mut t.entries {
-                    visit_children(&mut para.content, f);
-                }
-                for r in &mut t.fallback {
-                    if let Run::Text { props, .. } = r {
+            Block::Toc(_) | Block::SectionBreak(_) | Block::Tag(_) => {}
+        }
+    }
+}
+
+/// The highest-weight value, requiring a strict win over ties (a tie between
+/// two single-span values is no mandate — fall back to the chain default).
+fn weighted_mode<T: Ord + Clone>(
+    counts: std::collections::BTreeMap<T, usize>,
+) -> Option<T> {
+    let mut iter = counts.into_iter().collect::<Vec<_>>();
+    iter.sort_by_key(|(_, weight)| std::cmp::Reverse(*weight));
+    match iter.as_slice() {
+        [] => None,
+        [only] => Some(only.0.clone()),
+        [first, second, ..] if first.1 > second.1 => Some(first.0.clone()),
+        _ => None,
+    }
+}
+
+fn visit_para_run_props(para: &mut Para, f: &mut dyn FnMut(&mut RunProps)) {
+    for child in &mut para.content {
+        match child {
+            ParaChild::Run(Run::Text { props, .. }) => f(props),
+            ParaChild::Hyperlink { runs, .. } => {
+                for run in runs {
+                    if let Run::Text { props, .. } = run {
                         f(props);
                     }
                 }
             }
-            Block::SectionBreak(_) | Block::Tag(_) => {}
+            _ => {}
         }
     }
 }

@@ -69,6 +69,12 @@ const CT_FONT_TABLE: &str =
 const CT_WEB_SETTINGS: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml";
 
+fn push_font(fonts: &mut Vec<String>, font: &str) {
+    if !fonts.iter().any(|existing| existing == font) {
+        fonts.push(font.to_string());
+    }
+}
+
 /// Serializes a DOCX document into the OPC zip bytes.
 #[typst_macros::time(name = "docx encode")]
 pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<u8>> {
@@ -84,6 +90,7 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     let styles_xml = styles_part::build(
         &document.info,
         &document.text_defaults,
+        &document.heading_styles,
         document.max_heading_level,
         pretty,
     );
@@ -107,15 +114,18 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     // The document font + the standard auxiliary fonts (bullet glyphs, math).
     let mut fonts: Vec<String> = Vec::new();
     if let Some(f) = &document.text_defaults.font {
-        fonts.push(f.to_string());
+        push_font(&mut fonts, f);
     }
-    for f in ["Symbol", "Courier New"] {
-        if !fonts.iter().any(|x| x == f) {
-            fonts.push(f.to_string());
+    for style in &document.heading_styles {
+        if let Some(f) = &style.rpr.font {
+            push_font(&mut fonts, f);
         }
     }
+    for f in ["Symbol", "Courier New"] {
+        push_font(&mut fonts, f);
+    }
     if document.uses_math {
-        fonts.push("Cambria Math".to_string());
+        push_font(&mut fonts, "Cambria Math");
     }
     package.add_xml(
         "word/fontTable.xml",

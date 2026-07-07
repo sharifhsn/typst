@@ -211,6 +211,35 @@ const REFS_BIB: &[u8] = br#"@article{alpha,
 }
 "#;
 
+fn run_fragment_containing<'a>(doc_xml: &'a str, text: &str) -> &'a str {
+    for frag in doc_xml.split("<w:r>").skip(1) {
+        let Some(end) = frag.find("</w:r>") else { continue };
+        let run = &frag[..end];
+        if run.contains(text) {
+            return run;
+        }
+    }
+    panic!("run containing {text:?} not found");
+}
+
+fn para_fragment_containing<'a>(doc_xml: &'a str, text: &str) -> &'a str {
+    let text_at = doc_xml.find(text).unwrap_or_else(|| panic!("{text:?} not found"));
+    let start = doc_xml[..text_at].rfind("<w:p").expect("paragraph start");
+    let end = text_at + doc_xml[text_at..].find("</w:p>").expect("paragraph end");
+    &doc_xml[start..end]
+}
+
+fn style_fragment<'a>(styles_xml: &'a str, style_id: &str) -> &'a str {
+    let marker = format!("w:styleId=\"{style_id}\"");
+    let at = styles_xml
+        .find(&marker)
+        .unwrap_or_else(|| panic!("style {style_id} not found"));
+    let start = styles_xml[..at].rfind("<w:style").expect("style start");
+    let end =
+        at + styles_xml[at..].find("</w:style>").expect("style end") + "</w:style>".len();
+    &styles_xml[start..end]
+}
+
 fn run_text_and_child(doc_xml: &str, child: &str) -> Vec<(String, bool)> {
     let doc = roxmltree::Document::parse(doc_xml).expect("document XML should parse");
     doc.descendants()
@@ -1005,20 +1034,18 @@ fn single_slot_numbering_stays_a_bare_page_field() {
 }
 
 #[test]
-fn document_default_font_size_are_hoisted_into_doc_defaults() {
-    // The document's most common font/size is hoisted into `docDefaults`; body
-    // runs that match inherit it (no per-run `rFonts`/`sz`), so editing the Normal
-    // style in Word restyles the whole document. Only deviations emit `rPr`.
+fn document_default_text_props_are_hoisted_into_doc_defaults_and_normal() {
+    // The root StyleChain's font/size/color is hoisted into `docDefaults` and
+    // Normal; body runs that match inherit it, while deviations stay direct.
     let p = parts(
-        "#set text(font: \"Liberation Serif\", size: 12pt)\n\
-         Plain body text here, repeated so it is the most common run.\n\n\
-         More plain body so the mode is clearly the body font.\n\n\
-         #text(font: \"Liberation Mono\")[deviating run]",
+        "#set text(font: \"Liberation Serif\", size: 12pt, fill: rgb(\"123456\"))\n\
+         Plain body text here.\n\n\
+         #text(font: \"Liberation Mono\", fill: rgb(\"AA0000\"))[deviating run]",
     );
     let styles = &p["word/styles.xml"];
     let doc = &p["word/document.xml"];
 
-    // docDefaults carries the document's font + size (the mode).
+    // docDefaults carries the document's root font + size + color.
     let dd = &styles[styles.find("<w:docDefaults>").unwrap()..];
     let dd = &dd[..dd.find("</w:docDefaults>").unwrap()];
     assert!(dd.contains("liberation serif"), "default font hoisted: {dd}");
@@ -1026,10 +1053,78 @@ fn document_default_font_size_are_hoisted_into_doc_defaults() {
         dd.contains("w:val=\"24\""),
         "default size (12pt = 24 half-pt) hoisted: {dd}"
     );
+    assert!(dd.contains("<w:color w:val=\"123456\"/>"), "default color hoisted: {dd}");
 
-    // The body does NOT repeat the default font; only the deviating run does.
-    assert!(!doc.contains("liberation serif"), "body inherits the default font");
-    assert!(doc.contains("liberation mono"), "a deviating run still emits its font");
+    // Normal carries the same defaults so restyling Normal is effective.
+    let normal = style_fragment(styles, "Normal");
+    assert!(normal.contains("liberation serif"), "Normal owns default font");
+    assert!(normal.contains("w:val=\"24\""), "Normal owns default size");
+    assert!(normal.contains("<w:color w:val=\"123456\"/>"), "Normal owns color");
+
+    // The body run has no duplicate rPr; only the deviating run emits overrides.
+    let plain = run_fragment_containing(doc, "Plain body text here.");
+    assert!(!plain.contains("<w:rPr>"), "plain body inherits defaults: {plain}");
+    let deviating = run_fragment_containing(doc, "deviating run");
+    assert!(deviating.contains("liberation mono"), "deviating font stays direct");
+    assert!(
+        deviating.contains("<w:color w:val=\"AA0000\"/>"),
+        "deviating color stays direct: {deviating}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn heading_style_owns_matching_run_formatting() {
+    let p = parts(
+        "#set text(font: \"Liberation Serif\", size: 11pt)\n\
+         #show heading.where(level: 1): set text(font: \"Liberation Sans\", size: 20pt, fill: rgb(\"224466\"))\n\
+         = Styled Heading\n\n\
+         Body.",
+    );
+    let styles = &p["word/styles.xml"];
+    let doc = &p["word/document.xml"];
+
+    let heading_style = style_fragment(styles, "Heading1");
+    assert!(heading_style.contains("liberation sans"), "Heading1 owns font");
+    assert!(heading_style.contains("<w:sz w:val=\"40\"/>"), "Heading1 owns size");
+    assert!(heading_style.contains("<w:color w:val=\"224466\"/>"), "Heading1 owns color");
+    assert!(heading_style.contains("<w:b/>"), "Heading1 owns bold");
+
+    let para = para_fragment_containing(doc, "Styled Heading");
+    assert!(para.contains("w:pStyle w:val=\"Heading1\""), "heading uses style");
+    assert!(!para.contains("<w:keepNext/>"), "keepNext comes from style");
+    assert!(!para.contains("<w:outlineLvl"), "outline level comes from style");
+
+    let run = run_fragment_containing(doc, "Styled Heading");
+    assert!(!run.contains("<w:rFonts"), "matching font stripped: {run}");
+    assert!(!run.contains("<w:sz"), "matching size stripped: {run}");
+    assert!(!run.contains("<w:color"), "matching color stripped: {run}");
+    assert!(!run.contains("<w:b"), "matching bold stripped: {run}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn deviating_heading_run_keeps_only_the_deviation() {
+    let p = parts(
+        "#show heading.where(level: 1): set text(fill: rgb(\"224466\"))\n\
+         = #text(fill: rgb(\"AA0000\"))[Warning]",
+    );
+    let styles = &p["word/styles.xml"];
+    let doc = &p["word/document.xml"];
+
+    let heading_style = style_fragment(styles, "Heading1");
+    assert!(
+        heading_style.contains("<w:color w:val=\"224466\"/>"),
+        "Heading1 owns the style-chain color"
+    );
+
+    let run = run_fragment_containing(doc, "Warning");
+    assert!(
+        run.contains("<w:color w:val=\"AA0000\"/>"),
+        "manual heading color remains as a direct deviation: {run}"
+    );
+    assert!(!run.contains("<w:sz"), "matching heading size is stripped: {run}");
+    assert!(!run.contains("<w:b"), "matching heading bold is stripped: {run}");
     assert_all_wellformed(&p);
 }
 
