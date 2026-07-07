@@ -110,9 +110,41 @@ fn visible_text(xml: &str) -> String {
         .filter(|node| {
             node.tag_name().name() == "t"
                 && node.tag_name().namespace()
-                    == Some("http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+                    == Some(
+                        "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                    )
         })
         .filter_map(|node| node.text())
+        .collect()
+}
+
+fn run_text_and_child(doc_xml: &str, child: &str) -> Vec<(String, bool)> {
+    let doc = roxmltree::Document::parse(doc_xml).expect("document XML should parse");
+    doc.descendants()
+        .filter(|node| {
+            node.tag_name().name() == "r"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+        })
+        .map(|run| {
+            let text = run
+                .descendants()
+                .filter(|node| {
+                    node.tag_name().name() == "t"
+                        && node.tag_name().namespace()
+                            == Some(
+                                "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                            )
+                })
+                .filter_map(|node| node.text())
+                .collect();
+            let has_child = run.descendants().any(|node| {
+                node.tag_name().name() == child
+                    && node.tag_name().namespace()
+                        == Some("http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+            });
+            (text, has_child)
+        })
         .collect()
 }
 
@@ -138,6 +170,79 @@ fn heading_maps_to_heading_style() {
 fn strong_maps_to_bold_run() {
     let p = parts("Normal *bold* text.");
     assert!(p["word/document.xml"].contains("<w:b/>"), "strong should emit <w:b/>");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn raw_code_runs_disable_proofing_but_prose_does_not() {
+    let p = parts(
+        r#"Plain prose before `let inline_code = 1;` after.
+
+```rust
+let block_code = 2;
+```
+"#,
+    );
+    let doc = &p["word/document.xml"];
+    let runs = run_text_and_child(doc, "noProof");
+
+    assert!(
+        runs.iter()
+            .any(|(text, no_proof)| text.contains("inline_code") && *no_proof),
+        "inline raw code should emit <w:noProof/>"
+    );
+    assert!(
+        runs.iter()
+            .any(|(text, no_proof)| text.contains("block_code") && *no_proof),
+        "block raw code should emit <w:noProof/>"
+    );
+    assert!(
+        runs.iter()
+            .any(|(text, no_proof)| text.contains("Plain prose") && !*no_proof),
+        "ordinary prose should not emit <w:noProof/>"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn highlight_default_uses_word_highlight_yellow() {
+    let p = parts("#highlight[x]");
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<w:highlight w:val=\"yellow\"/>"),
+        "default Typst highlight should map to Word's yellow highlighter"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn highlight_custom_green_is_not_hard_coded_yellow() {
+    let p = parts("#highlight(fill: rgb(\"00FF00\"))[x]");
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<w:highlight w:val=\"green\"/>")
+            || doc.contains("w:fill=\"00FF00\""),
+        "custom green highlight should be emitted as green"
+    );
+    assert!(
+        !doc.contains("w:fill=\"FFFF00\"") && !doc.contains("w:val=\"yellow\""),
+        "custom green highlight must not fall back to the old hard-coded yellow"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn highlight_arbitrary_color_keeps_exact_shading() {
+    let p = parts("#highlight(fill: rgb(\"123456\"))[x]");
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"123456\"/>"),
+        "arbitrary highlight colors should keep exact run shading"
+    );
+    assert!(
+        !doc.contains("<w:highlight"),
+        "arbitrary highlight colors should not be forced into Word's named palette"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -182,7 +287,10 @@ fn curve_maps_to_a_native_bezier_path() {
     let doc = &p["word/document.xml"];
     assert!(doc.contains("<a:custGeom>"), "curve becomes a custom geometry");
     assert!(doc.contains("<a:cubicBezTo>"), "the Bézier segment is kept, not flattened");
-    assert!(!doc.contains("<w:drawing><wp:inline") || !doc.contains("<a:blip"), "not rasterized");
+    assert!(
+        !doc.contains("<w:drawing><wp:inline") || !doc.contains("<a:blip"),
+        "not rasterized"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -220,7 +328,10 @@ fn linear_gradient_fill_maps_to_native_gradfill() {
     let doc = &p["word/document.xml"];
     assert!(doc.contains("<a:gradFill"), "gradient fill becomes a:gradFill");
     assert!(doc.contains("<a:srgbClr val=\"FF0000\"/>"), "first stop is exact red");
-    assert!(doc.contains("<a:srgbClr val=\"0000FF\"/>"), "second stop is exact blue, not Oklab-misread");
+    assert!(
+        doc.contains("<a:srgbClr val=\"0000FF\"/>"),
+        "second stop is exact blue, not Oklab-misread"
+    );
     assert!(doc.contains("<a:lin ang=\"0\""), "0deg (left-to-right) maps to ang=0");
     assert!(!doc.contains("<a:blip"), "not rasterized");
 
@@ -268,7 +379,10 @@ fn shape_stroke_dash_and_cap_are_carried_natively() {
 
     // A plain solid stroke still carries an explicit cap but no prstDash.
     let solid = parts("#rect(width: 100pt, height: 40pt, stroke: black)");
-    assert!(!solid["word/document.xml"].contains("<a:prstDash"), "solid line has no dash element");
+    assert!(
+        !solid["word/document.xml"].contains("<a:prstDash"),
+        "solid line has no dash element"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -281,9 +395,15 @@ fn rasterized_content_keeps_its_text_as_hidden_runs() {
     // the exact visual, the hidden text carries the words.
     let p = parts("#skew(ax: 20deg)[HiddenSkewWord]");
     let doc = &p["word/document.xml"];
-    assert!(doc.contains("<a:blip"), "skew has no native form, so it rasterizes to an image");
+    assert!(
+        doc.contains("<a:blip"),
+        "skew has no native form, so it rasterizes to an image"
+    );
     assert!(doc.contains("<w:vanish/>"), "the recovered text is emitted as a hidden run");
-    assert!(doc.contains("HiddenSkewWord"), "the rasterized word survives as searchable text");
+    assert!(
+        doc.contains("HiddenSkewWord"),
+        "the rasterized word survives as searchable text"
+    );
     // The image also gets the recovered text as accessibility alt text.
     assert!(doc.contains("descr=\"HiddenSkewWord\""), "the drawing carries alt text");
     assert_all_wellformed(&p);
@@ -492,7 +612,10 @@ fn colored_math_carries_its_color() {
     // colour on the math `m:r`), not render black.
     let p = parts("$ y = #text(red)[x] + b $");
     let doc = &p["word/document.xml"];
-    assert!(doc.contains("<w:color w:val=\"FF4136\""), "the red math run carries its color");
+    assert!(
+        doc.contains("<w:color w:val=\"FF4136\""),
+        "the red math run carries its color"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -552,9 +675,8 @@ fn heading_outline_is_a_toc_content_control() {
 
 #[test]
 fn core_properties_carry_author_and_revision() {
-    let p = parts(
-        "#set document(title: \"T\", author: \"Ada Lovelace\")\n#outline()\n\n= H",
-    );
+    let p =
+        parts("#set document(title: \"T\", author: \"Ada Lovelace\")\n#outline()\n\n= H");
     let core = &p["docProps/core.xml"];
     assert!(core.contains("<dc:title>T</dc:title>"), "title is recorded");
     assert!(core.contains("Ada Lovelace"), "author is the creator");
@@ -643,7 +765,10 @@ fn standard_word_parts_are_present() {
     // settings.xml carries the compat block + the standard settings.
     let s = &p["word/settings.xml"];
     assert!(s.contains("compatibilityMode") && s.contains("w:val=\"15\""), "compat 15");
-    assert!(s.contains("clrSchemeMapping") && s.contains("defaultTabStop"), "rich settings");
+    assert!(
+        s.contains("clrSchemeMapping") && s.contains("defaultTabStop"),
+        "rich settings"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -656,8 +781,14 @@ fn standard_gallery_and_linked_heading_styles_are_defined() {
     let p = parts("= Heading one\n== Heading two\nBody.");
     let styles = &p["word/styles.xml"];
     for id in [
-        "Title", "TitleChar", "Subtitle", "Strong", "Emphasis", "TableGrid",
-        "FollowedHyperlink", "PageNumber",
+        "Title",
+        "TitleChar",
+        "Subtitle",
+        "Strong",
+        "Emphasis",
+        "TableGrid",
+        "FollowedHyperlink",
+        "PageNumber",
     ] {
         assert!(
             styles.contains(&format!("w:styleId=\"{id}\"")),
@@ -746,7 +877,10 @@ fn document_default_font_size_are_hoisted_into_doc_defaults() {
     let dd = &styles[styles.find("<w:docDefaults>").unwrap()..];
     let dd = &dd[..dd.find("</w:docDefaults>").unwrap()];
     assert!(dd.contains("liberation serif"), "default font hoisted: {dd}");
-    assert!(dd.contains("w:val=\"24\""), "default size (12pt = 24 half-pt) hoisted: {dd}");
+    assert!(
+        dd.contains("w:val=\"24\""),
+        "default size (12pt = 24 half-pt) hoisted: {dd}"
+    );
 
     // The body does NOT repeat the default font; only the deviating run does.
     assert!(!doc.contains("liberation serif"), "body inherits the default font");
@@ -807,9 +941,7 @@ fn solid_page_fill_becomes_a_native_page_color() {
     );
     // A gradient page fill has no native `w:background` form and is left unset
     // (distinct from `background:`, which still rasterizes to a behindDoc image).
-    let g = parts(
-        "#set page(fill: gradient.linear(red, blue))\nBody text.",
-    );
+    let g = parts("#set page(fill: gradient.linear(red, blue))\nBody text.");
     assert!(
         !g["word/document.xml"].contains("<w:background"),
         "a gradient page fill is not forced into a flat w:background"
@@ -850,7 +982,8 @@ fn framed_box_in_a_figure_is_rasterized_not_a_textbox() {
     // A framed box (`#figure(rect[..])`) is centered by the figure, and a
     // *centered* `wps:txbx` text box does not flow its text in LibreOffice. Such a
     // body must rasterize to a (centered) image so it renders in every consumer.
-    let p = parts("#figure(rect(width: 3cm, height: 1cm, fill: aqua)[box], caption: [c])");
+    let p =
+        parts("#figure(rect(width: 3cm, height: 1cm, fill: aqua)[box], caption: [c])");
     let doc = &p["word/document.xml"];
     assert!(
         !doc.contains("<w:txbxContent"),
@@ -892,7 +1025,10 @@ fn labeled_targets_get_bookmarks_so_refs_resolve() {
     let bookmarks = collect("w:name=\"", 8);
     assert!(anchors.len() >= 2, "an equation ref and a label link, got {anchors:?}");
     let dangling: Vec<_> = anchors.difference(&bookmarks).collect();
-    assert!(dangling.is_empty(), "every link anchor resolves to a bookmark: {dangling:?}");
+    assert!(
+        dangling.is_empty(),
+        "every link anchor resolves to a bookmark: {dangling:?}"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -932,7 +1068,10 @@ fn inline_equation_stays_in_its_paragraph() {
         .expect("a paragraph with the text");
     let para = &para[..para.find("</w:p>").unwrap()];
     assert!(para.contains("m:oMath"), "the inline equation shares the text's paragraph");
-    assert!(para.contains("text after it"), "text after the equation stays in the paragraph");
+    assert!(
+        para.contains("text after it"),
+        "text after the equation stays in the paragraph"
+    );
     // The spaces flanking the equation must survive: Typst trims them when it
     // splits the paragraph at a raw inline equation, so the converter relies on
     // the PAR grouping rule keeping the equation inline. Check for a lone-space
@@ -990,9 +1129,8 @@ fn header_link_relationship_lives_in_the_header_part_rels() {
     // A link/image in a header references a relationship by r:id; that id must
     // resolve against the header part's OWN .rels, not document.xml.rels, or Word
     // refuses to open the file.
-    let p = parts(
-        "#set page(header: [#link(\"https://example.com\")[site] head])\nBody.",
-    );
+    let p =
+        parts("#set page(header: [#link(\"https://example.com\")[site] head])\nBody.");
     let header = p
         .keys()
         .find(|k| k.starts_with("word/header") && k.ends_with(".xml"))
@@ -1146,7 +1284,10 @@ fn inline_styled_box_becomes_boxed_inline_text() {
     assert!(doc.contains("<w:hyperlink"), "a link inside the box stays clickable");
     let hl = &doc[doc.find("<w:hyperlink").unwrap()..];
     let hl = &hl[..hl.find("</w:hyperlink>").unwrap()];
-    assert!(hl.contains("<w:bdr") && hl.contains("<w:shd "), "with the box's shading + border");
+    assert!(
+        hl.contains("<w:bdr") && hl.contains("<w:shd "),
+        "with the box's shading + border"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -1176,7 +1317,10 @@ fn block_level_callout_flows_as_a_shaded_paragraph() {
     assert!(doc.contains("<w:pBdr>"), "it carries paragraph borders");
     assert!(doc.contains("<w:shd "), "and paragraph shading");
     assert!(doc.contains("keepNext"), "multi-paragraph box is held together");
-    assert!(doc.contains("First callout") && doc.contains("Second callout"), "text flows");
+    assert!(
+        doc.contains("First callout") && doc.contains("Second callout"),
+        "text flows"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -1191,10 +1335,14 @@ fn footnote_in_a_box_never_lands_in_a_text_box() {
         !inline["word/document.xml"].contains("wps:txbx"),
         "an inline box with a footnote must not become a text box"
     );
-    assert!(inline.contains_key("word/footnotes.xml"), "and the footnote body is emitted");
+    assert!(
+        inline.contains_key("word/footnotes.xml"),
+        "and the footnote body is emitted"
+    );
     assert_all_wellformed(&inline);
 
-    let block = parts("#rect(fill: green, inset: 6pt)[Callout with a #footnote[fn] here.]");
+    let block =
+        parts("#rect(fill: green, inset: 6pt)[Callout with a #footnote[fn] here.]");
     assert!(
         !block["word/document.xml"].contains("wps:txbx"),
         "a block callout with a footnote flows as a shaded paragraph, not a text box"
@@ -1355,9 +1503,8 @@ fn figure_emits_seq_field() {
 fn image_in_header_declares_drawing_namespaces() {
     // An image in a header part used to leave `wp:`/`a:`/`pic:` undeclared on
     // the header root, making Word/LibreOffice refuse to open the document.
-    let p = parts(
-        "#set page(header: box(fill: blue, width: 30pt, height: 8pt))\n\nBody.",
-    );
+    let p =
+        parts("#set page(header: box(fill: blue, width: 30pt, height: 8pt))\n\nBody.");
     let header = p
         .iter()
         .find(|(n, _)| n.starts_with("word/header"))
@@ -1373,9 +1520,7 @@ fn page_geometry_change_emits_a_section_break() {
     // A mid-document orientation change must produce a second section: the
     // landscape `sectPr` lives in a paragraph's `pPr`, the final portrait one
     // at body level.
-    let p = parts(
-        "Portrait body.\n\n#set page(flipped: true)\n\nLandscape body.",
-    );
+    let p = parts("Portrait body.\n\n#set page(flipped: true)\n\nLandscape body.");
     let doc = &p["word/document.xml"];
     assert_eq!(
         doc.matches("<w:sectPr>").count(),
@@ -1442,7 +1587,10 @@ fn leading_page_setup_does_not_advance_the_synthetic_page() {
     let doc = &p["word/document.xml"];
     let text = visible_text(doc);
     assert!(text.contains("UNIQUE-1-END"), "the first content page stays page 1");
-    assert!(!text.contains("UNIQUE-2-END"), "leading page setup must not advance to page 2");
+    assert!(
+        !text.contains("UNIQUE-2-END"),
+        "leading page setup must not advance to page 2"
+    );
     assert_all_wellformed(&p);
 }
 

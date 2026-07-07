@@ -26,7 +26,10 @@ pub fn run(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Vec<Block>> {
 /// block-level elements rather than pre-grouped into `ParElem`s. We therefore
 /// coalesce consecutive inline children into a single paragraph here, flushing
 /// the buffer whenever a block-level element or paragraph break is hit.
-pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Vec<Block>> {
+pub fn convert_children(
+    ctx: &mut DocxCtx,
+    children: &[Pair],
+) -> SourceResult<Vec<Block>> {
     use typst_library::foundations::Resolve;
     use typst_library::layout::VElem;
 
@@ -93,7 +96,8 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
                     && props.ind.as_ref().and_then(|i| i.first_line).is_none()
                     && let Some(amount) = ctx.consecutive_first_line_indent(*styles)
                 {
-                    props.ind.get_or_insert_with(Default::default).first_line = Some(amount);
+                    props.ind.get_or_insert_with(Default::default).first_line =
+                        Some(amount);
                 }
                 pending_props = Some(props);
             }
@@ -140,6 +144,14 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
             push_inline(ctx, child, *styles, &mut pending)?;
             have_pending = true;
             last_was_par = false;
+        } else if let Some(raw) = child.to_packed::<typst_library::text::RawElem>()
+            && !raw.block.get(*styles)
+        {
+            // A surviving inline raw element must stay in the current paragraph;
+            // `handle_inline` enters raw scope before re-realizing it.
+            push_inline(ctx, child, *styles, &mut pending)?;
+            have_pending = true;
+            last_was_par = false;
         } else if is_inline(child) {
             push_inline(ctx, child, *styles, &mut pending)?;
             have_pending = true;
@@ -163,7 +175,10 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
     // ever removes the spurious closing one.
     while let Some(Block::Para(para)) = blocks.last() {
         if !para.content.is_empty()
-            && para.content.iter().all(|c| matches!(c, ParaChild::Run(Run::PageBreak)))
+            && para
+                .content
+                .iter()
+                .all(|c| matches!(c, ParaChild::Run(Run::PageBreak)))
         {
             blocks.pop();
         } else {
@@ -267,8 +282,8 @@ fn is_inline(child: &Content) -> bool {
     use typst_library::layout::HElem;
     use typst_library::model::{EmphElem, LinkElem, RefElem, StrongElem};
     use typst_library::text::{
-        HighlightElem, LinebreakElem, SmallcapsElem, SmartQuoteElem, SpaceElem, StrikeElem,
-        SubElem, SuperElem, TextElem, UnderlineElem,
+        HighlightElem, LinebreakElem, SmallcapsElem, SmartQuoteElem, SpaceElem,
+        StrikeElem, SubElem, SuperElem, TextElem, UnderlineElem,
     };
     use typst_library::visualize::ImageElem;
 
@@ -450,11 +465,7 @@ fn equation_has_inner_label(eq_body: &Content) -> bool {
                     matches!(&r.text, RawContent::Text(s)
                         if s.len() > 2 && s.starts_with('<') && s.ends_with('>'))
                 });
-            if is_label {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            }
+            if is_label { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
         })
         .is_break()
 }
@@ -508,6 +519,8 @@ fn handle_block_inner(
 ) -> SourceResult<()> {
     if let Some(elem) = child.to_packed::<TagElem>() {
         out.push(Block::Tag(elem.tag.clone()));
+    } else if child.is::<typst_library::text::RawElem>() {
+        out.extend(ctx.with_raw_scope(|ctx| ctx.blocks(child, styles))?);
     } else if let Some(elem) = child.to_packed::<typst_library::pdf::PdfMarkerTag>() {
         // A PDF accessibility delimiter wraps real content (`body`); it has no DOCX
         // meaning itself, so unwrap it and lower the body (otherwise the wrapped
@@ -612,7 +625,11 @@ fn handle_block_inner(
             let em = crate::props::abs_to_twip(
                 typst_library::layout::Em::new(1.0).resolve(styles),
             );
-            crate::dom::Indent { left: Some(em), right: Some(em), ..Default::default() }
+            crate::dom::Indent {
+                left: Some(em),
+                right: Some(em),
+                ..Default::default()
+            }
         });
 
         // Lower the body as blocks (not flat runs) so a multi-paragraph quote
@@ -633,9 +650,7 @@ fn handle_block_inner(
 
         // The attribution ("— author", or a prose citation) renders below a
         // block quote, right-aligned (Typst's default). Was previously dropped.
-        if block
-            && let Some(attribution) = elem.attribution.get_cloned(styles)
-        {
+        if block && let Some(attribution) = elem.attribution.get_cloned(styles) {
             let realized = attribution.realize(elem.span());
             let attr_runs = ctx.inline_runs(&realized, styles, RunProps::default())?;
             if !attr_runs.is_empty() {
@@ -726,7 +741,8 @@ fn handle_block_inner(
         // Top-level `#place(..)` → an anchored drawing, or (for a float with
         // text-bearing content) the flowed blocks. See `mappers::image::place`.
         out.extend(mappers::image::place(elem, styles, ctx)?);
-    } else if (child.is::<typst_library::layout::BlockElem>() || is_framed_container(child))
+    } else if (child.is::<typst_library::layout::BlockElem>()
+        || is_framed_container(child))
         && contains_place(child)
         && placed_bodies_shape_only(child, styles)
         && let Some(run) = mappers::shape::transformed(child, styles, ctx)?
@@ -750,7 +766,8 @@ fn handle_block_inner(
         }));
     } else if let Some(elem) = child.to_packed::<typst_library::layout::BlockElem>() {
         handle_block_box(ctx, elem, styles, out)?;
-    } else if is_framed_container(child) && handle_block_framed(ctx, child, styles, out)? {
+    } else if is_framed_container(child) && handle_block_framed(ctx, child, styles, out)?
+    {
         // A block-level framed container (`#rect`/`#box`/`#square` standing as its
         // own block) with flowing content → shaded + bordered paragraphs that
         // break across pages, mirroring `#block`.
@@ -759,7 +776,9 @@ fn handle_block_inner(
         // `wps:txbx` text box does not flow its text in LibreOffice. Rasterize the
         // box to an image instead — a centered inline image renders correctly in
         // every consumer (Word renders the text box fine, but this keeps both).
-        if let Some(para) = fallback_para(mappers::image::laid_out_fallback(child, styles, ctx)?) {
+        if let Some(para) =
+            fallback_para(mappers::image::laid_out_fallback(child, styles, ctx)?)
+        {
             out.push(para);
         } else {
             ctx.warn_ignored(child.elem().name(), child.span());
@@ -827,9 +846,11 @@ fn handle_layout(
             out.extend(ctx.blocks(&content, styles)?);
         }
         None => {
-            if let Some(para) =
-                fallback_para(mappers::image::laid_out_fallback(elem.pack_ref(), styles, ctx)?)
-            {
+            if let Some(para) = fallback_para(mappers::image::laid_out_fallback(
+                elem.pack_ref(),
+                styles,
+                ctx,
+            )?) {
                 out.push(para);
             }
         }
@@ -900,9 +921,11 @@ fn handle_block_box(
             // A layouter body (`#block(width => ..)`) is an opaque closure with
             // no extractable content: rasterize the whole box (and recover its
             // laid-out text as hidden searchable runs beside the image).
-            if let Some(para) =
-                fallback_para(mappers::image::laid_out_fallback(elem.pack_ref(), styles, ctx)?)
-            {
+            if let Some(para) = fallback_para(mappers::image::laid_out_fallback(
+                elem.pack_ref(),
+                styles,
+                ctx,
+            )?) {
                 out.push(para);
             }
             return Ok(());
@@ -947,7 +970,12 @@ fn handle_block_box(
         &mut inner,
         shd_fill,
         &pbdr,
-        Insets { left: ind_left, right: ind_right, top: inset_top, bottom: inset_bottom },
+        Insets {
+            left: ind_left,
+            right: ind_right,
+            top: inset_top,
+            bottom: inset_bottom,
+        },
         above,
         below,
     );
@@ -991,9 +1019,10 @@ fn stamp_box_decorations(
             p.shd_fill.get_or_insert(f);
         }
         if let Some(b) = pbdr
-            && p.pbdr.is_none() {
-                p.pbdr = Some(b.clone());
-            }
+            && p.pbdr.is_none()
+        {
+            p.pbdr = Some(b.clone());
+        }
         if has_box && multi_para {
             p.keep_lines = true;
             if i != last {
@@ -1096,7 +1125,8 @@ pub(crate) fn body_shape_only(
     use typst_library::foundations::{SequenceElem, StyledElem};
     use typst_library::introspection::TagElem;
     use typst_library::layout::{
-        AlignElem, BoxElem, MoveElem, PadElem, PlaceElem, RotateElem, ScaleElem, StackElem,
+        AlignElem, BoxElem, MoveElem, PadElem, PlaceElem, RotateElem, ScaleElem,
+        StackElem,
     };
     use typst_library::visualize::{
         CircleElem, CurveElem, EllipseElem, LineElem, PolygonElem, RectElem, SquareElem,
@@ -1184,7 +1214,8 @@ fn handle_block_framed(
 ) -> SourceResult<bool> {
     use typst_library::visualize::Paint;
 
-    let Some((body, fill, stroke_sides, inset)) = block_framed_parts(child, styles) else {
+    let Some((body, fill, stroke_sides, inset)) = block_framed_parts(child, styles)
+    else {
         return Ok(false);
     };
     // A gradient/tiling fill has no flat-shading form: keep it for the text-box /
@@ -1262,14 +1293,21 @@ fn block_framed_parts(
     Content,
     Option<typst_library::visualize::Paint>,
     typst_library::layout::Sides<Option<Option<typst_library::visualize::Stroke>>>,
-    typst_library::layout::Sides<Option<typst_library::layout::Rel<typst_library::layout::Length>>>,
+    typst_library::layout::Sides<
+        Option<typst_library::layout::Rel<typst_library::layout::Length>>,
+    >,
 )> {
     use typst_library::layout::BoxElem;
     use typst_library::visualize::{RectElem, SquareElem};
 
     if let Some(e) = child.to_packed::<BoxElem>() {
         let body = e.body.get_cloned(styles)?;
-        Some((body, e.fill.get_cloned(styles), e.stroke.get_cloned(styles), e.inset.get_cloned(styles)))
+        Some((
+            body,
+            e.fill.get_cloned(styles),
+            e.stroke.get_cloned(styles),
+            e.inset.get_cloned(styles),
+        ))
     } else if let Some(e) = child.to_packed::<RectElem>() {
         let body = e.body.get_cloned(styles)?;
         let fill = e.fill.get_cloned(styles);
@@ -1298,7 +1336,9 @@ fn shape_stroke_sides(
     match stroke {
         Smart::Custom(sides) => sides,
         Smart::Auto if fill.is_some() => Sides::splat(None),
-        Smart::Auto => Sides::splat(Some(Some(typst_library::visualize::Stroke::default()))),
+        Smart::Auto => {
+            Sides::splat(Some(Some(typst_library::visualize::Stroke::default())))
+        }
     }
 }
 
@@ -1307,7 +1347,10 @@ fn shape_stroke_sides(
 /// table) rather than a short inline label. Checked on the raw body (no
 /// extraction): flowing iff it contains a paragraph break, a block raw listing,
 /// a list/enum/term list, a table/grid, or a nested block.
-fn body_is_flowing(body: &Content, styles: typst_library::foundations::StyleChain) -> bool {
+fn body_is_flowing(
+    body: &Content,
+    styles: typst_library::foundations::StyleChain,
+) -> bool {
     use std::ops::ControlFlow;
     use typst_library::layout::{BlockElem, GridElem};
     use typst_library::model::{EnumElem, ListElem, TableElem, TermsElem};

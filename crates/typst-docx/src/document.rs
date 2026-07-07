@@ -128,6 +128,10 @@ pub fn docx_document(
                 ctx.raster_height =
                     typst_library::layout::Abs::pt(first_geom.page_h as f64 / 20.0);
             }
+            // Record raw/code source ranges up front: inline raw is unwrapped to
+            // styled `TextElem`s before the walker sees a `RawElem`, so runs are
+            // tagged `w:noProof` by matching their source span, not the mono font.
+            ctx.record_raw_ranges(content);
 
         // Build the body and the (final) section properties. A single-section
         // document converts all `pairs` at once (unchanged behaviour, so leading

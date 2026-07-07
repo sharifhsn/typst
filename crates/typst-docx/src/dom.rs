@@ -154,9 +154,18 @@ pub enum ParaChild {
     /// A display equation `<m:oMathPara>` (serialized XML).
     OmmlPara(String),
     /// `<w:hyperlink r:id|w:anchor>` wrapping runs.
-    Hyperlink { rel: Option<EcoString>, anchor: Option<EcoString>, runs: Vec<Run> },
-    BookmarkStart { id: u32, name: EcoString },
-    BookmarkEnd { id: u32 },
+    Hyperlink {
+        rel: Option<EcoString>,
+        anchor: Option<EcoString>,
+        runs: Vec<Run>,
+    },
+    BookmarkStart {
+        id: u32,
+        name: EcoString,
+    },
+    BookmarkEnd {
+        id: u32,
+    },
     Tag(Tag),
 }
 
@@ -166,7 +175,10 @@ pub enum ParaChild {
 // worth the per-drawing allocation.
 #[allow(clippy::large_enum_variant)]
 pub enum Run {
-    Text { props: RunProps, text: EcoString },
+    Text {
+        props: RunProps,
+        text: EcoString,
+    },
     Break,
     PageBreak,
     /// A `#colbreak()` → `<w:br w:type="column"/>`: moves the following content to
@@ -177,7 +189,10 @@ pub enum Run {
     /// tab, but its paragraph gains a right-aligned tab stop at the content width
     /// so it pushes the following content to the right margin.
     FillTab,
-    FootnoteRef { props: RunProps, id: i32 },
+    FootnoteRef {
+        props: RunProps,
+        id: i32,
+    },
     /// The in-body footnote number mark (`<w:footnoteRef/>`, styled
     /// `FootnoteReference`). Prepended to a footnote body's first paragraph so
     /// Word/LibreOffice render the footnote's auto-number next to its text.
@@ -208,7 +223,12 @@ pub struct TextDefaults {
 impl Default for TextDefaults {
     fn default() -> Self {
         // 11pt, Word's own default, until the real root styles are resolved.
-        Self { font: None, size_half_pt: 22, color: None, lang: None }
+        Self {
+            font: None,
+            size_half_pt: 22,
+            color: None,
+            lang: None,
+        }
     }
 }
 
@@ -221,6 +241,8 @@ pub struct RunProps {
     pub italic: bool,
     pub smallcaps: bool,
     pub strike: bool,
+    /// `<w:noProof/>` — disables spelling/grammar proofing for code/raw runs.
+    pub no_proof: bool,
     pub color: Option<[u8; 3]>,
     /// Character spacing / tracking in signed twips (`<w:spacing w:val=…>` in
     /// `rPr`). `text(tracking:)`. Default none.
@@ -229,6 +251,8 @@ pub struct RunProps {
     /// `text(baseline:)` (downward-positive) is negated. Default none.
     pub position_half_pt: Option<i32>,
     pub size_half_pt: Option<u32>,
+    /// `<w:highlight w:val=...>` Word's named text highlighter colours.
+    pub highlight: Option<&'static str>,
     pub shd_fill: Option<[u8; 3]>,
     /// `<w:bdr>` run border (a character border box). Renders an *inline* framed
     /// container (`#box(stroke:)[..]` mid-line) as boxed text that flows in the
@@ -445,7 +469,10 @@ pub enum ShapeFill {
     /// Angle in 60,000ths of a degree (OOXML's `a:lin ang`), and colour stops
     /// as (position in 0..=100000, colour) — both already in the OOXML
     /// convention so the encoder only has to format them.
-    LinearGradient { angle_60000ths: i32, stops: Vec<(u32, [u8; 3])> },
+    LinearGradient {
+        angle_60000ths: i32,
+        stops: Vec<(u32, [u8; 3])>,
+    },
 }
 
 /// The text-box content of a shape (`wps:txbx` → `w:txbxContent`): real

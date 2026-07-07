@@ -109,24 +109,37 @@ impl RunProps {
         if self.strike {
             w.leaf(xml::W_STRIKE);
         }
-        // 7. color
+        // 7. noProof (after strike/dstrike/outline/shadow/emboss/imprint;
+        // before vanish/color/spacing).
+        if self.no_proof {
+            w.leaf("w:noProof");
+        }
+        // 8. vanish — hidden text (`#hide`).
+        if self.vanish {
+            w.open("w:vanish").empty();
+        }
+        // 9. color
         if let Some(c) = self.color {
             w.open(xml::W_COLOR).attr(xml::W_VAL, &hex(c)).empty();
         }
-        // 8. spacing (character tracking)
+        // 10. spacing (character tracking)
         if let Some(tracking) = self.tracking {
             w.open(xml::W_SPACING).attr(xml::W_VAL, &tracking.to_string()).empty();
         }
-        // 9. position (baseline shift, signed half-points)
+        // 11. position (baseline shift, signed half-points)
         if let Some(pos) = self.position_half_pt {
             w.open("w:position").attr(xml::W_VAL, &pos.to_string()).empty();
         }
-        // 10. sz / szCs
+        // 12. sz / szCs
         if let Some(sz) = self.size_half_pt {
             w.open(xml::W_SZ).attr(xml::W_VAL, &sz.to_string()).empty();
             w.open(xml::W_SZCS).attr(xml::W_VAL, &sz.to_string()).empty();
         }
-        // 11. u (canonical pos 27, before shd at 30)
+        // 13. highlight (after sz/szCs; before u/effect/bdr/shd).
+        if let Some(value) = self.highlight {
+            w.open("w:highlight").attr(xml::W_VAL, value).empty();
+        }
+        // 14. u (canonical pos 27, before shd at 30)
         if let Some(u) = &self.underline {
             w.open(xml::W_U).attr(xml::W_VAL, u.val);
             if let Some(c) = u.color {
@@ -134,11 +147,7 @@ impl RunProps {
             }
             w.empty();
         }
-        // 11b. vanish — hidden text (`#hide`).
-        if self.vanish {
-            w.open("w:vanish").empty();
-        }
-        // 11c. bdr — run border box (inline framed container).
+        // 15. bdr — run border box (inline framed container).
         if let Some(b) = &self.bdr {
             w.open("w:bdr")
                 .attr(xml::W_VAL, b.style)
@@ -147,7 +156,7 @@ impl RunProps {
                 .attr("w:color", &hex(b.color))
                 .empty();
         }
-        // 12. shd
+        // 16. shd
         if let Some(fill) = self.shd_fill {
             w.open(xml::W_SHD)
                 .attr(xml::W_VAL, "clear")
@@ -155,7 +164,7 @@ impl RunProps {
                 .attr("w:fill", &hex(fill))
                 .empty();
         }
-        // 13. vertAlign
+        // 17. vertAlign
         if let Some(va) = self.vert_align {
             let val = match va {
                 VertAlign::Super => "superscript",
@@ -163,14 +172,14 @@ impl RunProps {
             };
             w.open(xml::W_VERTALIGN).attr(xml::W_VAL, val).empty();
         }
-        // 14. rtl / cs (run reading order + complex-script formatting)
+        // 18. rtl / cs (run reading order + complex-script formatting)
         if self.rtl {
             w.leaf("w:rtl");
         }
         if self.cs {
             w.leaf("w:cs");
         }
-        // 15. lang
+        // 19. lang
         if let Some(lang) = &self.lang {
             w.open(xml::W_LANG).attr(xml::W_VAL, lang).empty();
         }
