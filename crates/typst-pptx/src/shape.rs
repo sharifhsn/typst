@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
-use crate::dom::{FillSpec, GeomShape, PathGeom, PicGeom};
+use crate::dom::{FillSpec, GeomKind, GeomShape, PathGeom, PicGeom};
 
 use typst_library::layout::{Size, Transform};
-use typst_library::visualize::{Color, Curve, Paint, Shape};
+use typst_library::visualize::{Color, Curve, Geometry, Paint, Shape};
 use typst_ooxml_core::dml::{self, AlphaMode};
 use typst_ooxml_core::{color as ooxml_color, units};
 
@@ -18,8 +18,14 @@ pub(crate) fn shape_to_geom(
     rot_60k: i32,
 ) -> Option<GeomShape> {
     let scale = dml::similarity_scale(&transform)?;
-    let fill = resolved_fill(&shape.fill)?;
     let stroke = dml::resolved_stroke(&shape.stroke, scale, AlphaMode::Preserve)?;
+
+    if let Some(connector) = line_to_connector(shape, transform, rot_60k, stroke.clone())
+    {
+        return Some(connector);
+    }
+
+    let fill = resolved_fill(&shape.fill)?;
     let raw = dml::geometry_to_raw(&shape.geometry, transform);
     let normalized = dml::normalize_segments(raw)?;
 
@@ -29,8 +35,46 @@ pub(crate) fn shape_to_geom(
         w_emu: units::abs_to_emu(normalized.w).max(1),
         h_emu: units::abs_to_emu(normalized.h).max(1),
         rot_60k,
-        geom: PathGeom::Custom(normalized.segments),
+        geom: GeomKind::Path(PathGeom::Custom(normalized.segments)),
         fill,
+        stroke,
+    })
+}
+
+fn line_to_connector(
+    shape: &Shape,
+    transform: Transform,
+    rot_60k: i32,
+    stroke: Option<dml::StrokeSpec>,
+) -> Option<GeomShape> {
+    let Geometry::Line(delta) = &shape.geometry else {
+        return None;
+    };
+
+    if shape.fill.is_some() {
+        return None;
+    }
+
+    let start = typst_library::layout::Point::zero().transform(transform);
+    let end = delta.transform(transform);
+    let (min_x, min_y) = (start.x.min(end.x), start.y.min(end.y));
+    let (max_x, max_y) = (start.x.max(end.x), start.y.max(end.y));
+    let (w, h) = (max_x - min_x, max_y - min_y);
+    if !w.to_pt().is_finite() || !h.to_pt().is_finite() {
+        return None;
+    }
+    if w.to_pt() <= 0.0 && h.to_pt() <= 0.0 {
+        return None;
+    }
+
+    Some(GeomShape {
+        x_emu: units::abs_to_emu(min_x),
+        y_emu: units::abs_to_emu(min_y),
+        w_emu: units::abs_to_emu(w).max(1),
+        h_emu: units::abs_to_emu(h).max(1),
+        rot_60k,
+        geom: GeomKind::Connector { flip_h: start.x > end.x, flip_v: start.y > end.y },
+        fill: None,
         stroke,
     })
 }
@@ -68,7 +112,7 @@ pub(crate) fn srgb_bytes(color: &Color) -> [u8; 4] {
 mod tests {
     use std::sync::Arc;
 
-    use crate::dom::PathSegment;
+    use crate::dom::{GeomKind, PathSegment};
     use typst_library::foundations::Smart;
     use typst_library::layout::{Abs, Angle, Point, Ratio, Size, Transform};
     use typst_library::visualize::{
@@ -101,7 +145,7 @@ mod tests {
         assert_eq!(geom.y_emu, 0);
         assert_eq!(geom.w_emu, emu_pt(10.0));
         assert_eq!(geom.h_emu, emu_pt(20.0));
-        let PathGeom::Custom(segments) = geom.geom else {
+        let GeomKind::Path(PathGeom::Custom(segments)) = geom.geom else {
             panic!("expected custom path");
         };
         assert_eq!(segments.len(), 5);
@@ -125,7 +169,7 @@ mod tests {
         );
         let shape = bare_shape(Geometry::Curve(curve));
         let geom = shape_to_geom(&shape, Transform::identity(), 0).unwrap();
-        let PathGeom::Custom(segments) = geom.geom else {
+        let GeomKind::Path(PathGeom::Custom(segments)) = geom.geom else {
             panic!("expected custom path");
         };
 
@@ -143,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn negative_coordinates_shift_path_and_preserve_bounds() {
+    fn line_geometry_lowers_to_loose_connector() {
         let shape = bare_shape(Geometry::Line(Point::new(Abs::pt(5.0), Abs::pt(5.0))));
         let transform = Transform::translate(Abs::pt(-5.0), Abs::pt(-10.0));
         let geom = shape_to_geom(&shape, transform, 0).unwrap();
@@ -152,13 +196,24 @@ mod tests {
         assert_eq!(geom.y_emu, emu_pt(-10.0));
         assert_eq!(geom.w_emu, emu_pt(5.0));
         assert_eq!(geom.h_emu, emu_pt(5.0));
-        let PathGeom::Custom(segments) = geom.geom else {
-            panic!("expected custom path");
-        };
-        assert!(matches!(segments[0], PathSegment::MoveTo(0, 0)));
-        assert!(
-            matches!(segments[1], PathSegment::LineTo(x, y) if x == emu_pt(5.0) && y == emu_pt(5.0))
-        );
+        assert!(matches!(
+            geom.geom,
+            GeomKind::Connector { flip_h: false, flip_v: false }
+        ));
+        assert!(geom.fill.is_none());
+    }
+
+    #[test]
+    fn descending_line_connector_records_flip() {
+        let shape = bare_shape(Geometry::Line(Point::new(Abs::pt(-5.0), Abs::pt(5.0))));
+        let transform = Transform::translate(Abs::pt(10.0), Abs::pt(0.0));
+        let geom = shape_to_geom(&shape, transform, 0).unwrap();
+
+        assert_eq!(geom.x_emu, emu_pt(5.0));
+        assert_eq!(geom.y_emu, 0);
+        assert_eq!(geom.w_emu, emu_pt(5.0));
+        assert_eq!(geom.h_emu, emu_pt(5.0));
+        assert!(matches!(geom.geom, GeomKind::Connector { flip_h: true, flip_v: false }));
     }
 
     #[test]
