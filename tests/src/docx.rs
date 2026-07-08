@@ -101,6 +101,16 @@ fn parts(src: &str) -> HashMap<String, String> {
 }
 
 fn parts_with_files(src: &str, files: &[(&str, &[u8])]) -> HashMap<String, String> {
+    package_bytes_with_files(src, files)
+        .into_iter()
+        .filter_map(|(name, bytes)| String::from_utf8(bytes).ok().map(|s| (name, s)))
+        .collect()
+}
+
+fn package_bytes_with_files(
+    src: &str,
+    files: &[(&str, &[u8])],
+) -> HashMap<String, Vec<u8>> {
     let doc = compile_docx(src, files);
     let bytes = docx(&doc, &DocxOptions { pretty: false }).expect("docx export failed");
 
@@ -109,10 +119,9 @@ fn parts_with_files(src: &str, files: &[(&str, &[u8])]) -> HashMap<String, Strin
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).unwrap();
         let name = f.name().to_string();
-        let mut s = String::new();
-        if f.read_to_string(&mut s).is_ok() {
-            map.insert(name, s);
-        }
+        let mut bytes = Vec::new();
+        f.read_to_end(&mut bytes).unwrap();
+        map.insert(name, bytes);
     }
     map
 }
@@ -529,6 +538,76 @@ fn rasterized_content_keeps_its_text_as_hidden_runs() {
     // The image also gets the recovered text as accessibility alt text.
     assert!(doc.contains("descr=\"HiddenSkewWord\""), "the drawing carries alt text");
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn svg_image_embeds_native_svg_with_png_fallback() {
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40"><rect width="80" height="40" fill="#0b6"/><circle cx="20" cy="20" r="12" fill="#fff"/></svg>"##;
+
+    let raw = package_bytes_with_files(
+        r#"#image("logo.svg", width: 40pt, alt: "Brand mark")"#,
+        &[("logo.svg", SVG)],
+    );
+    let p: HashMap<String, String> = raw
+        .iter()
+        .filter_map(|(name, bytes)| {
+            String::from_utf8(bytes.clone()).ok().map(|s| (name.clone(), s))
+        })
+        .collect();
+    let doc = &p["word/document.xml"];
+    let rels = &p["word/_rels/document.xml.rels"];
+
+    assert!(doc.contains("<a:blip r:embed=\""), "PNG fallback is the normal blip");
+    assert!(doc.contains("uri=\"{28A0092B-C50C-407E-A947-70E740481C1C}\""));
+    assert!(doc.contains("<a14:useLocalDpi"));
+    assert!(doc.contains("uri=\"{96DAC541-7B7A-43D3-8B79-37D633B846F1}\""));
+    assert!(doc.contains("<asvg:svgBlip"));
+    assert!(doc.contains(
+        "xmlns:asvg=\"http://schemas.microsoft.com/office/drawing/2016/SVG/main\""
+    ));
+    assert!(doc.contains("descr=\"Brand mark\""));
+
+    let png_rel = doc
+        .split("<a:blip r:embed=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("fallback relationship id");
+    let svg_rel = doc
+        .split("<asvg:svgBlip")
+        .nth(1)
+        .and_then(|s| s.split("r:embed=\"").nth(1))
+        .and_then(|s| s.split('"').next())
+        .expect("svg relationship id");
+
+    let png_target = relationship_target(rels, png_rel);
+    let svg_target = relationship_target(rels, svg_rel);
+    assert!(png_target.ends_with(".png"), "fallback target is PNG: {png_target}");
+    assert!(svg_target.ends_with(".svg"), "native target is SVG: {svg_target}");
+
+    let png_part = format!("word/{png_target}");
+    let svg_part = format!("word/{svg_target}");
+    assert_eq!(&raw[&svg_part], SVG, "the SVG media part stores the source bytes");
+    assert!(
+        raw[&png_part].starts_with(b"\x89PNG\r\n\x1a\n"),
+        "fallback media part must be a valid PNG"
+    );
+    assert!(
+        p["[Content_Types].xml"]
+            .contains("<Default Extension=\"svg\" ContentType=\"image/svg+xml\"/>"),
+        "package declares the SVG media content type"
+    );
+    assert_all_wellformed(&p);
+}
+
+fn relationship_target(rels_xml: &str, id: &str) -> String {
+    let rels = roxmltree::Document::parse(rels_xml).expect("rels XML should parse");
+    rels.descendants()
+        .find(|node| {
+            node.tag_name().name() == "Relationship" && node.attribute("Id") == Some(id)
+        })
+        .and_then(|node| node.attribute("Target"))
+        .unwrap_or_else(|| panic!("relationship {id} should exist"))
+        .to_string()
 }
 
 #[test]

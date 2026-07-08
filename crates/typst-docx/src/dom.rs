@@ -435,7 +435,11 @@ pub struct Field {
 
 /// An image. Inline (`anchor: None`) or floating (`anchor: Some`).
 pub struct Drawing {
+    /// The fallback raster image relationship used by `<a:blip r:embed>`.
     pub rel: EcoString,
+    /// Optional native SVG relationship referenced from `<asvg:svgBlip>`.
+    /// When present, `rel` remains the required raster fallback.
+    pub svg_rel: Option<EcoString>,
     pub w_emu: i64,
     pub h_emu: i64,
     pub alt: Option<EcoString>,
