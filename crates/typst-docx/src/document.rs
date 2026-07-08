@@ -14,8 +14,8 @@ use typst_library::routines::{Arenas, RealizationKind};
 use crate::ctx::DocxCtx;
 use crate::dom::{
     Block, DocxDocument, Field, HdrFtrPart, HdrFtrRef, HeadingStyle, HeadingStyleSample,
-    Para, ParaChild, ParaProps, PgNumType, Run, RunProps, SectPr, Spacing, TextDefaults,
-    TocHeading,
+    Para, ParaChild, ParaProps, PgNumType, Run, RunProps, SectPr, SectType, Spacing,
+    TextDefaults, TocHeading,
 };
 use crate::introspect::DocxIntrospector;
 use crate::props;
@@ -87,7 +87,7 @@ fn docx_document_impl(
     // The width fed to rasterized content comes from the first section.
     let first_geom = sections
         .first()
-        .map(|(g, _)| g.clone())
+        .map(|section| section.geom.clone())
         .unwrap_or_else(|| run_geometry(&[], styles));
 
     // Per-section `set page(numbering:)`, in section order — the synthetic page
@@ -96,7 +96,10 @@ fn docx_document_impl(
         if sections.is_empty() {
             vec![first_geom.numbering.clone()]
         } else {
-            sections.iter().map(|(g, _)| g.numbering.clone()).collect()
+            sections
+                .iter()
+                .map(|section| section.geom.numbering.clone())
+                .collect()
         };
 
     // Walk the native element tree into the typed IR.
@@ -183,19 +186,20 @@ fn docx_document_impl(
                 let mut body = Vec::new();
                 let mut final_sect = None;
                 let last = sections.len() - 1;
-                for (idx, (geom, range)) in sections.iter().enumerate() {
+                for (idx, section) in sections.iter().enumerate() {
                     let mut blocks =
-                        crate::convert::run(&mut ctx, &pairs[range.clone()])?;
+                        crate::convert::run(&mut ctx, &pairs[section.range.clone()])?;
                     body.append(&mut blocks);
-                    let (s, mut h, mut f) = build_section(&mut ctx, geom, styles)
-                        .unwrap_or_else(|_| {
-                            (sectpr_geometry(geom), Vec::new(), Vec::new())
-                        });
+                    let (mut s, mut h, mut f) =
+                        build_section(&mut ctx, &section.geom, styles).unwrap_or_else(
+                            |_| (sectpr_geometry(&section.geom), Vec::new(), Vec::new()),
+                        );
                     header_parts.append(&mut h);
                     footer_parts.append(&mut f);
                     if idx == last {
                         final_sect = Some(s);
                     } else {
+                        s.sect_type = section.break_after;
                         body.push(Block::SectionBreak(s));
                     }
                 }
@@ -720,28 +724,44 @@ struct SectGeom {
 /// same geometry are merged — their internal pagebreaks stay as `<w:br>`; a
 /// geometry change starts a new section, and the boundary pagebreaks between
 /// them are consumed by the section break). Engine-free.
+struct SectionRun {
+    geom: SectGeom,
+    range: std::ops::Range<usize>,
+    break_after: Option<SectType>,
+}
+
 fn resolve_sections(
     pairs: &[(&Content, StyleChain)],
     initial: StyleChain,
-) -> Vec<(SectGeom, std::ops::Range<usize>)> {
-    use typst_library::layout::PagebreakElem;
+) -> Vec<SectionRun> {
+    use typst_library::layout::{PagebreakElem, Parity};
 
-    let mut sections: Vec<(SectGeom, std::ops::Range<usize>)> = Vec::new();
+    let mut sections: Vec<SectionRun> = Vec::new();
     let mut initial = initial;
     let mut i = 0;
     while i < pairs.len() {
         // Skip pagebreaks, folding non-boundary (`set page`) ones into the
         // section-initial chain. Boundary pagebreaks carry pre-rule styles, so
         // they must NOT be folded.
+        let mut forced_break = None;
         while i < pairs.len() {
             if let Some(pb) = pairs[i].0.to_packed::<PagebreakElem>() {
                 if !pb.boundary.get(pairs[i].1) {
                     initial = pairs[i].1;
                 }
+                forced_break = pb.to.get(pairs[i].1).map(|parity| match parity {
+                    Parity::Even => SectType::EvenPage,
+                    Parity::Odd => SectType::OddPage,
+                });
                 i += 1;
             } else {
                 break;
             }
+        }
+        if let Some(sect_type) = forced_break
+            && let Some(previous) = sections.last_mut()
+        {
+            previous.break_after = Some(sect_type);
         }
         if i >= pairs.len() {
             break;
@@ -756,12 +776,13 @@ fn resolve_sections(
         // the pagebreaks between them then fall inside the merged range
         // (→ `<w:br>`).
         if let Some(last) = sections.last_mut()
-            && same_section(&last.0, &geom)
+            && last.break_after.is_none()
+            && same_section(&last.geom, &geom)
         {
-            last.1.end = i;
+            last.range.end = i;
             continue;
         }
-        sections.push((geom, start..i));
+        sections.push(SectionRun { geom, range: start..i, break_after: None });
     }
     sections
 }

@@ -642,12 +642,96 @@ fn nested_bullets_indent_by_level() {
 }
 
 #[test]
+fn ordered_enum_uses_native_word_numbering() {
+    let p = parts("+ first\n+ second\n+ third");
+    let doc = &p["word/document.xml"];
+    let numbering = &p["word/numbering.xml"];
+    assert!(doc.contains("<w:numPr>"), "enum paragraphs link to numbering");
+    assert!(
+        numbering.contains("<w:numFmt w:val=\"decimal\"/>"),
+        "default enum uses decimal Word numbering"
+    );
+    assert!(
+        numbering.contains("<w:lvlText w:val=\"%1.\"/>"),
+        "default enum level text remains 1."
+    );
+    assert!(
+        !doc.contains("<w:t>1.</w:t>"),
+        "native numbering must not bake marker text into document.xml"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn letter_and_roman_enums_use_native_word_numbering() {
+    let lettered = parts("#set enum(numbering: \"a.\")\n+ alpha\n+ beta");
+    let letter_numbering = &lettered["word/numbering.xml"];
+    assert!(
+        letter_numbering.contains("<w:numFmt w:val=\"lowerLetter\"/>"),
+        "lettered enum maps to lowerLetter"
+    );
+    assert!(
+        lettered["word/document.xml"].contains("<w:numPr>"),
+        "lettered enum uses native numPr"
+    );
+
+    let roman = parts("#set enum(numbering: \"I.\")\n+ one\n+ two");
+    let roman_numbering = &roman["word/numbering.xml"];
+    assert!(
+        roman_numbering.contains("<w:numFmt w:val=\"upperRoman\"/>"),
+        "Roman enum maps to upperRoman"
+    );
+    assert!(
+        roman["word/document.xml"].contains("<w:numPr>"),
+        "Roman enum uses native numPr"
+    );
+    assert_all_wellformed(&lettered);
+    assert_all_wellformed(&roman);
+}
+
+#[test]
+fn non_native_enums_keep_static_marker_fallback() {
+    let closure = parts("#set enum(numbering: n => str(n) + \")\")\n+ alpha\n+ beta");
+    let closure_doc = &closure["word/document.xml"];
+    assert!(
+        !closure_doc.contains("<w:numPr>"),
+        "numbering closures cannot use native Word counters"
+    );
+    assert!(
+        visible_text(closure_doc).contains("1)"),
+        "closure marker is baked as literal text"
+    );
+
+    let symbols = parts("#set enum(numbering: \"* \")\n+ alpha\n+ beta");
+    let symbol_doc = &symbols["word/document.xml"];
+    assert!(
+        !symbol_doc.contains("<w:numPr>"),
+        "symbol numbering stays on the static fallback"
+    );
+    assert!(
+        visible_text(symbol_doc).contains('*'),
+        "symbol marker is preserved as document text"
+    );
+    assert_all_wellformed(&closure);
+    assert_all_wellformed(&symbols);
+}
+
+#[test]
 fn nested_full_enum_numbers_include_ancestry() {
-    // `#set enum(full: true)` nested numbering must read `1.`, `1.1.`, `2.` — the
-    // parent ancestry folded onto each item body.
+    // `#set enum(full: true)` nested numbering must use a level-1 template that
+    // references the parent and child counters, with level-1 paragraph indents.
     let p = parts("#set enum(full: true)\n+ one\n  + one-a\n+ two");
     let doc = &p["word/document.xml"];
-    assert!(doc.contains("1.1."), "nested full enum shows the parent path (1.1.)");
+    let numbering = &p["word/numbering.xml"];
+    assert!(doc.contains("<w:ilvl w:val=\"1\"/>"), "nested enum reaches Word level 1");
+    assert!(
+        numbering.contains("<w:lvlText w:val=\"%1.%2.\"/>"),
+        "nested full enum shows parent and child counters"
+    );
+    assert!(
+        numbering.contains("w:left=\"1440\""),
+        "level-1 enum has the second-level indent"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -1030,6 +1114,16 @@ fn single_slot_numbering_stays_a_bare_page_field() {
         .expect("a numbered footer part");
     assert!(footer.contains("PAGE "), "has the PAGE field");
     assert!(!footer.contains("NUMPAGES"), "no total for a single-slot numbering");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn uppercase_text_uses_caps_without_rewriting_text() {
+    let p = parts("#upper[Hello World]");
+    let doc = &p["word/document.xml"];
+    let run = run_fragment_containing(doc, "Hello World");
+    assert!(run.contains("<w:caps/>"), "upper-case text uses the Word caps toggle");
+    assert!(!doc.contains("HELLO WORLD"), "raw run text keeps the original mixed case");
     assert_all_wellformed(&p);
 }
 
@@ -1635,6 +1729,49 @@ fn leading_page_setup_does_not_emit_a_blank_first_page() {
         q["word/document.xml"].matches("w:type=\"page\"").count(),
         1,
         "a real mid-document pagebreak is preserved"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn pagebreak_to_parity_emits_odd_even_section_breaks() {
+    let odd = parts("Before.\n#pagebreak(to: \"odd\")\nAfter.");
+    let odd_doc = &odd["word/document.xml"];
+    assert_eq!(
+        odd_doc.matches("<w:sectPr>").count(),
+        2,
+        "odd pagebreak should split the document into two sections"
+    );
+    assert!(
+        odd_doc.contains("<w:type w:val=\"oddPage\"/>"),
+        "odd pagebreak uses an oddPage section break"
+    );
+    assert!(
+        !odd_doc.contains("w:type=\"page\""),
+        "parity pagebreak is not emitted as a plain page break"
+    );
+
+    let even = parts("Before.\n#pagebreak(to: \"even\")\nAfter.");
+    assert!(
+        even["word/document.xml"].contains("<w:type w:val=\"evenPage\"/>"),
+        "even pagebreak uses an evenPage section break"
+    );
+    assert_all_wellformed(&odd);
+    assert_all_wellformed(&even);
+}
+
+#[test]
+fn plain_pagebreak_stays_a_page_break() {
+    let p = parts("Before.\n#pagebreak()\nAfter.");
+    let doc = &p["word/document.xml"];
+    assert_eq!(
+        doc.matches("w:type=\"page\"").count(),
+        1,
+        "plain pagebreak remains a run-level page break"
+    );
+    assert!(
+        !doc.contains("oddPage") && !doc.contains("evenPage"),
+        "plain pagebreak does not become a parity section"
     );
     assert_all_wellformed(&p);
 }

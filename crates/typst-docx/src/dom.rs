@@ -264,6 +264,7 @@ pub struct RunProps {
     pub font: Option<EcoString>,
     pub bold: bool,
     pub italic: bool,
+    pub caps: bool,
     pub smallcaps: bool,
     pub strike: bool,
     /// `<w:noProof/>` — disables spelling/grammar proofing for code/raw runs.
