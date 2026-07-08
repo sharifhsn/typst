@@ -485,7 +485,11 @@ fn linear_gradient_fill_maps_to_native_gradfill() {
     );
 
     // A radial gradient has no representable OOXML shape-relative form here and
-    // still rasterizes, same as before.
+    // still rasterizes, same as before. (An empirical LibreOffice check found
+    // the emitted a:path/a:fillToRect renders visibly more circular than
+    // Typst's own box-relative elliptical stretch on a non-square shape — the
+    // exact mismatch this comment originally warned about — so it stays
+    // scoped out rather than ship a subtly-wrong native mapping.)
     let r = parts("#rect(width: 100pt, height: 50pt, fill: gradient.radial(red, blue))");
     assert!(
         !r["word/document.xml"].contains("<a:gradFill"),

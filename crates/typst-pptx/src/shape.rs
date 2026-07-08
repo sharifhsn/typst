@@ -72,7 +72,8 @@ mod tests {
     use typst_library::foundations::Smart;
     use typst_library::layout::{Abs, Angle, Point, Ratio, Size, Transform};
     use typst_library::visualize::{
-        ColorSpace, FillRule, LinearGradient, Oklab, ProcessColor, ProcessColorSpace, Rgb,
+        ColorSpace, FillRule, LinearGradient, Oklab, ProcessColor, ProcessColorSpace,
+        RadialGradient, Rgb,
     };
     use typst_library::visualize::{Geometry, Gradient};
 
@@ -188,5 +189,39 @@ mod tests {
         assert_eq!(stops[1].pos_100k, 100_000);
         assert_ne!(stops[0].color, raw);
         assert_eq!(stops[0].color, srgb_bytes(&oklab));
+    }
+
+    #[test]
+    fn radial_gradient_is_not_natively_mapped() {
+        // Radial gradients bail to the raster fallback rather than a native
+        // fill: an empirical LibreOffice check found the DrawingML
+        // `a:path path="circle"`/`a:fillToRect` model renders visibly more
+        // circular than Typst's own box-relative elliptical stretch on a
+        // non-square shape, so `gradient_fill` intentionally never produces
+        // `FillSpec::RadialGradient` for now (see its doc comment).
+        let gradient = Gradient::Radial(Arc::new(RadialGradient {
+            stops: vec![
+                (
+                    Color::Process(ProcessColor::Rgb(Rgb::new(1.0, 0.0, 0.0, 1.0))),
+                    Ratio::zero(),
+                ),
+                (
+                    Color::Process(ProcessColor::Rgb(Rgb::new(0.0, 0.0, 1.0, 1.0))),
+                    Ratio::one(),
+                ),
+            ],
+            center: typst_library::layout::Axes::new(Ratio::new(0.4), Ratio::new(0.6)),
+            radius: Ratio::new(0.7),
+            focal_center: typst_library::layout::Axes::new(
+                Ratio::new(0.3),
+                Ratio::new(0.45),
+            ),
+            focal_radius: Ratio::new(0.1),
+            space: ColorSpace::Process(ProcessColorSpace::Srgb),
+            relative: Smart::Auto,
+            anti_alias: true,
+        }));
+
+        assert!(resolved_fill(&Some(Paint::Gradient(gradient))).is_none());
     }
 }

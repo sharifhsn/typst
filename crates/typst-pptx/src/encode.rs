@@ -441,6 +441,7 @@ fn write_r_pr(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink) {
 
 fn write_pic(w: &mut XmlWriter, pic: &Pic, id: u32, rels: &mut impl SlideRelSink) {
     let rid = rels.image_rid(pic.media);
+    let svg_rid = pic.svg_media.map(|media| rels.image_rid(media));
     w.open("p:pic").start_children();
     w.open("p:nvPicPr").start_children();
     w.open("p:cNvPr")
@@ -457,7 +458,7 @@ fn write_pic(w: &mut XmlWriter, pic: &Pic, id: u32, rels: &mut impl SlideRelSink
     w.close();
 
     w.open("p:blipFill").start_children();
-    w.open("a:blip").attr("r:embed", &rid).empty();
+    dml::write_blip(w, &rid, svg_rid.as_deref());
     if let Some([l, t, r, b]) = pic.src_rect {
         w.open("a:srcRect")
             .attr("l", &l.to_string())

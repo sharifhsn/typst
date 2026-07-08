@@ -533,6 +533,85 @@ Gradient"##,
 }
 
 #[test]
+fn radial_gradient_shape_does_not_native_map() {
+    // A radial gradient has no verified-correct OOXML shape-relative form
+    // here (an empirical LibreOffice check found the a:path/a:fillToRect
+    // model renders visibly more circular than Typst's own box-relative
+    // elliptical stretch on a non-square shape), so it stays on the raster
+    // fallback rather than ship a subtly-wrong native mapping.
+    let p = parts(
+        r#"#set page(width: 160pt, height: 100pt, margin: 0pt)
+#rect(width: 100pt, height: 60pt, fill: gradient.radial(red, blue))"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(!slide.contains("<a:gradFill"), "radial gradients are not natively mapped");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn radial_gradient_page_background_does_not_native_map() {
+    let p = parts(
+        r#"#set page(width: 160pt, height: 100pt, margin: 0pt, fill: gradient.radial(red, blue))
+Background"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(
+        !slide.contains("<p:bg><p:bgPr><a:gradFill"),
+        "radial page backgrounds are not natively mapped"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn svg_image_embeds_native_svg_with_png_fallback() {
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40"><rect width="80" height="40" fill="#0b6"/><circle cx="20" cy="20" r="12" fill="#fff"/></svg>"##;
+    let src = format!(
+        "#set page(width: 120pt, height: 80pt, margin: 0pt)\n\
+         #image({}, width: 40pt, alt: \"Brand mark\")",
+        bytes_literal(SVG),
+    );
+
+    let raw = binary_parts(&src);
+    let p = text_parts_from_binary(&raw);
+    let slide = &p["ppt/slides/slide1.xml"];
+    let rels = &p["ppt/slides/_rels/slide1.xml.rels"];
+
+    assert!(slide.contains("<a:blip r:embed=\""), "PNG fallback is the normal blip");
+    assert!(slide.contains("uri=\"{28A0092B-C50C-407E-A947-70E740481C1C}\""));
+    assert!(slide.contains("<a14:useLocalDpi"));
+    assert!(slide.contains("uri=\"{96DAC541-7B7A-43D3-8B79-37D633B846F1}\""));
+    assert!(slide.contains("<asvg:svgBlip"));
+    assert!(slide.contains(
+        "xmlns:asvg=\"http://schemas.microsoft.com/office/drawing/2016/SVG/main\""
+    ));
+    assert!(slide.contains("descr=\"Brand mark\""));
+    assert!(rels.contains(".png\""), "slide rels should include the PNG fallback");
+    assert!(rels.contains(".svg\""), "slide rels should include the native SVG");
+
+    let svg_parts: Vec<_> = raw
+        .iter()
+        .filter(|(name, _)| name.starts_with("ppt/media/") && name.ends_with(".svg"))
+        .collect();
+    let png_parts: Vec<_> = raw
+        .iter()
+        .filter(|(name, _)| name.starts_with("ppt/media/") && name.ends_with(".png"))
+        .collect();
+    assert_eq!(svg_parts.len(), 1, "exactly one native SVG media part");
+    assert_eq!(png_parts.len(), 1, "exactly one PNG fallback media part");
+    assert_eq!(svg_parts[0].1.as_slice(), SVG, "the SVG part stores source bytes");
+    assert!(
+        png_parts[0].1.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "fallback media part must be a valid PNG"
+    );
+    assert!(
+        p["[Content_Types].xml"]
+            .contains("<Default Extension=\"svg\" ContentType=\"image/svg+xml\"/>"),
+        "package declares the SVG media content type"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn wrapped_paragraph_merges_into_one_flowing_text_box() {
     let p = parts(
         r#"#set page(width: 220pt, height: 140pt, margin: 0pt)

@@ -1,12 +1,17 @@
 //! DrawingML geometry, fill, and stroke primitives shared by Office exporters.
 
 use crate::color;
+use crate::ns;
 use crate::units;
 use crate::xml::XmlWriter;
-use typst_library::layout::{Abs, Point, Size, Transform};
+use typst_library::layout::{Abs, Point, Ratio, Size, Transform};
 use typst_library::visualize::{
     Color, Curve, CurveItem, FixedStroke, Geometry, Gradient, LineCap, Paint,
 };
+
+const A14_USE_LOCAL_DPI_EXT_URI: &str = "{28A0092B-C50C-407E-A947-70E740481C1C}";
+const ASVG_SVG_BLIP_EXT_URI: &str = "{96DAC541-7B7A-43D3-8B79-37D633B846F1}";
+const ASVG_NS: &str = "http://schemas.microsoft.com/office/drawing/2016/SVG/main";
 
 /// One custom geometry path segment.
 pub enum PathSegment {
@@ -20,7 +25,17 @@ pub enum PathSegment {
 #[derive(Clone)]
 pub enum FillSpec {
     Solid([u8; 4]),
-    LinearGradient { angle_60k: i32, stops: Vec<GradientStop> },
+    LinearGradient {
+        angle_60k: i32,
+        stops: Vec<GradientStop>,
+    },
+    RadialGradient {
+        stops: Vec<GradientStop>,
+        center_100k: [i32; 2],
+        radius_100k: i32,
+        focal_center_100k: [i32; 2],
+        focal_radius_100k: i32,
+    },
 }
 
 /// A gradient stop.
@@ -59,26 +74,56 @@ pub fn resolved_fill(fill: &Option<Paint>, alpha: AlphaMode) -> Option<Option<Fi
     match fill {
         None => Some(None),
         Some(Paint::Solid(color)) => Some(Some(FillSpec::Solid(srgb_rgba(color, alpha)))),
-        Some(Paint::Gradient(gradient)) => {
-            linear_gradient_fill(gradient, alpha).map(Some)
-        }
+        Some(Paint::Gradient(gradient)) => gradient_fill(gradient, alpha).map(Some),
         Some(Paint::Tiling(_)) => None,
+    }
+}
+
+/// Lowers a Typst gradient to a DrawingML fill.
+///
+/// Radial gradients are intentionally NOT mapped to `FillSpec::RadialGradient`
+/// here: an empirical LibreOffice round-trip (Typst PDF ground truth vs. a
+/// DOCX/PPTX shape carrying a non-square bounding box) showed the emitted
+/// `a:path path="circle"`/`a:fillToRect` renders visibly more circular than
+/// Typst's own box-relative elliptical stretch — the exact coordinate-space
+/// mismatch a prior round's DOCX author flagged as a reason to scope radial
+/// out of shape fills. `FillSpec::RadialGradient` and its `write_fill` support
+/// are kept (and exercised directly by tests) as verified-correct-XML
+/// infrastructure for a future attempt that solves the aspect-ratio mapping,
+/// but no caller should reach it via `gradient_fill`/`resolved_fill` until
+/// that's fixed and re-verified visually.
+pub fn gradient_fill(gradient: &Gradient, alpha: AlphaMode) -> Option<FillSpec> {
+    match gradient {
+        Gradient::Linear(linear) => {
+            let angle_60k =
+                (linear.angle.to_deg().rem_euclid(360.0) * 60_000.0).round() as i32;
+            Some(FillSpec::LinearGradient {
+                angle_60k,
+                stops: gradient_stops(&linear.stops, alpha),
+            })
+        }
+        Gradient::Radial(_) | Gradient::Conic(_) => None,
     }
 }
 
 /// Lowers a Typst linear gradient to a DrawingML fill.
 pub fn linear_gradient_fill(gradient: &Gradient, alpha: AlphaMode) -> Option<FillSpec> {
-    let Gradient::Linear(linear) = gradient else { return None };
-    let stops = linear
-        .stops
+    let Gradient::Linear(_) = gradient else { return None };
+    gradient_fill(gradient, alpha)
+}
+
+fn gradient_stops(stops: &[(Color, Ratio)], alpha: AlphaMode) -> Vec<GradientStop> {
+    stops
         .iter()
         .map(|(color, pos)| GradientStop {
-            pos_100k: (pos.get() * 100_000.0).round() as i32,
+            pos_100k: ratio_100k(*pos),
             color: srgb_rgba(color, alpha),
         })
-        .collect();
-    let angle_60k = (linear.angle.to_deg().rem_euclid(360.0) * 60_000.0).round() as i32;
-    Some(FillSpec::LinearGradient { angle_60k, stops })
+        .collect()
+}
+
+fn ratio_100k(ratio: Ratio) -> i32 {
+    (ratio.get() * 100_000.0).round() as i32
 }
 
 /// Lowers a resolved Typst stroke to a DrawingML stroke.
@@ -434,22 +479,83 @@ pub fn write_fill(
         Some(FillSpec::Solid(rgba)) => write_solid_fill(w, *rgba),
         Some(FillSpec::LinearGradient { angle_60k, stops }) => {
             w.open("a:gradFill").attr("rotWithShape", "1").start_children();
-            w.open("a:gsLst").start_children();
-            for stop in stops {
-                w.open("a:gs")
-                    .attr("pos", &stop.pos_100k.to_string())
-                    .start_children();
-                write_srgb(w, stop.color);
-                w.close();
-            }
-            w.close();
+            write_gradient_stops(w, stops);
             w.open("a:lin")
                 .attr("ang", &angle_60k.to_string())
                 .attr("scaled", gradient_scaled)
                 .empty();
             w.close();
         }
+        Some(FillSpec::RadialGradient {
+            stops,
+            focal_center_100k,
+            focal_radius_100k,
+            ..
+        }) => {
+            let [l, t, r, b] =
+                radial_focus_rect_100k(*focal_center_100k, *focal_radius_100k);
+            w.open("a:gradFill").attr("rotWithShape", "1").start_children();
+            write_gradient_stops(w, stops);
+            w.open("a:path").attr("path", "circle").start_children();
+            w.open("a:fillToRect")
+                .attr("l", &l.to_string())
+                .attr("t", &t.to_string())
+                .attr("r", &r.to_string())
+                .attr("b", &b.to_string())
+                .empty();
+            w.close();
+            w.close();
+        }
         None => w.leaf("a:noFill"),
+    }
+}
+
+fn write_gradient_stops(w: &mut XmlWriter, stops: &[GradientStop]) {
+    w.open("a:gsLst").start_children();
+    for stop in stops {
+        w.open("a:gs")
+            .attr("pos", &stop.pos_100k.to_string())
+            .start_children();
+        write_srgb(w, stop.color);
+        w.close();
+    }
+    w.close();
+}
+
+fn radial_focus_rect_100k(focal_center: [i32; 2], focal_radius: i32) -> [i32; 4] {
+    let [x, y] = focal_center;
+    [
+        x - focal_radius,
+        y - focal_radius,
+        100_000 - x - focal_radius,
+        100_000 - y - focal_radius,
+    ]
+}
+
+/// Emits an `a:blip` child, including the Office SVG extension when present.
+pub fn write_blip(w: &mut XmlWriter, embed: &str, svg_embed: Option<&str>) {
+    w.open("a:blip").attr("r:embed", embed);
+    if let Some(svg_embed) = svg_embed {
+        w.start_children();
+        w.open("a:extLst").start_children();
+        w.open("a:ext")
+            .attr("uri", A14_USE_LOCAL_DPI_EXT_URI)
+            .start_children();
+        w.open("a14:useLocalDpi")
+            .attr("xmlns:a14", ns::A14)
+            .attr("val", "0")
+            .empty();
+        w.close();
+        w.open("a:ext").attr("uri", ASVG_SVG_BLIP_EXT_URI).start_children();
+        w.open("asvg:svgBlip")
+            .attr("xmlns:asvg", ASVG_NS)
+            .attr("r:embed", svg_embed)
+            .empty();
+        w.close();
+        w.close();
+        w.close();
+    } else {
+        w.empty();
     }
 }
 
@@ -497,5 +603,35 @@ pub fn write_srgb(w: &mut XmlWriter, rgba: [u8; 4]) {
             .attr("val", &color::alpha_to_100k(a).to_string())
             .empty();
         w.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `gradient_fill` never produces `FillSpec::RadialGradient` (see its doc
+    // comment — the mapping is visually wrong on non-square shapes), but the
+    // XML-writer path stays covered directly so it doesn't silently bitrot
+    // ahead of a future fix.
+    #[test]
+    fn write_fill_radial_gradient_emits_path_circle() {
+        let fill = FillSpec::RadialGradient {
+            stops: vec![
+                GradientStop { pos_100k: 0, color: [255, 0, 0, 255] },
+                GradientStop { pos_100k: 100_000, color: [0, 0, 255, 255] },
+            ],
+            center_100k: [50_000, 50_000],
+            radius_100k: 50_000,
+            focal_center_100k: [50_000, 50_000],
+            focal_radius_100k: 50_000,
+        };
+        let mut w = XmlWriter::new(false);
+        write_fill(&mut w, Some(&fill), "0");
+        let xml = w.finish();
+        assert!(xml.contains("<a:path path=\"circle\">"));
+        assert!(xml.contains("<a:fillToRect l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>"));
+        assert!(xml.contains("<a:srgbClr val=\"FF0000\"/>"));
+        assert!(xml.contains("<a:srgbClr val=\"0000FF\"/>"));
     }
 }

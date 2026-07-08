@@ -163,6 +163,7 @@ pub struct Pic {
     pub h_emu: i64,
     pub rot_60k: i32,
     pub media: MediaId,
+    pub svg_media: Option<MediaId>,
     pub alt: Option<EcoString>,
     pub geom: PicGeom,
     /// Source-rectangle crop `[left, top, right, bottom]` in 1/1000 % (OOXML

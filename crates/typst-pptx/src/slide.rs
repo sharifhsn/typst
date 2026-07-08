@@ -656,11 +656,16 @@ impl<'a, 'b> Walker<'a, 'b> {
         if let Some(sim) = classify_similarity(item_transform)
             && sim.rot_60k == 0
             && (sim.scale - 1.0).abs() < 1e-6
-            && let Some((media, off, sz)) =
-                crate::image::embed_image(self.ctx, image, size)
+            && let Some(embedded) = crate::image::embed_image(self.ctx, image, size)
         {
-            let pos = Point::zero().transform(item_transform) + off;
-            self.push_pic(order, media, pos, sz, image.alt().map(Into::into));
+            let pos = Point::zero().transform(item_transform) + embedded.offset;
+            self.push_pic(
+                order,
+                (embedded.media, embedded.svg_media),
+                pos,
+                embedded.size,
+                image.alt().map(Into::into),
+            );
             return;
         }
         debug_raster("image", "transform-or-kind", 0);
@@ -689,7 +694,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         let mut outer = Frame::soft(Size::zero());
         outer.push(Point::zero(), FrameItem::Group(group));
         if let Some((media, off, size)) = crate::image::raster_fallback(self.ctx, outer) {
-            self.push_pic(order, media, off, size, alt);
+            self.push_pic(order, (media, None), off, size, alt);
         }
     }
 
@@ -730,7 +735,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         let pic_pos = Point::zero().transform(group_transform);
         self.push_pic_with_geom(
             order,
-            media,
+            (media, None),
             pic_pos,
             frame.size(),
             image.alt().map(Into::into),
@@ -742,7 +747,7 @@ impl<'a, 'b> Walker<'a, 'b> {
     fn push_pic(
         &mut self,
         order: usize,
-        media: crate::dom::MediaId,
+        media: (crate::dom::MediaId, Option<crate::dom::MediaId>),
         pos: Point,
         size: Size,
         alt: Option<EcoString>,
@@ -754,12 +759,13 @@ impl<'a, 'b> Walker<'a, 'b> {
     fn push_pic_with_geom(
         &mut self,
         order: usize,
-        media: crate::dom::MediaId,
+        media: (crate::dom::MediaId, Option<crate::dom::MediaId>),
         pos: Point,
         size: Size,
         alt: Option<EcoString>,
         shape: (PicGeom, Option<[i32; 4]>),
     ) {
+        let (media, svg_media) = media;
         let (geom, src_rect) = shape;
         self.shapes.push(OrderedShape {
             order,
@@ -770,6 +776,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                 h_emu: crate::text::extent_emu(size.y),
                 rot_60k: 0,
                 media,
+                svg_media,
                 alt,
                 geom,
                 src_rect,
