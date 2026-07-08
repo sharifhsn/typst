@@ -372,7 +372,9 @@ mod tests {
 
     use typst_library::foundations::Smart;
     use typst_library::layout::{Angle, Ratio, Size};
-    use typst_library::visualize::{FillRule, LinearGradient, Oklab, ProcessColor, Rgb};
+    use typst_library::visualize::{
+        ColorSpace, FillRule, LinearGradient, Oklab, ProcessColor, ProcessColorSpace, Rgb,
+    };
 
     use super::*;
 
