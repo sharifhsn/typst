@@ -10,7 +10,7 @@ use typst_ooxml_core::ns;
 use typst_ooxml_core::opc::{Package, PackageOptions, RelMode, Rels};
 
 use crate::SpeakerNote;
-use crate::dom::{SlideCtx, SlideIr};
+use crate::dom::{Placeholder, SlideCtx, SlideIr, SlideShape};
 use crate::xml::{self, XmlWriter};
 
 const REL_OFFICE_DOCUMENT: &str = ns::rel::OFFICE_DOCUMENT;
@@ -93,6 +93,7 @@ pub fn write(
         .collect::<Vec<_>>();
 
     let (cx, cy) = first_page_size(document);
+    let placeholder_kinds = slide_placeholder_kinds(slides);
     package.add_xml(
         "ppt/presentation.xml",
         CT_PRESENTATION,
@@ -114,7 +115,7 @@ pub fn write(
     package.add_xml(
         "ppt/slideMasters/slideMaster1.xml",
         CT_SLIDE_MASTER,
-        slide_master_xml(),
+        slide_master_xml(placeholder_kinds),
     );
     let mut master_rels = Rels::new();
     master_rels.add(
@@ -132,7 +133,7 @@ pub fn write(
     package.add_xml(
         "ppt/slideLayouts/slideLayout1.xml",
         CT_SLIDE_LAYOUT,
-        slide_layout_xml(),
+        slide_layout_xml(placeholder_kinds),
     );
     let mut layout_rels = Rels::new();
     layout_rels.add(
@@ -254,6 +255,41 @@ fn first_page_size(document: &PagedDocument) -> (i64, i64) {
         .map(|page| page.frame.size())
         .unwrap_or_else(|| Size::new(Abs::pt(720.0), Abs::pt(540.0)));
     (extent_emu(size.x), extent_emu(size.y))
+}
+
+#[derive(Clone, Copy, Default)]
+struct SlidePlaceholderKinds {
+    body: bool,
+    slide_number: bool,
+}
+
+fn slide_placeholder_kinds(slides: &[SlideIr]) -> SlidePlaceholderKinds {
+    let mut kinds = SlidePlaceholderKinds::default();
+    for slide in slides {
+        for shape in &slide.shapes {
+            collect_placeholder_kinds(shape, &mut kinds);
+        }
+    }
+    kinds
+}
+
+fn collect_placeholder_kinds(shape: &SlideShape, kinds: &mut SlidePlaceholderKinds) {
+    match shape {
+        SlideShape::TextBox(text) => match text.placeholder {
+            Some(Placeholder::Body) => kinds.body = true,
+            Some(Placeholder::SlideNumber) => kinds.slide_number = true,
+            Some(Placeholder::Title) | None => {}
+        },
+        SlideShape::Group(group) => {
+            for child in &group.children {
+                collect_placeholder_kinds(child, kinds);
+            }
+        }
+        SlideShape::MathBox(_)
+        | SlideShape::TableBox(_)
+        | SlideShape::Pic(_)
+        | SlideShape::Geom(_) => {}
+    }
 }
 
 fn emu(abs: Abs) -> i64 {
@@ -451,7 +487,7 @@ fn write_notes_style(w: &mut XmlWriter) {
     w.close();
 }
 
-fn slide_master_xml() -> String {
+fn slide_master_xml(placeholders: SlidePlaceholderKinds) -> String {
     let mut w = XmlWriter::new(false);
     w.open("p:sldMaster")
         .attr("xmlns:a", ns::A)
@@ -459,7 +495,7 @@ fn slide_master_xml() -> String {
         .attr("xmlns:r", ns::R)
         .start_children();
     w.open("p:cSld").start_children();
-    write_title_placeholder_shape_tree(&mut w);
+    write_placeholder_shape_tree(&mut w, placeholders);
     w.close();
     w.open("p:clrMap")
         .attr("bg1", "lt1")
@@ -486,17 +522,19 @@ fn slide_master_xml() -> String {
     w.finish()
 }
 
-fn slide_layout_xml() -> String {
+fn slide_layout_xml(placeholders: SlidePlaceholderKinds) -> String {
     let mut w = XmlWriter::new(false);
     w.open("p:sldLayout")
         .attr("xmlns:a", ns::A)
         .attr("xmlns:p", ns::P)
         .attr("xmlns:r", ns::R)
-        .attr("type", "titleOnly")
+        .attr("type", if placeholders.body { "obj" } else { "titleOnly" })
         .attr("preserve", "1")
         .start_children();
-    w.open("p:cSld").attr("name", "Title Only").start_children();
-    write_title_placeholder_shape_tree(&mut w);
+    w.open("p:cSld")
+        .attr("name", if placeholders.body { "Title and Content" } else { "Title Only" })
+        .start_children();
+    write_placeholder_shape_tree(&mut w, placeholders);
     w.close();
     w.open("p:clrMapOvr").start_children();
     w.leaf("a:masterClrMapping");
@@ -505,7 +543,7 @@ fn slide_layout_xml() -> String {
     w.finish()
 }
 
-fn write_title_placeholder_shape_tree(w: &mut XmlWriter) {
+fn write_placeholder_shape_tree(w: &mut XmlWriter, placeholders: SlidePlaceholderKinds) {
     w.open("p:spTree").start_children();
     w.open("p:nvGrpSpPr").start_children();
     w.open("p:cNvPr").attr("id", "1").attr("name", "").empty();
@@ -514,6 +552,12 @@ fn write_title_placeholder_shape_tree(w: &mut XmlWriter) {
     w.close();
     w.leaf("p:grpSpPr");
     write_title_placeholder(w);
+    if placeholders.body {
+        write_body_placeholder(w);
+    }
+    if placeholders.slide_number {
+        write_slide_number_placeholder(w);
+    }
     w.close();
 }
 
@@ -536,6 +580,70 @@ fn write_title_placeholder(w: &mut XmlWriter) {
     w.open("a:xfrm").start_children();
     w.open("a:off").attr("x", "685800").attr("y", "457200").empty();
     w.open("a:ext").attr("cx", "7772400").attr("cy", "1143000").empty();
+    w.close();
+    w.close();
+
+    w.open("p:txBody").start_children();
+    w.open("a:bodyPr").attr("wrap", "square").empty();
+    w.leaf("a:lstStyle");
+    w.leaf("a:p");
+    w.close();
+    w.close();
+}
+
+fn write_body_placeholder(w: &mut XmlWriter) {
+    w.open("p:sp").start_children();
+    w.open("p:nvSpPr").start_children();
+    w.open("p:cNvPr")
+        .attr("id", "3")
+        .attr("name", "Content Placeholder 2")
+        .empty();
+    w.open("p:cNvSpPr").start_children();
+    w.open("a:spLocks").attr("noGrp", "1").empty();
+    w.close();
+    w.open("p:nvPr").start_children();
+    w.open("p:ph").attr("type", "body").attr("idx", "1").empty();
+    w.close();
+    w.close();
+
+    w.open("p:spPr").start_children();
+    w.open("a:xfrm").start_children();
+    w.open("a:off").attr("x", "685800").attr("y", "1828800").empty();
+    w.open("a:ext").attr("cx", "7772400").attr("cy", "4114800").empty();
+    w.close();
+    w.close();
+
+    w.open("p:txBody").start_children();
+    w.open("a:bodyPr").attr("wrap", "square").empty();
+    w.leaf("a:lstStyle");
+    w.leaf("a:p");
+    w.close();
+    w.close();
+}
+
+fn write_slide_number_placeholder(w: &mut XmlWriter) {
+    w.open("p:sp").start_children();
+    w.open("p:nvSpPr").start_children();
+    w.open("p:cNvPr")
+        .attr("id", "4")
+        .attr("name", "Slide Number Placeholder 3")
+        .empty();
+    w.open("p:cNvSpPr").start_children();
+    w.open("a:spLocks").attr("noGrp", "1").empty();
+    w.close();
+    w.open("p:nvPr").start_children();
+    w.open("p:ph")
+        .attr("type", "sldNum")
+        .attr("sz", "quarter")
+        .attr("idx", "10")
+        .empty();
+    w.close();
+    w.close();
+
+    w.open("p:spPr").start_children();
+    w.open("a:xfrm").start_children();
+    w.open("a:off").attr("x", "7772400").attr("y", "6400800").empty();
+    w.open("a:ext").attr("cx", "1371600").attr("cy", "365760").empty();
     w.close();
     w.close();
 

@@ -7,7 +7,7 @@ use typst_library::visualize::Paint;
 
 use crate::dom::{
     BulletKind, InlineMath, ParaBullet, Placeholder, RunLink, SlideShape, TextBox,
-    TextChild, TextPara, TextRun, TextWrap,
+    TextChild, TextField, TextPara, TextRun, TextWrap,
 };
 
 /// Cloneable link target used before lowering into the frozen DOM.
@@ -26,6 +26,7 @@ pub(crate) struct TextSource<'a> {
     pub rot_60k: i32,
     pub scale: f64,
     pub link: Option<LinkTarget>,
+    pub slide_number: bool,
 }
 
 /// One inline math item discovered by the frame walk.
@@ -80,7 +81,7 @@ pub(crate) fn cluster_text<'a>(
         class_start = class_end;
     }
 
-    mark_title_placeholder(&mut emit);
+    mark_placeholders(&mut emit);
     emit.sort_by_key(|cluster| cluster.order);
     emit
 }
@@ -844,27 +845,31 @@ fn strip_prefix_chars(children: &mut Vec<TextChild>, mut count: usize) {
     });
 }
 
-fn mark_title_placeholder(clusters: &mut [ClusteredText]) {
+fn mark_placeholders(clusters: &mut [ClusteredText]) {
+    let title = mark_title_placeholder(clusters);
+    mark_slide_number_placeholders(clusters);
+    mark_body_placeholder(clusters, title);
+}
+
+fn mark_title_placeholder(clusters: &mut [ClusteredText]) -> Option<usize> {
     let mut sizes = clusters
         .iter()
         .filter(|cluster| cluster.title_eligible)
         .map(|cluster| cluster.max_sz_100pt)
         .collect::<Vec<_>>();
     sizes.sort_unstable_by(|a, b| b.cmp(a));
-    let Some(&largest) = sizes.first() else {
-        return;
-    };
+    let &largest = sizes.first()?;
     if largest < 1_400 {
-        return;
+        return None;
     }
     if let Some(&second) = sizes.get(1)
         && largest < second + 200
         && largest * 100 < second * 115
     {
-        return;
+        return None;
     }
 
-    let Some((idx, _)) = clusters
+    let (idx, _) = clusters
         .iter()
         .enumerate()
         .filter(|(_, cluster)| cluster.title_eligible && cluster.max_sz_100pt == largest)
@@ -873,15 +878,111 @@ fn mark_title_placeholder(clusters: &mut [ClusteredText]) {
                 a.y_emu.cmp(&b.y_emu).then_with(|| a.x_emu.cmp(&b.x_emu))
             }
             _ => Ordering::Equal,
-        })
-    else {
-        return;
-    };
+        })?;
 
     if let SlideShape::TextBox(text) = &mut clusters[idx].shape {
         text.placeholder = Some(Placeholder::Title);
         text.wrap = TextWrap::Square;
+        Some(idx)
+    } else {
+        None
     }
+}
+
+fn mark_slide_number_placeholders(clusters: &mut [ClusteredText]) {
+    for cluster in clusters {
+        let SlideShape::TextBox(text) = &mut cluster.shape else {
+            continue;
+        };
+        if text.placeholder.is_none() && text_box_is_slide_number(text) {
+            text.placeholder = Some(Placeholder::SlideNumber);
+            text.wrap = TextWrap::Square;
+        }
+    }
+}
+
+fn mark_body_placeholder(clusters: &mut [ClusteredText], title_idx: Option<usize>) {
+    let Some(title_idx) = title_idx else { return };
+    let SlideShape::TextBox(title) = &clusters[title_idx].shape else { return };
+    let title_bottom = title.y_emu + title.h_emu / 2;
+
+    let mut candidates = clusters
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, cluster)| {
+            if idx == title_idx {
+                return None;
+            }
+            let SlideShape::TextBox(text) = &cluster.shape else { return None };
+            if text.placeholder.is_some()
+                || text.rot_60k != 0
+                || text.y_emu < title_bottom
+                || !body_placeholder_text_candidate(text)
+            {
+                return None;
+            }
+            let area = i128::from(text.w_emu.max(1)) * i128::from(text.h_emu.max(1));
+            Some((idx, area, cluster.order))
+        })
+        .collect::<Vec<_>>();
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
+    let selected = match candidates.as_slice() {
+        [(idx, _, _)] => Some(*idx),
+        [(idx, area, _), (_, next_area, _), ..] if *area >= *next_area * 2 => Some(*idx),
+        _ => None,
+    };
+
+    if let Some(idx) = selected
+        && let SlideShape::TextBox(text) = &mut clusters[idx].shape
+    {
+        text.placeholder = Some(Placeholder::Body);
+        text.wrap = TextWrap::Square;
+    }
+}
+
+fn text_box_is_slide_number(text: &TextBox) -> bool {
+    let mut has_field = false;
+    for para in &text.paras {
+        for child in &para.children {
+            match child {
+                TextChild::Run(run) => {
+                    if matches!(run.field, Some(TextField::SlideNumber)) {
+                        has_field = true;
+                    } else if !run.text.trim().is_empty() {
+                        return false;
+                    }
+                }
+                TextChild::Math(_) => return false,
+            }
+        }
+    }
+    has_field
+}
+
+fn body_placeholder_text_candidate(text: &TextBox) -> bool {
+    let mut chars = 0usize;
+    let mut saw_literal = false;
+    for para in &text.paras {
+        for child in &para.children {
+            match child {
+                TextChild::Run(run) => {
+                    if run.field.is_some() {
+                        continue;
+                    }
+                    let trimmed = run.text.trim();
+                    chars += trimmed.chars().count();
+                    saw_literal |= !trimmed.is_empty();
+                }
+                TextChild::Math(_) => saw_literal = true,
+            }
+        }
+    }
+    saw_literal && chars >= 2
 }
 
 fn run_props(source: &FlowItem<'_>, spc_100pt: Option<i32>) -> TextRun {
@@ -905,6 +1006,7 @@ fn text_run_props(source: &TextSource<'_>, spc_100pt: Option<i32>) -> TextRun {
             LinkTarget::Url(url) => RunLink::Url(url.clone()),
             LinkTarget::Slide(slide) => RunLink::Slide(*slide),
         }),
+        field: source.slide_number.then_some(TextField::SlideNumber),
     }
 }
 
@@ -918,6 +1020,7 @@ fn math_fallback_run(math: &InlineMathSource, spc_100pt: Option<i32>) -> TextRun
         color: [0, 0, 0, 255],
         spc_100pt,
         link: None,
+        field: None,
     }
 }
 
@@ -973,6 +1076,7 @@ fn synthesize_gap(
             color: props.color,
             spc_100pt: props.spc_100pt,
             link: None,
+            field: None,
         },
     );
 }
@@ -984,6 +1088,7 @@ fn compatible_run(a: &TextRun, b: &TextRun) -> bool {
         && a.i == b.i
         && a.color == b.color
         && a.spc_100pt == b.spc_100pt
+        && a.field == b.field
         && same_link(&a.link, &b.link)
 }
 

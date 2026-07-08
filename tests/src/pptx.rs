@@ -605,6 +605,66 @@ Body text."#,
 }
 
 #[test]
+fn main_body_text_is_bound_to_body_placeholder() {
+    let p = parts(
+        r#"#set page(width: 320pt, height: 180pt, margin: 18pt)
+= Native Title
+
+Some body text."#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let layout = &p["ppt/slideLayouts/slideLayout1.xml"];
+    let master = &p["ppt/slideMasters/slideMaster1.xml"];
+
+    assert_eq!(placeholder_count(slide, "body"), 1, "slide should mark one body ph");
+    assert!(has_placeholder(layout, "body"), "layout should inherit a body ph");
+    assert!(has_placeholder(master, "body"), "master should inherit a body ph");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn ambiguous_non_title_text_boxes_are_not_body_placeholders() {
+    let p = parts(
+        r#"#set page(width: 320pt, height: 180pt, margin: 0pt)
+#place(top + left, dx: 20pt, dy: 12pt)[#text(size: 24pt)[Deck Title]]
+#place(top + left, dx: 20pt, dy: 70pt)[Column]
+#place(top + left, dx: 180pt, dy: 70pt)[Column]"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let layout = &p["ppt/slideLayouts/slideLayout1.xml"];
+    let master = &p["ppt/slideMasters/slideMaster1.xml"];
+
+    assert_eq!(placeholder_count(slide, "body"), 0, "ambiguous columns stay plain");
+    assert!(!has_placeholder(layout, "body"), "layout should not gain body ph");
+    assert!(!has_placeholder(master, "body"), "master should not gain body ph");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn page_numbering_emits_live_slide_number_field() {
+    let p = parts(
+        r#"#set page(width: 320pt, height: 180pt, margin: 24pt, numbering: "1")
+= First
+Body
+#pagebreak()
+= Second
+More"#,
+    );
+    let slide1 = &p["ppt/slides/slide1.xml"];
+    let slide2 = &p["ppt/slides/slide2.xml"];
+    let layout = &p["ppt/slideLayouts/slideLayout1.xml"];
+    let master = &p["ppt/slideMasters/slideMaster1.xml"];
+
+    assert_eq!(placeholder_count(slide1, "sldNum"), 1);
+    assert_eq!(placeholder_count(slide2, "sldNum"), 1);
+    assert_eq!(slide_number_fallback(slide1), Some("1".into()));
+    assert_eq!(slide_number_fallback(slide2), Some("2".into()));
+    assert!(has_placeholder(layout, "sldNum"), "layout should inherit sldNum ph");
+    assert!(has_placeholder(master, "sldNum"), "master should inherit sldNum ph");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn translucent_fill_emits_alpha() {
     let p = parts(
         "#set page(width: 200pt, height: 100pt, margin: 0pt)\n\
@@ -865,10 +925,34 @@ fn assert_no_text_node_contains(slide: &str, marker: &str) {
 }
 
 fn has_title_placeholder(xml: &str) -> bool {
+    has_placeholder(xml, "title")
+}
+
+fn has_placeholder(xml: &str, ty: &str) -> bool {
+    placeholder_count(xml, ty) > 0
+}
+
+fn placeholder_count(xml: &str, ty: &str) -> usize {
     let doc = roxmltree::Document::parse(xml).unwrap();
-    doc.descendants().any(|node| {
-        node.tag_name().name() == "ph" && node.attribute("type") == Some("title")
-    })
+    doc.descendants()
+        .filter(|node| {
+            node.tag_name().name() == "ph" && node.attribute("type") == Some(ty)
+        })
+        .count()
+}
+
+fn slide_number_fallback(xml: &str) -> Option<String> {
+    let doc = roxmltree::Document::parse(xml).unwrap();
+    let field = doc.descendants().find(|node| {
+        node.tag_name().name() == "fld" && node.attribute("type") == Some("slidenum")
+    })?;
+    Some(
+        field
+            .descendants()
+            .filter(|node| node.tag_name().name() == "t")
+            .filter_map(|node| node.text())
+            .collect(),
+    )
 }
 
 fn tiny_png() -> Vec<u8> {

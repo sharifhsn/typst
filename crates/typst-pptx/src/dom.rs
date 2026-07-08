@@ -42,6 +42,8 @@ pub enum TextWrap {
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub enum Placeholder {
     Title,
+    Body,
+    SlideNumber,
 }
 
 /// A positioned native Office math object with a plain DrawingML fallback.
@@ -123,6 +125,13 @@ pub struct TextRun {
     pub color: [u8; 4],
     pub spc_100pt: Option<i32>,
     pub link: Option<RunLink>,
+    pub field: Option<TextField>,
+}
+
+/// A live DrawingML field represented by a text run fallback.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub enum TextField {
+    SlideNumber,
 }
 
 /// An inline native Office math object with a plain DrawingML fallback.
