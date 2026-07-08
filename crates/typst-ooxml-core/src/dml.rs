@@ -17,18 +17,21 @@ pub enum PathSegment {
 }
 
 /// A fill specification. Colors are straight sRGB + alpha (`[r, g, b, a]`).
+#[derive(Clone)]
 pub enum FillSpec {
     Solid([u8; 4]),
     LinearGradient { angle_60k: i32, stops: Vec<GradientStop> },
 }
 
 /// A gradient stop.
+#[derive(Clone)]
 pub struct GradientStop {
     pub pos_100k: i32,
     pub color: [u8; 4],
 }
 
 /// A stroke specification.
+#[derive(Clone)]
 pub struct StrokeSpec {
     pub color: [u8; 4],
     pub w_emu: i64,

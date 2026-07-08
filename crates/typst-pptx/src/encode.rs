@@ -3,8 +3,8 @@ use typst_ooxml_core::{dml, ns};
 
 use crate::dom::{
     BulletKind, FillSpec, GeomShape, GroupShape, InlineMath, MathBox, MediaId, PathGeom,
-    Pic, PicGeom, Placeholder, RunLink, SlideIr, SlideShape, TextBox, TextChild,
-    TextPara, TextRun, TextWrap,
+    Pic, PicGeom, Placeholder, RunLink, SlideIr, SlideShape, StrokeSpec, TableBox,
+    TableCell, TextBox, TextChild, TextPara, TextRun, TextWrap,
 };
 use crate::xml::XmlWriter;
 
@@ -75,6 +75,7 @@ fn write_shape(
     match shape {
         SlideShape::TextBox(text) => write_text_box(w, text, ids.next(), rels),
         SlideShape::MathBox(math) => write_math_box(w, math, ids.next(), rels),
+        SlideShape::TableBox(table) => write_table_box(w, table, ids.next(), rels),
         SlideShape::Pic(pic) => write_pic(w, pic, ids.next(), rels),
         SlideShape::Geom(geom) => write_geom_shape(w, geom, ids.next()),
         SlideShape::Group(group) => write_group_shape(w, group, ids, rels),
@@ -237,6 +238,120 @@ fn math_fallback_run(math: &MathBox) -> TextRun {
     }
 }
 
+fn write_table_box(
+    w: &mut XmlWriter,
+    table: &TableBox,
+    id: u32,
+    rels: &mut impl SlideRelSink,
+) {
+    w.open("p:graphicFrame").start_children();
+    w.open("p:nvGraphicFramePr").start_children();
+    w.open("p:cNvPr")
+        .attr("id", &id.to_string())
+        .attr("name", &format!("Table {id}"))
+        .empty();
+    w.open("p:cNvGraphicFramePr").start_children();
+    w.open("a:graphicFrameLocks").attr("noGrp", "1").empty();
+    w.close();
+    w.leaf("p:nvPr");
+    w.close();
+
+    write_xfrm(w, table.x_emu, table.y_emu, table.w_emu, table.h_emu, 0);
+
+    w.open("a:graphic").start_children();
+    w.open("a:graphicData")
+        .attr("uri", "http://schemas.openxmlformats.org/drawingml/2006/table")
+        .start_children();
+    w.open("a:tbl").start_children();
+
+    w.open("a:tblPr")
+        .attr("firstRow", "0")
+        .attr("bandRow", "0")
+        .start_children();
+    w.elem_text("a:tableStyleId", "{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}");
+    w.close();
+
+    w.open("a:tblGrid").start_children();
+    for width in &table.cols {
+        w.open("a:gridCol").attr("w", &(*width).max(1).to_string()).empty();
+    }
+    w.close();
+
+    for row in &table.rows {
+        w.open("a:tr")
+            .attr("h", &row.h_emu.max(1).to_string())
+            .start_children();
+        for cell in &row.cells {
+            write_table_cell(w, cell, rels);
+        }
+        w.close();
+    }
+
+    w.close();
+    w.close();
+    w.close();
+    w.close();
+}
+
+fn write_table_cell(w: &mut XmlWriter, cell: &TableCell, rels: &mut impl SlideRelSink) {
+    w.open("a:tc");
+    if cell.grid_span > 1 {
+        w.attr("gridSpan", &cell.grid_span.to_string());
+    }
+    if cell.row_span > 1 {
+        w.attr("rowSpan", &cell.row_span.to_string());
+    }
+    if cell.h_merge {
+        w.attr("hMerge", "1");
+    }
+    if cell.v_merge {
+        w.attr("vMerge", "1");
+    }
+    w.start_children();
+
+    w.open("a:txBody").start_children();
+    write_body_pr(w, TextWrap::Square);
+    w.leaf("a:lstStyle");
+    if cell.paras.is_empty() {
+        w.leaf("a:p");
+    } else {
+        for para in &cell.paras {
+            write_para(w, para, rels);
+        }
+    }
+    w.close();
+
+    w.open("a:tcPr").start_children();
+    dml::write_fill(w, cell.fill.as_ref(), "0");
+    write_cell_border(w, "a:lnL", cell.borders.left.as_ref());
+    write_cell_border(w, "a:lnR", cell.borders.right.as_ref());
+    write_cell_border(w, "a:lnT", cell.borders.top.as_ref());
+    write_cell_border(w, "a:lnB", cell.borders.bottom.as_ref());
+    w.close();
+    w.close();
+}
+
+fn write_cell_border(w: &mut XmlWriter, name: &'static str, stroke: Option<&StrokeSpec>) {
+    match stroke {
+        Some(stroke) => {
+            w.open(name)
+                .attr("w", &stroke.w_emu.max(0).to_string())
+                .attr("cap", stroke.cap)
+                .start_children();
+            dml::write_solid_fill(w, stroke.color);
+            if let Some(dash) = stroke.dash {
+                w.open("a:prstDash").attr("val", dash).empty();
+            }
+            w.close();
+        }
+        None => {
+            w.open(name).start_children();
+            w.leaf("a:noFill");
+            w.close();
+        }
+    }
+}
+
 fn slide_contains_math(slide: &SlideIr) -> bool {
     slide.shapes.iter().any(shape_contains_math)
 }
@@ -244,12 +359,21 @@ fn slide_contains_math(slide: &SlideIr) -> bool {
 fn shape_contains_math(shape: &SlideShape) -> bool {
     match shape {
         SlideShape::MathBox(_) => true,
-        SlideShape::TextBox(text) => text.paras.iter().any(|para| {
-            para.children.iter().any(|child| matches!(child, TextChild::Math(_)))
-        }),
+        SlideShape::TextBox(text) => paras_contain_math(&text.paras),
+        SlideShape::TableBox(table) => table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .any(|cell| paras_contain_math(&cell.paras)),
         SlideShape::Group(group) => group.children.iter().any(shape_contains_math),
         SlideShape::Pic(_) | SlideShape::Geom(_) => false,
     }
+}
+
+fn paras_contain_math(paras: &[TextPara]) -> bool {
+    paras
+        .iter()
+        .any(|para| para.children.iter().any(|child| matches!(child, TextChild::Math(_))))
 }
 
 fn write_bullet(w: &mut XmlWriter, bullet: &crate::dom::ParaBullet) {
