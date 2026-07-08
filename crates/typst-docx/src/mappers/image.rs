@@ -40,9 +40,8 @@ use typst_library::foundations::{Content, Packed, Smart, StyleChain};
 use typst_library::layout::{Abs, OuterVAlignment, Sizing, VAlignment};
 use typst_library::model::{FigureElem, FigureKind};
 use typst_library::text::TextElem;
-use typst_library::visualize::{
-    ExchangeFormat, Image, ImageElem, ImageKind, RasterFormat,
-};
+use typst_library::visualize::{Image, ImageElem};
+use typst_ooxml_core::media;
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
@@ -748,36 +747,8 @@ fn hidden_text_runs(text: &str, out: &mut Vec<Run>) {
 /// re-encode, preserving fidelity. WebP, SVG and PDF return `None` (see the
 /// module docs / [`laid_out_fallback`] INTEGRATION-NEEDED note).
 fn embeddable_bytes(image: &Image) -> Option<(Vec<u8>, EcoString)> {
-    match image.kind() {
-        ImageKind::Raster(raster) => match raster.format() {
-            RasterFormat::Exchange(ExchangeFormat::Png) => {
-                Some((raster.data().to_vec(), "png".into()))
-            }
-            RasterFormat::Exchange(ExchangeFormat::Jpg) => {
-                // Word's content-type Default for `.jpeg` covers `.jpg` too, but
-                // we use the canonical `jpeg` extension to match the registered
-                // Default content-type (`image/jpeg`).
-                Some((raster.data().to_vec(), "jpeg".into()))
-            }
-            RasterFormat::Exchange(ExchangeFormat::Gif) => {
-                Some((raster.data().to_vec(), "gif".into()))
-            }
-            // WebP is not a Word-native image type; it must be transcoded to
-            // PNG. Pixel-format (raw) rasters likewise have no exchange bytes
-            // to embed and must be PNG-encoded.
-            //
-            // INTEGRATION-NEEDED: transcode WebP / raw-pixel rasters to PNG.
-            // `RasterImage::dynamic()` yields an `image::DynamicImage` that can
-            // be `write_to(.., ImageFormat::Png)`-encoded, but the `image`
-            // crate is not a direct dependency of `typst-docx`. Add it (or
-            // route through a small helper exposed by `typst-library`) and
-            // return `(png_bytes, "png")` here.
-            RasterFormat::Exchange(ExchangeFormat::Webp) | RasterFormat::Pixel(_) => None,
-        },
-        // Vector sources (SVG / PDF) must be rasterized to PNG. See
-        // `laid_out_fallback`'s INTEGRATION-NEEDED note (needs `typst-render`).
-        ImageKind::Svg(_) | ImageKind::Pdf(_) => None,
-    }
+    let embeddable = media::embeddable_image_bytes(image)?;
+    Some((embeddable.bytes.to_vec(), embeddable.ext.into()))
 }
 
 /// Computes the inline display extents `(cx, cy)` in EMU.

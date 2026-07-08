@@ -206,7 +206,7 @@ pub fn write(
         }
     }
 
-    for media in &ctx.media {
+    for media in ctx.media.parts() {
         package.add_media(
             &media.part_name,
             &media.ext,
@@ -681,12 +681,7 @@ fn app_xml(slides: usize, notes: usize) -> String {
 }
 
 fn media_content_type(ext: &str) -> &'static str {
-    match ext {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        _ => "application/octet-stream",
-    }
+    typst_ooxml_core::media::image_content_type(ext)
 }
 
 struct PackageSlideRels<'a> {

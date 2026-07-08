@@ -213,7 +213,11 @@ fn docx_document_impl(
                 footer_parts,
                 std::mem::take(&mut ctx.footnotes),
                 std::mem::take(&mut ctx.numbering),
-                std::mem::take(&mut ctx.media),
+                std::mem::replace(
+                    &mut ctx.media,
+                    typst_ooxml_core::media::MediaRegistry::new("word/media"),
+                )
+                .into_parts(),
                 std::mem::take(&mut ctx.doc_rels),
                 std::mem::take(&mut ctx.footnote_rels),
                 std::mem::take(&mut ctx.bookmarks),

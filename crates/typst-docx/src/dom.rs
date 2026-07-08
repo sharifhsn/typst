@@ -8,6 +8,10 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Output, StyleChain, Target};
 use typst_library::introspection::{Introspector, Tag};
 use typst_library::model::{Document, DocumentInfo};
+pub use typst_ooxml_core::dml::{
+    FillSpec as ShapeFill, PathSegment, StrokeSpec as ShapeStroke,
+};
+pub use typst_ooxml_core::media::MediaPart;
 
 use crate::introspect::DocxIntrospector;
 use crate::package::Rels;
@@ -492,20 +496,6 @@ pub struct ShapeSpec {
     pub txbx: Option<TextBox>,
 }
 
-/// A shape's fill: solid, or a linear gradient (`a:gradFill` + `a:lin`).
-/// Radial/conic gradients and tiling fills have no representable form here and
-/// are left to the rasterize path.
-pub enum ShapeFill {
-    Solid([u8; 3]),
-    /// Angle in 60,000ths of a degree (OOXML's `a:lin ang`), and colour stops
-    /// as (position in 0..=100000, colour) — both already in the OOXML
-    /// convention so the encoder only has to format them.
-    LinearGradient {
-        angle_60000ths: i32,
-        stops: Vec<(u32, [u8; 3])>,
-    },
-}
-
 /// The text-box content of a shape (`wps:txbx` → `w:txbxContent`): real
 /// paragraphs the consumer can edit, with the box's inset reproduced as the
 /// text-frame insets `[left, top, right, bottom]` in EMU.
@@ -526,25 +516,6 @@ pub enum ShapeGeom {
     /// pre-shifted so the whole path is non-negative, matching the shape's
     /// declared bounding box (the OOXML `a:custGeom` coordinate convention).
     Path(Vec<PathSegment>),
-}
-
-/// One command in a [`ShapeGeom::Path`], mapping to an OOXML `a:path` child
-/// element (`a:moveTo`/`a:lnTo`/`a:cubicBezTo`/`a:close`).
-pub enum PathSegment {
-    MoveTo(i64, i64),
-    LineTo(i64, i64),
-    /// Cubic Bézier: control 1, control 2, end point.
-    CubicTo(i64, i64, i64, i64, i64, i64),
-    Close,
-}
-
-pub struct ShapeStroke {
-    pub color: [u8; 3],
-    pub w_emu: i64,
-    /// OOXML `a:ln`'s `cap` attribute value (`"flat"`/`"rnd"`/`"sq"`).
-    pub cap: &'static str,
-    /// OOXML `a:prstDash`'s `val`, or `None` for a solid line.
-    pub dash: Option<&'static str>,
 }
 
 /// Floating-image placement (`<wp:anchor>`): positionH/V + wrap.
@@ -753,13 +724,6 @@ impl Default for SectPr {
 pub struct Footnote {
     pub id: i32,
     pub blocks: Vec<Block>,
-}
-
-/// A media part to be embedded in `word/media/`.
-pub struct MediaPart {
-    pub part_name: EcoString,
-    pub ext: EcoString,
-    pub bytes: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
