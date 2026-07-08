@@ -73,6 +73,7 @@ impl RunProps {
             && self.font.is_none()
             && !self.writes_direct_bold()
             && !self.writes_direct_italic()
+            && !self.caps
             && !self.smallcaps
             && !self.strike
             && !self.no_proof

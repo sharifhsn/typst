@@ -3,8 +3,8 @@ use typst_ooxml_core::{dml, ns};
 
 use crate::dom::{
     BulletKind, FillSpec, GeomShape, GroupShape, InlineMath, MathBox, MediaId, PathGeom,
-    PathSegment, Pic, PicGeom, Placeholder, RunLink, SlideIr, SlideShape, StrokeSpec,
-    TextBox, TextChild, TextPara, TextRun, TextWrap,
+    Pic, PicGeom, Placeholder, RunLink, SlideIr, SlideShape, TextBox, TextChild,
+    TextPara, TextRun, TextWrap,
 };
 use crate::xml::XmlWriter;
 
