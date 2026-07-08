@@ -2,13 +2,15 @@ use ecow::EcoString;
 use rustc_hash::FxHashMap;
 use typst_layout::{Page, PagedDocument};
 use typst_library::foundations::{NativeElement, Smart, StyleChain};
-use typst_library::introspection::{Introspector, Location, Tag};
+use typst_library::introspection::{CounterDisplayElem, Introspector, Location, Tag};
 use typst_library::layout::{
     Abs, Frame, FrameItem, GridCell, GridCellRegion, GridElem, Point, Sides, Size,
     Transform,
 };
 use typst_library::math::EquationElem;
-use typst_library::model::{Destination, TableCell as TypstTableCell, TableElem};
+use typst_library::model::{
+    Destination, Numbering, TableCell as TypstTableCell, TableElem,
+};
 use typst_library::visualize::{LineCap, Paint, Shape, Stroke};
 
 use crate::dom::{
@@ -22,12 +24,18 @@ pub fn slides(document: &PagedDocument, ctx: &mut SlideCtx) -> Vec<SlideIr> {
     document
         .pages()
         .iter()
-        .map(|page| slide(document, page, ctx))
+        .enumerate()
+        .map(|(index, page)| slide(document, page, index, ctx))
         .collect()
 }
 
-fn slide(document: &PagedDocument, page: &Page, ctx: &mut SlideCtx) -> SlideIr {
-    let mut walker = Walker::new(document, ctx);
+fn slide(
+    document: &PagedDocument,
+    page: &Page,
+    slide_index: usize,
+    ctx: &mut SlideCtx,
+) -> SlideIr {
+    let mut walker = Walker::new(document, page, slide_index, ctx);
     walker.walk_frame(&page.frame, Transform::identity());
     walker.emit_loose_tables();
     attach_links(&mut walker.text, &walker.links);
@@ -55,7 +63,10 @@ struct Walker<'a, 'b> {
     inline_math: Vec<InlineMathSource>,
     links: Vec<LinkRect>,
     equations: FxHashMap<Location, MathSource>,
+    page_size: Size,
+    slide_number_fallback: Option<EcoString>,
     active_math: Vec<ActiveMath>,
+    active_slide_numbers: Vec<ActiveSlideNumber>,
     active_tables: Vec<ActiveTable>,
     loose_table_cells: Vec<CapturedTableCell>,
     active_table_cells: Vec<ActiveTableCell<'a>>,
@@ -84,6 +95,14 @@ struct ActiveMath {
     baseline: Option<Point>,
     rot_60k: i32,
     fallback: EcoString,
+}
+
+struct ActiveSlideNumber {
+    loc: Location,
+    expected: EcoString,
+    text_indices: Vec<usize>,
+    fallback: EcoString,
+    bounds: Option<Rect>,
 }
 
 struct ActiveTable {
@@ -133,7 +152,12 @@ struct Similarity {
 }
 
 impl<'a, 'b> Walker<'a, 'b> {
-    fn new(document: &'a PagedDocument, ctx: &'b mut SlideCtx) -> Self {
+    fn new(
+        document: &'a PagedDocument,
+        page: &Page,
+        slide_index: usize,
+        ctx: &'b mut SlideCtx,
+    ) -> Self {
         Self {
             document,
             ctx,
@@ -143,7 +167,10 @@ impl<'a, 'b> Walker<'a, 'b> {
             inline_math: Vec::new(),
             links: Vec::new(),
             equations: equation_sources(document),
+            page_size: page.frame.size(),
+            slide_number_fallback: slide_number_fallback(page, slide_index),
             active_math: Vec::new(),
+            active_slide_numbers: Vec::new(),
             active_tables: Vec::new(),
             loose_table_cells: Vec::new(),
             active_table_cells: Vec::new(),
@@ -213,6 +240,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                 FrameItem::Text(text) => {
                     if let Some(similarity) = classify_similarity(item_transform) {
                         let baseline = Point::zero().transform(item_transform);
+                        let index = self.text.len();
                         self.text.push(TextSource {
                             order,
                             baseline,
@@ -220,7 +248,9 @@ impl<'a, 'b> Walker<'a, 'b> {
                             rot_60k: similarity.rot_60k,
                             scale: similarity.scale,
                             link: None,
+                            slide_number: false,
                         });
+                        self.record_slide_number_text(index, text, item_transform);
                     } else {
                         debug_raster("text", "transform", text.text.chars().count());
                         self.raster_item(
@@ -278,6 +308,9 @@ impl<'a, 'b> Walker<'a, 'b> {
                 if self.start_table(tag, order) {
                     return;
                 }
+                if self.start_slide_number(tag) {
+                    return;
+                }
                 let loc = tag.location();
                 if self.equations.contains_key(&loc) {
                     self.active_math.push(ActiveMath {
@@ -291,6 +324,9 @@ impl<'a, 'b> Walker<'a, 'b> {
                 }
             }
             Tag::End(loc, ..) => {
+                if self.end_slide_number(*loc) {
+                    return;
+                }
                 if self.end_table_cell(*loc) {
                     return;
                 }
@@ -306,6 +342,68 @@ impl<'a, 'b> Walker<'a, 'b> {
                 self.emit_math_box(active);
             }
         }
+    }
+
+    fn start_slide_number(&mut self, tag: &Tag) -> bool {
+        let Some(expected) = self.slide_number_fallback.clone() else {
+            return false;
+        };
+        let Tag::Start(elem, ..) = tag else {
+            return false;
+        };
+        if elem.to_packed::<CounterDisplayElem>().is_none() {
+            return false;
+        }
+
+        self.active_slide_numbers.push(ActiveSlideNumber {
+            loc: tag.location(),
+            expected,
+            text_indices: Vec::new(),
+            fallback: EcoString::new(),
+            bounds: None,
+        });
+        true
+    }
+
+    fn end_slide_number(&mut self, loc: Location) -> bool {
+        let Some(index) =
+            self.active_slide_numbers.iter().rposition(|active| active.loc == loc)
+        else {
+            return false;
+        };
+        let active = self.active_slide_numbers.remove(index);
+        let Some(bounds) = active.bounds else {
+            return true;
+        };
+        if active.text_indices.len() == 1
+            && active.fallback.trim() == active.expected.as_str()
+            && slide_number_region(bounds, self.page_size)
+        {
+            for idx in active.text_indices {
+                if let Some(source) = self.text.get_mut(idx) {
+                    source.slide_number = true;
+                }
+            }
+        }
+        true
+    }
+
+    fn record_slide_number_text(
+        &mut self,
+        index: usize,
+        text: &typst_library::text::TextItem,
+        item_transform: Transform,
+    ) {
+        let Some(active) = self.active_slide_numbers.last_mut() else {
+            return;
+        };
+        active.text_indices.push(index);
+        active.fallback.push_str(&text.text);
+        let rect = text_item_rect(text, item_transform);
+        active.bounds = Some(match active.bounds {
+            Some(bounds) => bounds.union(rect),
+            None => rect,
+        });
     }
 
     fn start_table(&mut self, tag: &Tag, order: usize) -> bool {
@@ -461,6 +559,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                         rot_60k: similarity.rot_60k,
                         scale: similarity.scale,
                         link: None,
+                        slide_number: false,
                     });
                 } else {
                     debug_raster(
@@ -844,6 +943,39 @@ fn single_frame_image(
         }
     }
     image
+}
+
+fn slide_number_fallback(page: &Page, slide_index: usize) -> Option<EcoString> {
+    let physical = u64::try_from(slide_index).ok()?.checked_add(1)?;
+    if page.number != physical {
+        return None;
+    }
+
+    let Numbering::Pattern(pattern) = page.numbering.as_ref()? else {
+        return None;
+    };
+    if pattern.pieces() != 1 {
+        return None;
+    }
+
+    let expected = EcoString::from(physical.to_string());
+    let rendered = pattern.apply(None, &[page.number]).ok()?;
+    (rendered == expected).then_some(rendered)
+}
+
+fn slide_number_region(bounds: Rect, page_size: Size) -> bool {
+    let page_w = page_size.x.to_pt();
+    let page_h = page_size.y.to_pt();
+    if page_w <= 0.0 || page_h <= 0.0 {
+        return false;
+    }
+
+    let width = (bounds.max.x - bounds.min.x).to_pt().max(0.0);
+    let height = (bounds.max.y - bounds.min.y).to_pt().max(0.0);
+    let center_y = (bounds.min.y.to_pt() + bounds.max.y.to_pt()) / 2.0;
+    let near_header_or_footer = center_y <= page_h * 0.18 || center_y >= page_h * 0.82;
+
+    near_header_or_footer && width <= page_w * 0.25 && height <= page_h * 0.12
 }
 
 fn equation_sources(document: &PagedDocument) -> FxHashMap<Location, MathSource> {

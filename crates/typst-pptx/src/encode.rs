@@ -4,7 +4,7 @@ use typst_ooxml_core::{dml, ns};
 use crate::dom::{
     BulletKind, FillSpec, GeomShape, GroupShape, InlineMath, MathBox, MediaId, PathGeom,
     Pic, PicGeom, Placeholder, RunLink, SlideIr, SlideShape, StrokeSpec, TableBox,
-    TableCell, TextBox, TextChild, TextPara, TextRun, TextWrap,
+    TableCell, TextBox, TextChild, TextField, TextPara, TextRun, TextWrap,
 };
 use crate::xml::XmlWriter;
 
@@ -89,9 +89,13 @@ fn write_text_box(
     rels: &mut impl SlideRelSink,
 ) {
     w.open("p:sp").start_children();
-    let is_title = matches!(text.placeholder, Some(Placeholder::Title));
-    let name = if is_title { format!("Title {id}") } else { format!("TextBox {id}") };
-    write_sp_nv(w, id, &name, !is_title, text.placeholder);
+    let name = match text.placeholder {
+        Some(Placeholder::Title) => format!("Title {id}"),
+        Some(Placeholder::Body) => format!("Content Placeholder {id}"),
+        Some(Placeholder::SlideNumber) => format!("Slide Number Placeholder {id}"),
+        None => format!("TextBox {id}"),
+    };
+    write_sp_nv(w, id, &name, true, text.placeholder);
     w.open("p:spPr").start_children();
     write_xfrm(w, text.x_emu, text.y_emu, text.w_emu, text.h_emu, text.rot_60k);
     dml::write_prst_geom(w, "rect");
@@ -235,6 +239,7 @@ fn math_fallback_run(math: &MathBox) -> TextRun {
         color: [0, 0, 0, 255],
         spc_100pt: None,
         link: None,
+        field: None,
     }
 }
 
@@ -391,6 +396,11 @@ fn write_bullet(w: &mut XmlWriter, bullet: &crate::dom::ParaBullet) {
 }
 
 fn write_text_run(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink) {
+    if matches!(run.field, Some(TextField::SlideNumber)) {
+        write_slide_number_field(w, run, rels);
+        return;
+    }
+
     let mut first = true;
     for part in run.text.split('\n') {
         if !first {
@@ -405,6 +415,44 @@ fn write_text_run(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink
         w.elem_text("a:t", part);
         w.close();
     }
+}
+
+fn write_slide_number_field(
+    w: &mut XmlWriter,
+    run: &TextRun,
+    rels: &mut impl SlideRelSink,
+) {
+    if run.text.is_empty() {
+        return;
+    }
+    w.open("a:fld")
+        .attr("id", &field_id(run))
+        .attr("type", "slidenum")
+        .start_children();
+    write_r_pr(w, run, rels);
+    w.elem_text("a:t", &run.text);
+    w.close();
+}
+
+fn field_id(run: &TextRun) -> String {
+    let hash = typst_utils::hash128(&(
+        "typst-pptx-slidenum",
+        run.text.as_str(),
+        run.family.as_str(),
+        run.sz_100pt,
+        run.b,
+        run.i,
+        run.color,
+        run.spc_100pt,
+    ));
+    format!(
+        "{{{:08X}-{:04X}-{:04X}-{:04X}-{:012X}}}",
+        (hash >> 96) as u32,
+        (hash >> 80) as u16,
+        (hash >> 64) as u16,
+        (hash >> 48) as u16,
+        hash & 0x0000_FFFF_FFFF_FFFF,
+    )
 }
 
 fn write_r_pr(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink) {
@@ -564,6 +612,12 @@ fn write_sp_nv(
         match placeholder {
             Placeholder::Title => {
                 w.open("p:ph").attr("type", "title").attr("idx", "0").empty();
+            }
+            Placeholder::Body => {
+                w.open("p:ph").attr("type", "body").attr("idx", "1").empty();
+            }
+            Placeholder::SlideNumber => {
+                w.open("p:ph").attr("type", "sldNum").attr("idx", "10").empty();
             }
         }
         w.close();
