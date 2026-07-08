@@ -4,7 +4,8 @@ use typst_ooxml_core::{dml, ns};
 use crate::dom::{
     BulletKind, FillSpec, GeomKind, GeomShape, GroupShape, InlineMath, MathBox, MediaId,
     PathGeom, Pic, PicGeom, Placeholder, RunLink, SlideIr, SlideShape, StrokeSpec,
-    TableBox, TableCell, TextBox, TextChild, TextField, TextPara, TextRun, TextWrap,
+    TableBox, TableCell, TextBox, TextChild, TextColumns, TextField, TextPara, TextRun,
+    TextWrap,
 };
 use crate::xml::XmlWriter;
 
@@ -106,7 +107,7 @@ fn write_text_box(
     w.close();
 
     w.open("p:txBody").start_children();
-    write_body_pr(w, text.wrap);
+    write_body_pr(w, text.wrap, text.columns.as_ref());
     w.leaf("a:lstStyle");
     for para in &text.paras {
         write_para(w, para, rels);
@@ -133,7 +134,7 @@ fn write_math_box(
     w.close();
 
     w.open("p:txBody").start_children();
-    write_body_pr(w, TextWrap::None);
+    write_body_pr(w, TextWrap::None, None);
     w.leaf("a:lstStyle");
     w.open("a:p").start_children();
     w.open("a:pPr").attr("algn", "l").start_children();
@@ -161,7 +162,7 @@ fn write_math_box(
     w.close();
 }
 
-fn write_body_pr(w: &mut XmlWriter, wrap: TextWrap) {
+fn write_body_pr(w: &mut XmlWriter, wrap: TextWrap, columns: Option<&TextColumns>) {
     w.open("a:bodyPr")
         .attr("lIns", "0")
         .attr("tIns", "0")
@@ -176,8 +177,12 @@ fn write_body_pr(w: &mut XmlWriter, wrap: TextWrap) {
             },
         )
         .attr("horzOverflow", "overflow")
-        .attr("vertOverflow", "overflow")
-        .start_children();
+        .attr("vertOverflow", "overflow");
+    if let Some(columns) = columns {
+        w.attr("numCol", &columns.count.max(1).to_string())
+            .attr("spcCol", &columns.gutter_emu.max(0).to_string());
+    }
+    w.start_children();
     w.leaf("a:noAutofit");
     w.close();
 }
@@ -315,7 +320,7 @@ fn write_table_cell(w: &mut XmlWriter, cell: &TableCell, rels: &mut impl SlideRe
     w.start_children();
 
     w.open("a:txBody").start_children();
-    write_body_pr(w, TextWrap::Square);
+    write_body_pr(w, TextWrap::Square, None);
     w.leaf("a:lstStyle");
     if cell.paras.is_empty() {
         w.leaf("a:p");

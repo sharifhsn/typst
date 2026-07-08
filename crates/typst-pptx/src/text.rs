@@ -462,6 +462,7 @@ fn build_flow_box(group: &[usize], lines: &[LineSegment]) -> ClusteredText {
             h_emu: extent_emu((bottom - top).max(Abs::pt(0.1))),
             rot_60k: selected[0].rot_60k,
             wrap: TextWrap::Square,
+            columns: None,
             placeholder: None,
             paras: vec![TextPara {
                 children,
@@ -518,6 +519,7 @@ fn build_bullet_box(group: &[usize], lines: &[LineSegment]) -> ClusteredText {
             h_emu: extent_emu((bottom - top).max(Abs::pt(0.1))),
             rot_60k: selected[0].rot_60k,
             wrap: TextWrap::Square,
+            columns: None,
             placeholder: None,
             paras,
         }),
@@ -536,6 +538,7 @@ fn build_single_line_box(line: &LineSegment) -> ClusteredText {
             h_emu: extent_emu((line.bottom - line.top).max(Abs::pt(0.1))),
             rot_60k: line.rot_60k,
             wrap: TextWrap::None,
+            columns: None,
             placeholder: None,
             paras: vec![TextPara {
                 children: line.children.clone(),

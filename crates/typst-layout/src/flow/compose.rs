@@ -5,11 +5,12 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{Content, NativeElement, Packed, Resolve, Smart};
 use typst_library::introspection::{
     Counter, CounterDisplayElem, CounterState, CounterUpdate, Location, Locator,
-    SplitLocator, Tag,
+    SplitLocator, Tag, TagFlags,
 };
 use typst_library::layout::{
-    Abs, Axes, Dir, FixedAlignment, Fragment, Frame, FrameItem, FrameParent, Inherit,
-    OuterHAlignment, PlacementScope, Point, Region, Regions, Rel, Size,
+    Abs, Axes, ColumnRegion, Dir, FixedAlignment, Fragment, Frame, FrameItem,
+    FrameParent, Inherit, OuterHAlignment, PlacementScope, Point, Region, Regions, Rel,
+    Size,
 };
 use typst_library::model::{
     FootnoteElem, FootnoteEntry, LineNumberingScope, Numbering, ParLineMarker,
@@ -51,6 +52,33 @@ pub fn compose(
         footnote_queue: vec![],
     }
     .page(locator, regions)
+}
+
+/// Wrap a final multi-column frame in hidden region tags for post-layout
+/// consumers such as the PPTX exporter. The tags are not introspectable and
+/// therefore do not affect normal queries or tagged output.
+fn tag_column_region(
+    mut frame: Frame,
+    count: usize,
+    gutter: Abs,
+    span: Span,
+    locator: Locator,
+    engine: &mut Engine,
+) -> Frame {
+    let Some(count) = NonZeroUsize::new(count) else {
+        return frame;
+    };
+    let mut region =
+        Packed::new(ColumnRegion::new(count, gutter, frame.width(), frame.height()))
+            .spanned(span);
+    let key = typst_utils::hash128(&region);
+    let loc = locator.split().next_location(engine, key, span);
+    region.set_location(loc);
+
+    let flags = TagFlags { introspectable: false, tagged: false };
+    frame.prepend(Point::zero(), FrameItem::Tag(Tag::Start(region.pack(), flags)));
+    frame.push(Point::zero(), FrameItem::Tag(Tag::End(loc, key, flags)));
+    frame
 }
 
 /// State for composition.
@@ -136,6 +164,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
 
         let mut output = Frame::hard(size);
         let mut offset = Abs::zero();
+        let region_locator = locator.relayout();
         let mut locator = locator.split();
 
         // Lay out the columns and stitch them together.
@@ -165,6 +194,17 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
 
             output.push_frame(Point::with_x(x), frame);
             inner.next();
+        }
+
+        if let Some(span) = self.config.column_region_span {
+            output = tag_column_region(
+                output,
+                self.config.columns.count,
+                self.config.columns.gutter,
+                span,
+                region_locator,
+                self.engine,
+            );
         }
 
         Ok(output)

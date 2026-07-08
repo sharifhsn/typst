@@ -1011,6 +1011,75 @@ fn bold_and_italic_map_to_run_properties() {
 }
 
 #[test]
+fn explicit_columns_emit_single_multicolumn_text_box() {
+    let p = parts(
+        r#"#set page(width: 240pt, height: 120pt, margin: 10pt)
+#columns(2, gutter: 20pt)[
+  #text(size: 8pt)[#lorem(80)]
+]"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("numCol=\"2\""), "columns should set bodyPr numCol");
+    assert!(
+        slide.contains("spcCol=\"254000\""),
+        "20pt gutter should be emitted as 254000 EMU, got: {slide}"
+    );
+    assert_eq!(
+        slide.matches("txBox=\"1\"").count(),
+        1,
+        "real columns should be one editable text box"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn explicit_columns_preserve_reading_order_across_wrapped_lines() {
+    // Regression test: each column here wraps across multiple lines whose
+    // baselines land at nearly the same height as the other columns' lines.
+    // A naive vertical-position sort across the whole region would treat
+    // same-height lines from different columns as one reading row and
+    // interleave them; the paragraphs must instead stay grouped per physical
+    // column, each read top-to-bottom, in left-to-right column order.
+    let p = parts(
+        r#"#set page(width: 260pt, height: 120pt, margin: 10pt)
+#set text(size: 9pt)
+#columns(3, gutter: 12pt)[
+  Alpha one alpha two alpha three alpha four.
+
+  #colbreak()
+
+  Bravo one bravo two bravo three bravo four.
+
+  #colbreak()
+
+  Charlie one charlie two charlie three four.
+]"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let alpha = slide.find("Alpha").expect("alpha column text present");
+    let bravo = slide.find("Bravo").expect("bravo column text present");
+    let charlie = slide.find("Charlie").expect("charlie column text present");
+    assert!(
+        alpha < bravo && bravo < charlie,
+        "columns must stay in left-to-right reading order, got positions \
+         alpha={alpha} bravo={bravo} charlie={charlie} in: {slide}"
+    );
+    // Each column's own wrapped lines must not be split apart by another
+    // column's content landing in between.
+    let alpha_para_end = slide[alpha..].find("</a:p>").map(|i| alpha + i).unwrap();
+    assert!(
+        bravo > alpha_para_end,
+        "bravo column text must not be interleaved inside alpha's paragraph"
+    );
+    let bravo_para_end = slide[bravo..].find("</a:p>").map(|i| bravo + i).unwrap();
+    assert!(
+        charlie > bravo_para_end,
+        "charlie column text must not be interleaved inside bravo's paragraph"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn text_columns_split_into_separate_boxes() {
     let p = parts(
         r#"#set page(width: 200pt, height: 100pt, margin: 0pt)
