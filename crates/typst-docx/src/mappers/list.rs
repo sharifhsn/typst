@@ -26,7 +26,10 @@ use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Content, Context, Depth, Packed, Resolve, StyleChain};
 use typst_library::layout::Abs;
-use typst_library::model::{EnumElem, EnumItem, ListElem, Numbering, TermsElem};
+use typst_library::model::{
+    EnumElem, EnumItem, ListElem, NamedNumeralSystem, Numbering, NumberingPattern,
+    TermsElem,
+};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
@@ -147,8 +150,14 @@ pub fn enum_(
     let num_id = ctx.register_list(spec);
 
     let mut out = Vec::new();
+    let mut number = start_value;
     for item in &elem.children {
-        emit_item(ctx, &item.body, styles, num_id, ilvl, &mut out)?;
+        let item_body = item
+            .body
+            .clone()
+            .set(EnumElem::parents, core::iter::once(number).collect());
+        emit_item(ctx, &item_body, styles, num_id, ilvl, &mut out)?;
+        number = number.saturating_add(1);
     }
     Ok(out)
 }
@@ -168,49 +177,71 @@ fn native_enum_levels(numbering: &Numbering, full: bool) -> Option<Vec<ListLevel
         return None;
     }
 
-    // INTEGRATION-NEEDED: numeral-system → `w:numFmt` classification.
-    //
-    // To emit a native `w:numFmt`/`w:lvlText` per level we must read each
-    // counting symbol's numeral system off `pattern.pieces` (an
-    // `EcoVec<(EcoString /*prefix*/, NamedNumeralSystem)>`) and the trailing
-    // `pattern.suffix`. But `NamedNumeralSystem` (from the `codex` crate) is NOT
-    // re-exported through `typst-library`, and this module may not add a `codex`
-    // dependency to `Cargo.toml` nor edit shared crates. So the per-piece
-    // format cannot be determined here yet, and we return `None` to take the
-    // always-correct static-text fallback (which prints the exact Typst-rendered
-    // numbers, only losing Word-side live re-numbering).
-    //
-    // One-line fix for integration: re-export `NamedNumeralSystem` from
-    // `typst_library::model`, then implement `native_enum_levels` as below
-    // (sketch — engine-free, classifies by the system's representation of 1 and
-    // 4, which disambiguates every closed-enum family):
-    //
-    //   for i in 0..9 {
-    //       let last = pattern.pieces.last()?;
-    //       let (prefix, system) = pattern.pieces.get(i).unwrap_or(last);
-    //       let fmt = match (
-    //           system.system().represent(1).ok()?.to_string().as_str(),
-    //           system.system().represent(4).ok()?.to_string().as_str(),
-    //       ) {
-    //           ("1", "4")  => NumFmt::Decimal,
-    //           ("a", "d")  => NumFmt::LowerLetter,
-    //           ("A", "D")  => NumFmt::UpperLetter,
-    //           ("i", "iv") => NumFmt::LowerRoman,
-    //           ("I", "IV") => NumFmt::UpperRoman,
-    //           _ => return None, // symbol/CJK/abjad: no native numFmt
-    //       };
-    //       // lvl_text = prefix + (full ? "%1.…%{i+1}" : "%{i+1}") + suffix
-    //       //   where suffix = pattern.suffix iff this is the last piece.
-    //       levels.push(ListLevel { num_fmt: fmt, lvl_text, start: 1,
-    //           ind_left: LEVEL_INDENT_TWIPS*(i as i32+1), ind_hanging: HANGING_TWIPS,
-    //           bullet_font: None });
-    //   }
-    //
-    // Alternatively, add a `DocxCtx::enum_marker_kth(pattern, k, n)` helper that
-    // calls `pattern.apply_kth(engine, span, k, n)` (engine in hand) so the
-    // classification runs off rendered strings without naming `codex`.
-    let _ = (pattern, full);
-    None
+    let last = pattern.pieces.last()?;
+    let mut levels = Vec::with_capacity(9);
+    for i in 0..9 {
+        let (_, system) = pattern.pieces.get(i).unwrap_or(last);
+        let num_fmt = native_num_fmt(*system)?;
+        let lvl_text = if full {
+            full_level_text(pattern, i)
+        } else {
+            single_level_text(pattern, i)
+        };
+        levels.push(ListLevel {
+            num_fmt,
+            lvl_text,
+            start: 1,
+            ind_left: LEVEL_INDENT_TWIPS * (i as i32 + 1),
+            ind_hanging: HANGING_TWIPS,
+            bullet_font: None,
+        });
+    }
+    Some(levels)
+}
+
+fn native_num_fmt(system: NamedNumeralSystem) -> Option<NumFmt> {
+    let one = system.system().represent(1).ok()?.to_string();
+    let four = system.system().represent(4).ok()?.to_string();
+    Some(match (one.as_str(), four.as_str()) {
+        ("1", "4") => NumFmt::Decimal,
+        ("a", "d") => NumFmt::LowerLetter,
+        ("A", "D") => NumFmt::UpperLetter,
+        ("i", "iv") => NumFmt::LowerRoman,
+        ("I", "IV") => NumFmt::UpperRoman,
+        _ => return None,
+    })
+}
+
+fn full_level_text(pattern: &NumberingPattern, level: usize) -> EcoString {
+    let mut text = EcoString::new();
+    for i in 0..=level {
+        text.push_str(full_level_prefix(pattern, i));
+        text.push('%');
+        text.push_str(&(i + 1).to_string());
+    }
+    text.push_str(&pattern.suffix);
+    text
+}
+
+fn full_level_prefix(pattern: &NumberingPattern, level: usize) -> &str {
+    if let Some((prefix, _)) = pattern.pieces.get(level) {
+        prefix.as_str()
+    } else if let Some((prefix, _)) = pattern.pieces.last() {
+        if prefix.is_empty() { pattern.suffix.as_str() } else { prefix.as_str() }
+    } else {
+        ""
+    }
+}
+
+fn single_level_text(pattern: &NumberingPattern, level: usize) -> EcoString {
+    let mut text = EcoString::new();
+    if let Some((prefix, _)) = pattern.pieces.first() {
+        text.push_str(prefix);
+    }
+    text.push('%');
+    text.push_str(&(level + 1).to_string());
+    text.push_str(&pattern.suffix);
+    text
 }
 
 /// Renders an enum's items as plain paragraphs with the Typst-computed marker

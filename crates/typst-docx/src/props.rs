@@ -150,7 +150,10 @@ impl RunProps {
             w.leaf(xml::W_I);
             w.leaf(xml::W_ICS);
         }
-        // 5. smallCaps
+        // 5. caps / smallCaps
+        if self.caps {
+            w.leaf("w:caps");
+        }
         if self.smallcaps {
             w.leaf(xml::W_SMALLCAPS);
         }

@@ -801,7 +801,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             }
         }
 
-        // Small capitals.
+        // Case and small capitals.
+        if matches!(styles.get(TextElem::case), Some(typst_library::text::Case::Upper)) {
+            p.caps = true;
+        }
         if styles.get(TextElem::smallcaps).is_some() {
             p.smallcaps = true;
         }
@@ -843,10 +846,11 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
 
     /// Applies `TextElem::case` to a string.
     pub fn apply_case(&self, styles: StyleChain, text: &EcoString) -> EcoString {
-        if let Some(case) = styles.get(TextElem::case) {
-            case.apply(text.as_str()).into()
-        } else {
-            text.clone()
+        match styles.get(TextElem::case) {
+            Some(typst_library::text::Case::Lower) => {
+                typst_library::text::Case::Lower.apply(text.as_str()).into()
+            }
+            Some(typst_library::text::Case::Upper) | None => text.clone(),
         }
     }
 
