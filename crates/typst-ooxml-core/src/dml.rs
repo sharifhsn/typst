@@ -1,17 +1,24 @@
 //! DrawingML geometry, fill, and stroke primitives shared by Office exporters.
 
+use ecow::EcoString;
+
 use crate::color;
+use crate::media::MediaId;
 use crate::ns;
+use crate::render;
 use crate::units;
 use crate::xml::XmlWriter;
-use typst_library::layout::{Abs, Point, Ratio, Size, Transform};
+use typst_library::layout::{Abs, Frame, Point, Ratio, Size, Transform};
 use typst_library::visualize::{
-    Color, Curve, CurveItem, FixedStroke, Geometry, Gradient, LineCap, Paint,
+    Color, Curve, CurveItem, FixedStroke, Geometry, Gradient, LineCap, Paint, Tiling,
 };
 
 const A14_USE_LOCAL_DPI_EXT_URI: &str = "{28A0092B-C50C-407E-A947-70E740481C1C}";
 const ASVG_SVG_BLIP_EXT_URI: &str = "{96DAC541-7B7A-43D3-8B79-37D633B846F1}";
 const ASVG_NS: &str = "http://schemas.microsoft.com/office/drawing/2016/SVG/main";
+const TILE_PIXEL_PER_PT: f64 = 2.0;
+const OFFICE_DEFAULT_DPI: f64 = 96.0;
+const PT_PER_IN: f64 = 72.0;
 
 /// One custom geometry path segment.
 pub enum PathSegment {
@@ -36,6 +43,47 @@ pub enum FillSpec {
         focal_center_100k: [i32; 2],
         focal_radius_100k: i32,
     },
+    Tile {
+        image: TileImage,
+        tx_emu: i64,
+        ty_emu: i64,
+        sx_100k: i32,
+        sy_100k: i32,
+        algn: &'static str,
+    },
+}
+
+/// Where a tile fill's PNG is referenced from.
+#[derive(Clone)]
+pub enum TileImage {
+    /// Exporter-level media registry id; resolved to a part-local `rId` while
+    /// serializing the owning XML part.
+    Media(MediaId),
+    /// Already allocated relationship id in the owning XML part.
+    Rel(EcoString),
+}
+
+/// A rasterized tile cell plus its DrawingML placement attributes.
+pub struct RenderedTile {
+    pub png: Vec<u8>,
+    pub tx_emu: i64,
+    pub ty_emu: i64,
+    pub sx_100k: i32,
+    pub sy_100k: i32,
+    pub algn: &'static str,
+}
+
+impl RenderedTile {
+    pub fn fill(self, image: TileImage) -> FillSpec {
+        FillSpec::Tile {
+            image,
+            tx_emu: self.tx_emu,
+            ty_emu: self.ty_emu,
+            sx_100k: self.sx_100k,
+            sy_100k: self.sy_100k,
+            algn: self.algn,
+        }
+    }
 }
 
 /// A gradient stop.
@@ -110,6 +158,36 @@ pub fn gradient_fill(gradient: &Gradient, alpha: AlphaMode) -> Option<FillSpec> 
 pub fn linear_gradient_fill(gradient: &Gradient, alpha: AlphaMode) -> Option<FillSpec> {
     let Gradient::Linear(_) = gradient else { return None };
     gradient_fill(gradient, alpha)
+}
+
+/// Rasterizes one Typst tiling period for use in an OOXML `a:tile` fill.
+pub fn render_tiling_tile(tiling: &Tiling) -> Option<RenderedTile> {
+    let period = tiling.size() + tiling.spacing();
+    let (w_pt, h_pt) = (period.x.to_pt(), period.y.to_pt());
+    if !w_pt.is_finite() || !h_pt.is_finite() || w_pt <= 0.0 || h_pt <= 0.0 {
+        return None;
+    }
+
+    let w_px = ((w_pt * TILE_PIXEL_PER_PT).round() as u32).max(1);
+    let h_px = ((h_pt * TILE_PIXEL_PER_PT).round() as u32).max(1);
+
+    let mut frame = Frame::hard(period);
+    frame.push_frame(Point::zero(), tiling.frame().clone());
+    let raster = render::render_full_frame_to_png(frame, TILE_PIXEL_PER_PT)?;
+
+    Some(RenderedTile {
+        png: raster.png,
+        tx_emu: units::abs_to_emu(tiling.offset().x),
+        ty_emu: units::abs_to_emu(tiling.offset().y),
+        sx_100k: tile_scale_100k(period.x, w_px),
+        sy_100k: tile_scale_100k(period.y, h_px),
+        algn: "tl",
+    })
+}
+
+fn tile_scale_100k(target: Abs, pixels: u32) -> i32 {
+    let natural_pt = pixels as f64 * PT_PER_IN / OFFICE_DEFAULT_DPI;
+    ((target.to_pt() / natural_pt) * 100_000.0).round() as i32
 }
 
 fn gradient_stops(stops: &[(Color, Ratio)], alpha: AlphaMode) -> Vec<GradientStop> {
@@ -475,6 +553,16 @@ pub fn write_fill(
     fill: Option<&FillSpec>,
     gradient_scaled: &'static str,
 ) {
+    write_fill_with_tile_resolver(w, fill, gradient_scaled, |_| EcoString::new());
+}
+
+/// Emits an `a:solidFill`, `a:gradFill`, `a:blipFill`, or `a:noFill` child.
+pub fn write_fill_with_tile_resolver(
+    w: &mut XmlWriter,
+    fill: Option<&FillSpec>,
+    gradient_scaled: &'static str,
+    mut tile_media_rid: impl FnMut(MediaId) -> EcoString,
+) {
     match fill {
         Some(FillSpec::Solid(rgba)) => write_solid_fill(w, *rgba),
         Some(FillSpec::LinearGradient { angle_60k, stops }) => {
@@ -504,6 +592,26 @@ pub fn write_fill(
                 .attr("b", &b.to_string())
                 .empty();
             w.close();
+            w.close();
+        }
+        Some(FillSpec::Tile { image, tx_emu, ty_emu, sx_100k, sy_100k, algn }) => {
+            let embed = match image {
+                TileImage::Media(media) => tile_media_rid(*media),
+                TileImage::Rel(rid) => rid.clone(),
+            };
+            if embed.is_empty() {
+                w.leaf("a:noFill");
+                return;
+            }
+            w.open("a:blipFill").start_children();
+            write_blip(w, &embed, None);
+            w.open("a:tile")
+                .attr("tx", &tx_emu.to_string())
+                .attr("ty", &ty_emu.to_string())
+                .attr("sx", &sx_100k.to_string())
+                .attr("sy", &sy_100k.to_string())
+                .attr("algn", algn)
+                .empty();
             w.close();
         }
         None => w.leaf("a:noFill"),

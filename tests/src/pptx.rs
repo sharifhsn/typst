@@ -549,6 +549,37 @@ fn radial_gradient_shape_does_not_native_map() {
 }
 
 #[test]
+fn tiling_shape_fill_emits_native_blip_tile() {
+    let p = binary_parts(
+        r#"#set page(width: 240pt, height: 140pt, margin: 0pt)
+#let pat = tiling(
+  size: (20pt, 20pt),
+  circle(radius: 8pt, fill: blue),
+)
+#rect(width: 200pt, height: 100pt, fill: pat)"#,
+    );
+    let text = text_parts_from_binary(&p);
+    let slide = &text["ppt/slides/slide1.xml"];
+    let rels = &text["ppt/slides/_rels/slide1.xml.rels"];
+
+    assert!(slide.contains("<a:blipFill>"), "tiling fill should be image-backed");
+    assert!(slide.contains("<a:tile "), "tiling fill should emit a:tile");
+    assert!(slide.contains("sx=\"66667\""), "tile scale compensates PNG DPI");
+    assert!(slide.contains("sy=\"66667\""), "tile scale compensates PNG DPI");
+    assert!(slide.contains("algn=\"tl\""), "tile origin should align top-left");
+    assert!(!slide.contains("<p:pic"), "shape should not rasterize as a picture");
+
+    assert!(rels.contains("relationships/image"), "slide rels should include image");
+    assert!(rels.contains("Target=\"../media/image1.png\""), "tile PNG target");
+
+    let media: Vec<_> =
+        p.iter().filter(|(name, _)| name.starts_with("ppt/media/")).collect();
+    assert_eq!(media.len(), 1, "exactly one tile PNG media part");
+    assert!(media[0].1.starts_with(b"\x89PNG\r\n\x1a\n"), "tile media is a PNG");
+    assert_all_wellformed(&text);
+}
+
+#[test]
 fn radial_gradient_page_background_does_not_native_map() {
     let p = parts(
         r#"#set page(width: 160pt, height: 100pt, margin: 0pt, fill: gradient.radial(red, blue))

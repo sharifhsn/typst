@@ -553,6 +553,7 @@ fn write_vml_textbox(
                 w.attr("fillcolor", &hex(stop.color));
             }
         }
+        Some(ShapeFill::Tile { .. }) => {}
         None => {
             w.attr("filled", "f");
         }

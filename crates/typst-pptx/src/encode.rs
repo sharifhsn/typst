@@ -77,7 +77,7 @@ fn write_shape(
         SlideShape::MathBox(math) => write_math_box(w, math, ids.next(), rels),
         SlideShape::TableBox(table) => write_table_box(w, table, ids.next(), rels),
         SlideShape::Pic(pic) => write_pic(w, pic, ids.next(), rels),
-        SlideShape::Geom(geom) => write_geom_shape(w, geom, ids.next()),
+        SlideShape::Geom(geom) => write_geom_shape(w, geom, ids.next(), rels),
         SlideShape::Group(group) => write_group_shape(w, group, ids, rels),
     }
 }
@@ -327,7 +327,9 @@ fn write_table_cell(w: &mut XmlWriter, cell: &TableCell, rels: &mut impl SlideRe
     w.close();
 
     w.open("a:tcPr").start_children();
-    dml::write_fill(w, cell.fill.as_ref(), "0");
+    dml::write_fill_with_tile_resolver(w, cell.fill.as_ref(), "0", |media| {
+        rels.image_rid(media)
+    });
     write_cell_border(w, "a:lnL", cell.borders.left.as_ref());
     write_cell_border(w, "a:lnR", cell.borders.right.as_ref());
     write_cell_border(w, "a:lnT", cell.borders.top.as_ref());
@@ -537,13 +539,20 @@ fn write_pic_geom(w: &mut XmlWriter, geom: &PicGeom) {
     }
 }
 
-fn write_geom_shape(w: &mut XmlWriter, geom: &GeomShape, id: u32) {
+fn write_geom_shape(
+    w: &mut XmlWriter,
+    geom: &GeomShape,
+    id: u32,
+    rels: &mut impl SlideRelSink,
+) {
     w.open("p:sp").start_children();
     write_sp_nv(w, id, &format!("Shape {id}"), false, None);
     w.open("p:spPr").start_children();
     write_xfrm(w, geom.x_emu, geom.y_emu, geom.w_emu, geom.h_emu, geom.rot_60k);
     write_geom(w, &geom.geom, geom.w_emu, geom.h_emu);
-    dml::write_fill(w, geom.fill.as_ref(), "0");
+    dml::write_fill_with_tile_resolver(w, geom.fill.as_ref(), "0", |media| {
+        rels.image_rid(media)
+    });
     dml::write_stroke(w, geom.stroke.as_ref(), true);
     w.close();
     w.close();
