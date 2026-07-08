@@ -582,11 +582,9 @@ fn handle_block_inner(
         // rasterizing the whole block.
         out.extend(mappers::stack::stack(elem, styles, ctx)?);
     } else if let Some(elem) = child.to_packed::<typst_library::layout::ColumnsElem>() {
-        // `#columns(n)[..]` balances flowing content across n columns. There is
-        // no per-block multi-column construct in a flowing story (columns are a
-        // section property), so lower the body as ordinary blocks — the text
-        // stays editable instead of being rasterized to an image. The visual
-        // column split is approximated as a single column.
+        // Top-level `#columns(n)[..]` is wrapped in a continuous Word section by
+        // `resolve_sections`; nested columns still lower as ordinary editable
+        // blocks rather than rasterizing the body.
         out.extend(ctx.blocks(&elem.body, styles)?);
     } else if let Some(elem) = child.to_packed::<typst_library::layout::LayoutElem>() {
         // `#layout(size => ..)` hands the closure the container size and uses the
