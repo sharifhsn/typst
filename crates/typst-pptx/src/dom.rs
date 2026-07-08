@@ -27,8 +27,16 @@ pub struct TextBox {
     pub h_emu: i64,
     pub rot_60k: i32,
     pub wrap: TextWrap,
+    pub columns: Option<TextColumns>,
     pub placeholder: Option<Placeholder>,
     pub paras: Vec<TextPara>,
+}
+
+/// Multi-column text body properties for a DrawingML text box.
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub struct TextColumns {
+    pub count: usize,
+    pub gutter_emu: i64,
 }
 
 /// Text wrapping behavior for a DrawingML text body.

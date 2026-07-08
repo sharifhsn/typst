@@ -1,7 +1,10 @@
 use std::num::NonZeroUsize;
 
-use crate::foundations::{Content, elem};
-use crate::layout::{Length, Ratio, Rel};
+use crate::diag::{SourceResult, bail};
+use crate::engine::Engine;
+use crate::foundations::{Args, Construct, Content, elem};
+use crate::introspection::{Locatable, Unqueriable};
+use crate::layout::{Abs, Length, Ratio, Rel};
 
 /// Separates a region into multiple equally sized columns.
 ///
@@ -71,6 +74,40 @@ pub struct ColumnsElem {
     /// The content that should be layouted into the columns.
     #[required]
     pub body: Content,
+}
+
+/// Internal post-layout marker for native multi-column text export.
+///
+/// The column layouter emits this as a hidden tag around the physical columns
+/// region. It is intentionally non-introspectable; consumers that do not know
+/// about it simply ignore the tag.
+#[elem(Construct, Unqueriable, Locatable)]
+pub struct ColumnRegion {
+    /// The number of columns in the region.
+    #[required]
+    #[internal]
+    pub count: NonZeroUsize,
+
+    /// The physical gutter width in the laid-out frame.
+    #[required]
+    #[internal]
+    pub gutter: Abs,
+
+    /// The physical region width in the laid-out frame.
+    #[required]
+    #[internal]
+    pub width: Abs,
+
+    /// The physical region height in the laid-out frame.
+    #[required]
+    #[internal]
+    pub height: Abs,
+}
+
+impl Construct for ColumnRegion {
+    fn construct(_: &mut Engine, args: &mut Args) -> SourceResult<Content> {
+        bail!(args.span, "cannot be constructed manually")
+    }
 }
 
 /// Forces a column break.

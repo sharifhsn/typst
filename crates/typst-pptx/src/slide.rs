@@ -4,8 +4,8 @@ use typst_layout::{Page, PagedDocument};
 use typst_library::foundations::{NativeElement, Smart, StyleChain};
 use typst_library::introspection::{CounterDisplayElem, Introspector, Location, Tag};
 use typst_library::layout::{
-    Abs, Frame, FrameItem, GridCell, GridCellRegion, GridElem, Point, Sides, Size,
-    Transform,
+    Abs, ColumnRegion, Frame, FrameItem, GridCell, GridCellRegion, GridElem, Point,
+    Sides, Size, Transform,
 };
 use typst_library::math::EquationElem;
 use typst_library::model::{
@@ -15,7 +15,7 @@ use typst_library::visualize::{LineCap, Paint, Shape, Stroke};
 
 use crate::dom::{
     CellBorders, FillSpec, MathBox, PicGeom, SlideCtx, SlideIr, SlideShape, StrokeSpec,
-    TableBox, TableCell, TableRow, TextPara,
+    TableBox, TableCell, TableRow, TextBox, TextColumns, TextPara, TextWrap,
 };
 use crate::text::{InlineMathSource, LinkTarget, TextSource};
 
@@ -70,6 +70,7 @@ struct Walker<'a, 'b> {
     active_tables: Vec<ActiveTable>,
     loose_table_cells: Vec<CapturedTableCell>,
     active_table_cells: Vec<ActiveTableCell<'a>>,
+    active_columns: Vec<ActiveColumnRegion<'a>>,
 }
 
 struct OrderedShape {
@@ -126,6 +127,16 @@ struct ActiveTableCell<'a> {
     links: Vec<LinkRect>,
 }
 
+struct ActiveColumnRegion<'a> {
+    loc: Location,
+    order: usize,
+    rect: Rect,
+    count: usize,
+    gutter: Abs,
+    text: Vec<TextSource<'a>>,
+    links: Vec<LinkRect>,
+}
+
 struct CapturedTableCell {
     order: usize,
     table: bool,
@@ -174,6 +185,7 @@ impl<'a, 'b> Walker<'a, 'b> {
             active_tables: Vec::new(),
             loose_table_cells: Vec::new(),
             active_table_cells: Vec::new(),
+            active_columns: Vec::new(),
         }
     }
 
@@ -187,6 +199,9 @@ impl<'a, 'b> Walker<'a, 'b> {
                 }
                 if !self.active_tables.is_empty() && !matches!(item, FrameItem::Group(_))
                 {
+                    continue;
+                }
+                if self.capture_column_item(order, item, item_transform) {
                     continue;
                 }
                 if self.capture_math_item(item, item_transform) {
@@ -308,6 +323,9 @@ impl<'a, 'b> Walker<'a, 'b> {
                 if self.start_table(tag, order) {
                     return;
                 }
+                if self.start_column_region(tag, order, item_transform) {
+                    return;
+                }
                 if self.start_slide_number(tag) {
                     return;
                 }
@@ -331,6 +349,9 @@ impl<'a, 'b> Walker<'a, 'b> {
                     return;
                 }
                 if self.end_table(*loc) {
+                    return;
+                }
+                if self.end_column_region(*loc) {
                     return;
                 }
                 let Some(index) =
@@ -504,6 +525,95 @@ impl<'a, 'b> Walker<'a, 'b> {
             self.loose_table_cells.push(cell);
         }
         true
+    }
+
+    fn start_column_region(
+        &mut self,
+        tag: &Tag,
+        order: usize,
+        item_transform: Transform,
+    ) -> bool {
+        let Tag::Start(elem, ..) = tag else {
+            return false;
+        };
+        let Some(region) = elem.to_packed::<ColumnRegion>() else {
+            return false;
+        };
+        let Some(similarity) = classify_similarity(item_transform) else {
+            return true;
+        };
+        if similarity.rot_60k != 0 {
+            return true;
+        }
+
+        let origin = Point::zero().transform(item_transform);
+        let size =
+            Size::new(region.width * similarity.scale, region.height * similarity.scale);
+        self.active_columns.push(ActiveColumnRegion {
+            loc: tag.location(),
+            order,
+            rect: Rect { min: origin, max: origin + size.to_point() },
+            count: region.count.get(),
+            gutter: region.gutter * similarity.scale,
+            text: Vec::new(),
+            links: Vec::new(),
+        });
+        true
+    }
+
+    fn end_column_region(&mut self, loc: Location) -> bool {
+        let Some(index) =
+            self.active_columns.iter().rposition(|active| active.loc == loc)
+        else {
+            return false;
+        };
+        let mut active = self.active_columns.remove(index);
+        attach_links(&mut active.text, &active.links);
+        if let Some(shape) = column_shape(active) {
+            self.shapes.push(shape);
+        }
+        true
+    }
+
+    fn capture_column_item(
+        &mut self,
+        order: usize,
+        item: &'a FrameItem,
+        item_transform: Transform,
+    ) -> bool {
+        if self.active_columns.is_empty() {
+            return false;
+        }
+
+        match item {
+            FrameItem::Text(text) => {
+                let Some(similarity) = classify_similarity(item_transform) else {
+                    return false;
+                };
+                let baseline = Point::zero().transform(item_transform);
+                self.active_columns.last_mut().unwrap().text.push(TextSource {
+                    order,
+                    baseline,
+                    item: text,
+                    rot_60k: similarity.rot_60k,
+                    scale: similarity.scale,
+                    link: None,
+                    slide_number: false,
+                });
+                true
+            }
+            FrameItem::Link(dest, size) => {
+                let Some(target) = self.destination(dest) else {
+                    return true;
+                };
+                self.active_columns.last_mut().unwrap().links.push(LinkRect {
+                    rect: transformed_rect(item_transform, *size),
+                    target,
+                });
+                true
+            }
+            _ => false,
+        }
     }
 
     fn capture_table_item(
@@ -1018,6 +1128,84 @@ fn table_cell_paras(text: Vec<TextSource<'_>>) -> Vec<TextPara> {
             _ => Vec::new(),
         })
         .collect()
+}
+
+fn column_shape(active: ActiveColumnRegion<'_>) -> Option<OrderedShape> {
+    if active.count <= 1 {
+        return None;
+    }
+
+    let rect = active.rect;
+    let count = active.count;
+    let gutter = active.gutter;
+    let paras = column_region_paras(active.text, rect, count, gutter);
+    if paras.is_empty() {
+        return None;
+    }
+
+    let size = rect.size();
+    Some(OrderedShape {
+        order: active.order,
+        shape: SlideShape::TextBox(TextBox {
+            x_emu: crate::text::emu(rect.min.x),
+            y_emu: crate::text::emu(rect.min.y),
+            w_emu: crate::text::extent_emu(size.x),
+            h_emu: crate::text::extent_emu(size.y),
+            rot_60k: 0,
+            wrap: TextWrap::Square,
+            columns: Some(TextColumns { count, gutter_emu: crate::text::extent_emu(gutter) }),
+            placeholder: None,
+            paras,
+        }),
+    })
+}
+
+/// Reassemble a multi-column region's paragraphs in true reading order.
+///
+/// The general-purpose [`crate::text::cluster_text`] reconstructs a flow from
+/// wrapped line segments by sorting on vertical position, which is right for
+/// a single flowing box but wrong here: applied directly across a whole
+/// columns region, same-height lines from *different* physical columns look
+/// like one reading row and get interleaved. Bucket items by physical column
+/// first, using the region's known geometry (not by trusting frame-walk
+/// order, which is column-major only incidentally), cluster each column's
+/// items on their own — exactly the single-flow case `cluster_text` is
+/// designed for — then concatenate the columns in reading order.
+fn column_region_paras(
+    text: Vec<TextSource<'_>>,
+    rect: Rect,
+    count: usize,
+    gutter: Abs,
+) -> Vec<TextPara> {
+    let total_gutter = gutter * (count.saturating_sub(1) as f64);
+    let col_width = ((rect.size().x - total_gutter) / count as f64).max(Abs::pt(1.0));
+    let stride = col_width + gutter;
+
+    let mut buckets: Vec<Vec<TextSource<'_>>> = vec![Vec::new(); count];
+    for source in text {
+        let offset = (source.baseline.x - rect.min.x).max(Abs::zero());
+        let index = ((offset.to_pt() / stride.to_pt()) as usize).min(count - 1);
+        buckets[index].push(source);
+    }
+
+    // Order columns by reading order (the minimum walk-order of their
+    // contents), not raw bucket index, so this stays correct for RTL columns.
+    let mut order: Vec<usize> = (0..count).collect();
+    order.sort_by_key(|&i| buckets[i].iter().map(|s| s.order).min().unwrap_or(usize::MAX));
+
+    let mut paras = Vec::new();
+    for i in order {
+        let bucket = std::mem::take(&mut buckets[i]);
+        if bucket.is_empty() {
+            continue;
+        }
+        for cluster in crate::text::cluster_text(bucket, Vec::new()) {
+            if let SlideShape::TextBox(text) = cluster.shape {
+                paras.extend(text.paras);
+            }
+        }
+    }
+    paras
 }
 
 fn split_table_groups(
