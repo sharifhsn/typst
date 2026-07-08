@@ -1698,6 +1698,20 @@ fn fill_signature(fill: Option<&crate::dom::ShapeFill>) -> String {
                     .collect::<Vec<_>>()
             )
         }
+        Some(crate::dom::ShapeFill::Tile {
+            image,
+            tx_emu,
+            ty_emu,
+            sx_100k,
+            sy_100k,
+            algn,
+        }) => {
+            let image_sig = match image {
+                typst_ooxml_core::dml::TileImage::Media(id) => format!("media:{id}"),
+                typst_ooxml_core::dml::TileImage::Rel(rid) => format!("rel:{rid}"),
+            };
+            format!("tile={image_sig}:{tx_emu}:{ty_emu}:{sx_100k}:{sy_100k}:{algn}")
+        }
         None => String::new(),
     }
 }

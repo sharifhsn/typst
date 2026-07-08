@@ -3,17 +3,18 @@
 //! rasterized image.
 //!
 //! A shape is mapped only when it is purely decorative (no body) and has an
-//! explicit, representable size, fill and stroke — solid colours or DrawingML
-//! gradients, no auto/fractional size. Anything else returns `None`, and the
-//! caller rasterizes it so the visual is still preserved.
+//! explicit, representable size, fill and stroke — solid colours, DrawingML
+//! gradients, or raster-backed DrawingML tile fills, no auto/fractional size.
+//! Anything else returns `None`, and the caller rasterizes it so the visual is
+//! still preserved.
 
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Content, Resolve, Smart, StyleChain};
 use typst_library::layout::{Abs, BoxElem, Length, Rel, Sides, Sizing};
 use typst_library::visualize::{
-    CircleElem, EllipseElem, Paint, PolygonElem, RectElem, SquareElem, Stroke,
+    CircleElem, EllipseElem, Paint, PolygonElem, RectElem, SquareElem, Stroke, Tiling,
 };
-use typst_ooxml_core::dml;
+use typst_ooxml_core::dml::{self, TileImage};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
@@ -37,7 +38,7 @@ pub fn shape(
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
     let reference = typst_library::layout::Size::new(ctx.raster_width, ctx.raster_height);
-    let Some((w, h, spec)) = build(child, styles, reference) else {
+    let Some((w, h, spec)) = build(ctx, child, styles, reference) else {
         return Ok(None);
     };
     let (w_emu, h_emu) = (abs_to_emu(w), abs_to_emu(h));
@@ -297,6 +298,7 @@ fn resolve_insets(
 /// `size`/`radius` constructor args of `#square`/`#circle` fold into
 /// `width`/`height`, so all four read the same two fields.
 fn build(
+    ctx: &mut DocxCtx,
     child: &Content,
     styles: StyleChain,
     reference: typst_library::layout::Size,
@@ -307,7 +309,7 @@ fn build(
         }
         let (w, h) =
             explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
-        let fill = fill_color(e.fill.get_ref(styles))?;
+        let fill = fill_color(ctx, e.fill.get_ref(styles))?;
         let stroke =
             sides_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Rect, fill, stroke, txbx: None }))
@@ -317,7 +319,7 @@ fn build(
         }
         let (w, h) =
             explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
-        let fill = fill_color(e.fill.get_ref(styles))?;
+        let fill = fill_color(ctx, e.fill.get_ref(styles))?;
         let stroke =
             sides_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Rect, fill, stroke, txbx: None }))
@@ -327,7 +329,7 @@ fn build(
         }
         let (w, h) =
             explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
-        let fill = fill_color(e.fill.get_ref(styles))?;
+        let fill = fill_color(ctx, e.fill.get_ref(styles))?;
         let stroke =
             single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Ellipse, fill, stroke, txbx: None }))
@@ -337,7 +339,7 @@ fn build(
         }
         let (w, h) =
             explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
-        let fill = fill_color(e.fill.get_ref(styles))?;
+        let fill = fill_color(ctx, e.fill.get_ref(styles))?;
         let stroke =
             single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Ellipse, fill, stroke, txbx: None }))
@@ -374,7 +376,7 @@ fn build(
         raw.push(dml::RawSeg::Close);
         let normalized = dml::normalize_segments(raw)?;
         let (segments, w, h) = (normalized.segments, normalized.w, normalized.h);
-        let fill = fill_color(e.fill.get_ref(styles))?;
+        let fill = fill_color(ctx, e.fill.get_ref(styles))?;
         let stroke =
             single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((
@@ -418,14 +420,13 @@ fn explicit_size(
     Some((w, h))
 }
 
-/// `None` outer = unrepresentable fill (gradient/tiling) → rasterize; inner
-/// `None` = no fill.
-fn fill_color(paint: &Option<Paint>) -> Option<Option<ShapeFill>> {
+/// `None` outer = unrepresentable fill → rasterize; inner `None` = no fill.
+fn fill_color(ctx: &mut DocxCtx, paint: &Option<Paint>) -> Option<Option<ShapeFill>> {
     match paint {
         None => Some(None),
         Some(Paint::Solid(c)) => Some(Some(ShapeFill::Solid(opaque(color_to_hex(c))))),
         Some(Paint::Gradient(g)) => gradient_fill(g).map(Some),
-        Some(_) => None,
+        Some(Paint::Tiling(tiling)) => tile_fill(ctx, tiling).map(Some),
     }
 }
 
@@ -433,6 +434,12 @@ fn fill_color(paint: &Option<Paint>) -> Option<Option<ShapeFill>> {
 /// (bail to rasterize) for conic gradients.
 fn gradient_fill(gradient: &typst_library::visualize::Gradient) -> Option<ShapeFill> {
     dml::gradient_fill(gradient, dml::AlphaMode::Opaque)
+}
+
+fn tile_fill(ctx: &mut DocxCtx, tiling: &Tiling) -> Option<ShapeFill> {
+    let tile = dml::render_tiling_tile(tiling)?;
+    let rel = ctx.add_image(&tile.png, "png");
+    Some(tile.fill(TileImage::Rel(rel)))
 }
 
 /// Resolves a single optional stroke. `None` outer = unrepresentable (gradient)
@@ -740,13 +747,17 @@ struct ExtractedShape {
 /// baking the WHOLE accumulated transform directly into each point's
 /// coordinates (rather than trying to express the rotation as `a:xfrm rot=`)
 /// reuses every bit of the plain-translation machinery unchanged.
-fn extract_shapes(frame: &typst_library::layout::Frame) -> Option<Vec<ExtractedShape>> {
+fn extract_shapes(
+    ctx: &mut DocxCtx,
+    frame: &typst_library::layout::Frame,
+) -> Option<Vec<ExtractedShape>> {
     use typst_library::layout::Transform;
     let mut out = Vec::new();
-    collect_shapes(frame, Transform::identity(), 1.0, &mut out).then_some(out)
+    collect_shapes(ctx, frame, Transform::identity(), 1.0, &mut out).then_some(out)
 }
 
 fn collect_shapes(
+    ctx: &mut DocxCtx,
     frame: &typst_library::layout::Frame,
     acc: typst_library::layout::Transform,
     stroke_scale: f64,
@@ -763,7 +774,7 @@ fn collect_shapes(
         let item_transform = acc.pre_concat(Transform::translate(pos.x, pos.y));
         match item {
             FrameItem::Shape(shape, _) => {
-                let Some(fill) = resolved_fill(&shape.fill) else { return false };
+                let Some(fill) = resolved_fill(ctx, &shape.fill) else { return false };
                 let Some(stroke) = resolved_stroke(&shape.stroke, stroke_scale) else {
                     return false;
                 };
@@ -783,7 +794,8 @@ fn collect_shapes(
                     return false;
                 };
                 let new_acc = item_transform.pre_concat(group.transform);
-                if !collect_shapes(&group.frame, new_acc, stroke_scale * scale, out) {
+                if !collect_shapes(ctx, &group.frame, new_acc, stroke_scale * scale, out)
+                {
                     return false;
                 }
             }
@@ -803,7 +815,7 @@ fn build_shapes_drawing(
     ctx: &mut DocxCtx,
     frame: &typst_library::layout::Frame,
 ) -> SourceResult<Option<Run>> {
-    let Some(shapes) = extract_shapes(frame) else { return Ok(None) };
+    let Some(shapes) = extract_shapes(ctx, frame) else { return Ok(None) };
     if shapes.is_empty() {
         return Ok(None);
     }
@@ -902,11 +914,11 @@ fn build_shapes_drawing(
     })))
 }
 
-/// A resolved (post-layout) fill → its solid colour, or `None` (no fill).
-/// Returns the OUTER `None` when the paint is a gradient/tiling/pattern — no
-/// flat OOXML form — so the caller bails to rasterize.
-fn resolved_fill(fill: &Option<Paint>) -> Option<Option<ShapeFill>> {
-    fill_color(fill)
+/// A resolved (post-layout) fill → its native DrawingML form, or `None` (no
+/// fill). Returns the OUTER `None` when the paint has no native OOXML form, so
+/// the caller bails to rasterize.
+fn resolved_fill(ctx: &mut DocxCtx, fill: &Option<Paint>) -> Option<Option<ShapeFill>> {
+    fill_color(ctx, fill)
 }
 
 /// A resolved (post-layout) stroke → a uniform [`ShapeStroke`]. Same

@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
-use crate::dom::{FillSpec, GeomKind, GeomShape, PathGeom, PicGeom};
+use crate::dom::{FillSpec, GeomKind, GeomShape, PathGeom, PicGeom, SlideCtx};
 
 use typst_library::layout::{Size, Transform};
-use typst_library::visualize::{Color, Curve, Geometry, Paint, Shape};
-use typst_ooxml_core::dml::{self, AlphaMode};
+use typst_library::visualize::{Color, Curve, Geometry, Paint, Shape, Tiling};
+use typst_ooxml_core::dml::{self, AlphaMode, TileImage};
 use typst_ooxml_core::{color as ooxml_color, units};
 
 /// Lower one laid-out Typst shape to the PPTX slide IR.
@@ -13,6 +13,7 @@ use typst_ooxml_core::{color as ooxml_color, units};
 /// may translate, rotate, reflect, or uniformly scale the geometry; skew and
 /// non-uniform scale return `None` so the caller can rasterize instead.
 pub(crate) fn shape_to_geom(
+    ctx: &mut SlideCtx,
     shape: &Shape,
     transform: Transform,
     rot_60k: i32,
@@ -25,9 +26,9 @@ pub(crate) fn shape_to_geom(
         return Some(connector);
     }
 
-    let fill = resolved_fill(&shape.fill)?;
     let raw = dml::geometry_to_raw(&shape.geometry, transform);
     let normalized = dml::normalize_segments(raw)?;
+    let fill = resolved_fill(ctx, &shape.fill)?;
 
     Some(GeomShape {
         x_emu: units::abs_to_emu(normalized.min_x),
@@ -100,8 +101,20 @@ pub(crate) fn clip_to_pic_geom(clip: &Curve, size: Size) -> Option<PicGeom> {
     Some(PicGeom::RoundRect { adj_100k: dml::round_rect_adj(radius, size) })
 }
 
-pub(crate) fn resolved_fill(fill: &Option<Paint>) -> Option<Option<FillSpec>> {
-    dml::resolved_fill(fill, AlphaMode::Preserve)
+pub(crate) fn resolved_fill(
+    ctx: &mut SlideCtx,
+    fill: &Option<Paint>,
+) -> Option<Option<FillSpec>> {
+    match fill {
+        Some(Paint::Tiling(tiling)) => tile_fill(ctx, tiling).map(Some),
+        _ => dml::resolved_fill(fill, AlphaMode::Preserve),
+    }
+}
+
+fn tile_fill(ctx: &mut SlideCtx, tiling: &Tiling) -> Option<FillSpec> {
+    let tile = dml::render_tiling_tile(tiling)?;
+    let media = ctx.add_media(&tile.png, "png");
+    Some(tile.fill(TileImage::Media(media)))
 }
 
 pub(crate) fn srgb_bytes(color: &Color) -> [u8; 4] {
@@ -139,7 +152,8 @@ mod tests {
     #[test]
     fn rect_geometry_lowers_to_closed_four_corner_path() {
         let shape = bare_shape(Geometry::Rect(Size::new(Abs::pt(10.0), Abs::pt(20.0))));
-        let geom = shape_to_geom(&shape, Transform::identity(), 0).unwrap();
+        let mut ctx = SlideCtx::default();
+        let geom = shape_to_geom(&mut ctx, &shape, Transform::identity(), 0).unwrap();
 
         assert_eq!(geom.x_emu, 0);
         assert_eq!(geom.y_emu, 0);
@@ -168,7 +182,8 @@ mod tests {
             Point::new(Abs::pt(20.0), Abs::pt(4.0)),
         );
         let shape = bare_shape(Geometry::Curve(curve));
-        let geom = shape_to_geom(&shape, Transform::identity(), 0).unwrap();
+        let mut ctx = SlideCtx::default();
+        let geom = shape_to_geom(&mut ctx, &shape, Transform::identity(), 0).unwrap();
         let GeomKind::Path(PathGeom::Custom(segments)) = geom.geom else {
             panic!("expected custom path");
         };
@@ -190,7 +205,8 @@ mod tests {
     fn line_geometry_lowers_to_loose_connector() {
         let shape = bare_shape(Geometry::Line(Point::new(Abs::pt(5.0), Abs::pt(5.0))));
         let transform = Transform::translate(Abs::pt(-5.0), Abs::pt(-10.0));
-        let geom = shape_to_geom(&shape, transform, 0).unwrap();
+        let mut ctx = SlideCtx::default();
+        let geom = shape_to_geom(&mut ctx, &shape, transform, 0).unwrap();
 
         assert_eq!(geom.x_emu, emu_pt(-5.0));
         assert_eq!(geom.y_emu, emu_pt(-10.0));
@@ -207,7 +223,8 @@ mod tests {
     fn descending_line_connector_records_flip() {
         let shape = bare_shape(Geometry::Line(Point::new(Abs::pt(-5.0), Abs::pt(5.0))));
         let transform = Transform::translate(Abs::pt(10.0), Abs::pt(0.0));
-        let geom = shape_to_geom(&shape, transform, 0).unwrap();
+        let mut ctx = SlideCtx::default();
+        let geom = shape_to_geom(&mut ctx, &shape, transform, 0).unwrap();
 
         assert_eq!(geom.x_emu, emu_pt(5.0));
         assert_eq!(geom.y_emu, 0);
@@ -234,7 +251,10 @@ mod tests {
             anti_alias: true,
         }));
 
-        let fill = resolved_fill(&Some(Paint::Gradient(gradient))).unwrap().unwrap();
+        let mut ctx = SlideCtx::default();
+        let fill = resolved_fill(&mut ctx, &Some(Paint::Gradient(gradient)))
+            .unwrap()
+            .unwrap();
         let FillSpec::LinearGradient { angle_60k, stops } = fill else {
             panic!("expected linear gradient");
         };
@@ -277,6 +297,7 @@ mod tests {
             anti_alias: true,
         }));
 
-        assert!(resolved_fill(&Some(Paint::Gradient(gradient))).is_none());
+        let mut ctx = SlideCtx::default();
+        assert!(resolved_fill(&mut ctx, &Some(Paint::Gradient(gradient))).is_none());
     }
 }

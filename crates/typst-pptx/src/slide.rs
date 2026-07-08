@@ -12,6 +12,7 @@ use typst_library::model::{
     Destination, Numbering, TableCell as TypstTableCell, TableElem,
 };
 use typst_library::visualize::{LineCap, Paint, Shape, Stroke};
+use typst_ooxml_core::dml;
 
 use crate::dom::{
     CellBorders, FillSpec, MathBox, PicGeom, SlideCtx, SlideIr, SlideShape, StrokeSpec,
@@ -262,7 +263,8 @@ impl<'a, 'b> Walker<'a, 'b> {
                     }
                 }
                 FrameItem::Shape(shape, span) => {
-                    match crate::shape::shape_to_geom(shape, item_transform, 0) {
+                    match crate::shape::shape_to_geom(self.ctx, shape, item_transform, 0)
+                    {
                         Some(geom) => self
                             .shapes
                             .push(OrderedShape { order, shape: SlideShape::Geom(geom) }),
@@ -459,6 +461,8 @@ impl<'a, 'b> Walker<'a, 'b> {
         let size =
             Size::new(region.width * similarity.scale, region.height * similarity.scale);
         let styles = StyleChain::default();
+        let fill = region_fill(self.ctx, &region.body, styles);
+        let borders = region_borders(&region.body, styles);
         self.active_table_cells.push(ActiveTableCell {
             loc: tag.location(),
             order,
@@ -468,8 +472,8 @@ impl<'a, 'b> Walker<'a, 'b> {
             colspan: region.colspan.get(),
             rowspan: region.rowspan.get(),
             rect: Rect { min: origin, max: origin + size.to_point() },
-            fill: region_fill(&region.body, styles),
-            borders: region_borders(&region.body, styles),
+            fill,
+            borders,
             text: Vec::new(),
             links: Vec::new(),
         });
@@ -584,7 +588,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                 }
             }
             FrameItem::Shape(shape, span) => {
-                match crate::shape::shape_to_geom(shape, item_transform, 0) {
+                match crate::shape::shape_to_geom(self.ctx, shape, item_transform, 0) {
                     Some(geom) => self
                         .shapes
                         .push(OrderedShape { order, shape: SlideShape::Geom(geom) }),
@@ -1189,6 +1193,7 @@ fn track_widths(
 }
 
 fn region_fill(
+    ctx: &mut SlideCtx,
     body: &typst_library::foundations::Content,
     styles: StyleChain,
 ) -> Option<FillSpec> {
@@ -1199,7 +1204,7 @@ fn region_fill(
             body.to_packed::<GridCell>()
                 .and_then(|cell| smart_fill(cell.fill.get_cloned(styles)))
         })?;
-    crate::shape::resolved_fill(&Some(fill)).flatten()
+    crate::shape::resolved_fill(ctx, &Some(fill)).flatten()
 }
 
 fn smart_fill(fill: Smart<Option<Paint>>) -> Option<Paint> {
@@ -1467,7 +1472,7 @@ fn background(page: &Page) -> Option<FillSpec> {
     fill.as_ref()?;
     // A solid or linear-gradient page fill maps to a native slide background;
     // a tiling or non-linear gradient we cannot represent falls back to white.
-    match crate::shape::resolved_fill(&fill) {
+    match dml::resolved_fill(&fill, dml::AlphaMode::Preserve) {
         Some(spec) => spec,
         None => Some(FillSpec::Solid([255, 255, 255, 255])),
     }

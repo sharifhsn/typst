@@ -198,3 +198,36 @@ pub fn render_frame_to_png(
     let png = pixmap.encode_png().ok()?;
     Some(RasterizedPng { png, offset: ink.min + offset, size })
 }
+
+/// Renders a laid-out frame to PNG at its full logical frame size.
+pub fn render_full_frame_to_png(
+    frame: Frame,
+    pixel_per_pt: f64,
+) -> Option<RasterizedPng> {
+    let size = frame.size();
+    let (w, h) = (size.x.to_pt(), size.y.to_pt());
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+
+    let page = typst_layout::Page {
+        frame,
+        bleed: Sides::splat(Abs::zero()),
+        fill: Smart::Custom(None),
+        numbering: None,
+        supplement: Content::empty(),
+        number: 1,
+    };
+    let render_options = typst_render::RenderOptions {
+        pixel_per_pt: pixel_per_pt.into(),
+        ..Default::default()
+    };
+    let rendered =
+        catch_unwind(AssertUnwindSafe(|| typst_render::render(&page, &render_options)));
+    let Ok(pixmap) = rendered else {
+        return None;
+    };
+
+    let png = pixmap.encode_png().ok()?;
+    Some(RasterizedPng { png, offset: Point::zero(), size })
+}
