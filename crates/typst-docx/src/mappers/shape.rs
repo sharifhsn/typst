@@ -48,6 +48,7 @@ pub fn shape(
     let name = ecow::eco_format!("Shape {docpr_id}");
     Ok(Some(Run::Drawing(Drawing {
         rel: EcoString::new(),
+        svg_rel: None,
         w_emu,
         h_emu,
         alt: None,
@@ -138,6 +139,7 @@ pub fn text_box(
     let name = ecow::eco_format!("Text Box {docpr_id}");
     Ok(Some(Run::Drawing(Drawing {
         rel: EcoString::new(),
+        svg_rel: None,
         w_emu,
         h_emu,
         alt: None,
@@ -826,6 +828,7 @@ fn build_shapes_drawing(
         let name = ecow::eco_format!("Shape {docpr_id}");
         return Ok(Some(Run::Drawing(Drawing {
             rel: EcoString::new(),
+            svg_rel: None,
             w_emu,
             h_emu,
             alt: None,
@@ -892,6 +895,7 @@ fn build_shapes_drawing(
     let name = ecow::eco_format!("Group {docpr_id}");
     Ok(Some(Run::Drawing(Drawing {
         rel: EcoString::new(),
+        svg_rel: None,
         w_emu: group_w_emu,
         h_emu: group_h_emu,
         alt: None,

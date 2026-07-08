@@ -28,11 +28,10 @@
 //! ## Format handling
 //!
 //! Word embeds raster *exchange* formats directly: PNG, JPEG and GIF bytes are
-//! stored verbatim (no re-encode), preserving fidelity and file size. WebP, SVG
-//! and PDF sources have no universally-safe native Word representation and must
-//! be rasterized to PNG first; that path is flagged INTEGRATION-NEEDED because
-//! it needs `typst-render` (not currently a dependency — adding it touches
-//! `Cargo.toml`, which mappers may not edit).
+//! stored verbatim (no re-encode), preserving fidelity and file size. SVG
+//! sources are embedded as a native SVG media part referenced from
+//! `<asvg:svgBlip>`, while keeping the required PNG fallback in the normal
+//! `<a:blip r:embed>` slot. WebP and PDF sources stay on the raster fallback.
 
 use ecow::EcoString;
 use typst_library::diag::SourceResult;
@@ -40,7 +39,7 @@ use typst_library::foundations::{Content, Packed, Smart, StyleChain};
 use typst_library::layout::{Abs, OuterVAlignment, Sizing, VAlignment};
 use typst_library::model::{FigureElem, FigureKind};
 use typst_library::text::TextElem;
-use typst_library::visualize::{Image, ImageElem};
+use typst_library::visualize::{Image, ImageElem, ImageKind, SvgImage};
 use typst_ooxml_core::media;
 
 use crate::ctx::DocxCtx;
@@ -75,10 +74,34 @@ pub fn image(
     // Decode the image so we know its real format and intrinsic pixel size.
     let decoded = elem.decode(ctx.engine(), styles)?;
 
+    if let Some(svg) = svg_image(&decoded) {
+        let content = elem.clone().pack();
+        if let Some((png_rel, size, _text)) = ctx.rasterize(&content, styles, span)? {
+            let svg_rel = ctx.add_image(svg.data().as_slice(), "svg");
+            let docpr_id = ctx.next_drawing_id();
+            let name: EcoString = ecow::eco_format!("Picture {docpr_id}");
+            let alt = elem.alt.get_cloned(styles);
+            return Ok(Run::Drawing(Drawing {
+                rel: png_rel,
+                svg_rel: Some(svg_rel),
+                w_emu: crate::props::abs_to_emu(size.x),
+                h_emu: crate::props::abs_to_emu(size.y),
+                alt,
+                docpr_id,
+                name,
+                anchor: None,
+                shape: None,
+                group: None,
+            }));
+        }
+        ctx.warn_ignored("SVG image could not be rasterized for DOCX fallback", span);
+        return Ok(Run::Text { props: RunProps::default(), text: "".into() });
+    }
+
     // Obtain embeddable bytes + the lowercase extension Word understands.
     let Some((bytes, ext)) = embeddable_bytes(&decoded) else {
-        // Vector / WebP / PDF have no Word-embeddable raster form, so lay the
-        // image out and rasterize it to a PNG via the generic fallback.
+        // WebP / PDF have no native Word picture form here, so lay the image
+        // out and rasterize it to a PNG via the generic fallback.
         let content = elem.clone().pack();
         // The vector image rasterizes to a single drawing (an image carries no
         // extractable body text, so `laid_out_fallback`'s hidden-text runs are
@@ -106,6 +129,7 @@ pub fn image(
 
     Ok(Run::Drawing(Drawing {
         rel,
+        svg_rel: None,
         w_emu,
         h_emu,
         alt,
@@ -699,6 +723,7 @@ fn fallback_runs(
     let mut runs = Vec::with_capacity(2);
     runs.push(Run::Drawing(Drawing {
         rel,
+        svg_rel: None,
         w_emu: crate::props::abs_to_emu(size.x),
         h_emu: crate::props::abs_to_emu(size.y),
         alt: Some(text.replace('\n', " ").into())
@@ -744,11 +769,19 @@ fn hidden_text_runs(text: &str, out: &mut Vec<Run>) {
 /// the format needs rasterization that is not yet available.
 ///
 /// Raster *exchange* formats (PNG/JPEG/GIF) are embedded verbatim — no
-/// re-encode, preserving fidelity. WebP, SVG and PDF return `None` (see the
-/// module docs / [`laid_out_fallback`] INTEGRATION-NEEDED note).
+/// re-encode, preserving fidelity. SVG is handled by [`image`] before this
+/// helper so it can carry both a native SVG part and a PNG fallback. WebP and
+/// PDF return `None` and stay on the raster fallback.
 fn embeddable_bytes(image: &Image) -> Option<(Vec<u8>, EcoString)> {
     let embeddable = media::embeddable_image_bytes(image)?;
     Some((embeddable.bytes.to_vec(), embeddable.ext.into()))
+}
+
+fn svg_image(image: &Image) -> Option<&SvgImage> {
+    match image.kind() {
+        ImageKind::Svg(svg) => Some(svg),
+        _ => None,
+    }
 }
 
 /// Computes the inline display extents `(cx, cy)` in EMU.

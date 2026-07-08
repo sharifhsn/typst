@@ -1161,6 +1161,7 @@ fn background_block(
     let docpr_id = ctx.next_drawing_id();
     let drawing = Drawing {
         rel,
+        svg_rel: None,
         w_emu: geom.page_w as i64 * EMU_PER_TWIP,
         h_emu: geom.page_h as i64 * EMU_PER_TWIP,
         alt: None,

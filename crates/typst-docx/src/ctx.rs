@@ -292,8 +292,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     /// Lays out arbitrary content and rasterizes it to a PNG, embedding it as a
     /// media part. Returns the media relationship id and the content's size, or
     /// `None` if the content lays out to nothing. This is the universal fallback
-    /// for content that has no idiomatic OOXML representation (drawn shapes, SVG
-    /// images, externally-rendered figures, …).
+    /// for content that has no idiomatic OOXML representation (drawn shapes,
+    /// PDF images, externally-rendered figures, …).
     /// Rasterizes `content` to a PNG media part and returns its relationship
     /// id, size, and the plain text recovered from the laid-out frame (empty if
     /// none) — the caller can attach that text as hidden runs so the
@@ -1509,7 +1509,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         Ok(())
     }
 
-    /// No idiomatic representation (a drawn shape, an SVG/PDF image, an
+    /// No idiomatic representation (a drawn shape, a PDF image, an
     /// externally-rendered figure, …): rasterize it and embed as an image so
     /// the content survives instead of being dropped.
     fn rasterize_fallback(
