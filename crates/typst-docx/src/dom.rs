@@ -50,6 +50,10 @@ pub struct DocxDocument {
     /// Whether the document enables hyphenation (`#set text(hyphenate: ..)`,
     /// resolved at the root style chain). Emits `w:autoHyphenation`.
     pub(crate) hyphenate: bool,
+    /// Whether any section emits distinct `even` header/footer references.
+    /// Word ignores those references unless `w:evenAndOddHeaders` is enabled
+    /// in `word/settings.xml`.
+    pub(crate) even_and_odd_headers: bool,
 }
 
 impl DocxDocument {

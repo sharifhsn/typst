@@ -1214,6 +1214,9 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
     if document.hyphenate {
         w.leaf("w:autoHyphenation");
     }
+    if document.even_and_odd_headers {
+        w.leaf("w:evenAndOddHeaders");
+    }
     w.open("w:characterSpacingControl")
         .attr(xml::W_VAL, "doNotCompress")
         .empty();
