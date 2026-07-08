@@ -1107,7 +1107,8 @@ fn write_sectpr(w: &mut XmlWriter, sect: &SectPr) {
     w.open(xml::W_SECTPR).start_children();
 
     // CT_SectPr child order is strict: headerReference/footerReference precede
-    // everything, then (type) → pgSz → pgMar → pgNumType → cols → titlePg.
+    // everything, then (type) → pgSz → pgMar → lnNumType → pgNumType → cols →
+    // titlePg.
     for h in &sect.headers {
         w.open("w:headerReference")
             .attr("w:type", h.kind)
@@ -1147,6 +1148,14 @@ fn write_sectpr(w: &mut XmlWriter, sect: &SectPr) {
         .attr("w:footer", &sect.footer.to_string())
         .attr("w:gutter", &sect.gutter.to_string())
         .empty();
+    if let Some(line_numbers) = &sect.line_numbers {
+        w.open("w:lnNumType")
+            .attr("w:countBy", &line_numbers.count_by.to_string())
+            .attr("w:start", &line_numbers.start.to_string())
+            .attr("w:restart", line_numbers.restart)
+            .attr("w:distance", &line_numbers.distance.to_string())
+            .empty();
+    }
     if let Some(pn) = &sect.pg_num {
         w.open("w:pgNumType").attr("w:fmt", pn.fmt);
         if let Some(s) = pn.start {
@@ -1232,6 +1241,12 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
         .attr("w:spelling", "clean")
         .attr("w:grammar", "clean")
         .empty();
+    if document.mirror_margins {
+        w.leaf("w:mirrorMargins");
+    }
+    if document.rtl_gutter {
+        w.leaf("w:rtlGutter");
+    }
     w.open("w:defaultTabStop").attr(xml::W_VAL, "720").empty();
     // A bare element (no `w:val`) — Word's own CT_OnOff-by-presence convention —
     // between defaultTabStop and characterSpacingControl, the schema position

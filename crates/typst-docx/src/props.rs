@@ -252,6 +252,7 @@ impl ParaProps {
             && !self.keep_next
             && !self.keep_lines
             && self.num.is_none()
+            && !self.suppress_line_numbers
             && !self.bidi
             && self.spacing.is_none()
             && self.ind.is_none()
@@ -289,11 +290,15 @@ impl ParaProps {
             w.open("w:numId").attr(xml::W_VAL, &num_id.to_string()).empty();
             w.close();
         }
-        // 5. bidi (paragraph base reading order)
+        // 5. suppressLineNumbers (paragraph opt-out inside a numbered section)
+        if self.suppress_line_numbers {
+            w.leaf("w:suppressLineNumbers");
+        }
+        // 6. bidi (paragraph base reading order)
         if self.bidi {
             w.leaf("w:bidi");
         }
-        // 6. tabs
+        // 7. tabs
         if !self.tabs.is_empty() {
             w.open("w:tabs").start_children();
             for tab in &self.tabs {
@@ -315,11 +320,11 @@ impl ParaProps {
             }
             w.close();
         }
-        // 7. pBdr (paragraph borders, before shd)
+        // 8. pBdr (paragraph borders, before shd)
         if let Some(b) = &self.pbdr {
             write_pbdr(w, b);
         }
-        // 8. shd (paragraph shading)
+        // 9. shd (paragraph shading)
         if let Some(fill) = self.shd_fill {
             w.open(xml::W_SHD)
                 .attr(xml::W_VAL, "clear")
@@ -327,19 +332,19 @@ impl ParaProps {
                 .attr("w:fill", &hex(fill))
                 .empty();
         }
-        // 9. spacing
+        // 10. spacing
         if let Some(sp) = &self.spacing {
             write_spacing(w, sp);
         }
-        // 10. ind
+        // 11. ind
         if let Some(ind) = &self.ind {
             write_indent(w, ind);
         }
-        // 11. contextualSpacing
+        // 12. contextualSpacing
         if self.contextual_spacing {
             w.leaf("w:contextualSpacing");
         }
-        // 12. jc
+        // 13. jc
         if let Some(jc) = self.jc {
             let val = match jc {
                 Jc::Start => "start",
@@ -349,7 +354,7 @@ impl ParaProps {
             };
             w.open("w:jc").attr(xml::W_VAL, val).empty();
         }
-        // 13. outlineLvl
+        // 14. outlineLvl
         if let Some(lvl) = self.outline_lvl {
             w.open("w:outlineLvl").attr(xml::W_VAL, &lvl.to_string()).empty();
         }

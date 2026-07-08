@@ -142,6 +142,11 @@ pub struct DocxCtx<'a, 'e> {
     /// keeps the origin check tied to source raw spans instead of monospace font.
     raw_ranges: Vec<RawRange>,
 
+    /// Whether the current body section emits Word line numbering. Paragraphs
+    /// whose own style chain disables Typst line numbers become
+    /// `w:suppressLineNumbers` only while this is true.
+    pub(crate) line_numbering_active: bool,
+
     /// Whether we are currently lowering a footnote's body (into `footnotes.xml`).
     /// Word forbids a footnote *inside* a footnote — a `w:footnoteReference` in
     /// the footnote story makes the file unopenable — so an inner `FootnoteElem`
@@ -193,6 +198,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             last_char: None,
             raw_depth: 0,
             raw_ranges: Vec::new(),
+            line_numbering_active: false,
             in_footnote: false,
             suppress_text_box: false,
         }
@@ -862,10 +868,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     ) -> ParaProps {
         use typst_library::foundations::Resolve;
         use typst_library::layout::{AlignElem, Em, FixedAlignment};
-        use typst_library::model::ParElem;
+        use typst_library::model::{ParElem, ParLine};
         use typst_library::text::TextElem;
 
         let mut p = ParaProps::default();
+
+        if self.line_numbering_active && styles.get_ref(ParLine::numbering).is_none() {
+            p.suppress_line_numbers = true;
+        }
 
         // G3 alignment. Justification (`w:jc="both"`) wins over horizontal
         // alignment; a left/start paragraph stays `None` for byte-identity with

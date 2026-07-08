@@ -50,6 +50,12 @@ pub struct DocxDocument {
     /// Whether the document enables hyphenation (`#set text(hyphenate: ..)`,
     /// resolved at the root style chain). Emits `w:autoHyphenation`.
     pub(crate) hyphenate: bool,
+    /// Whether any section uses inside/outside page margins. Emits the
+    /// document-wide `<w:mirrorMargins/>` setting.
+    pub(crate) mirror_margins: bool,
+    /// Whether any mirrored-margin section uses a right-side binding gutter.
+    /// Emits the document-wide `<w:rtlGutter/>` setting.
+    pub(crate) rtl_gutter: bool,
 }
 
 impl DocxDocument {
@@ -341,6 +347,9 @@ pub struct ParaProps {
     /// `<w:keepLines/>` (keep all lines on one page). Default false.
     pub keep_lines: bool,
     pub num: Option<(u32, u8)>,
+    /// `<w:suppressLineNumbers/>` for paragraphs whose Typst styles explicitly
+    /// disable `par.line(numbering:)` inside a numbered section.
+    pub suppress_line_numbers: bool,
     /// `<w:bidi/>` (paragraph base reading order is RTL). Default false.
     pub bidi: bool,
     pub spacing: Option<Spacing>,
@@ -644,6 +653,9 @@ pub struct SectPr {
     pub gutter: i32,
     /// Equal-width column gutter in twips (Word `w:cols/@w:space`). Default 720.
     pub col_space: i32,
+    /// Section line numbering (`w:lnNumType`) when `par.line(numbering:)` is
+    /// active for this section.
+    pub line_numbers: Option<LineNumbering>,
     /// Page-number glyph format + start, if `set page(numbering:)` is active.
     pub pg_num: Option<PgNumType>,
     /// `w:type` (only for non-final sections / `pagebreak(to:)`); None = default `nextPage`.
@@ -654,6 +666,17 @@ pub struct SectPr {
     pub footers: Vec<HdrFtrRef>,
     /// `<w:titlePg/>` (distinct first page). Default false.
     pub title_pg: bool,
+}
+
+/// Line numbering settings for `<w:lnNumType>`.
+#[derive(Clone, PartialEq)]
+pub struct LineNumbering {
+    pub count_by: u32,
+    pub start: u32,
+    /// `continuous` | `newPage` | `newSection`.
+    pub restart: &'static str,
+    /// Distance between the body text and line number in twips.
+    pub distance: i32,
 }
 
 /// Page-number format + start for `<w:pgNumType>`.
@@ -716,6 +739,7 @@ impl Default for SectPr {
             columns: 1,
             gutter: 0,
             col_space: 720,
+            line_numbers: None,
             pg_num: None,
             sect_type: None,
             headers: Vec::new(),
