@@ -3,9 +3,9 @@
 //! rasterized image.
 //!
 //! A shape is mapped only when it is purely decorative (no body) and has an
-//! explicit, representable size, fill and stroke — solid colours, no gradient,
-//! no auto/fractional size. Anything else returns `None`, and the caller
-//! rasterizes it so the visual is still preserved.
+//! explicit, representable size, fill and stroke — solid colours or DrawingML
+//! gradients, no auto/fractional size. Anything else returns `None`, and the
+//! caller rasterizes it so the visual is still preserved.
 
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Content, Resolve, Smart, StyleChain};
@@ -424,20 +424,15 @@ fn fill_color(paint: &Option<Paint>) -> Option<Option<ShapeFill>> {
     match paint {
         None => Some(None),
         Some(Paint::Solid(c)) => Some(Some(ShapeFill::Solid(opaque(color_to_hex(c))))),
-        Some(Paint::Gradient(g)) => linear_gradient_fill(g).map(Some),
+        Some(Paint::Gradient(g)) => gradient_fill(g).map(Some),
         Some(_) => None,
     }
 }
 
-/// Maps a Typst [`Gradient`] to a native [`ShapeFill::LinearGradient`], or
-/// `None` (bail to rasterize) for a radial/conic gradient — those don't map
-/// cleanly onto OOXML's shape-relative `a:path` radial model (center/radius
-/// are free-form in Typst but the OOXML form is anchored to the bounding box),
-/// so they are scoped out rather than risk a subtly-wrong mapping.
-fn linear_gradient_fill(
-    gradient: &typst_library::visualize::Gradient,
-) -> Option<ShapeFill> {
-    dml::linear_gradient_fill(gradient, dml::AlphaMode::Opaque)
+/// Maps a Typst [`Gradient`] to a native DrawingML gradient fill, or `None`
+/// (bail to rasterize) for conic gradients.
+fn gradient_fill(gradient: &typst_library::visualize::Gradient) -> Option<ShapeFill> {
+    dml::gradient_fill(gradient, dml::AlphaMode::Opaque)
 }
 
 /// Resolves a single optional stroke. `None` outer = unrepresentable (gradient)

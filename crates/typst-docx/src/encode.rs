@@ -50,10 +50,6 @@ const CT_THEME: &str = ns::ct::THEME;
 const CT_FONT_TABLE: &str = ns::ct::WORD_FONT_TABLE;
 const CT_WEB_SETTINGS: &str = ns::ct::WORD_WEB_SETTINGS;
 
-const A14_USE_LOCAL_DPI_EXT_URI: &str = "{28A0092B-C50C-407E-A947-70E740481C1C}";
-const ASVG_SVG_BLIP_EXT_URI: &str = "{96DAC541-7B7A-43D3-8B79-37D633B846F1}";
-const ASVG_NS: &str = "http://schemas.microsoft.com/office/drawing/2016/SVG/main";
-
 fn push_font(fonts: &mut Vec<String>, font: &str) {
     if !fonts.iter().any(|existing| existing == font) {
         fonts.push(font.to_string());
@@ -551,7 +547,8 @@ fn write_vml_textbox(
         Some(ShapeFill::Solid(c)) => {
             w.attr("fillcolor", &hex(*c));
         }
-        Some(ShapeFill::LinearGradient { stops, .. }) => {
+        Some(ShapeFill::LinearGradient { stops, .. })
+        | Some(ShapeFill::RadialGradient { stops, .. }) => {
             if let Some(stop) = stops.first() {
                 w.attr("fillcolor", &hex(stop.color));
             }
@@ -726,29 +723,7 @@ fn write_pic_payload(w: &mut XmlWriter, d: &Drawing) {
     w.close(); // pic:nvPicPr
     // pic:blipFill
     w.open("pic:blipFill").start_children();
-    w.open("a:blip").attr("r:embed", &d.rel);
-    if let Some(svg_rel) = &d.svg_rel {
-        w.start_children();
-        w.open("a:extLst").start_children();
-        w.open("a:ext")
-            .attr("uri", A14_USE_LOCAL_DPI_EXT_URI)
-            .start_children();
-        w.open("a14:useLocalDpi")
-            .attr("xmlns:a14", ns::A14)
-            .attr("val", "0")
-            .empty();
-        w.close(); // a:ext
-        w.open("a:ext").attr("uri", ASVG_SVG_BLIP_EXT_URI).start_children();
-        w.open("asvg:svgBlip")
-            .attr("xmlns:asvg", ASVG_NS)
-            .attr("r:embed", svg_rel)
-            .empty();
-        w.close(); // a:ext
-        w.close(); // a:extLst
-        w.close(); // a:blip
-    } else {
-        w.empty();
-    }
+    dml::write_blip(w, &d.rel, d.svg_rel.as_deref());
     w.open("a:stretch").start_children();
     w.open("a:fillRect").empty();
     w.close(); // a:stretch

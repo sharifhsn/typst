@@ -2,28 +2,48 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use typst_library::foundations::{Content, Smart};
 use typst_library::layout::{Abs, Frame, FrameItem, Point, Sides, Size};
-use typst_library::visualize::Image;
+use typst_library::visualize::{Image, ImageKind};
 use typst_ooxml_core::media;
 use typst_ooxml_core::render::{self, RasterOptions};
 
 use crate::dom::{MediaId, SlideCtx};
 
+pub(crate) struct EmbeddedImage {
+    pub media: MediaId,
+    pub svg_media: Option<MediaId>,
+    pub offset: Point,
+    pub size: Size,
+}
+
 /// Embed a laid-out image and return the media id, crop offset, and display size.
 ///
 /// PNG/JPEG/GIF exchange rasters are embedded verbatim. WebP, raw-pixel rasters,
-/// SVG, and PDF are rendered at the supplied display size and embedded as PNG.
+/// and PDF are rendered at the supplied display size and embedded as PNG. SVG
+/// embeds both a native SVG media part and a rendered PNG fallback.
 #[allow(dead_code)]
 pub(crate) fn embed_image(
     ctx: &mut SlideCtx,
     image: &Image,
     size: Size,
-) -> Option<(MediaId, Point, Size)> {
+) -> Option<EmbeddedImage> {
     if let Some(embeddable) = media::embeddable_image_bytes(image) {
-        return Some((
-            ctx.add_media(embeddable.bytes, embeddable.ext),
-            Point::zero(),
+        return Some(EmbeddedImage {
+            media: ctx.add_media(embeddable.bytes, embeddable.ext),
+            svg_media: None,
+            offset: Point::zero(),
             size,
-        ));
+        });
+    }
+
+    if let ImageKind::Svg(svg) = image.kind() {
+        let svg_media = ctx.add_media(svg.data().as_slice(), "svg");
+        let mut frame = Frame::soft(size);
+        frame.push(
+            Point::zero(),
+            FrameItem::Image(image.clone(), size, typst_syntax::Span::detached()),
+        );
+        let (media, offset, size) = raster_fallback(ctx, frame)?;
+        return Some(EmbeddedImage { media, svg_media: Some(svg_media), offset, size });
     }
 
     let mut frame = Frame::soft(size);
@@ -31,7 +51,8 @@ pub(crate) fn embed_image(
         Point::zero(),
         FrameItem::Image(image.clone(), size, typst_syntax::Span::detached()),
     );
-    raster_fallback(ctx, frame)
+    let (media, offset, size) = raster_fallback(ctx, frame)?;
+    Some(EmbeddedImage { media, svg_media: None, offset, size })
 }
 
 /// Embed an exchange-format raster image without re-rendering it.
