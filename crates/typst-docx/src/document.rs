@@ -14,8 +14,8 @@ use typst_library::routines::{Arenas, RealizationKind};
 use crate::ctx::DocxCtx;
 use crate::dom::{
     Block, DocxDocument, Field, HdrFtrPart, HdrFtrRef, HeadingStyle, HeadingStyleSample,
-    Para, ParaChild, ParaProps, PgNumType, Run, RunProps, SectPr, SectType, Spacing,
-    TextDefaults, TocHeading,
+    LineNumbering, Para, ParaChild, ParaProps, PgNumType, Run, RunProps, SectPr,
+    SectType, Spacing, TextDefaults, TocHeading,
 };
 use crate::introspect::DocxIntrospector;
 use crate::props;
@@ -101,6 +101,16 @@ fn docx_document_impl(
                 .map(|section| section.geom.numbering.clone())
                 .collect()
         };
+    let mirror_margins = if sections.is_empty() {
+        first_geom.mirror_margins
+    } else {
+        sections.iter().any(|section| section.geom.mirror_margins)
+    };
+    let rtl_gutter = if sections.is_empty() {
+        first_geom.rtl_gutter
+    } else {
+        sections.iter().any(|section| section.geom.rtl_gutter)
+    };
 
     // Walk the native element tree into the typed IR.
     let (
@@ -170,6 +180,7 @@ fn docx_document_impl(
             // converts each section's content separately and joins them with
             // `Block::SectionBreak`s carrying the earlier sections' `sectPr`.
             let (body, sect, header_parts, footer_parts) = if sections.len() <= 1 {
+                ctx.line_numbering_active = first_geom.line_numbers.is_some();
                 let body = crate::convert::run(&mut ctx, &pairs)?;
                 let (sect, h, f) = build_section(&mut ctx, &first_geom, styles)?;
                 (body, sect, h, f)
@@ -187,6 +198,7 @@ fn docx_document_impl(
                 let mut final_sect = None;
                 let last = sections.len() - 1;
                 for (idx, section) in sections.iter().enumerate() {
+                    ctx.line_numbering_active = section.geom.line_numbers.is_some();
                     let mut blocks =
                         crate::convert::run(&mut ctx, &pairs[section.range.clone()])?;
                     body.append(&mut blocks);
@@ -375,6 +387,8 @@ fn docx_document_impl(
         background_color: first_geom.background_color,
         hyphenate: first_geom.hyphenate,
         even_and_odd_headers,
+        mirror_margins,
+        rtl_gutter,
     })
 }
 
@@ -708,6 +722,13 @@ struct SectGeom {
     gutter: i32,
     columns: u32,
     col_space: i32,
+    /// Whether this section uses Typst inside/outside margins. Word exposes the
+    /// behavior as the document-wide `<w:mirrorMargins/>` setting.
+    mirror_margins: bool,
+    /// Whether this section needs Word's right-side gutter setting.
+    rtl_gutter: bool,
+    /// Section-level line numbering derived from `par.line(numbering:)`.
+    line_numbers: Option<LineNumbering>,
     /// `set page(numbering:)`, if any (drives `pgNumType` + the PAGE field).
     numbering: Option<typst_library::model::Numbering>,
     /// Where the auto page-number marginal lands: Top → header, else footer.
@@ -724,6 +745,9 @@ struct SectGeom {
     /// `set page(background:)` content — a full-page image/art drawn behind the
     /// text. Emitted as a `behindDoc` page-anchored drawing in the header.
     background: Option<Content>,
+    /// `set page(foreground:)` content — a full-page image/art drawn in front of
+    /// the body text via a page-anchored drawing in the header.
+    foreground: Option<Content>,
     /// `set page(fill: solid-color)` — a flat page background colour (Word's
     /// "Page Color"). `None` for `auto`/`none`/a gradient or tiling fill (which
     /// has no native `w:background` form and is left unset, matching Word's
@@ -830,6 +854,7 @@ fn same_section(a: &SectGeom, b: &SectGeom) -> bool {
         && a.col_space == b.col_space
         && a.gutter == b.gutter
         && a.numbering == b.numbering
+        && a.line_numbers == b.line_numbers
         && a.number_in_header == b.number_in_header
         && a.number_jc == b.number_jc
         && a.header_suppressed == b.header_suppressed
@@ -837,15 +862,17 @@ fn same_section(a: &SectGeom, b: &SectGeom) -> bool {
         && hash128(&a.header) == hash128(&b.header)
         && hash128(&a.footer) == hash128(&b.footer)
         && hash128(&a.background) == hash128(&b.background)
+        && hash128(&a.foreground) == hash128(&b.foreground)
 }
 
 /// Resolves one page run's geometry from its group of content pairs.
 fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGeom {
     use typst_library::foundations::{Resolve, Smart, Styles};
     use typst_library::layout::{
-        Abs, FixAlignment, FixedAlignment, Length, OuterVAlignment, PageElem, Paper, Rel,
-        Sides, Size,
+        Abs, Binding, Dir, Em, FixAlignment, FixedAlignment, Length, OuterVAlignment,
+        PageElem, Paper, Rel, Sides, Size,
     };
+    use typst_library::model::{LineNumberingScope, ParLine};
     use typst_library::text::TextElem;
     use typst_utils::Numeric;
 
@@ -876,6 +903,7 @@ fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGe
 
     let default_margin = Rel::<Length>::from((2.5 / 21.0) * minside);
     let margin = sc.get(PageElem::margin).unwrap_or_default();
+    let mirror_margins = margin.two_sided.unwrap_or(false);
     let sides: Sides<Abs> = margin
         .sides
         .map(|s| s.and_then(Smart::custom).unwrap_or(default_margin))
@@ -901,8 +929,53 @@ fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGe
         props::abs_to_twip(sides.bottom),
     );
 
-    // Binding allowance → gutter (informational; default LTR binding = left).
-    let gutter = 0;
+    // Word represents the usual "inside margin is larger than outside margin"
+    // book-binding setup as an outside base margin plus a gutter. Typst stores
+    // inside/outside as left/right in the unresolved margin and swaps them during
+    // page finalization; `<w:mirrorMargins/>` handles that alternating swap in
+    // Word.
+    let binding =
+        sc.get(PageElem::binding)
+            .unwrap_or_else(|| match sc.resolve(TextElem::dir) {
+                Dir::LTR => Binding::Left,
+                _ => Binding::Right,
+            });
+    let (margin_left, margin_right, gutter) = if mirror_margins {
+        let inside = props::abs_to_twip(sides.left);
+        let outside = props::abs_to_twip(sides.right);
+        if inside >= outside {
+            (outside, outside, inside - outside)
+        } else {
+            (inside, outside, 0)
+        }
+    } else {
+        (props::abs_to_twip(sides.left), props::abs_to_twip(sides.right), 0)
+    };
+    let rtl_gutter = mirror_margins && binding == Binding::Right && gutter > 0;
+
+    let line_numbers = sc.get_ref(ParLine::numbering).as_ref().map(|_| {
+        let distance = match sc.get(ParLine::number_clearance) {
+            Smart::Auto => {
+                let reference_width = if sc.get(PageElem::flipped) {
+                    sc.resolve(PageElem::height)
+                } else {
+                    sc.resolve(PageElem::width)
+                }
+                .unwrap_or_default();
+                let font_size = sc.resolve(TextElem::size);
+                props::abs_to_twip((0.026 * reference_width).clamp(
+                    Em::new(0.75).at(font_size).max(Abs::zero()),
+                    Em::new(2.5).at(font_size).max(Abs::zero()),
+                ))
+            }
+            Smart::Custom(clearance) => props::abs_to_twip(clearance.resolve(sc)),
+        };
+        let restart = match sc.get(ParLine::numbering_scope) {
+            LineNumberingScope::Document => "continuous",
+            LineNumberingScope::Page => "newPage",
+        };
+        LineNumbering { count_by: 1, start: 1, restart, distance }
+    });
 
     let numbering = sc.get_ref(PageElem::numbering).clone();
     let number_align = sc.get(PageElem::number_align);
@@ -924,6 +997,7 @@ fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGe
         Smart::Auto => (None, false),
     };
     let background = sc.get_ref(PageElem::background).clone().filter(|c| !c.is_empty());
+    let foreground = sc.get_ref(PageElem::foreground).clone().filter(|c| !c.is_empty());
     // A flat solid page-colour maps natively; `auto` (none), an explicit `none`,
     // or a gradient/tiling paint have no `w:background` form and are left unset
     // (a gradient page fill still reaches Word via `background:` if the author
@@ -950,13 +1024,16 @@ fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGe
         landscape,
         margin_top: props::abs_to_twip(sides.top),
         margin_bottom: props::abs_to_twip(sides.bottom),
-        margin_left: props::abs_to_twip(sides.left),
-        margin_right: props::abs_to_twip(sides.right),
+        margin_left,
+        margin_right,
         header_band,
         footer_band,
         gutter,
         columns,
         col_space,
+        mirror_margins,
+        rtl_gutter,
+        line_numbers,
         numbering,
         number_in_header,
         number_jc,
@@ -965,6 +1042,7 @@ fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGe
         footer,
         footer_suppressed,
         background,
+        foreground,
         background_color,
         hyphenate,
     }
@@ -1002,6 +1080,7 @@ fn sectpr_geometry(geom: &SectGeom) -> SectPr {
         columns: geom.columns,
         gutter: geom.gutter,
         col_space: geom.col_space,
+        line_numbers: geom.line_numbers.clone(),
         pg_num: None,
         sect_type: None,
         headers: Vec::new(),
@@ -1025,13 +1104,15 @@ fn build_section(
         sect.pg_num = Some(PgNumType { fmt: numbering_fmt(ctx, numbering), start: None });
     }
 
-    // -- Header content + page background ----------------------------------
+    // -- Header content + page background/foreground -----------------------
     // A `set page(background:)` image is emitted as a full-page `behindDoc`
     // page-anchored drawing at the *top* of the (default) header, so it repeats
     // on every page behind the body text — the Word idiom for a page background /
-    // watermark. The background and the explicit header share ONE part so their
-    // image relationships live in a single `headerN.xml.rels` (no rId collision).
-    if geom.header.is_some() || geom.background.is_some() {
+    // watermark. Foreground uses the same page-anchored mechanism with
+    // `behindDoc="0"`, so it overlays the body text. These drawings and the
+    // explicit header share ONE part so their image relationships live in a
+    // single `headerN.xml.rels` (no rId collision).
+    if geom.header.is_some() || geom.background.is_some() || geom.foreground.is_some() {
         build_furniture_refs(
             ctx,
             &mut sect,
@@ -1041,6 +1122,7 @@ fn build_section(
             FurnitureSource {
                 content: geom.header.as_ref(),
                 background: geom.background.as_ref(),
+                foreground: geom.foreground.as_ref(),
             },
             styles,
         )?;
@@ -1054,7 +1136,7 @@ fn build_section(
             &mut footer_parts,
             FurnitureSlot::Footer,
             geom,
-            FurnitureSource { content: Some(content), background: None },
+            FurnitureSource { content: Some(content), background: None, foreground: None },
             styles,
         )?;
     }
@@ -1119,6 +1201,7 @@ struct LoweredFurniture {
 struct FurnitureSource<'a> {
     content: Option<&'a Content>,
     background: Option<&'a Content>,
+    foreground: Option<&'a Content>,
 }
 
 fn build_furniture_refs(
@@ -1131,7 +1214,8 @@ fn build_furniture_refs(
     styles: StyleChain,
 ) -> SourceResult<()> {
     let context_sensitive = source.content.is_some_and(contains_context)
-        || source.background.is_some_and(contains_context);
+        || source.background.is_some_and(contains_context)
+        || source.foreground.is_some_and(contains_context);
 
     let first = lower_furniture(ctx, slot, geom, source, styles, 1)?;
     if !context_sensitive {
@@ -1202,13 +1286,15 @@ fn lower_furniture(
 
         if slot.is_header()
             && let Some(bg) = source.background
-            && let Some(block) = background_block(ctx, bg, geom, styles)?
+            && let Some(block) = page_overlay_block(ctx, bg, geom, styles, true, "Background")?
         {
             blocks.push(block);
         }
 
         if let Some(content) = source.content {
             let saved_h = ctx.raster_height;
+            let saved_line_numbering = ctx.line_numbering_active;
+            ctx.line_numbering_active = false;
             ctx.raster_height = match slot {
                 FurnitureSlot::Header => {
                     typst_library::layout::Abs::pt(geom.margin_top as f64 / 20.0)
@@ -1220,7 +1306,15 @@ fn lower_furniture(
             .max(typst_library::layout::Abs::pt(6.0));
             let lowered = ctx.blocks(content, styles);
             ctx.raster_height = saved_h;
+            ctx.line_numbering_active = saved_line_numbering;
             blocks.extend(lowered?);
+        }
+
+        if slot.is_header()
+            && let Some(fg) = source.foreground
+            && let Some(block) = page_overlay_block(ctx, fg, geom, styles, false, "Foreground")?
+        {
+            blocks.push(block);
         }
 
         let rels = ctx.part_rels.take().unwrap_or_default();
@@ -1712,17 +1806,19 @@ fn anchor_wrap_name(wrap: crate::dom::AnchorWrap) -> &'static str {
     }
 }
 
-/// Rasterizes a `set page(background:)` body and wraps it in a full-page
-/// `behindDoc` page-anchored drawing (one paragraph). Rasterized at the full page
-/// *width* so a `width: 100%` background fills the page; the drawing's extent is
-/// the full page size so it covers the sheet edge-to-edge. `None` if the
-/// background lays out to nothing. Must be called inside an active part-rels
+/// Rasterizes `set page(background:)` or `set page(foreground:)` content and
+/// wraps it in a full-page page-anchored drawing (one paragraph). Rasterized at
+/// the full page *width* so `width: 100%` fills the page; the drawing's extent
+/// is the full page size so it covers the sheet edge-to-edge. `None` if the
+/// overlay lays out to nothing. Must be called inside an active part-rels
 /// context (the image relationship belongs to the header part).
-fn background_block(
+fn page_overlay_block(
     ctx: &mut DocxCtx,
-    bg: &Content,
+    content: &Content,
     geom: &SectGeom,
     styles: StyleChain,
+    behind: bool,
+    name: &'static str,
 ) -> SourceResult<Option<crate::dom::Block>> {
     use crate::dom::{
         Anchor, AnchorPos, AnchorWrap, Block, Drawing, Para, ParaChild, Run,
@@ -1737,7 +1833,7 @@ fn background_block(
     // Uncropped: this drawing is stretched to the full page below, so the
     // render must keep its full extent (ink-cropping a corner watermark would
     // blow it up to full-bleed).
-    let result = ctx.rasterize_uncropped(bg, styles, bg.span())?;
+    let result = ctx.rasterize_uncropped(content, styles, content.span())?;
     ctx.raster_width = saved_w;
     let Some((rel, _size, _text)) = result else {
         return Ok(None);
@@ -1751,14 +1847,14 @@ fn background_block(
         h_emu: geom.page_h as i64 * EMU_PER_TWIP,
         alt: None,
         docpr_id,
-        name: ecow::eco_format!("Background {docpr_id}"),
+        name: ecow::eco_format!("{name} {docpr_id}"),
         anchor: Some(Anchor {
             z: ctx.next_z(),
             pos_h: AnchorPos { rel_from: "page", align: None, offset: Some(0) },
             pos_v: AnchorPos { rel_from: "page", align: None, offset: Some(0) },
             wrap: AnchorWrap::None,
             dist: [0, 0, 0, 0],
-            behind: true,
+            behind,
         }),
         shape: None,
         group: None,

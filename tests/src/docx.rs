@@ -1423,6 +1423,33 @@ fn multi_paragraph_block_quote_keeps_its_paragraphs() {
 }
 
 #[test]
+fn par_line_numbering_becomes_section_line_numbering() {
+    // Typst line numbering is paragraph-style driven; Word enables it at the
+    // section level. Preserve the section-level controls Word can express.
+    let p = parts(
+        "#set par.line(numbering: \"1\", numbering-scope: \"page\", number-clearance: 5pt)\n\
+         Numbered first line. \\\n\
+         Numbered second line.",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<w:lnNumType"), "section enables line numbering");
+    assert!(doc.contains("w:countBy=\"1\""), "line numbers count every line");
+    assert!(doc.contains("w:start=\"1\""), "line numbering starts at one");
+    assert!(
+        doc.contains("w:restart=\"newPage\""),
+        "Typst page-scoped line numbering resets on each Word page"
+    );
+    assert!(doc.contains("w:distance=\"100\""), "5pt number-clearance becomes 100 twips");
+    let plain = parts("No line numbering here.");
+    assert!(
+        !plain["word/document.xml"].contains("<w:lnNumType"),
+        "plain documents do not gain section line numbering"
+    );
+    assert_all_wellformed(&p);
+    assert_all_wellformed(&plain);
+}
+
+#[test]
 fn page_background_becomes_a_behind_text_header_image() {
     // `set page(background: ..)` → a full-page `behindDoc`, page-anchored image in
     // the (default) header, so it repeats on every page behind the body text.
@@ -1443,6 +1470,27 @@ fn page_background_becomes_a_behind_text_header_image() {
 }
 
 #[test]
+fn page_foreground_becomes_a_front_of_text_header_image() {
+    // `set page(foreground: ..)` uses the same page-anchored header drawing
+    // idiom as backgrounds, but in front of body text.
+    let p = parts("#set page(foreground: rotate(45deg)[DRAFT])\nBody text.");
+    let header = p
+        .iter()
+        .find(|(k, xml)| {
+            k.starts_with("word/header")
+                && k.ends_with(".xml")
+                && xml.contains("Foreground")
+        })
+        .map(|(_, xml)| xml)
+        .expect("a header part for the foreground");
+    assert!(header.contains("behindDoc=\"0\""), "foreground sits in front of text");
+    assert!(header.contains("relativeFrom=\"page\""), "positioned against the page");
+    assert!(header.contains("<a:blip"), "the foreground is an embedded image");
+    assert!(p["word/document.xml"].contains("Body text"), "body text remains in flow");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn solid_page_fill_becomes_a_native_page_color() {
     // `set page(fill: solid-color)` (Word's "Page Color") maps to the
     // document-level `w:background` element — no image, no header part.
@@ -1459,6 +1507,37 @@ fn solid_page_fill_becomes_a_native_page_color() {
         "a gradient page fill is not forced into a flat w:background"
     );
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn inside_outside_page_margins_emit_gutter_and_mirror_margins() {
+    let p = parts("#set page(margin: (inside: 3cm, outside: 2cm))\nBody text.");
+    let doc = &p["word/document.xml"];
+    let settings = &p["word/settings.xml"];
+    assert!(
+        settings.contains("<w:mirrorMargins/>"),
+        "inside/outside margins enable Word mirrored margins"
+    );
+    assert!(
+        doc.contains("w:gutter=\"567\""),
+        "inside margin extra becomes a nonzero Word gutter"
+    );
+    assert!(
+        doc.contains("w:left=\"1134\"") && doc.contains("w:right=\"1134\""),
+        "outside margin is the base margin on both sides"
+    );
+
+    let plain = parts("#set page(margin: (left: 3cm, right: 2cm))\nBody text.");
+    assert!(
+        !plain["word/settings.xml"].contains("mirrorMargins"),
+        "plain left/right margins do not enable mirrored margins"
+    );
+    assert!(
+        plain["word/document.xml"].contains("w:gutter=\"0\""),
+        "plain left/right margins keep a zero gutter"
+    );
+    assert_all_wellformed(&p);
+    assert_all_wellformed(&plain);
 }
 
 #[test]
