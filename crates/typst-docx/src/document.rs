@@ -1589,6 +1589,21 @@ fn fill_signature(fill: Option<&crate::dom::ShapeFill>) -> String {
                     .collect::<Vec<_>>()
             )
         }
+        Some(crate::dom::ShapeFill::RadialGradient {
+            stops,
+            center_100k,
+            radius_100k,
+            focal_center_100k,
+            focal_radius_100k,
+        }) => {
+            format!(
+                "radial={center_100k:?}:{radius_100k}:{focal_center_100k:?}:{focal_radius_100k}:{:?}",
+                stops
+                    .iter()
+                    .map(|stop| (stop.pos_100k, stop.color))
+                    .collect::<Vec<_>>()
+            )
+        }
         None => String::new(),
     }
 }
