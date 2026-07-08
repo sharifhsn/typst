@@ -194,9 +194,20 @@ pub struct GeomShape {
     pub w_emu: i64,
     pub h_emu: i64,
     pub rot_60k: i32,
-    pub geom: PathGeom,
+    pub geom: GeomKind,
     pub fill: Option<FillSpec>,
     pub stroke: Option<StrokeSpec>,
+}
+
+/// The PowerPoint shape kind for a vector shape.
+pub enum GeomKind {
+    Path(PathGeom),
+    /// A loose straight connector. DrawingML's `line` preset is the diagonal
+    /// of its transform box; flips choose the diagonal direction.
+    Connector {
+        flip_h: bool,
+        flip_v: bool,
+    },
 }
 
 /// A positioned group.

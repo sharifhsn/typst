@@ -2,9 +2,9 @@ use ecow::EcoString;
 use typst_ooxml_core::{dml, ns};
 
 use crate::dom::{
-    BulletKind, FillSpec, GeomShape, GroupShape, InlineMath, MathBox, MediaId, PathGeom,
-    Pic, PicGeom, Placeholder, RunLink, SlideIr, SlideShape, StrokeSpec, TableBox,
-    TableCell, TextBox, TextChild, TextField, TextPara, TextRun, TextWrap,
+    BulletKind, FillSpec, GeomKind, GeomShape, GroupShape, InlineMath, MathBox, MediaId,
+    PathGeom, Pic, PicGeom, Placeholder, RunLink, SlideIr, SlideShape, StrokeSpec,
+    TableBox, TableCell, TextBox, TextChild, TextField, TextPara, TextRun, TextWrap,
 };
 use crate::xml::XmlWriter;
 
@@ -538,12 +538,44 @@ fn write_pic_geom(w: &mut XmlWriter, geom: &PicGeom) {
 }
 
 fn write_geom_shape(w: &mut XmlWriter, geom: &GeomShape, id: u32) {
-    w.open("p:sp").start_children();
-    write_sp_nv(w, id, &format!("Shape {id}"), false, None);
+    match &geom.geom {
+        GeomKind::Path(path) => {
+            w.open("p:sp").start_children();
+            write_sp_nv(w, id, &format!("Shape {id}"), false, None);
+            w.open("p:spPr").start_children();
+            write_xfrm(w, geom.x_emu, geom.y_emu, geom.w_emu, geom.h_emu, geom.rot_60k);
+            write_geom(w, path, geom.w_emu, geom.h_emu);
+            dml::write_fill(w, geom.fill.as_ref(), "0");
+            dml::write_stroke(w, geom.stroke.as_ref(), true);
+            w.close();
+            w.close();
+        }
+        GeomKind::Connector { flip_h, flip_v } => {
+            write_connector_shape(w, geom, id, *flip_h, *flip_v);
+        }
+    }
+}
+
+fn write_connector_shape(
+    w: &mut XmlWriter,
+    geom: &GeomShape,
+    id: u32,
+    flip_h: bool,
+    flip_v: bool,
+) {
+    w.open("p:cxnSp").start_children();
+    write_cxn_nv(w, id, &format!("Connector {id}"));
     w.open("p:spPr").start_children();
-    write_xfrm(w, geom.x_emu, geom.y_emu, geom.w_emu, geom.h_emu, geom.rot_60k);
-    write_geom(w, &geom.geom, geom.w_emu, geom.h_emu);
-    dml::write_fill(w, geom.fill.as_ref(), "0");
+    write_xfrm_with_flips(
+        w,
+        geom.x_emu,
+        geom.y_emu,
+        geom.w_emu,
+        geom.h_emu,
+        geom.rot_60k,
+        Some((flip_h, flip_v)),
+    );
+    dml::write_prst_geom(w, "line");
     dml::write_stroke(w, geom.stroke.as_ref(), true);
     w.close();
     w.close();
@@ -639,10 +671,40 @@ fn write_group_nv(w: &mut XmlWriter, id: u32, name: &str) {
     w.close();
 }
 
+fn write_cxn_nv(w: &mut XmlWriter, id: u32, name: &str) {
+    w.open("p:nvCxnSpPr").start_children();
+    w.open("p:cNvPr")
+        .attr("id", &id.to_string())
+        .attr("name", name)
+        .empty();
+    w.leaf("p:cNvCxnSpPr");
+    w.leaf("p:nvPr");
+    w.close();
+}
+
 fn write_xfrm(w: &mut XmlWriter, x: i64, y: i64, cx: i64, cy: i64, rot_60k: i32) {
+    write_xfrm_with_flips(w, x, y, cx, cy, rot_60k, None);
+}
+
+fn write_xfrm_with_flips(
+    w: &mut XmlWriter,
+    x: i64,
+    y: i64,
+    cx: i64,
+    cy: i64,
+    rot_60k: i32,
+    flips: Option<(bool, bool)>,
+) {
     w.open("a:xfrm");
     if rot_60k != 0 {
         w.attr("rot", &rot_60k.to_string());
+    }
+    let (flip_h, flip_v) = flips.unwrap_or((false, false));
+    if flip_h {
+        w.attr("flipH", "1");
+    }
+    if flip_v {
+        w.attr("flipV", "1");
     }
     w.start_children();
     w.open("a:off")

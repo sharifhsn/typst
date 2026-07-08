@@ -756,6 +756,117 @@ fn translucent_fill_emits_alpha() {
 }
 
 #[test]
+fn straight_line_exports_as_loose_connector() {
+    let p = parts(
+        r#"#set page(width: 200pt, height: 100pt, margin: 0pt)
+#line(
+  start: (0pt, 0pt),
+  end: (100pt, 50pt),
+  stroke: (paint: red, thickness: 2pt, cap: "round", dash: "dashed"),
+)"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let doc = roxmltree::Document::parse(slide).unwrap();
+    let connectors = doc
+        .descendants()
+        .filter(|node| node.tag_name().name() == "cxnSp")
+        .collect::<Vec<_>>();
+    assert_eq!(connectors.len(), 1, "straight line should be one connector");
+    assert_eq!(count_xml_nodes(slide, "sp"), 0, "line must not emit p:sp");
+
+    let connector = connectors[0];
+    assert!(
+        connector
+            .descendants()
+            .any(|node| node.tag_name().name() == "nvCxnSpPr"),
+        "connector should use connector non-visual properties"
+    );
+    assert!(
+        connector
+            .descendants()
+            .any(|node| node.tag_name().name() == "cNvCxnSpPr"),
+        "connector should use cNvCxnSpPr"
+    );
+
+    let xfrm = connector
+        .descendants()
+        .find(|node| node.tag_name().name() == "xfrm")
+        .expect("connector should have a:xfrm");
+    assert_eq!(xfrm.attribute("flipH"), None);
+    assert_eq!(xfrm.attribute("flipV"), None);
+    let ext = xfrm
+        .descendants()
+        .find(|node| node.tag_name().name() == "ext")
+        .expect("connector should have a:ext");
+    assert_eq!(ext.attribute("cx"), Some("1270000"));
+    assert_eq!(ext.attribute("cy"), Some("635000"));
+
+    let prst = connector
+        .descendants()
+        .find(|node| node.tag_name().name() == "prstGeom")
+        .expect("connector should have preset geometry");
+    assert_eq!(prst.attribute("prst"), Some("line"));
+    let stroke = connector
+        .descendants()
+        .find(|node| node.tag_name().name() == "ln")
+        .expect("connector should have stroke");
+    assert_eq!(stroke.attribute("w"), Some("25400"));
+    assert_eq!(stroke.attribute("cap"), Some("rnd"));
+    assert!(
+        stroke.descendants().any(|node| node.tag_name().name() == "prstDash"
+            && node.attribute("val") == Some("dash")),
+        "connector should preserve dash preset"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn descending_straight_line_connector_uses_flip() {
+    let p = parts(
+        r#"#set page(width: 200pt, height: 100pt, margin: 0pt)
+#line(start: (100pt, 0pt), end: (0pt, 50pt), stroke: 2pt)"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let doc = roxmltree::Document::parse(slide).unwrap();
+    let connector = doc
+        .descendants()
+        .find(|node| node.tag_name().name() == "cxnSp")
+        .expect("straight line should emit a connector");
+    let xfrm = connector
+        .descendants()
+        .find(|node| node.tag_name().name() == "xfrm")
+        .expect("connector should have a:xfrm");
+    assert_eq!(xfrm.attribute("flipH"), Some("1"));
+    assert_eq!(xfrm.attribute("flipV"), None);
+    let ext = xfrm
+        .descendants()
+        .find(|node| node.tag_name().name() == "ext")
+        .expect("connector should have a:ext");
+    assert_eq!(ext.attribute("cx"), Some("1270000"));
+    assert_eq!(ext.attribute("cy"), Some("635000"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn curves_and_rectangles_remain_regular_shapes() {
+    let p = parts(
+        r#"#set page(width: 200pt, height: 120pt, margin: 0pt)
+#rect(width: 40pt, height: 20pt, fill: teal)
+#curve(
+  stroke: 2pt,
+  curve.move((0pt, 0pt)),
+  curve.cubic((10pt, 0pt), (20pt, 50pt), (50pt, 50pt)),
+)"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert_eq!(count_xml_nodes(slide, "cxnSp"), 0, "non-lines stay p:sp");
+    assert_eq!(count_xml_nodes(slide, "sp"), 2, "rect and curve stay regular shapes");
+    assert!(slide.contains("<a:custGeom>"), "regular shapes still use custGeom");
+    assert!(slide.contains("<a:cubicBezTo>"), "curve cubic segment is preserved");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn noop_clip_keeps_text_live() {
     // A clipped card whose content fits inside the clip must not bake its
     // text into a picture — the render probe proves the clip is a no-op.
