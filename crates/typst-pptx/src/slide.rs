@@ -9,7 +9,7 @@ use typst_library::model::Destination;
 use typst_library::visualize::{Paint, Shape};
 
 use crate::dom::{FillSpec, MathBox, PicGeom, SlideCtx, SlideIr, SlideShape};
-use crate::text::{LinkTarget, TextSource};
+use crate::text::{InlineMathSource, LinkTarget, TextSource};
 
 /// Convert all pages into slide IR.
 pub fn slides(document: &PagedDocument, ctx: &mut SlideCtx) -> Vec<SlideIr> {
@@ -27,7 +27,7 @@ fn slide(document: &PagedDocument, page: &Page, ctx: &mut SlideCtx) -> SlideIr {
 
     let mut ordered = walker.shapes;
     ordered.extend(
-        crate::text::cluster_text(walker.text)
+        crate::text::cluster_text(walker.text, walker.inline_math)
             .into_iter()
             .map(|cluster| OrderedShape { order: cluster.order, shape: cluster.shape }),
     );
@@ -45,6 +45,7 @@ struct Walker<'a, 'b> {
     next_order: usize,
     shapes: Vec<OrderedShape>,
     text: Vec<TextSource<'a>>,
+    inline_math: Vec<InlineMathSource>,
     links: Vec<LinkRect>,
     equations: FxHashMap<Location, MathSource>,
     active_math: Vec<ActiveMath>,
@@ -63,12 +64,15 @@ struct LinkRect {
 struct MathSource {
     omml: String,
     fallback: EcoString,
+    block: bool,
 }
 
 struct ActiveMath {
     loc: Location,
     order: usize,
     bounds: Option<Rect>,
+    baseline: Option<Point>,
+    rot_60k: i32,
     fallback: EcoString,
 }
 
@@ -92,8 +96,9 @@ impl<'a, 'b> Walker<'a, 'b> {
             next_order: 0,
             shapes: Vec::new(),
             text: Vec::new(),
+            inline_math: Vec::new(),
             links: Vec::new(),
-            equations: display_equations(document),
+            equations: equation_sources(document),
             active_math: Vec::new(),
         }
     }
@@ -217,6 +222,8 @@ impl<'a, 'b> Walker<'a, 'b> {
                         loc,
                         order,
                         bounds: None,
+                        baseline: None,
+                        rot_60k: 0,
                         fallback: EcoString::new(),
                     });
                 }
@@ -249,6 +256,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                     group_transform,
                     group.frame.size(),
                 ));
+                self.record_math_frame_text(&group.frame, group_transform);
                 append_frame_text(
                     &group.frame,
                     &mut self.active_math.last_mut().unwrap().fallback,
@@ -256,6 +264,7 @@ impl<'a, 'b> Walker<'a, 'b> {
             }
             FrameItem::Text(text) => {
                 self.add_math_bounds(text_item_rect(text, item_transform));
+                self.record_math_text(text, item_transform);
                 self.active_math.last_mut().unwrap().fallback.push_str(&text.text);
             }
             FrameItem::Shape(shape, _) => {
@@ -273,6 +282,37 @@ impl<'a, 'b> Walker<'a, 'b> {
         true
     }
 
+    fn record_math_frame_text(&mut self, frame: &Frame, transform: Transform) {
+        for (pos, item) in frame.items() {
+            let item_transform = transform.pre_concat(Transform::translate(pos.x, pos.y));
+            match item {
+                FrameItem::Text(text) => self.record_math_text(text, item_transform),
+                FrameItem::Group(group) => {
+                    self.record_math_frame_text(
+                        &group.frame,
+                        item_transform.pre_concat(group.transform),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn record_math_text(
+        &mut self,
+        _text: &typst_library::text::TextItem,
+        item_transform: Transform,
+    ) {
+        let Some(similarity) = classify_similarity(item_transform) else {
+            return;
+        };
+        let active = self.active_math.last_mut().expect("active math exists");
+        if active.baseline.is_none() {
+            active.baseline = Some(Point::zero().transform(item_transform));
+            active.rot_60k = similarity.rot_60k;
+        }
+    }
+
     fn add_math_bounds(&mut self, rect: Rect) {
         let active = self.active_math.last_mut().expect("active math exists");
         active.bounds = Some(match active.bounds {
@@ -288,26 +328,40 @@ impl<'a, 'b> Walker<'a, 'b> {
         let Some(bounds) = active.bounds else {
             return;
         };
+        let block = source.block;
+        let omml = source.omml.clone();
+        let source_fallback = source.fallback.clone();
 
         let size = bounds.size();
-        let fallback = if active.fallback.is_empty() {
-            source.fallback.clone()
-        } else {
-            active.fallback
-        };
+        let fallback =
+            if active.fallback.is_empty() { source_fallback } else { active.fallback };
 
-        self.shapes.push(OrderedShape {
-            order: active.order,
-            shape: SlideShape::MathBox(MathBox {
-                x_emu: crate::text::emu(bounds.min.x),
-                y_emu: crate::text::emu(bounds.min.y),
-                w_emu: crate::text::extent_emu(size.x),
-                h_emu: crate::text::extent_emu(size.y),
-                rot_60k: 0,
-                omml: source.omml.clone(),
+        if block {
+            self.shapes.push(OrderedShape {
+                order: active.order,
+                shape: SlideShape::MathBox(MathBox {
+                    x_emu: crate::text::emu(bounds.min.x),
+                    y_emu: crate::text::emu(bounds.min.y),
+                    w_emu: crate::text::extent_emu(size.x),
+                    h_emu: crate::text::extent_emu(size.y),
+                    rot_60k: 0,
+                    omml,
+                    fallback,
+                }),
+            });
+        } else {
+            self.inline_math.push(InlineMathSource {
+                order: active.order,
+                baseline: active
+                    .baseline
+                    .unwrap_or_else(|| Point::new(bounds.min.x, bounds.max.y)),
+                min: bounds.min,
+                max: bounds.max,
+                rot_60k: active.rot_60k,
+                omml,
                 fallback,
-            }),
-        });
+            });
+        }
     }
 
     fn emit_image(
@@ -514,7 +568,7 @@ fn single_frame_image(
     image
 }
 
-fn display_equations(document: &PagedDocument) -> FxHashMap<Location, MathSource> {
+fn equation_sources(document: &PagedDocument) -> FxHashMap<Location, MathSource> {
     let styles = StyleChain::default();
     document
         .introspector()
@@ -522,9 +576,7 @@ fn display_equations(document: &PagedDocument) -> FxHashMap<Location, MathSource
         .into_iter()
         .filter_map(|content| {
             let elem = content.to_packed::<EquationElem>()?;
-            if !elem.block.get(styles) {
-                return None;
-            }
+            let block = elem.block.get(styles);
             let loc = elem.location()?;
             let omml = typst_ooxml_core::omml::equation_omml_fragment(elem)?;
             let fallback = elem
@@ -532,7 +584,7 @@ fn display_equations(document: &PagedDocument) -> FxHashMap<Location, MathSource
                 .get_cloned(styles)
                 .filter(|text| !text.is_empty())
                 .unwrap_or_else(|| elem.body.plain_text());
-            Some((loc, MathSource { omml, fallback }))
+            Some((loc, MathSource { omml, fallback, block }))
         })
         .collect()
 }

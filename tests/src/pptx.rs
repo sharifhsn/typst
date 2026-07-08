@@ -348,6 +348,120 @@ $ sum_(i=1)^n i = (n(n+1))/2 $"#,
 }
 
 #[test]
+fn inline_equation_splices_native_omml_between_text_runs() {
+    let p = parts(
+        r#"#set page(width: 260pt, height: 120pt, margin: 12pt)
+before $x^2$ after"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let doc = roxmltree::Document::parse(slide).unwrap();
+
+    assert_eq!(
+        text_shape_count(slide),
+        1,
+        "inline math should stay in the surrounding text box"
+    );
+    assert_eq!(
+        drawingml_paragraph_count(slide),
+        1,
+        "inline math should stay in the surrounding paragraph"
+    );
+
+    let para = doc
+        .descendants()
+        .find(|node| {
+            node.tag_name().name() == "p"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/drawingml/2006/main")
+                && node.descendants().any(|desc| {
+                    desc.tag_name().name() == "t"
+                        && desc.text().is_some_and(|text| text.contains("before"))
+                })
+        })
+        .expect("paragraph with surrounding prose");
+
+    let children = para
+        .children()
+        .filter(|node| node.is_element())
+        .filter(|node| node.tag_name().name() != "pPr")
+        .collect::<Vec<_>>();
+    let child_names =
+        children.iter().map(|node| node.tag_name().name()).collect::<Vec<_>>();
+    assert_eq!(
+        child_names,
+        ["r", "AlternateContent", "r"],
+        "paragraph children should preserve text/math/text order"
+    );
+
+    let first_text = children[0]
+        .descendants()
+        .filter(|node| node.tag_name().name() == "t")
+        .filter_map(|node| node.text())
+        .collect::<String>();
+    let last_text = children[2]
+        .descendants()
+        .filter(|node| node.tag_name().name() == "t")
+        .filter_map(|node| node.text())
+        .collect::<String>();
+    assert_eq!(first_text, "before ");
+    assert_eq!(last_text, " after");
+
+    let alternate = children[1];
+    let choice = alternate
+        .descendants()
+        .find(|node| {
+            node.tag_name().name() == "Choice"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/markup-compatibility/2006")
+        })
+        .expect("inline math should have an mc:Choice");
+    assert_eq!(choice.attribute("Requires"), Some("a14"));
+    assert!(
+        choice.descendants().any(|node| {
+            node.tag_name().name() == "m"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.microsoft.com/office/drawing/2010/main")
+        }),
+        "choice should contain a14:m"
+    );
+    assert!(
+        choice.descendants().any(|node| {
+            node.tag_name().name() == "oMath"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/officeDocument/2006/math")
+        }),
+        "inline math should use bare m:oMath"
+    );
+    assert!(
+        !choice.descendants().any(|node| {
+            node.tag_name().name() == "oMathPara"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/officeDocument/2006/math")
+        }),
+        "inline math must not use display m:oMathPara"
+    );
+
+    let fallback = alternate
+        .descendants()
+        .find(|node| {
+            node.tag_name().name() == "Fallback"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/markup-compatibility/2006")
+        })
+        .expect("inline math should have an mc:Fallback");
+    let fallback_text = fallback
+        .descendants()
+        .filter(|node| node.tag_name().name() == "t")
+        .filter_map(|node| node.text())
+        .collect::<String>();
+    assert!(!fallback_text.is_empty(), "fallback should contain linear text");
+
+    assert!(!slide.contains("<m:oMathPara"), "inline-only slide has no display math");
+    assert!(!slide.contains("<p:pic"), "inline math should not rasterize");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn non_math_slides_do_not_gain_math_namespaces() {
     let p = parts("Plain text only.");
     let slide = &p["ppt/slides/slide1.xml"];

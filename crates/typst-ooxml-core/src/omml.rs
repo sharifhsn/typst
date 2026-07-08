@@ -128,6 +128,7 @@ impl DirectEmitter {
                 self.emit_content(&frac.denom);
             }
             FracStyle::Skewed | FracStyle::Vertical => {
+                self.emitted = true;
                 self.buf.open("m:f").children();
                 if frac.style.get(StyleChain::default()) == FracStyle::Skewed {
                     self.buf.open("m:fPr").children();
@@ -142,6 +143,7 @@ impl DirectEmitter {
     }
 
     fn emit_attach(&mut self, attach: &Packed<AttachElem>) {
+        self.emitted = true;
         let styles = StyleChain::default();
         let upper = attach.t.get_cloned(styles).or_else(|| attach.tr.get_cloned(styles));
         let lower = attach.b.get_cloned(styles).or_else(|| attach.br.get_cloned(styles));
@@ -177,6 +179,7 @@ impl DirectEmitter {
     }
 
     fn emit_root(&mut self, root: &Packed<RootElem>) {
+        self.emitted = true;
         self.buf.open("m:rad").children();
         match root.index.get_cloned(StyleChain::default()) {
             Some(index) => self.wrap_content("m:deg", &index),
@@ -206,6 +209,7 @@ impl DirectEmitter {
             return;
         }
 
+        self.emitted = true;
         self.buf.open("m:d").children();
         self.buf.open("m:dPr").children();
         self.buf
@@ -224,6 +228,7 @@ impl DirectEmitter {
     }
 
     fn emit_binom(&mut self, binom: &Packed<BinomElem>) {
+        self.emitted = true;
         self.buf.open("m:d").children();
         self.buf.open("m:dPr").children();
         self.buf.open("m:begChr").attr("m:val", "(").empty();
@@ -249,6 +254,7 @@ impl DirectEmitter {
     }
 
     fn emit_accent(&mut self, accent: &Packed<AccentElem>) {
+        self.emitted = true;
         self.buf.open("m:acc").children();
         self.buf.open("m:accPr").children();
         self.buf
@@ -261,6 +267,7 @@ impl DirectEmitter {
     }
 
     fn emit_bar(&mut self, body: &Content, position: Position) {
+        self.emitted = true;
         let pos = match position {
             Position::Above => "top",
             Position::Below => "bot",
@@ -280,6 +287,7 @@ impl DirectEmitter {
         upper: Option<&Content>,
         integrand: &[&Content],
     ) {
+        self.emitted = true;
         self.buf.open("m:nary").children();
         self.buf.open("m:naryPr").children();
         self.buf.open("m:chr").attr("m:val", &chr.to_string()).empty();
