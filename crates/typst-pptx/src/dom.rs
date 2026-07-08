@@ -56,7 +56,7 @@ pub struct MathBox {
 /// A text paragraph.
 #[derive(Clone)]
 pub struct TextPara {
-    pub runs: Vec<TextRun>,
+    pub children: Vec<TextChild>,
     pub rtl: bool,
     /// Absolute line pitch (baseline-to-baseline) in 1/100 pt (`a:spcPts`).
     /// A percentage (`a:spcPct`) would multiply the FONT's single spacing -
@@ -64,6 +64,13 @@ pub struct TextPara {
     /// pitch and overflowing the box. `None` = explicit single spacing.
     pub line_spacing_100pt: Option<i32>,
     pub bullet: Option<ParaBullet>,
+}
+
+/// A child of a DrawingML text paragraph.
+#[derive(Clone)]
+pub enum TextChild {
+    Run(TextRun),
+    Math(InlineMath),
 }
 
 /// A text run.
@@ -78,6 +85,13 @@ pub struct TextRun {
     pub color: [u8; 4],
     pub spc_100pt: Option<i32>,
     pub link: Option<RunLink>,
+}
+
+/// An inline native Office math object with a plain DrawingML fallback.
+#[derive(Clone)]
+pub struct InlineMath {
+    pub omml: String,
+    pub fallback: TextRun,
 }
 
 /// Native bullet or autonumbering properties for a paragraph.

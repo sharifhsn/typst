@@ -3,9 +3,9 @@ use typst_ooxml_core::color as ooxml_color;
 use typst_ooxml_core::ns;
 
 use crate::dom::{
-    BulletKind, FillSpec, GeomShape, GroupShape, MathBox, MediaId, PathGeom, PathSegment,
-    Pic, PicGeom, Placeholder, RunLink, SlideIr, SlideShape, StrokeSpec, TextBox,
-    TextPara, TextRun, TextWrap,
+    BulletKind, FillSpec, GeomShape, GroupShape, InlineMath, MathBox, MediaId, PathGeom,
+    PathSegment, Pic, PicGeom, Placeholder, RunLink, SlideIr, SlideShape, StrokeSpec,
+    TextBox, TextChild, TextPara, TextRun, TextWrap,
 };
 use crate::xml::XmlWriter;
 
@@ -203,9 +203,25 @@ fn write_para(w: &mut XmlWriter, para: &TextPara, rels: &mut impl SlideRelSink) 
     }
     w.close();
 
-    for run in &para.runs {
-        write_text_run(w, run, rels);
+    for child in &para.children {
+        match child {
+            TextChild::Run(run) => write_text_run(w, run, rels),
+            TextChild::Math(math) => write_inline_math(w, math, rels),
+        }
     }
+    w.close();
+}
+
+fn write_inline_math(w: &mut XmlWriter, math: &InlineMath, rels: &mut impl SlideRelSink) {
+    w.open("mc:AlternateContent").start_children();
+    w.open("mc:Choice").attr("Requires", "a14").start_children();
+    w.open("a14:m").start_children();
+    w.raw(&math.omml);
+    w.close();
+    w.close();
+    w.open("mc:Fallback").start_children();
+    write_text_run(w, &math.fallback, rels);
+    w.close();
     w.close();
 }
 
@@ -229,8 +245,11 @@ fn slide_contains_math(slide: &SlideIr) -> bool {
 fn shape_contains_math(shape: &SlideShape) -> bool {
     match shape {
         SlideShape::MathBox(_) => true,
+        SlideShape::TextBox(text) => text.paras.iter().any(|para| {
+            para.children.iter().any(|child| matches!(child, TextChild::Math(_)))
+        }),
         SlideShape::Group(group) => group.children.iter().any(shape_contains_math),
-        SlideShape::TextBox(_) | SlideShape::Pic(_) | SlideShape::Geom(_) => false,
+        SlideShape::Pic(_) | SlideShape::Geom(_) => false,
     }
 }
 

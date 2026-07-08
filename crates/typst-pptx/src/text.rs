@@ -6,8 +6,8 @@ use typst_library::text::{FontStyle, TextItem};
 use typst_library::visualize::Paint;
 
 use crate::dom::{
-    BulletKind, ParaBullet, Placeholder, RunLink, SlideShape, TextBox, TextPara, TextRun,
-    TextWrap,
+    BulletKind, InlineMath, ParaBullet, Placeholder, RunLink, SlideShape, TextBox,
+    TextChild, TextPara, TextRun, TextWrap,
 };
 
 /// Cloneable link target used before lowering into the frozen DOM.
@@ -28,6 +28,18 @@ pub(crate) struct TextSource<'a> {
     pub link: Option<LinkTarget>,
 }
 
+/// One inline math item discovered by the frame walk.
+#[derive(Clone)]
+pub(crate) struct InlineMathSource {
+    pub order: usize,
+    pub baseline: Point,
+    pub min: Point,
+    pub max: Point,
+    pub rot_60k: i32,
+    pub omml: String,
+    pub fallback: EcoString,
+}
+
 /// A clustered text box and the walk order of its first contributing item.
 pub(crate) struct ClusteredText {
     pub order: usize,
@@ -36,28 +48,33 @@ pub(crate) struct ClusteredText {
     title_eligible: bool,
 }
 
-/// Cluster `FrameItem::Text` entries by rotation and baseline.
-pub(crate) fn cluster_text(items: Vec<TextSource<'_>>) -> Vec<ClusteredText> {
+/// Cluster `FrameItem::Text` entries and inline math by rotation and baseline.
+pub(crate) fn cluster_text<'a>(
+    text: Vec<TextSource<'a>>,
+    math: Vec<InlineMathSource>,
+) -> Vec<ClusteredText> {
     let mut emit = Vec::new();
-    let mut items = items
+    let mut items = text
         .into_iter()
         .filter(|source| !source.item.text.is_empty())
+        .map(FlowItem::Text)
+        .chain(math.into_iter().map(FlowItem::Math))
         .collect::<Vec<_>>();
 
     items.sort_by(|a, b| {
-        a.rot_60k
-            .cmp(&b.rot_60k)
-            .then_with(|| cmp_abs(a.baseline.y, b.baseline.y))
-            .then_with(|| cmp_abs(a.baseline.x, b.baseline.x))
-            .then_with(|| a.order.cmp(&b.order))
+        item_rot(a)
+            .cmp(&item_rot(b))
+            .then_with(|| cmp_abs(item_baseline(a).y, item_baseline(b).y))
+            .then_with(|| cmp_abs(item_left_x(a), item_left_x(b)))
+            .then_with(|| item_order(a).cmp(&item_order(b)))
     });
 
     let mut class_start = 0;
     while class_start < items.len() {
-        let rot = items[class_start].rot_60k;
+        let rot = item_rot(&items[class_start]);
         let class_end = items[class_start..]
             .iter()
-            .position(|source| source.rot_60k != rot)
+            .position(|source| item_rot(source) != rot)
             .map_or(items.len(), |pos| class_start + pos);
         cluster_rotation_class(&items[class_start..class_end], &mut emit);
         class_start = class_end;
@@ -68,7 +85,13 @@ pub(crate) fn cluster_text(items: Vec<TextSource<'_>>) -> Vec<ClusteredText> {
     emit
 }
 
-fn cluster_rotation_class(items: &[TextSource<'_>], emit: &mut Vec<ClusteredText>) {
+#[derive(Clone)]
+enum FlowItem<'a> {
+    Text(TextSource<'a>),
+    Math(InlineMathSource),
+}
+
+fn cluster_rotation_class(items: &[FlowItem<'_>], emit: &mut Vec<ClusteredText>) {
     let mut lines = Vec::new();
     let mut line_start = 0;
     while line_start < items.len() {
@@ -81,7 +104,8 @@ fn cluster_rotation_class(items: &[TextSource<'_>], emit: &mut Vec<ClusteredText
 
         let mut line = items[line_start..line_end].iter().collect::<Vec<_>>();
         line.sort_by(|a, b| {
-            cmp_abs(a.baseline.x, b.baseline.x).then_with(|| a.order.cmp(&b.order))
+            cmp_abs(item_left_x(a), item_left_x(b))
+                .then_with(|| item_order(a).cmp(&item_order(b)))
         });
 
         let mut segment_start = 0;
@@ -105,14 +129,14 @@ fn cluster_rotation_class(items: &[TextSource<'_>], emit: &mut Vec<ClusteredText
     emit.extend(build_clusters(lines));
 }
 
-fn same_baseline_line(a: &TextSource<'_>, b: &TextSource<'_>) -> bool {
-    let max_size = scaled_size(a).max(scaled_size(b));
-    (a.baseline.y - b.baseline.y).abs() <= max_size * 0.25
+fn same_baseline_line(a: &FlowItem<'_>, b: &FlowItem<'_>) -> bool {
+    let max_size = item_scaled_size(a).max(item_scaled_size(b));
+    (item_baseline(a).y - item_baseline(b).y).abs() <= max_size * 0.25
 }
 
-fn is_column_gap(a: &TextSource<'_>, b: &TextSource<'_>) -> bool {
-    let gap = (b.baseline.x - item_end_x(a)).max(Abs::zero());
-    gap > scaled_size(a).max(scaled_size(b)) * 2.0
+fn is_column_gap(a: &FlowItem<'_>, b: &FlowItem<'_>) -> bool {
+    let gap = (item_left_x(b) - item_end_x(a)).max(Abs::zero());
+    gap > item_scaled_size(a).max(item_scaled_size(b)) * 2.0
 }
 
 #[derive(Clone)]
@@ -126,7 +150,7 @@ struct LineSegment {
     max_size: Abs,
     max_sz_100pt: i32,
     rot_60k: i32,
-    runs: Vec<TextRun>,
+    children: Vec<TextChild>,
     rtl: bool,
     bullet: Option<LineBullet>,
 }
@@ -150,63 +174,79 @@ struct BulletDetection {
     strip_chars: usize,
 }
 
-fn build_line_segment(segment: &[&TextSource<'_>]) -> Option<LineSegment> {
+fn build_line_segment(segment: &[&FlowItem<'_>]) -> Option<LineSegment> {
     let first = *segment.first()?;
     let max_size = segment
         .iter()
-        .map(|source| scaled_size(source))
+        .map(|source| item_scaled_size(source))
         .max()
         .unwrap_or(Abs::zero());
     let descent = segment
         .iter()
-        .map(|source| (-source.item.font.metrics().descender).at(scaled_size(source)))
+        .map(|source| item_descent(source))
         .max()
         .unwrap_or(Abs::zero());
 
     let left = segment
         .iter()
-        .map(|source| source.baseline.x)
+        .map(|source| item_left_x(source))
         .min()
-        .unwrap_or(first.baseline.x);
+        .unwrap_or(item_left_x(first));
     let right = segment
         .iter()
         .map(|source| item_end_x(source))
         .max()
-        .unwrap_or(first.baseline.x);
-    let height = box_height(max_size, descent);
-    let top = box_top(first.baseline.y, max_size);
+        .unwrap_or(item_left_x(first));
+    let top = segment
+        .iter()
+        .map(|source| item_top(source))
+        .min()
+        .unwrap_or_else(|| box_top(item_baseline(first).y, max_size));
+    let bottom = segment
+        .iter()
+        .map(|source| item_bottom(source))
+        .max()
+        .unwrap_or_else(|| top + box_height(max_size, descent));
 
-    let mut runs = Vec::new();
+    let mut children = Vec::new();
     let spc_100pt = segment_tracking(segment);
     for (idx, source) in segment.iter().enumerate() {
         let props = run_props(source, spc_100pt);
         if let Some(prev) = idx.checked_sub(1).map(|idx| segment[idx]) {
-            synthesize_gap(prev, source, &props, &mut runs);
+            synthesize_gap(prev, source, &props, &mut children);
         }
-        push_or_merge_run(&mut runs, props);
+        match source {
+            FlowItem::Text(_) => push_or_merge_run(&mut children, props),
+            FlowItem::Math(math) => children.push(TextChild::Math(InlineMath {
+                omml: math.omml.clone(),
+                fallback: props,
+            })),
+        }
     }
 
-    if runs.is_empty() {
+    if children.is_empty() {
         return None;
     }
 
-    let rtl = segment
+    let rtl = segment.iter().any(|source| item_rtl(source));
+    let order = segment
         .iter()
-        .any(|source| matches!(source.item.lang.dir(), typst_library::layout::Dir::RTL));
-    let order = segment.iter().map(|source| source.order).min().unwrap_or(first.order);
+        .map(|source| item_order(source))
+        .min()
+        .unwrap_or(item_order(first));
     let max_sz_100pt = (max_size.to_pt() * 100.0).round() as i32;
-    let bullet = detect_bullet(segment, left, max_size, &runs);
+    let bullet = detect_bullet(segment, left, max_size, &children);
     Some(LineSegment {
         order,
         left,
         right,
         top,
-        bottom: top + height,
-        baseline_y: first.baseline.y,
+        bottom,
+        baseline_y: item_baseline(first).y,
         max_size,
         max_sz_100pt,
-        rot_60k: first.rot_60k,
-        runs,
+        rot_60k: item_rot(first),
+        children,
         rtl,
         bullet,
     })
@@ -405,7 +445,7 @@ fn build_flow_box(group: &[usize], lines: &[LineSegment]) -> ClusteredText {
     let selected = group.iter().map(|&idx| lines[idx].clone()).collect::<Vec<_>>();
     let (left, right, top, bottom) = bounds(&selected);
     let leading = measured_leading(&selected);
-    let runs = runs_from_lines(&selected, right, false);
+    let children = children_from_lines(&selected, right, false);
     let rtl = selected.iter().any(|line| line.rtl);
     let max_sz_100pt = selected.iter().map(|line| line.max_sz_100pt).max().unwrap_or(0);
     let order = selected.iter().map(|line| line.order).min().unwrap_or(0);
@@ -423,7 +463,7 @@ fn build_flow_box(group: &[usize], lines: &[LineSegment]) -> ClusteredText {
             wrap: TextWrap::Square,
             placeholder: None,
             paras: vec![TextPara {
-                runs,
+                children,
                 rtl,
                 line_spacing_100pt: leading_100pt(leading),
                 bullet: None,
@@ -497,7 +537,7 @@ fn build_single_line_box(line: &LineSegment) -> ClusteredText {
             wrap: TextWrap::None,
             placeholder: None,
             paras: vec![TextPara {
-                runs: line.runs.clone(),
+                children: line.children.clone(),
                 rtl: line.rtl,
                 line_spacing_100pt: None,
                 bullet: None,
@@ -520,7 +560,7 @@ fn bullet_para(
         .unwrap_or(0)
         .min(8) as u8;
     TextPara {
-        runs: runs_from_lines(lines, box_right, true),
+        children: children_from_lines(lines, box_right, true),
         rtl: lines.iter().any(|line| line.rtl),
         line_spacing_100pt: leading_100pt(leading),
         bullet: Some(ParaBullet {
@@ -532,42 +572,45 @@ fn bullet_para(
     }
 }
 
-fn runs_from_lines(
+fn children_from_lines(
     lines: &[LineSegment],
     box_right: Abs,
     strip_first_bullet: bool,
-) -> Vec<TextRun> {
-    let mut runs = Vec::new();
+) -> Vec<TextChild> {
+    let mut children = Vec::new();
     for (idx, line) in lines.iter().enumerate() {
         if idx > 0 {
             let prev = &lines[idx - 1];
             let separator =
                 if hard_line_break(prev, line, box_right) { "\n" } else { " " };
-            push_separator(&mut runs, line, separator);
+            push_separator(&mut children, line, separator);
         }
 
-        let mut line_runs = line.runs.clone();
+        let mut line_children = line.children.clone();
         if idx == 0
             && strip_first_bullet
             && let Some(bullet) = &line.bullet
         {
-            strip_prefix_chars(&mut line_runs, bullet.strip_chars);
+            strip_prefix_chars(&mut line_children, bullet.strip_chars);
         }
-        for run in line_runs {
-            push_or_merge_run(&mut runs, run);
+        for child in line_children {
+            match child {
+                TextChild::Run(run) => push_or_merge_run(&mut children, run),
+                TextChild::Math(math) => children.push(TextChild::Math(math)),
+            }
         }
     }
-    runs
+    children
 }
 
-fn push_separator(runs: &mut Vec<TextRun>, line: &LineSegment, separator: &str) {
-    let Some(template) = runs.last().or_else(|| line.runs.first()) else {
+fn push_separator(children: &mut Vec<TextChild>, line: &LineSegment, separator: &str) {
+    let Some(template) = last_run(children).or_else(|| first_run(&line.children)) else {
         return;
     };
     let mut run = template.clone();
     run.text = EcoString::from(separator);
     run.link = None;
-    push_or_merge_run(runs, run);
+    push_or_merge_run(children, run);
 }
 
 fn bounds(lines: &[LineSegment]) -> (Abs, Abs, Abs, Abs) {
@@ -667,12 +710,18 @@ fn bullet_kind(kind: &LineBulletKind) -> BulletKind {
 }
 
 fn detect_bullet(
-    segment: &[&TextSource<'_>],
+    segment: &[&FlowItem<'_>],
     left: Abs,
     max_size: Abs,
-    runs: &[TextRun],
+    children: &[TextChild],
 ) -> Option<LineBullet> {
-    let text = runs.iter().map(|run| run.text.as_str()).collect::<String>();
+    let text = children
+        .iter()
+        .map(|child| match child {
+            TextChild::Run(run) => run.text.as_str(),
+            TextChild::Math(math) => math.fallback.text.as_str(),
+        })
+        .collect::<String>();
     let detection = parse_bullet_prefix(&text)?;
     let body_left =
         measured_bullet_body_left(segment).unwrap_or_else(|| left + max_size * 1.8);
@@ -738,10 +787,13 @@ fn parse_bullet_prefix(text: &str) -> Option<BulletDetection> {
         .then_some(BulletDetection { kind, strip_chars: leading + (idx - leading) })
 }
 
-fn measured_bullet_body_left(segment: &[&TextSource<'_>]) -> Option<Abs> {
+fn measured_bullet_body_left(segment: &[&FlowItem<'_>]) -> Option<Abs> {
     let mut saw_marker = false;
     for source in segment {
-        let trimmed = source.item.text.trim();
+        let trimmed = match *source {
+            FlowItem::Text(source) => source.item.text.trim(),
+            FlowItem::Math(math) => math.fallback.trim(),
+        };
         if trimmed.is_empty() {
             continue;
         }
@@ -752,7 +804,7 @@ fn measured_bullet_body_left(segment: &[&TextSource<'_>]) -> Option<Abs> {
             }
             return None;
         }
-        return Some(source.baseline.x);
+        return Some(item_left_x(source));
     }
     None
 }
@@ -769,11 +821,14 @@ fn marker_only(text: &str) -> bool {
         )
 }
 
-fn strip_prefix_chars(runs: &mut Vec<TextRun>, mut count: usize) {
-    for run in runs.iter_mut() {
+fn strip_prefix_chars(children: &mut Vec<TextChild>, mut count: usize) {
+    for child in children.iter_mut() {
         if count == 0 {
             break;
         }
+        let TextChild::Run(run) = child else {
+            continue;
+        };
         let len = run.text.chars().count();
         if count >= len {
             run.text.clear();
@@ -783,7 +838,10 @@ fn strip_prefix_chars(runs: &mut Vec<TextRun>, mut count: usize) {
             break;
         }
     }
-    runs.retain(|run| !run.text.is_empty());
+    children.retain(|child| match child {
+        TextChild::Run(run) => !run.text.is_empty(),
+        TextChild::Math(_) => true,
+    });
 }
 
 fn mark_title_placeholder(clusters: &mut [ClusteredText]) {
@@ -826,7 +884,14 @@ fn mark_title_placeholder(clusters: &mut [ClusteredText]) {
     }
 }
 
-fn run_props(source: &TextSource<'_>, spc_100pt: Option<i32>) -> TextRun {
+fn run_props(source: &FlowItem<'_>, spc_100pt: Option<i32>) -> TextRun {
+    match source {
+        FlowItem::Text(source) => text_run_props(source, spc_100pt),
+        FlowItem::Math(math) => math_fallback_run(math, spc_100pt),
+    }
+}
+
+fn text_run_props(source: &TextSource<'_>, spc_100pt: Option<i32>) -> TextRun {
     let variant = source.item.font.font().info().variant;
     TextRun {
         text: source.item.text.clone(),
@@ -843,24 +908,51 @@ fn run_props(source: &TextSource<'_>, spc_100pt: Option<i32>) -> TextRun {
     }
 }
 
-fn push_or_merge_run(runs: &mut Vec<TextRun>, run: TextRun) {
-    if let Some(last) = runs.last_mut()
+fn math_fallback_run(math: &InlineMathSource, spc_100pt: Option<i32>) -> TextRun {
+    TextRun {
+        text: math.fallback.clone(),
+        family: EcoString::from("New Computer Modern Math"),
+        sz_100pt: (inline_math_size(math).to_pt() * 100.0).round() as i32,
+        b: false,
+        i: false,
+        color: [0, 0, 0, 255],
+        spc_100pt,
+        link: None,
+    }
+}
+
+fn push_or_merge_run(children: &mut Vec<TextChild>, run: TextRun) {
+    if let Some(TextChild::Run(last)) = children.last_mut()
         && compatible_run(last, &run)
     {
         last.text.push_str(&run.text);
         return;
     }
-    runs.push(run);
+    children.push(TextChild::Run(run));
+}
+
+fn last_run(children: &[TextChild]) -> Option<&TextRun> {
+    children.iter().rev().find_map(|child| match child {
+        TextChild::Run(run) => Some(run),
+        TextChild::Math(_) => None,
+    })
+}
+
+fn first_run(children: &[TextChild]) -> Option<&TextRun> {
+    children.iter().find_map(|child| match child {
+        TextChild::Run(run) => Some(run),
+        TextChild::Math(_) => None,
+    })
 }
 
 fn synthesize_gap(
-    prev: &TextSource<'_>,
-    source: &TextSource<'_>,
+    prev: &FlowItem<'_>,
+    source: &FlowItem<'_>,
     props: &TextRun,
-    runs: &mut Vec<TextRun>,
+    children: &mut Vec<TextChild>,
 ) {
-    let gap = (source.baseline.x - item_end_x(prev)).max(Abs::zero());
-    let size = scaled_size(prev).max(scaled_size(source));
+    let gap = (item_left_x(source) - item_end_x(prev)).max(Abs::zero());
+    let size = item_scaled_size(prev).max(item_scaled_size(source));
     if gap < size * 0.15 {
         return;
     }
@@ -871,7 +963,7 @@ fn synthesize_gap(
         ((gap.to_pt() / (0.25 * size.to_pt())).round() as usize).max(1)
     };
     push_or_merge_run(
-        runs,
+        children,
         TextRun {
             text: EcoString::from(" ".repeat(count)),
             family: props.family.clone(),
@@ -904,16 +996,27 @@ fn same_link(a: &Option<RunLink>, b: &Option<RunLink>) -> bool {
     }
 }
 
-fn segment_tracking(segment: &[&TextSource<'_>]) -> Option<i32> {
+fn segment_tracking(segment: &[&FlowItem<'_>]) -> Option<i32> {
     if segment.len() < 2 {
         return None;
     }
 
-    let left = segment.first()?.baseline.x;
-    let right = item_end_x(segment.last()?);
+    let mut text_items = Vec::new();
+    for source in segment {
+        match *source {
+            FlowItem::Text(text) => text_items.push(text),
+            FlowItem::Math(_) => return None,
+        }
+    }
+    if text_items.len() < 2 {
+        return None;
+    }
+
+    let left = text_items.first()?.baseline.x;
+    let right = text_item_end_x(text_items.last()?);
     let typst_segment_width = right - left;
-    let item_width = segment.iter().map(|source| scaled_width(source)).sum::<Abs>();
-    let char_count = segment
+    let item_width = text_items.iter().map(|source| scaled_width(source)).sum::<Abs>();
+    let char_count = text_items
         .iter()
         .map(|source| source.item.text.chars().count())
         .sum::<usize>();
@@ -927,6 +1030,87 @@ fn segment_tracking(segment: &[&TextSource<'_>]) -> Option<i32> {
     } else {
         Some((correction * 100.0).round() as i32)
     }
+}
+
+fn item_order(source: &FlowItem<'_>) -> usize {
+    match source {
+        FlowItem::Text(source) => source.order,
+        FlowItem::Math(math) => math.order,
+    }
+}
+
+fn item_baseline(source: &FlowItem<'_>) -> Point {
+    match source {
+        FlowItem::Text(source) => source.baseline,
+        FlowItem::Math(math) => math.baseline,
+    }
+}
+
+fn item_rot(source: &FlowItem<'_>) -> i32 {
+    match source {
+        FlowItem::Text(source) => source.rot_60k,
+        FlowItem::Math(math) => math.rot_60k,
+    }
+}
+
+fn item_left_x(source: &FlowItem<'_>) -> Abs {
+    match source {
+        FlowItem::Text(source) => source.baseline.x,
+        FlowItem::Math(math) => math.min.x,
+    }
+}
+
+fn item_end_x(source: &FlowItem<'_>) -> Abs {
+    match source {
+        FlowItem::Text(source) => text_item_end_x(source),
+        FlowItem::Math(math) => math.max.x,
+    }
+}
+
+fn item_top(source: &FlowItem<'_>) -> Abs {
+    match source {
+        FlowItem::Text(source) => box_top(source.baseline.y, scaled_size(source)),
+        FlowItem::Math(math) => math.min.y,
+    }
+}
+
+fn item_bottom(source: &FlowItem<'_>) -> Abs {
+    match source {
+        FlowItem::Text(source) => {
+            source.baseline.y
+                + (-source.item.font.metrics().descender).at(scaled_size(source))
+        }
+        FlowItem::Math(math) => math.max.y,
+    }
+}
+
+fn item_descent(source: &FlowItem<'_>) -> Abs {
+    match source {
+        FlowItem::Text(source) => {
+            (-source.item.font.metrics().descender).at(scaled_size(source))
+        }
+        FlowItem::Math(math) => (math.max.y - math.baseline.y).max(Abs::zero()),
+    }
+}
+
+fn item_scaled_size(source: &FlowItem<'_>) -> Abs {
+    match source {
+        FlowItem::Text(source) => scaled_size(source),
+        FlowItem::Math(math) => inline_math_size(math),
+    }
+}
+
+fn item_rtl(source: &FlowItem<'_>) -> bool {
+    match source {
+        FlowItem::Text(source) => {
+            matches!(source.item.lang.dir(), typst_library::layout::Dir::RTL)
+        }
+        FlowItem::Math(_) => false,
+    }
+}
+
+fn inline_math_size(math: &InlineMathSource) -> Abs {
+    (math.max.y - math.min.y).max(Abs::pt(0.1))
 }
 
 /// A representative solid color for a text run.
@@ -948,7 +1132,7 @@ fn text_color(fill: &Paint) -> [u8; 4] {
     }
 }
 
-fn item_end_x(source: &TextSource<'_>) -> Abs {
+fn text_item_end_x(source: &TextSource<'_>) -> Abs {
     source.baseline.x + scaled_width(source)
 }
 
