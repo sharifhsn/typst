@@ -1,6 +1,7 @@
-use ecow::{EcoString, eco_format};
-use rustc_hash::FxHashMap;
-use typst_utils::hash128;
+use ecow::EcoString;
+pub use typst_ooxml_core::dml::{FillSpec, PathSegment, StrokeSpec};
+pub use typst_ooxml_core::media::MediaId;
+use typst_ooxml_core::media::MediaRegistry;
 
 /// A slide-level intermediate representation.
 pub struct SlideIr {
@@ -154,67 +155,20 @@ pub enum PathGeom {
     Custom(Vec<PathSegment>),
 }
 
-/// One custom geometry path segment.
-pub enum PathSegment {
-    MoveTo(i64, i64),
-    LineTo(i64, i64),
-    CubicTo(i64, i64, i64, i64, i64, i64),
-    Close,
-}
-
-/// A fill specification. Colors are straight sRGB + alpha (`[r, g, b, a]`).
-pub enum FillSpec {
-    Solid([u8; 4]),
-    LinearGradient { angle_60k: i32, stops: Vec<GradientStop> },
-}
-
-/// A gradient stop.
-pub struct GradientStop {
-    pub pos_100k: i32,
-    pub color: [u8; 4],
-}
-
-/// A stroke specification.
-pub struct StrokeSpec {
-    pub color: [u8; 4],
-    pub w_emu: i64,
-    pub cap: &'static str,
-    pub dash: Option<&'static str>,
-}
-
-/// Index into the package media registry.
-pub type MediaId = usize;
-
-/// One media part in the package.
-pub struct MediaPart {
-    pub part_name: EcoString,
-    pub ext: EcoString,
-    pub bytes: Vec<u8>,
-}
-
 /// Shared slide conversion context.
-#[derive(Default)]
 pub struct SlideCtx {
-    pub media: Vec<MediaPart>,
-    media_dedup: FxHashMap<u128, MediaId>,
+    pub media: MediaRegistry,
+}
+
+impl Default for SlideCtx {
+    fn default() -> Self {
+        Self { media: MediaRegistry::new("ppt/media") }
+    }
 }
 
 impl SlideCtx {
     /// Add media bytes to the shared registry, deduplicating identical bytes.
     pub fn add_media(&mut self, bytes: &[u8], ext: &str) -> MediaId {
-        let hash = hash128(bytes);
-        if let Some(&id) = self.media_dedup.get(&hash) {
-            return id;
-        }
-
-        let clean_ext = ext.trim_start_matches('.').to_ascii_lowercase();
-        let id = self.media.len();
-        self.media.push(MediaPart {
-            part_name: eco_format!("ppt/media/image{}.{}", id + 1, clean_ext),
-            ext: clean_ext.into(),
-            bytes: bytes.to_vec(),
-        });
-        self.media_dedup.insert(hash, id);
-        id
+        self.media.add(bytes, ext)
     }
 }

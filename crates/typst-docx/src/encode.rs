@@ -4,12 +4,12 @@ use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::Smart;
 use typst_library::model::DocumentInfo;
-use typst_ooxml_core::ns;
+use typst_ooxml_core::{dml, ns};
 
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, DocxDocument,
-    Drawing, Field, Footnote, GroupSpec, HdrFtrPart, Para, ParaChild, PathSegment, Row,
-    Run, SectPr, SectType, ShapeFill, ShapeGeom, ShapeSpec, Tbl, Toc, VAlign, VMerge,
+    Drawing, Field, Footnote, GroupSpec, HdrFtrPart, Para, ParaChild, Row, Run, SectPr,
+    SectType, ShapeFill, ShapeGeom, ShapeSpec, Tbl, Toc, VAlign, VMerge,
 };
 use crate::package::{DOCX_PACKAGE_OPTIONS, Package, RelMode, Rels};
 use crate::styles_part;
@@ -204,13 +204,7 @@ fn clone_rels(src: &Rels) -> Rels {
 
 /// Picks the content type for a media extension.
 fn media_content_type(ext: &str) -> &'static str {
-    match ext {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        _ => "application/octet-stream",
-    }
+    typst_ooxml_core::media::image_content_type(ext)
 }
 
 // ---------------------------------------------------------------------------
@@ -540,7 +534,7 @@ fn write_vml_textbox(
     tb: &crate::dom::TextBox,
 ) {
     let pt = |emu: i64| format!("{:.2}", emu as f64 / 12700.0);
-    let hex = |c: [u8; 3]| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
+    let hex = |c: [u8; 4]| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
 
     w.open("w:pict").start_children();
     w.open("v:rect")
@@ -554,8 +548,8 @@ fn write_vml_textbox(
             w.attr("fillcolor", &hex(*c));
         }
         Some(ShapeFill::LinearGradient { stops, .. }) => {
-            if let Some((_, c)) = stops.first() {
-                w.attr("fillcolor", &hex(*c));
+            if let Some(stop) = stops.first() {
+                w.attr("fillcolor", &hex(stop.color));
             }
         }
         None => {
@@ -816,8 +810,6 @@ fn write_wsp(
     h_emu: i64,
     shape: &ShapeSpec,
 ) {
-    let hex = |c: [u8; 3]| format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
-
     w.open("wps:wsp").attr("xmlns:wps", WPS_NS).start_children();
     w.open("wps:cNvSpPr").empty();
     w.open("wps:spPr").start_children();
@@ -840,105 +832,15 @@ fn write_wsp(
                 ShapeGeom::Ellipse => "ellipse",
                 _ => "rect",
             };
-            w.open("a:prstGeom").attr("prst", prst).start_children();
-            w.open("a:avLst").empty();
-            w.close();
+            dml::write_prst_geom(w, prst);
         }
         ShapeGeom::Path(segments) => {
-            let (cx, cy) = (w_emu.to_string(), h_emu.to_string());
-            w.open("a:custGeom").start_children();
-            for empty in ["a:avLst", "a:gdLst", "a:ahLst", "a:cxnLst"] {
-                w.open(empty).empty();
-            }
-            w.open("a:rect")
-                .attr("l", "0")
-                .attr("t", "0")
-                .attr("r", &cx)
-                .attr("b", &cy)
-                .empty();
-            w.open("a:pathLst").start_children();
-            w.open("a:path").attr("w", &cx).attr("h", &cy).start_children();
-            let pt = |w: &mut XmlWriter, x: i64, y: i64| {
-                w.open("a:pt")
-                    .attr("x", &x.to_string())
-                    .attr("y", &y.to_string())
-                    .empty();
-            };
-            for seg in segments {
-                match *seg {
-                    PathSegment::MoveTo(x, y) => {
-                        w.open("a:moveTo").start_children();
-                        pt(w, x, y);
-                        w.close();
-                    }
-                    PathSegment::LineTo(x, y) => {
-                        w.open("a:lnTo").start_children();
-                        pt(w, x, y);
-                        w.close();
-                    }
-                    PathSegment::CubicTo(c1x, c1y, c2x, c2y, ex, ey) => {
-                        w.open("a:cubicBezTo").start_children();
-                        pt(w, c1x, c1y);
-                        pt(w, c2x, c2y);
-                        pt(w, ex, ey);
-                        w.close();
-                    }
-                    PathSegment::Close => {
-                        w.open("a:close").empty();
-                    }
-                }
-            }
-            w.close(); // a:path
-            w.close(); // a:pathLst
-            w.close(); // a:custGeom
+            dml::write_custom_geom(w, segments, w_emu, h_emu);
         }
     }
 
-    match &shape.fill {
-        Some(ShapeFill::Solid(c)) => {
-            w.open("a:solidFill").start_children();
-            w.open("a:srgbClr").attr("val", &hex(*c)).empty();
-            w.close();
-        }
-        Some(ShapeFill::LinearGradient { angle_60000ths, stops }) => {
-            w.open("a:gradFill").attr("rotWithShape", "1").start_children();
-            w.open("a:gsLst").start_children();
-            for (pos, c) in stops {
-                w.open("a:gs").attr("pos", &pos.to_string()).start_children();
-                w.open("a:srgbClr").attr("val", &hex(*c)).empty();
-                w.close(); // a:gs
-            }
-            w.close(); // a:gsLst
-            w.open("a:lin")
-                .attr("ang", &angle_60000ths.to_string())
-                .attr("scaled", "1")
-                .empty();
-            w.close(); // a:gradFill
-        }
-        None => {
-            w.open("a:noFill").empty();
-        }
-    }
-    match &shape.stroke {
-        Some(s) => {
-            w.open("a:ln")
-                .attr("w", &s.w_emu.to_string())
-                .attr("cap", s.cap)
-                .start_children();
-            w.open("a:solidFill").start_children();
-            w.open("a:srgbClr").attr("val", &hex(s.color)).empty();
-            w.close();
-            if let Some(dash) = s.dash {
-                w.open("a:prstDash").attr("val", dash).empty();
-            }
-            w.close(); // a:ln
-        }
-        None => {
-            w.open("a:ln").start_children();
-            w.open("a:noFill").empty();
-            w.close();
-        }
-    }
+    dml::write_fill(w, shape.fill.as_ref(), "1");
+    dml::write_stroke(w, shape.stroke.as_ref(), false);
 
     w.close(); // wps:spPr
 

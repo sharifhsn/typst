@@ -3206,12 +3206,10 @@ dependencies = [
  "flate2",
  "rustc-hash",
  "time",
- "tiny-skia",
  "typst-layout",
  "typst-library",
  "typst-macros",
  "typst-ooxml-core",
- "typst-render",
  "typst-svg",
  "typst-syntax",
  "typst-timing",
@@ -3446,7 +3444,11 @@ version = "0.15.0"
 dependencies = [
  "ecow",
  "rustc-hash",
+ "tiny-skia",
+ "typst-layout",
  "typst-library",
+ "typst-render",
+ "typst-utils",
  "zip",
 ]
 
@@ -3503,7 +3505,6 @@ dependencies = [
  "ecow",
  "rustc-hash",
  "time",
- "tiny-skia",
  "typst-layout",
  "typst-library",
  "typst-ooxml-core",

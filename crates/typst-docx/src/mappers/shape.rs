@@ -13,13 +13,22 @@ use typst_library::layout::{Abs, BoxElem, Length, Rel, Sides, Sizing};
 use typst_library::visualize::{
     CircleElem, EllipseElem, Paint, PolygonElem, RectElem, SquareElem, Stroke,
 };
+use typst_ooxml_core::dml;
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Drawing, GroupChild, GroupSpec, PathSegment, Run, ShapeFill, ShapeGeom, ShapeSpec,
-    ShapeStroke, TextBox,
+    Drawing, GroupChild, GroupSpec, Run, ShapeFill, ShapeGeom, ShapeSpec, ShapeStroke,
+    TextBox,
 };
 use crate::props::{abs_to_emu, color_to_hex};
+
+fn opaque(rgb: [u8; 3]) -> [u8; 4] {
+    [rgb[0], rgb[1], rgb[2], 255]
+}
+
+fn rgb(rgba: [u8; 4]) -> [u8; 3] {
+    [rgba[0], rgba[1], rgba[2]]
+}
 
 /// Maps a shape element to a vector DrawingML shape run, or `None` to rasterize.
 pub fn shape(
@@ -77,7 +86,7 @@ pub fn text_box(
     // A gradient/tiling fill has no solid-colour text-box form: keep rasterizing
     // it so the visual survives.
     let fill = match fill_paint {
-        Some(Paint::Solid(c)) => Some(ShapeFill::Solid(color_to_hex(&c))),
+        Some(Paint::Solid(c)) => Some(ShapeFill::Solid(opaque(color_to_hex(&c)))),
         Some(_) => return Ok(None),
         None => None,
     };
@@ -173,7 +182,7 @@ pub fn inline_frame(
             // `w:bdr/@w:sz` is in eighths of a point; keep a visible minimum.
             sz: ((pt * 8.0).round() as u32).max(2),
             space: 0,
-            color: s.color,
+            color: rgb(s.color),
         }
     });
     Some((framed.body, fill, bdr))
@@ -358,10 +367,11 @@ fn build(
         // (`max_y <= 0`) on any all-non-positive axis, forcing a rasterize.
         let mut raw = Vec::with_capacity(verts.len() + 1);
         for (i, p) in verts.iter().enumerate() {
-            raw.push(if i == 0 { RawSeg::Move(*p) } else { RawSeg::Line(*p) });
+            raw.push(if i == 0 { dml::RawSeg::Move(*p) } else { dml::RawSeg::Line(*p) });
         }
-        raw.push(RawSeg::Close);
-        let (segments, w, h) = normalize_segments(raw)?;
+        raw.push(dml::RawSeg::Close);
+        let normalized = dml::normalize_segments(raw)?;
+        let (segments, w, h) = (normalized.segments, normalized.w, normalized.h);
         let fill = fill_color(e.fill.get_ref(styles))?;
         let stroke =
             single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
@@ -411,7 +421,7 @@ fn explicit_size(
 fn fill_color(paint: &Option<Paint>) -> Option<Option<ShapeFill>> {
     match paint {
         None => Some(None),
-        Some(Paint::Solid(c)) => Some(Some(ShapeFill::Solid(color_to_hex(c)))),
+        Some(Paint::Solid(c)) => Some(Some(ShapeFill::Solid(opaque(color_to_hex(c))))),
         Some(Paint::Gradient(g)) => linear_gradient_fill(g).map(Some),
         Some(_) => None,
     }
@@ -425,28 +435,7 @@ fn fill_color(paint: &Option<Paint>) -> Option<Option<ShapeFill>> {
 fn linear_gradient_fill(
     gradient: &typst_library::visualize::Gradient,
 ) -> Option<ShapeFill> {
-    use typst_library::visualize::{ColorSpace, Gradient, ProcessColorSpace};
-    let Gradient::Linear(lg) = gradient else { return None };
-    // A gradient's stops are stored in its own interpolation space (Oklab by
-    // default, not sRGB) for correct in-between blending — `Color::to_vec4_u8`
-    // reads a colour's CURRENT components verbatim, with no implicit space
-    // conversion, so calling it directly on a stop yields the Oklab L/a/b
-    // triple reinterpreted as RGB bytes (a plausible-looking but wrong colour).
-    // Convert every stop to sRGB first, exactly as the SVG exporter does
-    // before hex-encoding a stop (`paint.rs::write_gradients`).
-    let srgb = ColorSpace::Process(ProcessColorSpace::Srgb);
-    let stops = lg
-        .stops
-        .iter()
-        .map(|(c, pos)| {
-            let rgb = c.to_space(&srgb).unwrap_or_else(|_| c.clone());
-            ((pos.get() * 100_000.0).round() as u32, color_to_hex(&rgb))
-        })
-        .collect();
-    // OOXML's `a:lin ang` is measured the same way Typst's gradient angle is:
-    // 0 = left-to-right, increasing clockwise, in 60,000ths of a degree.
-    let angle_60000ths = (lg.angle.to_deg().rem_euclid(360.0) * 60_000.0).round() as i32;
-    Some(ShapeFill::LinearGradient { angle_60000ths, stops })
+    dml::linear_gradient_fill(gradient, dml::AlphaMode::Opaque)
 }
 
 /// Resolves a single optional stroke. `None` outer = unrepresentable (gradient)
@@ -484,7 +473,7 @@ fn default_stroke(fill: &Option<Paint>) -> Option<ShapeStroke> {
         None
     } else {
         Some(ShapeStroke {
-            color: [0, 0, 0],
+            color: [0, 0, 0, 255],
             w_emu: abs_to_emu(Abs::pt(1.0)),
             cap: "flat",
             dash: None,
@@ -496,54 +485,12 @@ fn resolve_stroke(stroke: Stroke, styles: StyleChain) -> Option<ShapeStroke> {
     let fx = stroke.resolve(styles).unwrap_or_default();
     match &fx.paint {
         Paint::Solid(c) => Some(ShapeStroke {
-            color: color_to_hex(c),
+            color: opaque(color_to_hex(c)),
             w_emu: abs_to_emu(fx.thickness),
-            cap: line_cap_to_ooxml(fx.cap),
-            dash: fx.dash.as_ref().map(|d| prst_dash(&d.array, fx.thickness)),
+            cap: dml::line_cap_to_ooxml(fx.cap),
+            dash: fx.dash.as_ref().map(|d| dml::prst_dash(&d.array, fx.thickness)),
         }),
         _ => None,
-    }
-}
-
-/// Maps Typst's [`LineCap`] to OOXML's `a:ln` `cap` attribute.
-fn line_cap_to_ooxml(cap: typst_library::visualize::LineCap) -> &'static str {
-    use typst_library::visualize::LineCap;
-    match cap {
-        LineCap::Butt => "flat",
-        LineCap::Round => "rnd",
-        LineCap::Square => "sq",
-    }
-}
-
-/// Maps a *resolved* dash array (plain absolute on/off lengths — by this
-/// point `DashLength::LineWidth` has already been multiplied out, so the
-/// dot-vs-dash distinction `classify_dash` reads directly from the unresolved
-/// source stroke isn't available) to the closest OOXML `a:prstDash` preset — a
-/// small fixed vocabulary, so an arbitrary dash array is approximated rather
-/// than reproduced exactly. An "on" segment at (or barely above) the line's
-/// own thickness reads as a dot (`DashLength::LineWidth` resolves to exactly
-/// 1x); a longer one reads as a dash. This is inherently lossy — Typst's own
-/// `"dashed"` preset (`3pt` on/off, fixed regardless of thickness) and a
-/// custom `dash: "dotted"`-like array both just look like "some on/off array"
-/// once resolved to plain lengths, so a sufficiently thick `"dashed"` stroke
-/// can misclassify as a dot. Kept tight (1.2x) to favor the common case
-/// (thin-to-medium strokes) over the rarer thick-dashed edge case.
-fn prst_dash(array: &[Abs], thickness: Abs) -> &'static str {
-    if array.is_empty() {
-        return "solid";
-    }
-    let (mut has_dot, mut has_dash) = (false, false);
-    for on in array.iter().step_by(2) {
-        if *on <= thickness * 1.2 {
-            has_dot = true;
-        } else {
-            has_dash = true;
-        }
-    }
-    match (has_dot, has_dash) {
-        (true, true) => "dashDot",
-        (true, false) => "sysDot",
-        _ => "dash",
     }
 }
 
@@ -780,7 +727,7 @@ fn layout_shape_frame(
 /// coordinate space of whatever frame it was extracted from (so multiple
 /// shapes from one frame can be positioned relative to each other).
 struct ExtractedShape {
-    raw: Vec<RawSeg>,
+    raw: Vec<dml::RawSeg>,
     fill: Option<ShapeFill>,
     stroke: Option<ShapeStroke>,
 }
@@ -800,27 +747,6 @@ fn extract_shapes(frame: &typst_library::layout::Frame) -> Option<Vec<ExtractedS
     use typst_library::layout::Transform;
     let mut out = Vec::new();
     collect_shapes(frame, Transform::identity(), 1.0, &mut out).then_some(out)
-}
-
-/// A 2D affine transform's uniform scale factor, if it's a "similarity"
-/// (pure rotation and/or reflection, optionally combined with a UNIFORM
-/// scale — no skew, no non-uniform scale) — the class of transform that can
-/// be baked directly into a flat path's point coordinates while keeping a
-/// single scalar stroke width exactly correct (rotation/reflection preserve
-/// length; a uniform scale just multiplies it). `None` for anything else
-/// (skew, or X/Y scaled by different factors), which has no exact
-/// single-width representation and must keep rasterizing.
-fn similarity_scale(t: &typst_library::layout::Transform) -> Option<f64> {
-    let (sx, ky, kx, sy) = (t.sx.get(), t.ky.get(), t.kx.get(), t.sy.get());
-    let col1 = sx * sx + ky * ky;
-    let col2 = kx * kx + sy * sy;
-    let dot = sx * kx + ky * sy;
-    const EPS: f64 = 1e-4;
-    if col1 <= EPS || (col1 - col2).abs() > EPS * col1.max(col2) || dot.abs() > EPS * col1
-    {
-        return None;
-    }
-    Some(col1.sqrt())
 }
 
 fn collect_shapes(
@@ -844,7 +770,7 @@ fn collect_shapes(
                 let Some(stroke) = resolved_stroke(&shape.stroke, stroke_scale) else {
                     return false;
                 };
-                let raw = geometry_to_raw(&shape.geometry, item_transform);
+                let raw = dml::geometry_to_raw(&shape.geometry, item_transform);
                 out.push(ExtractedShape { raw, fill, stroke });
             }
             FrameItem::Group(group) => {
@@ -852,7 +778,7 @@ fn collect_shapes(
                     // A clip path inside — not attempted; bail to rasterize.
                     return false;
                 }
-                let Some(scale) = similarity_scale(&group.transform) else {
+                let Some(scale) = dml::similarity_scale(&group.transform) else {
                     // A skew or non-uniform scale — no exact flat-stroke-width
                     // representation; the exact "grouped shapes with a
                     // transform" case this pass doesn't attempt (see
@@ -873,43 +799,6 @@ fn collect_shapes(
     true
 }
 
-/// A resolved shape [`Geometry`](typst_library::visualize::Geometry) → its
-/// [`RawSeg`] path, with `transform` (the frame item's own position, composed
-/// with any ancestor rotation/reflection/uniform-scale — see
-/// [`collect_shapes`]) applied to every point. Always succeeds: every
-/// geometry variant (including `Rect`, lowered to its 4-corner closed path)
-/// is representable as a raw path, which is what lets a rect compose
-/// alongside lines/curves in a group — a rect as the SOLE top-level shape
-/// instead takes the nicer preset-geometry path in [`shape`], since Word
-/// gives `a:prstGeom prst="rect"` a resizable handle a `custGeom` path
-/// doesn't get.
-fn geometry_to_raw(
-    geometry: &typst_library::visualize::Geometry,
-    transform: typst_library::layout::Transform,
-) -> Vec<RawSeg> {
-    use typst_library::layout::Point;
-    use typst_library::visualize::Geometry;
-    let at = |p: Point| p.transform(transform);
-    match geometry {
-        Geometry::Curve(curve) => raw_segments_from_curve(curve, transform),
-        // `layout_line` pushes its `Shape` at `start.to_point()` (not the
-        // origin) and the geometry is only the *delta* from there — so both
-        // ends (the local origin and the local `delta`) go through the same
-        // `transform`, or the line's true start/end (and hence its bounding
-        // box) comes out wrong.
-        Geometry::Line(delta) => {
-            vec![RawSeg::Move(at(Point::zero())), RawSeg::Line(at(*delta))]
-        }
-        Geometry::Rect(size) => vec![
-            RawSeg::Move(at(Point::zero())),
-            RawSeg::Line(at(Point::new(size.x, Abs::zero()))),
-            RawSeg::Line(at(Point::new(size.x, size.y))),
-            RawSeg::Line(at(Point::new(Abs::zero(), size.y))),
-            RawSeg::Close,
-        ],
-    }
-}
-
 /// Builds the final [`Run::Drawing`] from every shape found in `frame`: `None`
 /// if the frame holds anything not natively representable, a single native
 /// shape if it holds exactly one, or a `wpg:wgp` group if it holds several.
@@ -924,7 +813,10 @@ fn build_shapes_drawing(
 
     if shapes.len() == 1 {
         let ExtractedShape { raw, fill, stroke } = shapes.into_iter().next().unwrap();
-        let Some((segments, w, h)) = normalize_segments(raw) else { return Ok(None) };
+        let Some(normalized) = dml::normalize_segments(raw) else {
+            return Ok(None);
+        };
+        let (segments, w, h) = (normalized.segments, normalized.w, normalized.h);
         // A perfectly horizontal/vertical line is legitimately degenerate on
         // one axis; floor it to 1 EMU (imperceptible) rather than the 0 Word
         // handles poorly for a drawing extent. `normalize_segments` already
@@ -953,7 +845,7 @@ fn build_shapes_drawing(
     // Several shapes: position each relative to the GROUP's own shared origin
     // (the union of every shape's own bounds), so their relative layout — not
     // just each one's own local geometry — is preserved.
-    let bounds: Vec<_> = shapes.iter().map(|s| raw_bounds(&s.raw)).collect();
+    let bounds: Vec<_> = shapes.iter().map(|s| dml::raw_bounds(&s.raw)).collect();
     let (mut group_min_x, mut group_min_y, mut group_max_x, mut group_max_y) = bounds[0];
     for &(x0, y0, x1, y1) in &bounds[1..] {
         group_min_x = group_min_x.min(x0);
@@ -974,7 +866,8 @@ fn build_shapes_drawing(
     let mut children = Vec::with_capacity(shapes.len());
     for (shape, (min_x, min_y, _, _)) in shapes.into_iter().zip(bounds) {
         let ExtractedShape { raw, fill, stroke } = shape;
-        let Some((segments, w, h)) = normalize_segments(raw) else { continue };
+        let Some(normalized) = dml::normalize_segments(raw) else { continue };
+        let (segments, w, h) = (normalized.segments, normalized.w, normalized.h);
         children.push(GroupChild {
             x_emu: abs_to_emu(min_x - group_min_x),
             y_emu: abs_to_emu(min_y - group_min_y),
@@ -1034,142 +927,13 @@ fn resolved_stroke(
             Paint::Solid(c) => {
                 let thickness = fx.thickness * scale;
                 Some(Some(ShapeStroke {
-                    color: color_to_hex(c),
+                    color: opaque(color_to_hex(c)),
                     w_emu: abs_to_emu(thickness),
-                    cap: line_cap_to_ooxml(fx.cap),
-                    dash: fx.dash.as_ref().map(|d| prst_dash(&d.array, thickness)),
+                    cap: dml::line_cap_to_ooxml(fx.cap),
+                    dash: fx.dash.as_ref().map(|d| dml::prst_dash(&d.array, thickness)),
                 }))
             }
             _ => None,
         },
     }
-}
-
-/// A curve/line command in the shape's own (possibly negative) coordinate
-/// space, before the shift to OOXML's non-negative convention.
-enum RawSeg {
-    Move(typst_library::layout::Point),
-    Line(typst_library::layout::Point),
-    Cubic(
-        typst_library::layout::Point,
-        typst_library::layout::Point,
-        typst_library::layout::Point,
-    ),
-    Close,
-}
-
-/// Lowers a resolved [`typst_library::visualize::Curve`] into [`RawSeg`]s,
-/// mirroring the SVG/PDF exporters' own item walk (`CurveItem::Move` →
-/// `RawSeg::Move`, …) — the direct, 1:1 translation of Typst's Bézier
-/// vocabulary into OOXML's. `transform` is the frame item's own position
-/// composed with any ancestor transform (applied to every point; see the
-/// caller's note on why this matters).
-fn raw_segments_from_curve(
-    curve: &typst_library::visualize::Curve,
-    transform: typst_library::layout::Transform,
-) -> Vec<RawSeg> {
-    use typst_library::visualize::CurveItem;
-    curve
-        .0
-        .iter()
-        .map(|item| match item {
-            CurveItem::Move(p) => RawSeg::Move(p.transform(transform)),
-            CurveItem::Line(p) => RawSeg::Line(p.transform(transform)),
-            CurveItem::Cubic(c1, c2, end) => RawSeg::Cubic(
-                c1.transform(transform),
-                c2.transform(transform),
-                end.transform(transform),
-            ),
-            CurveItem::Close => RawSeg::Close,
-        })
-        .collect()
-}
-
-/// The conservative bounding box of a raw path — see [`normalize_segments`]'s
-/// doc comment for why it's the control-point hull, not the tight curve
-/// extent. Returns `(min_x, min_y, max_x, max_y)` in the path's own (possibly
-/// negative) coordinate space. Shared by [`normalize_segments`] (a single
-/// shape's own bounds) and [`build_shapes_drawing`] (each group child's bounds
-/// relative to the whole group).
-fn raw_bounds(raw: &[RawSeg]) -> (Abs, Abs, Abs, Abs) {
-    // Seed from the first real coordinate rather than the origin: a path whose
-    // points are all offset from `(0, 0)` (a `#line(start: (10pt, 10pt), …)`, or
-    // a group child positioned away from the group origin) must not have its box
-    // stretched back to include the origin — that inflates the drawing extent
-    // with phantom padding. `normalize_segments` shifts the path by these mins,
-    // so an origin-anchored box left the shape correct-but-padded; a tight box
-    // is both smaller and exactly right.
-    let mut bounds: Option<(Abs, Abs, Abs, Abs)> = None;
-    let mut expand = |p: typst_library::layout::Point| {
-        bounds = Some(match bounds {
-            None => (p.x, p.y, p.x, p.y),
-            Some((min_x, min_y, max_x, max_y)) => {
-                (min_x.min(p.x), min_y.min(p.y), max_x.max(p.x), max_y.max(p.y))
-            }
-        });
-    };
-    for seg in raw {
-        match seg {
-            RawSeg::Move(p) | RawSeg::Line(p) => expand(*p),
-            RawSeg::Cubic(c1, c2, end) => {
-                expand(*c1);
-                expand(*c2);
-                expand(*end);
-            }
-            RawSeg::Close => {}
-        }
-    }
-    bounds.unwrap_or((Abs::zero(), Abs::zero(), Abs::zero(), Abs::zero()))
-}
-
-/// Shifts a path so every coordinate is non-negative (the OOXML `a:custGeom`
-/// convention — the path's own local space spans `[0, w] x [0, h]`) and
-/// converts to EMU, returning the segments plus the path's true bounding size.
-///
-/// The bound is conservative rather than the mathematically tight curve
-/// extent: for a cubic segment it includes the two control points as well as
-/// the endpoints. A cubic Bézier always lies within the convex hull of its 4
-/// control points, so this never clips the curve — unlike reusing the laid-out
-/// frame's own `size()`, which only tracks the *positive* extent (see
-/// `CurveBuilder::expand_bounds` in `typst-layout`) and would silently clip any
-/// segment that dips negative.
-fn normalize_segments(raw: Vec<RawSeg>) -> Option<(Vec<PathSegment>, Abs, Abs)> {
-    let (min_x, min_y, max_x, max_y) = raw_bounds(&raw);
-    let (w, h) = (max_x - min_x, max_y - min_y);
-    if !w.to_pt().is_finite() || !h.to_pt().is_finite() {
-        return None;
-    }
-    // A perfectly horizontal or vertical `#line` is legitimately degenerate on
-    // ONE axis (it is a 1-D stroke, not a 2-D fill region) — floor that axis to
-    // a single, visually imperceptible EMU rather than bailing to rasterize
-    // (Word accepts a zero-size drawing extent poorly, but not a 1-EMU one). A
-    // point (both axes degenerate — a zero-length line) has nothing to draw.
-    if w.to_pt() <= 0.0 && h.to_pt() <= 0.0 {
-        return None;
-    }
-
-    let shift = |p: typst_library::layout::Point| -> (i64, i64) {
-        (abs_to_emu(p.x - min_x), abs_to_emu(p.y - min_y))
-    };
-    let segments = raw
-        .into_iter()
-        .map(|seg| match seg {
-            RawSeg::Move(p) => {
-                let (x, y) = shift(p);
-                PathSegment::MoveTo(x, y)
-            }
-            RawSeg::Line(p) => {
-                let (x, y) = shift(p);
-                PathSegment::LineTo(x, y)
-            }
-            RawSeg::Cubic(c1, c2, end) => {
-                let (c1x, c1y) = shift(c1);
-                let (c2x, c2y) = shift(c2);
-                let (ex, ey) = shift(end);
-                PathSegment::CubicTo(c1x, c1y, c2x, c2y, ex, ey)
-            }
-            RawSeg::Close => PathSegment::Close,
-        })
-        .collect();
-    Some((segments, w, h))
 }

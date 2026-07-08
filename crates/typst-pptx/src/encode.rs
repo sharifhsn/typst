@@ -1,11 +1,10 @@
 use ecow::EcoString;
-use typst_ooxml_core::color as ooxml_color;
-use typst_ooxml_core::ns;
+use typst_ooxml_core::{dml, ns};
 
 use crate::dom::{
-    BulletKind, FillSpec, GeomShape, GroupShape, MathBox, MediaId, PathGeom, PathSegment,
-    Pic, PicGeom, Placeholder, RunLink, SlideIr, SlideShape, StrokeSpec, TextBox,
-    TextPara, TextRun, TextWrap,
+    BulletKind, FillSpec, GeomShape, GroupShape, MathBox, MediaId, PathGeom, Pic,
+    PicGeom, Placeholder, RunLink, SlideIr, SlideShape, TextBox, TextPara, TextRun,
+    TextWrap,
 };
 use crate::xml::XmlWriter;
 
@@ -48,7 +47,7 @@ pub(crate) fn slide_xml(slide: &SlideIr, rels: &mut impl SlideRelSink) -> String
 fn write_background(w: &mut XmlWriter, fill: &FillSpec) {
     w.open("p:bg").start_children();
     w.open("p:bgPr").start_children();
-    write_fill(w, Some(fill));
+    dml::write_fill(w, Some(fill), "0");
     w.leaf("a:effectLst");
     w.close();
     w.close();
@@ -94,7 +93,7 @@ fn write_text_box(
     write_sp_nv(w, id, &name, !is_title, text.placeholder);
     w.open("p:spPr").start_children();
     write_xfrm(w, text.x_emu, text.y_emu, text.w_emu, text.h_emu, text.rot_60k);
-    write_prst_geom(w, "rect");
+    dml::write_prst_geom(w, "rect");
     w.leaf("a:noFill");
     w.open("a:ln").start_children();
     w.leaf("a:noFill");
@@ -121,7 +120,7 @@ fn write_math_box(
     write_sp_nv(w, id, &format!("Math {id}"), true, None);
     w.open("p:spPr").start_children();
     write_xfrm(w, math.x_emu, math.y_emu, math.w_emu, math.h_emu, math.rot_60k);
-    write_prst_geom(w, "rect");
+    dml::write_prst_geom(w, "rect");
     w.leaf("a:noFill");
     w.open("a:ln").start_children();
     w.leaf("a:noFill");
@@ -279,7 +278,7 @@ fn write_r_pr(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink) {
         w.attr("spc", &spc.to_string());
     }
     w.start_children();
-    write_solid_fill(w, run.color);
+    dml::write_solid_fill(w, run.color);
     w.open("a:latin").attr("typeface", &run.family).empty();
     w.open("a:ea").attr("typeface", &run.family).empty();
     w.open("a:cs").attr("typeface", &run.family).empty();
@@ -338,11 +337,11 @@ fn write_pic(w: &mut XmlWriter, pic: &Pic, id: u32, rels: &mut impl SlideRelSink
 
 fn write_pic_geom(w: &mut XmlWriter, geom: &PicGeom) {
     match geom {
-        PicGeom::Rect => write_prst_geom(w, "rect"),
+        PicGeom::Rect => dml::write_prst_geom(w, "rect"),
         PicGeom::RoundRect { adj_100k } => {
-            write_prst_geom_with_adj(w, "roundRect", *adj_100k)
+            dml::write_prst_geom_with_adj(w, "roundRect", *adj_100k)
         }
-        PicGeom::Ellipse => write_prst_geom(w, "ellipse"),
+        PicGeom::Ellipse => dml::write_prst_geom(w, "ellipse"),
     }
 }
 
@@ -352,8 +351,8 @@ fn write_geom_shape(w: &mut XmlWriter, geom: &GeomShape, id: u32) {
     w.open("p:spPr").start_children();
     write_xfrm(w, geom.x_emu, geom.y_emu, geom.w_emu, geom.h_emu, geom.rot_60k);
     write_geom(w, &geom.geom, geom.w_emu, geom.h_emu);
-    write_fill(w, geom.fill.as_ref());
-    write_stroke(w, geom.stroke.as_ref());
+    dml::write_fill(w, geom.fill.as_ref(), "0");
+    dml::write_stroke(w, geom.stroke.as_ref(), true);
     w.close();
     w.close();
 }
@@ -461,163 +460,12 @@ fn write_xfrm(w: &mut XmlWriter, x: i64, y: i64, cx: i64, cy: i64, rot_60k: i32)
 
 fn write_geom(w: &mut XmlWriter, geom: &PathGeom, w_emu: i64, h_emu: i64) {
     match geom {
-        PathGeom::Rect => write_prst_geom(w, "rect"),
-        PathGeom::Ellipse => write_prst_geom(w, "ellipse"),
-        PathGeom::Custom(segments) => write_custom_geom(w, segments, w_emu, h_emu),
-    }
-}
-
-fn write_prst_geom(w: &mut XmlWriter, prst: &'static str) {
-    w.open("a:prstGeom").attr("prst", prst).start_children();
-    w.leaf("a:avLst");
-    w.close();
-}
-
-fn write_prst_geom_with_adj(w: &mut XmlWriter, prst: &'static str, adj: i32) {
-    w.open("a:prstGeom").attr("prst", prst).start_children();
-    w.open("a:avLst").start_children();
-    w.open("a:gd")
-        .attr("name", "adj")
-        .attr("fmla", &format!("val {}", adj.clamp(0, 50_000)))
-        .empty();
-    w.close();
-    w.close();
-}
-
-fn write_custom_geom(
-    w: &mut XmlWriter,
-    segments: &[PathSegment],
-    w_emu: i64,
-    h_emu: i64,
-) {
-    w.open("a:custGeom").start_children();
-    w.leaf("a:avLst");
-    w.leaf("a:gdLst");
-    w.leaf("a:ahLst");
-    w.leaf("a:cxnLst");
-    // The text rectangle in LITERAL coordinates. `r="r" b="b"` reference
-    // guide names that must be defined in `<a:gdLst>` — with an empty gdLst
-    // they are undefined, which PowerPoint *repairs* (LibreOffice tolerates
-    // it). Our path space equals the extent, so the rect is the full box.
-    w.open("a:rect")
-        .attr("l", "0")
-        .attr("t", "0")
-        .attr("r", &w_emu.max(1).to_string())
-        .attr("b", &h_emu.max(1).to_string())
-        .empty();
-    w.open("a:pathLst").start_children();
-    // The path's own coordinate space. Without explicit w/h a consumer cannot
-    // normalize the (EMU-valued) points against the shape extent and stretches
-    // the path arbitrarily — LibreOffice blew a 120pt rect up to slide width.
-    // Our points already live in [0, ext], so the space equals the extent.
-    w.open("a:path")
-        .attr("w", &w_emu.max(1).to_string())
-        .attr("h", &h_emu.max(1).to_string())
-        .start_children();
-    for segment in segments {
-        match *segment {
-            PathSegment::MoveTo(x, y) => {
-                w.open("a:moveTo").start_children();
-                write_pt(w, x, y);
-                w.close();
-            }
-            PathSegment::LineTo(x, y) => {
-                w.open("a:lnTo").start_children();
-                write_pt(w, x, y);
-                w.close();
-            }
-            PathSegment::CubicTo(x1, y1, x2, y2, x, y) => {
-                w.open("a:cubicBezTo").start_children();
-                write_pt(w, x1, y1);
-                write_pt(w, x2, y2);
-                write_pt(w, x, y);
-                w.close();
-            }
-            PathSegment::Close => w.leaf("a:close"),
+        PathGeom::Rect => dml::write_prst_geom(w, "rect"),
+        PathGeom::Ellipse => dml::write_prst_geom(w, "ellipse"),
+        PathGeom::Custom(segments) => {
+            dml::write_custom_geom(w, segments, w_emu.max(1), h_emu.max(1))
         }
     }
-    w.close();
-    w.close();
-    w.close();
-}
-
-fn write_pt(w: &mut XmlWriter, x: i64, y: i64) {
-    w.open("a:pt")
-        .attr("x", &x.to_string())
-        .attr("y", &y.to_string())
-        .empty();
-}
-
-fn write_fill(w: &mut XmlWriter, fill: Option<&FillSpec>) {
-    match fill {
-        Some(FillSpec::Solid(rgb)) => write_solid_fill(w, *rgb),
-        Some(FillSpec::LinearGradient { angle_60k, stops }) => {
-            w.open("a:gradFill").attr("rotWithShape", "1").start_children();
-            w.open("a:gsLst").start_children();
-            for stop in stops {
-                w.open("a:gs")
-                    .attr("pos", &stop.pos_100k.to_string())
-                    .start_children();
-                // CT_GradientStop holds the color element DIRECTLY — wrapping
-                // it in a:solidFill is schema-invalid and consumers drop the
-                // whole fill (the shape rendered invisible in LibreOffice).
-                write_srgb(w, stop.color);
-                w.close();
-            }
-            w.close();
-            w.open("a:lin")
-                .attr("ang", &angle_60k.to_string())
-                .attr("scaled", "0")
-                .empty();
-            w.close();
-        }
-        None => w.leaf("a:noFill"),
-    }
-}
-
-fn write_stroke(w: &mut XmlWriter, stroke: Option<&StrokeSpec>) {
-    match stroke {
-        Some(stroke) => {
-            w.open("a:ln")
-                .attr("w", &stroke.w_emu.max(0).to_string())
-                .attr("cap", stroke.cap)
-                .start_children();
-            write_solid_fill(w, stroke.color);
-            if let Some(dash) = stroke.dash {
-                w.open("a:prstDash").attr("val", dash).empty();
-            }
-            w.close();
-        }
-        None => {
-            w.open("a:ln").start_children();
-            w.leaf("a:noFill");
-            w.close();
-        }
-    }
-}
-
-fn write_solid_fill(w: &mut XmlWriter, rgba: [u8; 4]) {
-    w.open("a:solidFill").start_children();
-    write_srgb(w, rgba);
-    w.close();
-}
-
-fn write_srgb(w: &mut XmlWriter, rgba: [u8; 4]) {
-    let [r, g, b, a] = rgba;
-    if a == 255 {
-        w.open("a:srgbClr").attr("val", &hex([r, g, b])).empty();
-    } else {
-        // Straight alpha as a percentage in thousandths (DrawingML CT_Color).
-        w.open("a:srgbClr").attr("val", &hex([r, g, b])).start_children();
-        w.open("a:alpha")
-            .attr("val", &ooxml_color::alpha_to_100k(a).to_string())
-            .empty();
-        w.close();
-    }
-}
-
-pub fn hex(rgb: [u8; 3]) -> String {
-    ooxml_color::hex_rgb(rgb)
 }
 
 struct Ids {
