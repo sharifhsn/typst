@@ -350,6 +350,11 @@ fn docx_document_impl(
     introspector.set_anchors(crate::bookmark::anchors(&bookmarks));
     introspector.set_page_model(page_model, page, section_numberings);
 
+    let even_and_odd_headers = section_uses_even_furniture(&sect)
+        || body.iter().any(|block| {
+            matches!(block, Block::SectionBreak(sect) if section_uses_even_furniture(sect))
+        });
+
     Ok(DocxDocument {
         info,
         body,
@@ -369,7 +374,15 @@ fn docx_document_impl(
         footer_parts,
         background_color: first_geom.background_color,
         hyphenate: first_geom.hyphenate,
+        even_and_odd_headers,
     })
+}
+
+fn section_uses_even_furniture(sect: &SectPr) -> bool {
+    sect.headers
+        .iter()
+        .chain(&sect.footers)
+        .any(|reference| reference.kind == "even")
 }
 
 /// Resolves the root text properties that define `docDefaults` and `Normal`.
@@ -1019,75 +1032,31 @@ fn build_section(
     // watermark. The background and the explicit header share ONE part so their
     // image relationships live in a single `headerN.xml.rels` (no rId collision).
     if geom.header.is_some() || geom.background.is_some() {
-        let saved = ctx.part_rels.take();
-        ctx.part_rels = Some(crate::package::Rels::new());
-        let mut blocks = Vec::new();
-        if let Some(bg) = &geom.background
-            && let Some(block) = background_block(ctx, bg, geom, styles)?
-        {
-            blocks.push(block);
-        }
-        if let Some(content) = &geom.header {
-            // Bound furniture rasters to the header band, not the page region.
-            // A header composition built from 100%-relative pieces (a slide
-            // theme's navigation bar) cannot resolve under the infinite-height
-            // first pass, and the full-page retry would rasterize it at page
-            // size — a page-sized image in the header then eats every page of
-            // the section. Word furniture physically lives in its margin band,
-            // so that is the honest bound. Intrinsically-sized header content
-            // (a logo image, plain text) resolves in the first pass and never
-            // sees this.
-            let saved_h = ctx.raster_height;
-            ctx.raster_height =
-                typst_library::layout::Abs::pt(geom.margin_top as f64 / 20.0)
-                    .max(typst_library::layout::Abs::pt(6.0));
-            let lowered = ctx.blocks(content, styles);
-            ctx.raster_height = saved_h;
-            blocks.extend(lowered?);
-        }
-        let rels = ctx.part_rels.take().unwrap_or_default();
-        ctx.part_rels = saved;
-        // Header content lives outside the body IR, so its introspection tags
-        // would never reach the introspector — harvest them here (a labeled
-        // element in a running head is a real query target; templates read
-        // page furniture via `query(<label>)`). Appended tags sort after the
-        // whole body, which is also where an `.after(here())` furniture query
-        // expects them. Duplicate locations across sections are deduped by the
-        // introspector builder.
-        let mut tags = Vec::new();
-        collect_tags(&blocks, &mut tags);
-        ctx.real_alias_locations.extend(tags.iter().map(Tag::location));
-        ctx.deferred_tags.extend(tags);
-        // Emit the header part whenever a header is explicitly set (even if it
-        // lowered to nothing) — matching the prior unconditional behaviour — or
-        // when the background produced a drawing.
-        if geom.header.is_some() || !blocks.is_empty() {
-            let part_name = ctx.next_hdrftr_name(true);
-            let rel = ctx.add_header_rel(&part_name);
-            sect.headers.push(HdrFtrRef { kind: "default", rel });
-            header_parts.push(HdrFtrPart { part_name, is_header: true, blocks, rels });
-        }
+        build_furniture_refs(
+            ctx,
+            &mut sect,
+            &mut header_parts,
+            FurnitureSlot::Header,
+            geom,
+            FurnitureSource {
+                content: geom.header.as_ref(),
+                background: geom.background.as_ref(),
+            },
+            styles,
+        )?;
     }
 
     // -- Explicit footer content -------------------------------------------
     if let Some(content) = &geom.footer {
-        // Same band bound as the header above, against the bottom margin.
-        let saved_h = ctx.raster_height;
-        ctx.raster_height =
-            typst_library::layout::Abs::pt(geom.margin_bottom as f64 / 20.0)
-                .max(typst_library::layout::Abs::pt(6.0));
-        let lowered = ctx.part_blocks(content, styles);
-        ctx.raster_height = saved_h;
-        let (blocks, rels) = lowered?;
-        // Same as the header above: footer tags must reach the introspector.
-        let mut tags = Vec::new();
-        collect_tags(&blocks, &mut tags);
-        ctx.real_alias_locations.extend(tags.iter().map(Tag::location));
-        ctx.deferred_tags.extend(tags);
-        let part_name = ctx.next_hdrftr_name(false);
-        let rel = ctx.add_footer_rel(&part_name);
-        sect.footers.push(HdrFtrRef { kind: "default", rel });
-        footer_parts.push(HdrFtrPart { part_name, is_header: false, blocks, rels });
+        build_furniture_refs(
+            ctx,
+            &mut sect,
+            &mut footer_parts,
+            FurnitureSlot::Footer,
+            geom,
+            FurnitureSource { content: Some(content), background: None },
+            styles,
+        )?;
     }
 
     // -- Synthetic page-number band (numbering set, band left as `auto`) ----
@@ -1125,6 +1094,607 @@ fn build_section(
     }
 
     Ok((sect, header_parts, footer_parts))
+}
+
+#[derive(Copy, Clone)]
+enum FurnitureSlot {
+    Header,
+    Footer,
+}
+
+impl FurnitureSlot {
+    fn is_header(self) -> bool {
+        matches!(self, Self::Header)
+    }
+}
+
+struct LoweredFurniture {
+    blocks: Vec<Block>,
+    rels: crate::package::Rels,
+    signature: String,
+    emit_empty: bool,
+}
+
+#[derive(Copy, Clone)]
+struct FurnitureSource<'a> {
+    content: Option<&'a Content>,
+    background: Option<&'a Content>,
+}
+
+fn build_furniture_refs(
+    ctx: &mut DocxCtx,
+    sect: &mut SectPr,
+    parts: &mut Vec<HdrFtrPart>,
+    slot: FurnitureSlot,
+    geom: &SectGeom,
+    source: FurnitureSource<'_>,
+    styles: StyleChain,
+) -> SourceResult<()> {
+    let context_sensitive = source.content.is_some_and(contains_context)
+        || source.background.is_some_and(contains_context);
+
+    let first = lower_furniture(ctx, slot, geom, source, styles, 1)?;
+    if !context_sensitive {
+        emit_furniture(ctx, sect, parts, slot, "default", first);
+        return Ok(());
+    }
+
+    let even = lower_furniture(ctx, slot, geom, source, styles, 2)?;
+    let odd = lower_furniture(ctx, slot, geom, source, styles, 3)?;
+    let even_again = lower_furniture(ctx, slot, geom, source, styles, 4)?;
+    let odd_again = lower_furniture(ctx, slot, geom, source, styles, 5)?;
+
+    // `first`/`even`/`default` can only express first-page and parity-stable
+    // differences. A header that embeds the literal page number, for example,
+    // changes on page 3 vs page 5 and must not be represented as one odd-page
+    // default header that repeats page 3 forever.
+    if even.signature != even_again.signature || odd.signature != odd_again.signature {
+        emit_furniture(ctx, sect, parts, slot, "default", first);
+        return Ok(());
+    }
+
+    let needs_even = even.signature != odd.signature;
+    let needs_first = first.signature != odd.signature;
+
+    if !needs_even && !needs_first {
+        emit_furniture(ctx, sect, parts, slot, "default", first);
+        return Ok(());
+    }
+
+    let mut first = Some(first);
+    let mut even = Some(even);
+    let mut odd = Some(odd);
+
+    if needs_first {
+        sect.title_pg = true;
+        emit_furniture(ctx, sect, parts, slot, "first", first.take().unwrap());
+    }
+
+    if needs_even {
+        emit_furniture(ctx, sect, parts, slot, "even", even.take().unwrap());
+    }
+
+    let default = if needs_first {
+        odd.take().unwrap()
+    } else if first.as_ref().unwrap().signature == odd.as_ref().unwrap().signature {
+        first.take().unwrap()
+    } else {
+        odd.take().unwrap()
+    };
+    emit_furniture(ctx, sect, parts, slot, "default", default);
+
+    Ok(())
+}
+
+fn lower_furniture(
+    ctx: &mut DocxCtx,
+    slot: FurnitureSlot,
+    geom: &SectGeom,
+    source: FurnitureSource<'_>,
+    styles: StyleChain,
+    page: usize,
+) -> SourceResult<LoweredFurniture> {
+    let page = NonZeroUsize::new(page).unwrap();
+    crate::introspect::with_furniture_page(page, || {
+        let saved = ctx.part_rels.take();
+        ctx.part_rels = Some(crate::package::Rels::new());
+        let mut blocks = Vec::new();
+
+        if slot.is_header()
+            && let Some(bg) = source.background
+            && let Some(block) = background_block(ctx, bg, geom, styles)?
+        {
+            blocks.push(block);
+        }
+
+        if let Some(content) = source.content {
+            let saved_h = ctx.raster_height;
+            ctx.raster_height = match slot {
+                FurnitureSlot::Header => {
+                    typst_library::layout::Abs::pt(geom.margin_top as f64 / 20.0)
+                }
+                FurnitureSlot::Footer => {
+                    typst_library::layout::Abs::pt(geom.margin_bottom as f64 / 20.0)
+                }
+            }
+            .max(typst_library::layout::Abs::pt(6.0));
+            let lowered = ctx.blocks(content, styles);
+            ctx.raster_height = saved_h;
+            blocks.extend(lowered?);
+        }
+
+        let rels = ctx.part_rels.take().unwrap_or_default();
+        ctx.part_rels = saved;
+        let signature = furniture_signature(&blocks);
+        Ok(LoweredFurniture {
+            blocks,
+            rels,
+            signature,
+            emit_empty: source.content.is_some(),
+        })
+    })
+}
+
+fn emit_furniture(
+    ctx: &mut DocxCtx,
+    sect: &mut SectPr,
+    parts: &mut Vec<HdrFtrPart>,
+    slot: FurnitureSlot,
+    kind: &'static str,
+    lowered: LoweredFurniture,
+) {
+    if !lowered.emit_empty && lowered.blocks.is_empty() {
+        return;
+    }
+
+    // Header/footer content lives outside the body IR, so its introspection
+    // tags would never reach the introspector unless harvested here.
+    let mut tags = Vec::new();
+    collect_tags(&lowered.blocks, &mut tags);
+    ctx.real_alias_locations.extend(tags.iter().map(Tag::location));
+    ctx.deferred_tags.extend(tags);
+
+    let part_name = ctx.next_hdrftr_name(slot.is_header());
+    let rel = if slot.is_header() {
+        ctx.add_header_rel(&part_name)
+    } else {
+        ctx.add_footer_rel(&part_name)
+    };
+    let reference = HdrFtrRef { kind, rel };
+    if slot.is_header() {
+        sect.headers.push(reference);
+    } else {
+        sect.footers.push(reference);
+    }
+    parts.push(HdrFtrPart {
+        part_name,
+        is_header: slot.is_header(),
+        blocks: lowered.blocks,
+        rels: lowered.rels,
+    });
+}
+
+fn contains_context(content: &Content) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::foundations::ContextElem;
+
+    content
+        .traverse(&mut |elem| {
+            if elem.is::<ContextElem>() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .is_break()
+}
+
+fn furniture_signature(blocks: &[Block]) -> String {
+    let mut out = String::new();
+    for block in blocks {
+        sig_block(block, &mut out);
+    }
+    out
+}
+
+fn sig_block(block: &Block, out: &mut String) {
+    use std::fmt::Write;
+
+    match block {
+        Block::Para(para) => sig_para(para, out),
+        Block::Table(table) => {
+            let _ = write!(
+                out,
+                "tbl(w={:?},style={:?},grid={:?}",
+                table.props.width_dxa, table.props.style, table.grid
+            );
+            for row in &table.rows {
+                let _ = write!(
+                    out,
+                    "row(h={},cs={},rh={:?}",
+                    row.header,
+                    row.cant_split,
+                    row.height.as_ref().map(|h| (h.val, h.exact))
+                );
+                for cell in &row.cells {
+                    let _ = write!(
+                        out,
+                        "cell(w={:?},span={},merge={},shd={:?},valign={}",
+                        cell.w_dxa,
+                        cell.grid_span,
+                        vmerge_name(cell.v_merge),
+                        cell.shd_fill,
+                        valign_name(cell.valign)
+                    );
+                    for block in &cell.blocks {
+                        sig_block(block, out);
+                    }
+                    out.push(')');
+                }
+                out.push(')');
+            }
+            out.push(')');
+        }
+        Block::Toc(toc) => {
+            let _ = write!(
+                out,
+                "toc(instr={},dirty={},depth={:?},cat={:?},tab={})",
+                toc.instr, toc.dirty, toc.depth, toc.caption_category, toc.tab_pos
+            );
+            for entry in &toc.entries {
+                sig_para(entry, out);
+            }
+            for run in &toc.fallback {
+                sig_run(run, out);
+            }
+        }
+        Block::SectionBreak(sect) => {
+            let _ = write!(
+                out,
+                "sect({},{},{},{},{},{},{},{},{},{},{},{},{},{:?})",
+                sect.page_w,
+                sect.page_h,
+                sect.landscape,
+                sect.margin_top,
+                sect.margin_bottom,
+                sect.margin_left,
+                sect.margin_right,
+                sect.header,
+                sect.footer,
+                sect.columns,
+                sect.gutter,
+                sect.col_space,
+                sect.title_pg,
+                sect.pg_num.as_ref().map(|pg| (pg.fmt, pg.start))
+            );
+        }
+        Block::Tag(_) => {}
+    }
+}
+
+fn sig_para(para: &Para, out: &mut String) {
+    out.push_str("p(");
+    sig_para_props(&para.props, out);
+    for child in &para.content {
+        sig_para_child(child, out);
+    }
+    out.push(')');
+}
+
+fn sig_para_child(child: &ParaChild, out: &mut String) {
+    use std::fmt::Write;
+
+    match child {
+        ParaChild::Run(run) => sig_run(run, out),
+        ParaChild::OmmlPara(xml) => {
+            let _ = write!(out, "ommlp({xml})");
+        }
+        ParaChild::Hyperlink { anchor, runs, .. } => {
+            let _ = write!(out, "link({anchor:?}");
+            for run in runs {
+                sig_run(run, out);
+            }
+            out.push(')');
+        }
+        ParaChild::BookmarkStart { .. } | ParaChild::BookmarkEnd { .. } => {}
+        ParaChild::Tag(_) => {}
+    }
+}
+
+fn sig_run(run: &Run, out: &mut String) {
+    use std::fmt::Write;
+
+    match run {
+        Run::Text { props, text } => {
+            out.push_str("r(");
+            sig_run_props(props, out);
+            let _ = write!(out, "text={text})");
+        }
+        Run::Break => out.push_str("br;"),
+        Run::PageBreak => out.push_str("pagebr;"),
+        Run::ColumnBreak => out.push_str("colbr;"),
+        Run::Tab => out.push_str("tab;"),
+        Run::FillTab => out.push_str("filltab;"),
+        Run::FootnoteRef { props, id } => {
+            out.push_str("fnref(");
+            sig_run_props(props, out);
+            let _ = write!(out, "{id})");
+        }
+        Run::FootnoteRefMark => out.push_str("fnmark;"),
+        Run::Drawing(drawing) => sig_drawing(drawing, out),
+        Run::OmmlInline(xml) => {
+            let _ = write!(out, "ommli({xml})");
+        }
+        Run::Field(field) => {
+            let _ = write!(out, "field({},dirty={}", field.instr, field.dirty);
+            for run in &field.result {
+                sig_run(run, out);
+            }
+            out.push(')');
+        }
+    }
+}
+
+fn sig_para_props(props: &ParaProps, out: &mut String) {
+    use std::fmt::Write;
+
+    let _ = write!(
+        out,
+        "style={:?};keep_next={};keep_lines={};num={:?};bidi={};jc={};outline={:?};shd={:?};",
+        props.style,
+        props.keep_next,
+        props.keep_lines,
+        props.num,
+        props.bidi,
+        jc_name(props.jc),
+        props.outline_lvl,
+        props.shd_fill
+    );
+    if let Some(spacing) = &props.spacing {
+        let _ = write!(
+            out,
+            "spacing={:?},{:?},{:?},{},{};",
+            spacing.before,
+            spacing.after,
+            spacing.line,
+            spacing.line_rule_auto,
+            spacing.line_rule_at_least
+        );
+    }
+    if let Some(ind) = &props.ind {
+        let _ = write!(
+            out,
+            "ind={:?},{:?},{:?},{:?};",
+            ind.left, ind.right, ind.first_line, ind.hanging
+        );
+    }
+    for tab in &props.tabs {
+        let _ = write!(
+            out,
+            "tab={},leader={},pos={};",
+            tab_align_name(tab.val),
+            tab.leader.map(tab_leader_name).unwrap_or(""),
+            tab.pos
+        );
+    }
+}
+
+fn sig_run_props(props: &RunProps, out: &mut String) {
+    use std::fmt::Write;
+
+    let _ = write!(
+        out,
+        "style={:?};font={:?};strong={};bold={};emph={};italic={};caps={};smallcaps={};strike={};noproof={};color={:?};tracking={:?};pos={:?};size={:?};highlight={:?};shd={:?};underline={};vanish={};vert={};rtl={};cs={};lang={:?};",
+        props.style,
+        props.font,
+        props.strong,
+        props.bold,
+        props.emphasis,
+        props.italic,
+        props.caps,
+        props.smallcaps,
+        props.strike,
+        props.no_proof,
+        props.color,
+        props.tracking,
+        props.position_half_pt,
+        props.size_half_pt,
+        props.highlight,
+        props.shd_fill,
+        underline_name(props.underline.as_ref()),
+        props.vanish,
+        vert_align_name(props.vert_align),
+        props.rtl,
+        props.cs,
+        props.lang
+    );
+}
+
+fn sig_drawing(drawing: &crate::dom::Drawing, out: &mut String) {
+    use std::fmt::Write;
+
+    let _ = write!(
+        out,
+        "drawing(w={},h={},alt={:?},anchor={},shape={},group={})",
+        drawing.w_emu,
+        drawing.h_emu,
+        drawing.alt,
+        drawing.anchor.as_ref().map(anchor_signature).unwrap_or_default(),
+        drawing.shape.as_ref().map(shape_signature).unwrap_or_default(),
+        drawing.group.as_ref().map(group_signature).unwrap_or_default()
+    );
+}
+
+fn anchor_signature(anchor: &crate::dom::Anchor) -> String {
+    format!(
+        "h={}:{}:{:?},v={}:{}:{:?},wrap={},dist={:?},behind={}",
+        anchor.pos_h.rel_from,
+        anchor.pos_h.align.unwrap_or(""),
+        anchor.pos_h.offset,
+        anchor.pos_v.rel_from,
+        anchor.pos_v.align.unwrap_or(""),
+        anchor.pos_v.offset,
+        anchor_wrap_name(anchor.wrap),
+        anchor.dist,
+        anchor.behind
+    )
+}
+
+fn shape_signature(shape: &crate::dom::ShapeSpec) -> String {
+    format!(
+        "geom={},fill={},stroke={},txbx={}",
+        shape_geom_name(&shape.geom),
+        fill_signature(shape.fill.as_ref()),
+        stroke_signature(shape.stroke.as_ref()),
+        shape
+            .txbx
+            .as_ref()
+            .map(|txbx| {
+                let mut out = format!("ins={:?};", txbx.ins);
+                for block in &txbx.blocks {
+                    sig_block(block, &mut out);
+                }
+                out
+            })
+            .unwrap_or_default()
+    )
+}
+
+fn group_signature(group: &crate::dom::GroupSpec) -> String {
+    let mut out = String::new();
+    for child in &group.children {
+        use std::fmt::Write;
+        let _ = write!(
+            out,
+            "child({},{},{},{},{});",
+            child.x_emu,
+            child.y_emu,
+            child.w_emu,
+            child.h_emu,
+            shape_signature(&child.shape)
+        );
+    }
+    out
+}
+
+fn fill_signature(fill: Option<&crate::dom::ShapeFill>) -> String {
+    match fill {
+        Some(crate::dom::ShapeFill::Solid(rgba)) => format!("solid={rgba:?}"),
+        Some(crate::dom::ShapeFill::LinearGradient { angle_60k, stops }) => {
+            format!(
+                "linear={angle_60k}:{:?}",
+                stops
+                    .iter()
+                    .map(|stop| (stop.pos_100k, stop.color))
+                    .collect::<Vec<_>>()
+            )
+        }
+        None => String::new(),
+    }
+}
+
+fn stroke_signature(stroke: Option<&crate::dom::ShapeStroke>) -> String {
+    stroke
+        .map(|stroke| {
+            format!(
+                "{:?}:{}:{}:{:?}",
+                stroke.color, stroke.w_emu, stroke.cap, stroke.dash
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn shape_geom_name(geom: &crate::dom::ShapeGeom) -> String {
+    match geom {
+        crate::dom::ShapeGeom::Rect => "rect".into(),
+        crate::dom::ShapeGeom::RoundRect => "roundrect".into(),
+        crate::dom::ShapeGeom::Ellipse => "ellipse".into(),
+        crate::dom::ShapeGeom::Path(segments) => {
+            let mut out = String::from("path:");
+            for segment in segments {
+                use crate::dom::PathSegment;
+                use std::fmt::Write;
+                match segment {
+                    PathSegment::MoveTo(x, y) => {
+                        let _ = write!(out, "M{x},{y};");
+                    }
+                    PathSegment::LineTo(x, y) => {
+                        let _ = write!(out, "L{x},{y};");
+                    }
+                    PathSegment::CubicTo(x1, y1, x2, y2, x, y) => {
+                        let _ = write!(out, "C{x1},{y1},{x2},{y2},{x},{y};");
+                    }
+                    PathSegment::Close => out.push_str("Z;"),
+                }
+            }
+            out
+        }
+    }
+}
+
+fn jc_name(jc: Option<crate::dom::Jc>) -> &'static str {
+    match jc {
+        Some(crate::dom::Jc::Start) => "start",
+        Some(crate::dom::Jc::End) => "end",
+        Some(crate::dom::Jc::Center) => "center",
+        Some(crate::dom::Jc::Both) => "both",
+        None => "",
+    }
+}
+
+fn tab_align_name(align: crate::dom::TabAlign) -> &'static str {
+    match align {
+        crate::dom::TabAlign::Start => "start",
+        crate::dom::TabAlign::End => "end",
+        crate::dom::TabAlign::Center => "center",
+    }
+}
+
+fn tab_leader_name(leader: crate::dom::TabLeader) -> &'static str {
+    match leader {
+        crate::dom::TabLeader::Dot => "dot",
+        crate::dom::TabLeader::Hyphen => "hyphen",
+        crate::dom::TabLeader::Underscore => "underscore",
+    }
+}
+
+fn underline_name(underline: Option<&crate::dom::Underline>) -> String {
+    underline
+        .map(|underline| format!("{}:{:?}", underline.val, underline.color))
+        .unwrap_or_default()
+}
+
+fn vert_align_name(align: Option<crate::dom::VertAlign>) -> &'static str {
+    match align {
+        Some(crate::dom::VertAlign::Super) => "super",
+        Some(crate::dom::VertAlign::Sub) => "sub",
+        None => "",
+    }
+}
+
+fn vmerge_name(merge: Option<crate::dom::VMerge>) -> &'static str {
+    match merge {
+        Some(crate::dom::VMerge::Restart) => "restart",
+        Some(crate::dom::VMerge::Continue) => "continue",
+        None => "",
+    }
+}
+
+fn valign_name(align: Option<crate::dom::VAlign>) -> &'static str {
+    match align {
+        Some(crate::dom::VAlign::Top) => "top",
+        Some(crate::dom::VAlign::Center) => "center",
+        Some(crate::dom::VAlign::Bottom) => "bottom",
+        None => "",
+    }
+}
+
+fn anchor_wrap_name(wrap: crate::dom::AnchorWrap) -> &'static str {
+    match wrap {
+        crate::dom::AnchorWrap::TopAndBottom => "top-bottom",
+        crate::dom::AnchorWrap::Square(value) => value,
+        crate::dom::AnchorWrap::None => "none",
+    }
 }
 
 /// Rasterizes a `set page(background:)` body and wraps it in a full-page

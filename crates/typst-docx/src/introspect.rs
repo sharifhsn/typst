@@ -6,6 +6,7 @@
 //! so positions are synthetic but preserve the lowered IR's page and block
 //! order.
 
+use std::cell::Cell;
 use std::fmt::{self, Debug, Formatter};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -18,8 +19,29 @@ use typst_library::introspection::{
     DocumentPosition, ElementIntrospector, ElementIntrospectorBuilder, Introspector,
     Location, PagedPosition, Tag,
 };
+use typst_library::layout::Point;
 use typst_library::model::Numbering;
 use typst_syntax::VirtualPath;
+
+thread_local! {
+    static FURNITURE_PAGE_OVERRIDE: Cell<Option<NonZeroUsize>> =
+        const { Cell::new(None) };
+}
+
+/// Runs `f` while unresolved DOCX page-furniture locations report `page`.
+///
+/// This is intentionally scoped to DOCX's own introspector and is used only
+/// while lowering header/footer variants. Real paged locations keep delegating
+/// to the paged introspector, so queries over body elements still see true
+/// paged positions.
+pub(crate) fn with_furniture_page<T>(page: NonZeroUsize, f: impl FnOnce() -> T) -> T {
+    FURNITURE_PAGE_OVERRIDE.with(|slot| {
+        let prev = slot.replace(Some(page));
+        let result = f();
+        slot.set(prev);
+        result
+    })
+}
 
 /// An introspector implementation for DOCX documents.
 #[derive(Clone)]
@@ -128,10 +150,22 @@ impl DocxIntrospector {
             self.real_aliases.get(&location).copied()
         }
     }
+
+    fn furniture_page_override(&self, location: Location) -> Option<NonZeroUsize> {
+        let page = FURNITURE_PAGE_OVERRIDE.with(Cell::get)?;
+        match &self.real {
+            Some(real) if real.position(location).is_none() => Some(page),
+            None if self.elements.position(location).is_none() => Some(page),
+            _ => None,
+        }
+    }
 }
 
 impl Introspector for DocxIntrospector {
     fn query(&self, selector: &Selector) -> EcoVec<Content> {
+        if let Some(result) = self.query_with_furniture_page(selector) {
+            return result;
+        }
         if let Some(real) = &self.real {
             let result = real.query(selector);
             if !result.is_empty() {
@@ -177,6 +211,17 @@ impl Introspector for DocxIntrospector {
     }
 
     fn query_count_before(&self, selector: &Selector, end: Location) -> usize {
+        if let Some(page) = self.furniture_page_override(end) {
+            return self
+                .query(selector)
+                .iter()
+                .filter(|elem| {
+                    elem.location()
+                        .and_then(|loc| self.page(loc))
+                        .is_none_or(|elem_page| elem_page <= page)
+                })
+                .count();
+        }
         if let Some(real) = &self.real
             && let Some(real_end) = self.real_location(end)
         {
@@ -208,6 +253,9 @@ impl Introspector for DocxIntrospector {
     }
 
     fn page(&self, location: Location) -> Option<NonZeroUsize> {
+        if let Some(page) = self.furniture_page_override(location) {
+            return Some(page);
+        }
         if let Some(real) = &self.real
             && let Some(real_loc) = self.real_location(location)
             && let Some(page) = real.page(real_loc)
@@ -224,6 +272,12 @@ impl Introspector for DocxIntrospector {
     }
 
     fn position(&self, location: Location) -> Option<DocumentPosition> {
+        if let Some(page) = self.furniture_page_override(location) {
+            return Some(DocumentPosition::Paged(PagedPosition {
+                page,
+                point: Point::zero(),
+            }));
+        }
         if let Some(real) = &self.real
             && let Some(real_loc) = self.real_location(location)
             && let Some(pos) = real.position(real_loc)
@@ -279,6 +333,36 @@ impl Introspector for DocxIntrospector {
             let real_loc = self.real_location(location)?;
             real.path(real_loc)
         })
+    }
+}
+
+impl DocxIntrospector {
+    fn query_with_furniture_page(&self, selector: &Selector) -> Option<EcoVec<Content>> {
+        match selector {
+            Selector::Before { selector, end, inclusive } => {
+                let Selector::Location(end) = end.as_ref() else { return None };
+                let page = self.furniture_page_override(*end)?;
+                let mut list = self.query(selector);
+                list.retain(|elem| {
+                    elem.location().and_then(|loc| self.page(loc)).is_some_and(
+                        |elem_page| elem_page < page || (*inclusive && elem_page == page),
+                    )
+                });
+                Some(list)
+            }
+            Selector::After { selector, start, inclusive } => {
+                let Selector::Location(start) = start.as_ref() else { return None };
+                let page = self.furniture_page_override(*start)?;
+                let mut list = self.query(selector);
+                list.retain(|elem| {
+                    elem.location().and_then(|loc| self.page(loc)).is_some_and(
+                        |elem_page| elem_page > page || (*inclusive && elem_page == page),
+                    )
+                });
+                Some(list)
+            }
+            _ => None,
+        }
     }
 }
 

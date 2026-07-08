@@ -2193,6 +2193,100 @@ fn header_here_page_uses_real_paged_page() {
 }
 
 #[test]
+fn contextual_odd_even_furniture_emits_even_references_and_setting() {
+    let p = parts(
+        "#set page(\n\
+         \theader: context if calc.odd(here().page()) [Odd header] else [Even header],\n\
+         \tfooter: context if calc.odd(here().page()) [Odd footer] else [Even footer],\n\
+         )\n\
+         First page.\n#pagebreak()\nSecond page.\n#pagebreak()\nThird page.",
+    );
+    let doc = &p["word/document.xml"];
+    let settings = &p["word/settings.xml"];
+
+    assert!(
+        settings.contains("<w:evenAndOddHeaders/>"),
+        "even/odd references require the document-level Word setting"
+    );
+    assert!(doc.contains("<w:headerReference w:type=\"default\""));
+    assert!(doc.contains("<w:headerReference w:type=\"even\""));
+    assert!(doc.contains("<w:footerReference w:type=\"default\""));
+    assert!(doc.contains("<w:footerReference w:type=\"even\""));
+    assert!(!doc.contains("<w:titlePg"), "parity-only furniture is not first-page");
+
+    let headers: Vec<_> = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("word/header") && name.ends_with(".xml"))
+        .map(|(_, xml)| visible_text(xml))
+        .collect();
+    assert!(headers.iter().any(|text| text.contains("Odd header")));
+    assert!(headers.iter().any(|text| text.contains("Even header")));
+
+    let footers: Vec<_> = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("word/footer") && name.ends_with(".xml"))
+        .map(|(_, xml)| visible_text(xml))
+        .collect();
+    assert!(footers.iter().any(|text| text.contains("Odd footer")));
+    assert!(footers.iter().any(|text| text.contains("Even footer")));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn contextual_first_page_header_emits_titlepg_and_first_reference() {
+    let p = parts(
+        "#set page(header: context if here().page() == 1 [First header] else [Rest header])\n\
+         First page.\n#pagebreak()\nSecond page.\n#pagebreak()\nThird page.",
+    );
+    let doc = &p["word/document.xml"];
+    let settings = &p["word/settings.xml"];
+
+    assert!(doc.contains("<w:titlePg/>"), "section enables first-page header");
+    assert!(doc.contains("<w:headerReference w:type=\"first\""));
+    assert!(doc.contains("<w:headerReference w:type=\"default\""));
+    assert!(!doc.contains("<w:headerReference w:type=\"even\""));
+    assert!(
+        !settings.contains("<w:evenAndOddHeaders/>"),
+        "first-page-only furniture does not enable even/odd mode"
+    );
+
+    let headers: Vec<_> = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("word/header") && name.ends_with(".xml"))
+        .map(|(_, xml)| visible_text(xml))
+        .collect();
+    assert!(headers.iter().any(|text| text.contains("First header")));
+    assert!(headers.iter().any(|text| text.contains("Rest header")));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn per_page_literal_header_does_not_fake_an_odd_even_split() {
+    // A literal page number changes on page 3 vs page 5. Word's
+    // first/even/default references cannot express that, so the exporter must
+    // keep the existing single sampled header instead of pretending page 3 is
+    // the header for every later odd page.
+    let p = parts(
+        "#set page(header: context [HEAD-#here().page()-END])\n\
+         One.\n#pagebreak()\nTwo.\n#pagebreak()\nThree.\n#pagebreak()\nFour.\n#pagebreak()\nFive.",
+    );
+    let doc = &p["word/document.xml"];
+    let settings = &p["word/settings.xml"];
+
+    assert!(!settings.contains("<w:evenAndOddHeaders/>"));
+    assert!(!doc.contains("<w:titlePg"));
+    assert!(!doc.contains("w:type=\"even\""));
+    assert_eq!(
+        p.keys()
+            .filter(|name| name.starts_with("word/header") && name.ends_with(".xml"))
+            .count(),
+        1,
+        "non-parity-stable furniture stays a single sampled header"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn citations_and_bibliography_converge_against_paged_introspection() {
     let p = parts_with_files(
         "First @beta and then @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")",
