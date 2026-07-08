@@ -205,6 +205,18 @@ fn visible_text(xml: &str) -> String {
         .collect()
 }
 
+fn sect_pr_chunks(doc: &str) -> Vec<&str> {
+    let positions: Vec<_> = doc.match_indices("<w:sectPr>").map(|(pos, _)| pos).collect();
+    positions
+        .iter()
+        .enumerate()
+        .map(|(idx, start)| {
+            let end = positions.get(idx + 1).copied().unwrap_or(doc.len());
+            &doc[*start..end]
+        })
+        .collect()
+}
+
 const REFS_BIB: &[u8] = br#"@article{alpha,
   title = {Alpha Source},
   author = {Able, Alice},
@@ -706,15 +718,73 @@ fn wrap_content_figure_is_recovered_not_rasterized() {
 }
 
 #[test]
-fn inline_columns_flow_their_text_natively() {
-    // `#columns(n)[..]` wraps flowing content (whole academic papers and
-    // cheatsheets do this). It must keep the text editable, not rasterize the
-    // body to an image — the column split is approximated as a single column.
-    let p = parts("#columns(2)[A first column paragraph. #colbreak() A second one.]");
+fn block_columns_emit_continuous_sections() {
+    // `#columns(n)[..]` is section-scoped in Word: split into a continuous
+    // multi-column section for the block, then immediately return to the
+    // surrounding column count.
+    let p = parts(
+        "Intro text.\n\
+         #columns(2, gutter: 12pt)[Column content starts here. #colbreak() \
+         Column content continues here.]\n\
+         More text after.",
+    );
     let doc = &p["word/document.xml"];
-    assert!(doc.contains("first column paragraph"), "column text is kept");
-    assert!(doc.contains("A second one"), "all column content is kept");
+    assert!(doc.contains("Intro text"), "pre-column text is kept");
+    assert!(doc.contains("Column content starts"), "column text is kept");
+    assert!(doc.contains("More text after"), "post-column text is kept");
     assert!(!doc.contains("<w:drawing>"), "columns are not rasterized");
+    assert!(doc.contains("w:type=\"column\""), "explicit column breaks survive");
+
+    let intro = doc.find("Intro text").unwrap();
+    let column = doc.find("Column content starts").unwrap();
+    let after = doc.find("More text after").unwrap();
+    let sects = sect_pr_chunks(doc);
+    assert_eq!(sects.len(), 3, "block columns create before/block/after sections");
+    assert!(intro < doc.find("<w:sectPr>").unwrap());
+    assert!(doc.find("<w:sectPr>").unwrap() < column);
+    assert!(column < doc.rfind("<w:sectPr>").unwrap());
+    assert!(after < doc.rfind("<w:sectPr>").unwrap());
+
+    assert!(sects[0].contains("<w:type w:val=\"continuous\"/>"));
+    assert!(sects[1].contains("<w:type w:val=\"continuous\"/>"));
+    assert!(
+        !sects[2].contains("<w:type"),
+        "the final restored section has the document-final sectPr"
+    );
+    assert!(
+        !sects[0].contains("w:num="),
+        "the surrounding section remains single-column"
+    );
+    assert!(
+        sects[1].contains("<w:cols w:num=\"2\"") && sects[1].contains("w:space=\"240\""),
+        "the columns block gets two columns and its 12pt gutter"
+    );
+    assert!(
+        !sects[2].contains("w:num="),
+        "the post-column section restores single-column layout"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn block_columns_restore_page_level_column_count() {
+    let p = parts(
+        "#set page(columns: 2)\n\
+         Before.\n\
+         #columns(3)[First. #colbreak() Second. #colbreak() Third.]\n\
+         After.",
+    );
+    let doc = &p["word/document.xml"];
+    let sects = sect_pr_chunks(doc);
+    assert_eq!(sects.len(), 3, "block columns split the page-level section");
+    assert!(sects[0].contains("<w:cols w:num=\"2\""));
+    assert!(sects[0].contains("<w:type w:val=\"continuous\"/>"));
+    assert!(sects[1].contains("<w:cols w:num=\"3\""));
+    assert!(sects[1].contains("<w:type w:val=\"continuous\"/>"));
+    assert!(
+        sects[2].contains("<w:cols w:num=\"2\""),
+        "the section after #columns() restores page-level columns"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -1413,6 +1483,19 @@ fn colbreak_becomes_a_column_break() {
 }
 
 #[test]
+fn page_level_columns_stay_a_single_section() {
+    let p = parts("#set page(columns: 2)\nLeft.\n#colbreak()\nNext column.");
+    let doc = &p["word/document.xml"];
+    assert_eq!(
+        doc.matches("<w:sectPr>").count(),
+        1,
+        "page-level columns are already native section columns"
+    );
+    assert!(doc.contains("<w:cols w:num=\"2\""));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn multi_paragraph_block_quote_keeps_its_paragraphs() {
     // A two-paragraph block quote must stay two paragraphs — the internal parbreak
     // is real separation, not something to silently drop (which would merge them).
@@ -1447,6 +1530,30 @@ fn par_line_numbering_becomes_section_line_numbering() {
     );
     assert_all_wellformed(&p);
     assert_all_wellformed(&plain);
+}
+
+#[test]
+fn block_columns_keep_line_numbering_on_split_sections() {
+    let p = parts(
+        "#set par.line(numbering: \"1\", numbering-scope: \"page\", number-clearance: 5pt)\n\
+         Before columns. \\\n\
+         #columns(2)[Column line one. \\\n\
+         Column line two.]\n\
+         After columns.",
+    );
+    let doc = &p["word/document.xml"];
+    let sects = sect_pr_chunks(doc);
+    assert_eq!(sects.len(), 3, "columns split into three sections");
+    assert_eq!(
+        doc.matches("<w:lnNumType").count(),
+        3,
+        "line numbering stays active in every split section"
+    );
+    for sect in sects {
+        assert!(sect.contains("w:restart=\"newPage\""));
+        assert!(sect.contains("w:distance=\"100\""));
+    }
+    assert_all_wellformed(&p);
 }
 
 #[test]
@@ -2296,6 +2403,45 @@ fn contextual_odd_even_furniture_emits_even_references_and_setting() {
     assert!(doc.contains("<w:footerReference w:type=\"default\""));
     assert!(doc.contains("<w:footerReference w:type=\"even\""));
     assert!(!doc.contains("<w:titlePg"), "parity-only furniture is not first-page");
+
+    let headers: Vec<_> = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("word/header") && name.ends_with(".xml"))
+        .map(|(_, xml)| visible_text(xml))
+        .collect();
+    assert!(headers.iter().any(|text| text.contains("Odd header")));
+    assert!(headers.iter().any(|text| text.contains("Even header")));
+
+    let footers: Vec<_> = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("word/footer") && name.ends_with(".xml"))
+        .map(|(_, xml)| visible_text(xml))
+        .collect();
+    assert!(footers.iter().any(|text| text.contains("Odd footer")));
+    assert!(footers.iter().any(|text| text.contains("Even footer")));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn block_columns_keep_contextual_odd_even_furniture() {
+    let p = parts(
+        "#set page(\n\
+         \theader: context if calc.odd(here().page()) [Odd header] else [Even header],\n\
+         \tfooter: context if calc.odd(here().page()) [Odd footer] else [Even footer],\n\
+         )\n\
+         Before.\n\
+         #columns(2)[Column section body.]\n\
+         #pagebreak()\nSecond page.\n#pagebreak()\nThird page.",
+    );
+    let doc = &p["word/document.xml"];
+    let settings = &p["word/settings.xml"];
+
+    assert_eq!(sect_pr_chunks(doc).len(), 3, "columns still split the body");
+    assert!(settings.contains("<w:evenAndOddHeaders/>"));
+    assert!(doc.contains("<w:headerReference w:type=\"default\""));
+    assert!(doc.contains("<w:headerReference w:type=\"even\""));
+    assert!(doc.contains("<w:footerReference w:type=\"default\""));
+    assert!(doc.contains("<w:footerReference w:type=\"even\""));
 
     let headers: Vec<_> = p
         .iter()

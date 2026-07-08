@@ -775,7 +775,7 @@ fn resolve_sections(
     pairs: &[(&Content, StyleChain)],
     initial: StyleChain,
 ) -> Vec<SectionRun> {
-    use typst_library::layout::{PagebreakElem, Parity};
+    use typst_library::layout::{ColumnsElem, PagebreakElem, Parity};
 
     let mut sections: Vec<SectionRun> = Vec::new();
     let mut initial = initial;
@@ -812,20 +812,112 @@ fn resolve_sections(
         while i < pairs.len() && !pairs[i].0.is::<PagebreakElem>() {
             i += 1;
         }
-        let geom = run_geometry(&pairs[start..i], initial);
-        // Merge into the previous section if nothing section-scoped changed;
-        // the pagebreaks between them then fall inside the merged range
-        // (→ `<w:br>`).
-        if let Some(last) = sections.last_mut()
-            && last.break_after.is_none()
-            && same_section(&last.geom, &geom)
-        {
-            last.range.end = i;
-            continue;
+        let group = &pairs[start..i];
+        if group.iter().any(|(child, _)| child.is::<ColumnsElem>()) {
+            push_column_sections(&mut sections, pairs, start..i, initial);
+        } else {
+            let geom = run_geometry(group, initial);
+            // Merge into the previous section if nothing section-scoped changed;
+            // the pagebreaks between them then fall inside the merged range
+            // (→ `<w:br>`).
+            push_section_run(&mut sections, geom, start..i, None, false);
         }
-        sections.push(SectionRun { geom, range: start..i, break_after: None });
     }
     sections
+}
+
+fn push_column_sections(
+    sections: &mut Vec<SectionRun>,
+    pairs: &[(&Content, StyleChain)],
+    range: std::ops::Range<usize>,
+    initial: StyleChain,
+) {
+    use typst_library::layout::ColumnsElem;
+
+    let base_geom = run_geometry(&pairs[range.clone()], initial);
+    let mut segment_start = range.start;
+    let mut saw_columns = false;
+    for i in range.clone() {
+        let Some(columns) = pairs[i].0.to_packed::<ColumnsElem>() else {
+            continue;
+        };
+
+        if segment_start < i {
+            push_section_run(
+                sections,
+                base_geom.clone(),
+                segment_start..i,
+                Some(SectType::Continuous),
+                false,
+            );
+        } else {
+            close_previous_section_at(sections, &base_geom, i);
+        }
+
+        let geom = columns_section_geometry(&base_geom, columns, pairs[i].1);
+        push_section_run(sections, geom, i..i + 1, Some(SectType::Continuous), false);
+        saw_columns = true;
+        segment_start = i + 1;
+    }
+
+    if segment_start < range.end {
+        push_section_run(sections, base_geom, segment_start..range.end, None, false);
+    } else if saw_columns {
+        push_section_run(sections, base_geom, range.end..range.end, None, true);
+    }
+}
+
+fn push_section_run(
+    sections: &mut Vec<SectionRun>,
+    geom: SectGeom,
+    range: std::ops::Range<usize>,
+    break_after: Option<SectType>,
+    allow_empty: bool,
+) {
+    if let Some(last) = sections.last_mut()
+        && last.break_after.is_none()
+        && same_section(&last.geom, &geom)
+    {
+        last.range.end = range.end;
+        last.break_after = break_after;
+        return;
+    }
+
+    if range.is_empty() && !allow_empty {
+        return;
+    }
+
+    sections.push(SectionRun { geom, range, break_after });
+}
+
+fn close_previous_section_at(
+    sections: &mut [SectionRun],
+    geom: &SectGeom,
+    boundary: usize,
+) {
+    if let Some(last) = sections.last_mut()
+        && last.break_after.is_none()
+        && same_section(&last.geom, geom)
+    {
+        last.range.end = boundary;
+        last.break_after = Some(SectType::Continuous);
+    }
+}
+
+fn columns_section_geometry(
+    base: &SectGeom,
+    elem: &typst_library::foundations::Packed<typst_library::layout::ColumnsElem>,
+    styles: StyleChain,
+) -> SectGeom {
+    use typst_library::layout::Abs;
+
+    let mut geom = base.clone();
+    geom.columns = elem.count.get(styles).get() as u32;
+    let content_width = (base.page_w - base.margin_left - base.margin_right).max(0);
+    let reference = Abs::pt(content_width as f64 / 20.0);
+    geom.col_space =
+        props::abs_to_twip(elem.gutter.resolve(styles).relative_to(reference));
+    geom
 }
 
 /// Whether two page runs can share one `<w:sectPr>` — equal on every property
