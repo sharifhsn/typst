@@ -4,7 +4,7 @@ use typst_library::foundations::Resolve;
 use typst_library::layout::grid::resolve::Repeatable;
 use typst_library::layout::{Abs, Axes, Frame, Point, Region, Regions, Size, Sizing};
 
-use super::layouter::{Row, points};
+use super::layouter::{Row, points, tag_cell_region};
 use super::{Cell, GridLayouter, layout_cell};
 
 /// All information needed to layout a single rowspan.
@@ -126,6 +126,7 @@ impl GridLayouter<'_> {
         };
         let cell = self.grid.cell(x, y).unwrap();
         let width = self.cell_spanned_width(cell, x);
+        let has_gutter = self.grid.has_gutter;
         // In RTL cells expand to the left, thus the position
         // must additionally be offset by the cell's width.
         let dx = if self.is_rtl { self.width - (dx + width) } else { dx };
@@ -149,8 +150,11 @@ impl GridLayouter<'_> {
 
         // Push the layouted frames directly into the finished frames.
         let locator = self.cell_locator(Axes::new(x, y), disambiguator);
+        let region_locator = locator.relayout();
         let fragment =
             layout_cell(cell, engine, locator, self.styles, pod, is_being_repeated)?;
+        let single_region = fragment.len() == 1;
+        let mut region_locator = single_region.then_some(region_locator);
         let (current_region, current_header_row_height) = current_region_data.unzip();
 
         // Clever trick to process finished header rows:
@@ -192,6 +196,21 @@ impl GridLayouter<'_> {
                 header_dy
             };
 
+            let frame = if let Some(locator) = region_locator.take() {
+                tag_cell_region(
+                    frame,
+                    cell,
+                    Axes::new(
+                        if has_gutter { x / 2 } else { x },
+                        if has_gutter { y / 2 } else { y },
+                    ),
+                    Size::new(width, *first_height),
+                    locator,
+                    engine,
+                )
+            } else {
+                frame
+            };
             finished.push_frame(Point::new(dx, dy), frame);
         }
 

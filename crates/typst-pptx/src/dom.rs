@@ -12,6 +12,7 @@ pub struct SlideIr {
 pub enum SlideShape {
     TextBox(TextBox),
     MathBox(MathBox),
+    TableBox(TableBox),
     Pic(Pic),
     Geom(GeomShape),
     Group(GroupShape),
@@ -51,6 +52,42 @@ pub struct MathBox {
     pub rot_60k: i32,
     pub omml: String,
     pub fallback: EcoString,
+}
+
+/// A positioned editable PowerPoint table.
+pub struct TableBox {
+    pub x_emu: i64,
+    pub y_emu: i64,
+    pub w_emu: i64,
+    pub h_emu: i64,
+    pub cols: Vec<i64>,
+    pub rows: Vec<TableRow>,
+}
+
+/// One table row.
+pub struct TableRow {
+    pub h_emu: i64,
+    pub cells: Vec<TableCell>,
+}
+
+/// One table cell, including merge continuation placeholders.
+pub struct TableCell {
+    pub grid_span: usize,
+    pub row_span: usize,
+    pub h_merge: bool,
+    pub v_merge: bool,
+    pub fill: Option<FillSpec>,
+    pub borders: CellBorders,
+    pub paras: Vec<TextPara>,
+}
+
+/// Per-edge table-cell borders.
+#[derive(Clone, Default)]
+pub struct CellBorders {
+    pub left: Option<StrokeSpec>,
+    pub right: Option<StrokeSpec>,
+    pub top: Option<StrokeSpec>,
+    pub bottom: Option<StrokeSpec>,
 }
 
 /// A text paragraph.
@@ -163,18 +200,21 @@ pub enum PathSegment {
 }
 
 /// A fill specification. Colors are straight sRGB + alpha (`[r, g, b, a]`).
+#[derive(Clone)]
 pub enum FillSpec {
     Solid([u8; 4]),
     LinearGradient { angle_60k: i32, stops: Vec<GradientStop> },
 }
 
 /// A gradient stop.
+#[derive(Clone)]
 pub struct GradientStop {
     pub pos_100k: i32,
     pub color: [u8; 4],
 }
 
 /// A stroke specification.
+#[derive(Clone)]
 pub struct StrokeSpec {
     pub color: [u8; 4],
     pub w_emu: i64,

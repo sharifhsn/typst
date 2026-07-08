@@ -139,6 +139,13 @@ fn slide_count(presentation: &str) -> usize {
         .count()
 }
 
+fn count_xml_nodes(xml: &str, local: &str) -> usize {
+    let doc = roxmltree::Document::parse(xml).expect("xml should parse");
+    doc.descendants()
+        .filter(|node| node.tag_name().name() == local)
+        .count()
+}
+
 #[test]
 fn required_parts_are_present_and_wellformed() {
     let p = parts("= Hello\nSome text.");
@@ -257,6 +264,46 @@ fn page_fill_becomes_solid_slide_background() {
     let slide = &p["ppt/slides/slide1.xml"];
     assert!(slide.contains("<p:bg>"), "slide should carry a background");
     assert!(slide.contains("val=\"7FDBFF\""), "aqua background should be sRGB");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn table_exports_as_native_drawingml_table() {
+    let p = parts(
+        r#"#set page(width: 320pt, height: 180pt)
+#table(columns: 3, [a], [b], [c], [d], [e], [f])"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<p:graphicFrame>"));
+    assert!(slide.contains("<a:tbl>"));
+    assert_eq!(count_xml_nodes(slide, "gridCol"), 3);
+    assert_eq!(count_xml_nodes(slide, "tr"), 2);
+    assert_eq!(count_xml_nodes(slide, "tc"), 6);
+    for text in ["a", "b", "c", "d", "e", "f"] {
+        assert!(slide.contains(&format!("<a:t>{text}</a:t>")), "missing {text}");
+    }
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn table_colspan_and_rowspan_emit_merge_attrs() {
+    let p = parts(
+        r#"#set page(width: 360pt, height: 200pt)
+#table(
+  columns: 3,
+  table.cell(colspan: 2)[wide], [c],
+  table.cell(rowspan: 2)[tall], [e], [f],
+  [h], [i],
+)"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<a:tbl>"));
+    assert!(slide.contains("gridSpan=\"2\""));
+    assert!(slide.contains("rowSpan=\"2\""));
+    assert!(slide.contains("vMerge=\"1\""));
+    for text in ["wide", "tall", "c", "e", "f", "h", "i"] {
+        assert!(slide.contains(&format!("<a:t>{text}</a:t>")), "missing {text}");
+    }
     assert_all_wellformed(&p);
 }
 
