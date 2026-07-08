@@ -68,7 +68,54 @@ pub fn hex(rgb: [u8; 3]) -> String {
 impl RunProps {
     /// Whether this run carries any formatting at all.
     pub fn is_empty(&self) -> bool {
-        *self == RunProps::default()
+        self.style.is_none()
+            && self.semantic_rstyle().is_none()
+            && self.font.is_none()
+            && !self.writes_direct_bold()
+            && !self.writes_direct_italic()
+            && !self.smallcaps
+            && !self.strike
+            && !self.no_proof
+            && self.color.is_none()
+            && self.tracking.is_none()
+            && self.position_half_pt.is_none()
+            && self.size_half_pt.is_none()
+            && self.highlight.is_none()
+            && self.shd_fill.is_none()
+            && self.bdr.is_none()
+            && self.underline.is_none()
+            && !self.vanish
+            && self.vert_align.is_none()
+            && !self.rtl
+            && !self.cs
+            && self.lang.is_none()
+    }
+
+    /// The Word semantic character style represented by Typst `#strong` or
+    /// `#emph`, when no other character style already occupies `w:rStyle`.
+    ///
+    /// Word permits one `w:rStyle` plus direct run properties. For nested
+    /// strong/emphasis we keep the stronger semantic style as `w:rStyle` and
+    /// write the italic half as direct formatting.
+    fn semantic_rstyle(&self) -> Option<&'static str> {
+        if self.style.is_some() {
+            return None;
+        }
+        if self.strong && self.bold {
+            Some("Strong")
+        } else if self.emphasis && self.italic {
+            Some("Emphasis")
+        } else {
+            None
+        }
+    }
+
+    fn writes_direct_bold(&self) -> bool {
+        self.bold && self.semantic_rstyle() != Some("Strong")
+    }
+
+    fn writes_direct_italic(&self) -> bool {
+        self.italic && self.semantic_rstyle() != Some("Emphasis")
     }
 
     /// Writes `<w:rPr>...</w:rPr>` in canonical order. Emits nothing if empty.
@@ -81,6 +128,8 @@ impl RunProps {
         // 1. rStyle
         if let Some(style) = &self.style {
             w.open(xml::W_RSTYLE).attr(xml::W_VAL, style).empty();
+        } else if let Some(style) = self.semantic_rstyle() {
+            w.open(xml::W_RSTYLE).attr(xml::W_VAL, style).empty();
         }
         // 2. rFonts
         if let Some(font) = &self.font {
@@ -92,12 +141,12 @@ impl RunProps {
                 .empty();
         }
         // 3. b / bCs
-        if self.bold {
+        if self.writes_direct_bold() {
             w.leaf(xml::W_B);
             w.leaf(xml::W_BCS);
         }
         // 4. i / iCs
-        if self.italic {
+        if self.writes_direct_italic() {
             w.leaf(xml::W_I);
             w.leaf(xml::W_ICS);
         }

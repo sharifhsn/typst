@@ -840,9 +840,12 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             p.font = Some(first.as_str().into());
         }
 
-        // Weight → bold (base weight plus the `strong` delta).
-        let weight = styles.get(TextElem::weight).to_number() as i64
-            + styles.get(TextElem::delta).0;
+        // Weight → bold (base weight plus the semantic `strong` delta).
+        let strong_delta = styles.get(TextElem::delta).0;
+        if strong_delta > 0 {
+            p.strong = true;
+        }
+        let weight = styles.get(TextElem::weight).to_number() as i64 + strong_delta;
         if weight >= 600 {
             p.bold = true;
         }
@@ -851,7 +854,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         if styles.get(TextElem::style) != typst_library::text::FontStyle::Normal {
             p.italic = true;
         }
-        if styles.get(TextElem::emph).0 {
+        let emph = styles.get(TextElem::emph).0;
+        if emph {
+            p.emphasis = true;
             p.italic = !p.italic;
         }
 
@@ -1311,10 +1316,12 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             self.push_text(out, rp, quote);
         } else if let Some(elem) = child.to_packed::<StrongElem>() {
             let mut p = props.clone();
+            p.strong = true;
             p.bold = true;
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<EmphElem>() {
             let mut p = props.clone();
+            p.emphasis = true;
             p.italic = true;
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<SubElem>() {
