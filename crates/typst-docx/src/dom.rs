@@ -262,7 +262,13 @@ pub(crate) struct HeadingStyleSample {
 pub struct RunProps {
     pub style: Option<EcoString>,
     pub font: Option<EcoString>,
+    /// True when bold came from Typst's semantic `#strong` wrapper. This lets
+    /// the encoder use Word's Strong character style instead of guessing from a
+    /// resolved bold value that may have come from `#text(weight:)` or a style.
+    pub strong: bool,
     pub bold: bool,
+    /// True when italic came from Typst's semantic `#emph` wrapper.
+    pub emphasis: bool,
     pub italic: bool,
     pub smallcaps: bool,
     pub strike: bool,

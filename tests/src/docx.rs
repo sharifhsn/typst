@@ -289,9 +289,17 @@ fn heading_maps_to_heading_style() {
 }
 
 #[test]
-fn strong_maps_to_bold_run() {
+fn strong_maps_to_strong_character_style() {
     let p = parts("Normal *bold* text.");
-    assert!(p["word/document.xml"].contains("<w:b/>"), "strong should emit <w:b/>");
+    let run = run_fragment_containing(&p["word/document.xml"], "bold");
+    assert!(
+        run.contains("<w:rStyle w:val=\"Strong\"/>"),
+        "strong should emit the Strong character style: {run}"
+    );
+    assert!(
+        !run.contains("<w:b"),
+        "Strong style should supply bold without direct formatting: {run}"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -923,6 +931,93 @@ fn standard_gallery_and_linked_heading_styles_are_defined() {
     assert!(
         styles.contains("<w:link w:val=\"Heading1Char\"/>"),
         "the heading paragraph style links to its char style"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn strong_and_emph_use_word_character_styles() {
+    let p = parts("#strong[semantic bold]\n\n#emph[semantic italic]");
+    let doc = &p["word/document.xml"];
+
+    let strong = run_fragment_containing(doc, "semantic bold");
+    assert!(
+        strong.contains("<w:rStyle w:val=\"Strong\"/>"),
+        "strong run should use the Strong character style: {strong}"
+    );
+    assert!(
+        !strong.contains("<w:b"),
+        "strong run should not duplicate bold as direct formatting: {strong}"
+    );
+
+    let emphasis = run_fragment_containing(doc, "semantic italic");
+    assert!(
+        emphasis.contains("<w:rStyle w:val=\"Emphasis\"/>"),
+        "emph run should use the Emphasis character style: {emphasis}"
+    );
+    assert!(
+        !emphasis.contains("<w:i"),
+        "emph run should not duplicate italic as direct formatting: {emphasis}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn manual_bold_and_italic_stay_direct_formatting() {
+    let p = parts(
+        "#text(weight: \"bold\")[manual bold]\n\n\
+         #text(style: \"italic\")[manual italic]",
+    );
+    let doc = &p["word/document.xml"];
+
+    let bold = run_fragment_containing(doc, "manual bold");
+    assert!(!bold.contains("w:rStyle w:val=\"Strong\""), "manual bold is not Strong");
+    assert!(bold.contains("<w:b/>"), "manual bold remains direct: {bold}");
+
+    let italic = run_fragment_containing(doc, "manual italic");
+    assert!(
+        !italic.contains("w:rStyle w:val=\"Emphasis\""),
+        "manual italic is not Emphasis"
+    );
+    assert!(italic.contains("<w:i/>"), "manual italic remains direct: {italic}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn heading_bold_is_not_misclassified_as_strong() {
+    let p = parts("= Styled Heading");
+    let styles = &p["word/styles.xml"];
+    let doc = &p["word/document.xml"];
+
+    let heading_style = style_fragment(styles, "Heading1");
+    assert!(heading_style.contains("<w:b/>"), "Heading1 owns heading bold");
+
+    let run = run_fragment_containing(doc, "Styled Heading");
+    assert!(
+        !run.contains("w:rStyle w:val=\"Strong\""),
+        "heading-inherited bold is not semantic Strong: {run}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn nested_strong_emphasis_layers_character_style_with_direct_formatting() {
+    let p = parts(
+        "Plain body text long enough to keep black as the document default.\n\n\
+         #strong[#emph[#text(fill: rgb(\"AA0000\"))[combined red]]]",
+    );
+    let doc = &p["word/document.xml"];
+
+    let run = run_fragment_containing(doc, "combined red");
+    assert!(
+        run.contains("<w:rStyle w:val=\"Strong\"/>"),
+        "combined strong/emph uses Strong as the character style: {run}"
+    );
+    assert!(!run.contains("<w:b"), "the Strong character style supplies bold: {run}");
+    assert!(run.contains("<w:i/>"), "nested emphasis is layered as direct italic: {run}");
+    assert!(
+        run.contains("<w:color w:val=\"AA0000\"/>"),
+        "other direct deviations must survive beside the character style: {run}"
     );
     assert_all_wellformed(&p);
 }
