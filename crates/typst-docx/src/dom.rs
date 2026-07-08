@@ -60,6 +60,11 @@ pub struct DocxDocument {
     /// Whether any mirrored-margin section uses a right-side binding gutter.
     /// Emits the document-wide `<w:rtlGutter/>` setting.
     pub(crate) rtl_gutter: bool,
+    /// The document's bibliography, synthesized as a BibLaTeX (`.bib`) string
+    /// (same call the Pandoc exporter uses for its sidecar). `None` when the
+    /// document has no bibliography. Embedded as an inert sidecar part, not
+    /// Word-native `CITATION`/`BIBLIOGRAPHY` fields — see `encode.rs`.
+    pub(crate) bibliography: Option<String>,
 }
 
 impl DocxDocument {

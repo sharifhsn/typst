@@ -255,6 +255,21 @@ fn docx_document_impl(
         converted
     };
 
+    // Synthesize the document's bibliography into a BibLaTeX (`.bib`) string,
+    // embedded as an inert sidecar part (see `encode.rs`) so external tools can
+    // recover structured citation data — Word's own CITATION/BIBLIOGRAPHY field
+    // model is proprietary and lossy relative to Typst/Hayagriva, so the visible
+    // body text stays the realized, formatted citations; this is metadata only.
+    // Same call and reasoning as the Pandoc exporter's `.bib` sidecar: a pure
+    // query of the (already-stabilized) shared introspector, so it cannot
+    // perturb convergence. `None` when the document has no bibliography.
+    let bibliography = {
+        let introspector = engine.introspector.access(
+            "querying bibliography elements to synthesize a .bib sidecar is a pure query",
+        );
+        typst_library::model::BibliographyElem::biblatex(*introspector)
+    };
+
     // Fallback heading list, for documents whose headings are show-ruled or
     // rasterized and so never reach the heading mapper (nothing recorded): query
     // the introspector, which still holds every heading. These entries have no
@@ -389,6 +404,7 @@ fn docx_document_impl(
         even_and_odd_headers,
         mirror_margins,
         rtl_gutter,
+        bibliography,
     })
 }
 

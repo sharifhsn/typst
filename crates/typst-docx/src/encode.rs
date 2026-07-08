@@ -172,6 +172,28 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
         );
     }
 
+    // -- word/typstBibliography.xml (conditional) --
+    // An inert BibLaTeX sidecar, not Word-native CITATION/BIBLIOGRAPHY fields:
+    // Word's citation-field model is proprietary and lossy relative to
+    // Typst/Hayagriva (see the DOCX citation-feasibility research), so the
+    // visible body keeps the realized, formatted citation text as the fidelity
+    // path. This part exists purely so an external tool can recover the
+    // structured bibliography data, under a private relationship type Word
+    // itself does not recognize (so it never interacts with Word's own
+    // Source Manager / citation UI).
+    if let Some(bib) = &document.bibliography {
+        package.add_xml(
+            "word/typstBibliography.xml",
+            "application/xml",
+            build_typst_bibliography(bib, pretty),
+        );
+        doc_rels.add(
+            "https://typst.app/schema/2026/relationships/bibliography",
+            "typstBibliography.xml",
+            RelMode::Internal,
+        );
+    }
+
     // -- word/document.xml --
     let document_xml = build_document(document, pretty);
     package.add_xml("word/document.xml", CT_DOCUMENT, document_xml);
@@ -1474,6 +1496,23 @@ fn write_footnote(w: &mut XmlWriter, footnote: &Footnote) {
         w.leaf(xml::W_P);
     }
     w.close();
+}
+
+// ---------------------------------------------------------------------------
+// word/typstBibliography.xml
+// ---------------------------------------------------------------------------
+
+/// A private, inert sidecar part carrying the document's bibliography as a
+/// BibLaTeX string, under a namespace Word does not recognize. See the call
+/// site in `docx` for why this exists instead of native Word citation fields.
+fn build_typst_bibliography(bib: &str, pretty: bool) -> String {
+    let mut w = XmlWriter::new(pretty);
+    w.open("typstBibliography")
+        .attr("xmlns", "https://typst.app/schema/2026/docx-bibliography")
+        .start_children();
+    w.elem_text("biblatex", bib);
+    w.close();
+    w.finish()
 }
 
 // ---------------------------------------------------------------------------

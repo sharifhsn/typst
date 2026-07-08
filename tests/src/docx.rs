@@ -2530,6 +2530,50 @@ fn citations_and_bibliography_converge_against_paged_introspection() {
 }
 
 #[test]
+fn bibliography_gets_a_biblatex_sidecar_part() {
+    // The visible body keeps the realized, formatted citation text (Word's own
+    // CITATION/BIBLIOGRAPHY field model is proprietary and lossy relative to
+    // Typst/Hayagriva); the sidecar is metadata only, for external tools that
+    // want the structured bibliography back.
+    let p = parts_with_files(
+        "First @beta and then @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")",
+        &[("refs.bib", REFS_BIB)],
+    );
+    let sidecar = p
+        .get("word/typstBibliography.xml")
+        .expect("bibliography sidecar part should be present");
+    assert!(sidecar.contains("https://typst.app/schema/2026/docx-bibliography"));
+    assert!(sidecar.contains("@article{alpha") || sidecar.contains("@article{beta"));
+    assert!(sidecar.contains("Alpha Source"));
+    assert!(sidecar.contains("Beta Source"));
+
+    let rels = &p["word/_rels/document.xml.rels"];
+    assert!(
+        rels.contains("https://typst.app/schema/2026/relationships/bibliography"),
+        "document.xml.rels should reference the sidecar under a private relationship type"
+    );
+    assert!(rels.contains("Target=\"typstBibliography.xml\""));
+
+    let content_types = &p["[Content_Types].xml"];
+    assert!(
+        content_types.contains("/word/typstBibliography.xml"),
+        "the sidecar's content type must be declared or strict consumers repair the file"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn no_bibliography_means_no_sidecar_part() {
+    let p = parts("Just some plain text, no citations at all.");
+    assert!(
+        !p.contains_key("word/typstBibliography.xml"),
+        "a document with no bibliography should not get a sidecar part"
+    );
+    assert!(!p["word/_rels/document.xml.rels"].contains("docx-bibliography"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn page_refs_follow_real_numbering_across_sections() {
     let p = parts(
         "#set page(numbering: \"i\")\n\
