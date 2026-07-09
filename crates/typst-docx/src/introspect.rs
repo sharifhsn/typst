@@ -14,13 +14,13 @@ use std::sync::Arc;
 use ecow::{EcoString, EcoVec};
 use rustc_hash::{FxHashMap, FxHashSet};
 use typst_library::diag::StrResult;
-use typst_library::foundations::{Content, Label, Selector};
+use typst_library::foundations::{Content, Label, NativeElement, Selector};
 use typst_library::introspection::{
     DocumentPosition, ElementIntrospector, ElementIntrospectorBuilder, Introspector,
     Location, PagedPosition, Tag,
 };
 use typst_library::layout::Point;
-use typst_library::model::Numbering;
+use typst_library::model::{BibliographyElem, CiteGroup, Numbering};
 use typst_syntax::VirtualPath;
 
 thread_local! {
@@ -183,6 +183,50 @@ impl Introspector for DocxIntrospector {
     fn query(&self, selector: &Selector) -> EcoVec<Content> {
         if let Some(result) = self.query_with_furniture_page(selector) {
             return result;
+        }
+        // Bibliography/citation-group elements are synthesized *during
+        // realize*, and DOCX runs its own separate realize pass over the
+        // same source (rather than reusing the paged realize that produced
+        // `real`) — so `real`'s CiteGroup/BibliographyElem instances can
+        // carry locations from an entirely different Locator sequence than
+        // the ones DOCX's own show rules will look up via `here()` when they
+        // later call `Works::citation`/`Works::bibliography`. When that
+        // happens, `real`'s and `self.elements`' locations for this selector
+        // are completely disjoint, so preferring `real` (as the general case
+        // below does for content that IS shared, like headings/state/
+        // counters) is *guaranteed* to feed `Works::generate` a
+        // `bibs_and_groups` snapshot keyed by locations no later `here()`
+        // call can ever hit, hard-failing convergence with "citation/
+        // bibliography could not be located" (confirmed on a real corpus
+        // doc). But other docs' two realize passes agree closely enough
+        // (partial location overlap) that the general "prefer real"
+        // behavior already resolves correctly — unconditionally switching
+        // to `self.elements` regresses those, since `self.elements` isn't
+        // reliably any more stable than `real` when they partially agree.
+        // So only override when the two sources are fully disjoint (a
+        // certain-failure signature under the general rule); otherwise fall
+        // through to the normal prefer-real path below.
+        if mentions_bibliography_or_cite_group(selector) {
+            let elements_result = self.elements.query(selector);
+            let real_result = self.real.as_ref().map(|real| real.query(selector));
+            let disjoint = !elements_result.is_empty()
+                && real_result
+                    .as_ref()
+                    .is_some_and(|real_result| {
+                        !real_result.is_empty()
+                            && elements_result
+                                .iter()
+                                .all(|e| !real_result.iter().any(|r| r.location() == e.location()))
+                    });
+            if disjoint {
+                return elements_result;
+            }
+            if let Some(real_result) = real_result
+                && !real_result.is_empty()
+            {
+                return real_result;
+            }
+            return elements_result;
         }
         if let Some(real) = &self.real {
             let result = real.query(selector);
@@ -398,5 +442,23 @@ impl DocxIntrospector {
 impl Debug for DocxIntrospector {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.pad("DocxIntrospector(..)")
+    }
+}
+
+/// Whether `selector` (recursing through `Or`/`And`) matches
+/// [`BibliographyElem`] or [`CiteGroup`] — the elements
+/// `Works::generate`/`citation`/`bibliography` (in typst-library's
+/// `bibliography.rs`) query to build the `Location`-keyed map that a later
+/// `here()` call in the *same* realize pass must hit exactly. See the
+/// `query` doc comment above for why these specifically cannot prefer `real`.
+fn mentions_bibliography_or_cite_group(selector: &Selector) -> bool {
+    match selector {
+        Selector::Elem(elem, _) => {
+            *elem == BibliographyElem::ELEM || *elem == CiteGroup::ELEM
+        }
+        Selector::Or(list) | Selector::And(list) => {
+            list.iter().any(mentions_bibliography_or_cite_group)
+        }
+        _ => false,
     }
 }
