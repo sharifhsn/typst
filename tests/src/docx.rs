@@ -743,6 +743,38 @@ fn wrap_content_figure_is_recovered_not_rasterized() {
 }
 
 #[test]
+fn frameless_box_wrapping_columns_flows_instead_of_rasterizing() {
+    // A bare top-level `#box(inset: ..)[#columns(2, ..)]` (the poster-template
+    // idiom — pollux's own layout) is paragraph-wrapped by Typst's realize
+    // (there's no bare-inline-content block variant), which used to force it
+    // through the run-only inline path: `#columns` fails
+    // `body_inline_extractable`, so the *entire* multi-section body rasterized
+    // as ONE image many times taller than the page, spilling across dozens of
+    // near-blank pages in Word/LibreOffice. A frameless box whose whole body is
+    // `#columns`/`#stack`/a non-figure `#grid` now flows as ordinary native
+    // blocks instead (single-column-approximated — the box has no fill/stroke
+    // for a column split to interact with, so nothing else is lost).
+    let p = parts(
+        "#box(inset: 1cm)[#columns(2, [Introduction text here. Method text here.])]",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("Introduction text here"), "columns body is extracted");
+    assert!(doc.contains("Method text here"), "columns body is extracted");
+    assert!(!doc.contains("<w:drawing>"), "the box is not rasterized wholesale");
+    assert_all_wellformed(&p);
+
+    // A box with a fill/stroke around the SAME body is intentionally NOT
+    // widened by this change (only the frameless case is validated safe here)
+    // — it keeps its pre-existing rasterize behavior, preserving the visual.
+    let framed = parts(
+        "#box(inset: 1cm, fill: yellow)[#columns(2, [Framed section text.])]",
+    );
+    let doc = &framed["word/document.xml"];
+    assert!(doc.contains("<w:drawing>"), "a filled box still rasterizes its visual");
+    assert_all_wellformed(&framed);
+}
+
+#[test]
 fn block_columns_emit_continuous_sections() {
     // `#columns(n)[..]` is section-scoped in Word: split into a continuous
     // multi-column section for the block, then immediately return to the

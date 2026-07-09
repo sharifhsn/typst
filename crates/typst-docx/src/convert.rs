@@ -73,6 +73,27 @@ pub fn convert_children(
             continue;
         }
         if let Some(par) = child.to_packed::<ParElem>() {
+            // A bare inline-level framed container (`#box`/`#rect`/`#square`)
+            // sitting alone at block scope gets paragraph-wrapped by Typst's
+            // own realize (there is no bare-inline-content block variant) —
+            // it would otherwise be forced through the run-only inline path
+            // in `handle_inline`, which has no way to carry multi-paragraph
+            // block content and can only rasterize a body that fails
+            // `body_inline_extractable` (see `paragraph_sole_flowing_
+            // container`'s doc comment for the pollux poster regression this
+            // fixes). Detect that narrow, validated-safe shape and route it
+            // through the full block dispatch instead — unless it's a link
+            // target (labels on a redirected block aren't bookmarked below).
+            if child.label().is_none()
+                && let Some(sole) = paragraph_sole_flowing_container(&par.body, *styles)
+            {
+                let from = blocks.len();
+                flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
+                pending_v = apply_pending_v(&mut blocks, from, pending_v);
+                handle_block(ctx, sole, *styles, &mut blocks)?;
+                last_was_par = false;
+                continue;
+            }
             // Consecutive `ParElem`s are separate paragraphs and must be flushed
             // apart (`ParbreakElem`s are consumed during realization), otherwise
             // the whole document would merge into one `<w:p>` and per-paragraph
@@ -447,6 +468,103 @@ pub(crate) fn body_is_wrap_figure(body: &Content) -> bool {
         }
     });
     has_grid && has_figure
+}
+
+/// Peels transparent `#set`-style and pure single-child join wrappers
+/// (`StyledElem`, a `SequenceElem` with exactly one non-trivial child) off a
+/// content value, returning whatever is structurally underneath. Used to see
+/// through the styling/joining Typst's own realization wraps around a bare
+/// expression so the *actual* element can be identified.
+fn peel_wrappers(mut body: &Content) -> &Content {
+    use typst_library::foundations::{SequenceElem, StyledElem};
+    use typst_library::introspection::TagElem;
+    use typst_library::model::ParbreakElem;
+    use typst_library::text::SpaceElem;
+
+    loop {
+        if let Some(styled) = body.to_packed::<StyledElem>() {
+            body = &styled.child;
+            continue;
+        }
+        if let Some(seq) = body.to_packed::<SequenceElem>() {
+            let mut rest = seq.children.iter().filter(|c| {
+                !c.is::<SpaceElem>() && !c.is::<ParbreakElem>() && !c.is::<TagElem>()
+            });
+            if let (Some(only), None) = (rest.next(), rest.next()) {
+                body = only;
+                continue;
+            }
+        }
+        return body;
+    }
+}
+
+/// Whether a frameless box/rect/square body IS (after [`peel_wrappers`])
+/// directly one of the ordinary flowing block containers — `#columns`,
+/// `#stack`, or a non-figure `#grid` — rather than some more elaborate
+/// composition.
+///
+/// Deliberately narrow, mirroring [`body_is_wrap_figure`]'s "one specific
+/// shape, not just contains X anywhere" contract: when a frameless box's
+/// *entire* content collapses to one of these, flattening it via
+/// `ctx.blocks` can only ever lose the (single-column-approximated) column
+/// split — never introspection-order-dependent content buried inside a more
+/// elaborate composition. That broader case is the "designed full-page
+/// layout box" that a wholesale frameless-box unwrap previously regressed by
+/// -148 words (ca8ce358d); this signature stays clear of it by requiring the
+/// container to BE the whole body, not merely present somewhere inside it.
+pub(crate) fn body_is_frameless_flow_container(body: &Content) -> bool {
+    use typst_library::layout::{ColumnsElem, GridElem, StackElem};
+
+    let inner = peel_wrappers(body);
+    if inner.is::<ColumnsElem>() || inner.is::<StackElem>() {
+        return true;
+    }
+    if inner.is::<GridElem>() {
+        // A grid-of-figure is the `wrap-content` shape, already handled by
+        // `body_is_wrap_figure` via the well-tested grid→figure/table mapper;
+        // keep that gate separate rather than double-widening here.
+        return !body_is_wrap_figure(inner);
+    }
+    false
+}
+
+/// Whether a `ParElem`'s body reduces, after [`peel_wrappers`], to a SOLE
+/// framed container (`#box`/`#rect`/`#square`) that [`handle_block_framed`]
+/// would flatten to flowing blocks — i.e. Typst paragraph-wrapped a bare
+/// inline-level container at block scope (there is no bare-inline-content
+/// block variant) purely because it's nominally inline, not because it sits
+/// alongside real running text. Filing such a container through the
+/// run-only inline path (`handle_inline`) has no way to carry multi-
+/// paragraph block content and can only rasterize a body that fails
+/// `body_inline_extractable` — e.g. `box(inset: ..)[#columns(2, ..)]`
+/// rasterized an entire two-column A0 poster as one page-spanning image
+/// (~26 near-blank pages in Word/LibreOffice; the pollux poster template).
+///
+/// Mirrors `handle_block_framed`'s own frameless-container acceptance
+/// exactly (frameless, `body_extractable`, and — new here —
+/// [`body_is_frameless_flow_container`] or [`body_is_wrap_figure`]) so a
+/// redirect here only ever routes to a call that `handle_block_framed` would
+/// have accepted anyway.
+fn paragraph_sole_flowing_container<'a>(
+    body: &'a Content,
+    styles: typst_library::foundations::StyleChain,
+) -> Option<&'a Content> {
+    let inner = peel_wrappers(body);
+    if !is_framed_container(inner) {
+        return None;
+    }
+    let (fbody, fill, stroke_sides, _inset) = block_framed_parts(inner, styles)?;
+    if fill.is_some() {
+        return None;
+    }
+    if block_borders(&stroke_sides, styles).is_some() {
+        return None;
+    }
+    if !body_extractable(&fbody) {
+        return None;
+    }
+    (body_is_wrap_figure(&fbody) || body_is_frameless_flow_container(&fbody)).then_some(inner)
 }
 
 /// Whether an equation body carries a label *inside* it (a per-line label),
@@ -1241,8 +1359,14 @@ fn handle_block_framed(
         // the well-tested grid mapper doesn't drop content. We deliberately do
         // NOT lower an arbitrary frameless box here — a designed full-page
         // layout box can lose content through a native re-walk — so the body
-        // must structurally be a grid-of-figure, not just "non-text".
-        if body_is_wrap_figure(&body) {
+        // must structurally be a grid-of-figure (`body_is_wrap_figure`) or —
+        // the second recoverable case — directly one ordinary flowing
+        // container (`#columns`/`#stack`/a non-figure `#grid`,
+        // `body_is_frameless_flow_container`): a frameless box whose *whole*
+        // body is one of these (e.g. a poster's `box(inset: ..)[#columns(2,
+        // ..)]`) has nothing else that could be lost by flattening it, unlike
+        // a more elaborate full-page composition.
+        if body_is_wrap_figure(&body) || body_is_frameless_flow_container(&body) {
             let inner = ctx.blocks(&body, styles)?;
             crate::document::collect_tags(&inner, &mut ctx.deferred_tags);
             out.extend(inner);
