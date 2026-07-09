@@ -775,6 +775,43 @@ fn frameless_box_wrapping_columns_flows_instead_of_rasterizing() {
 }
 
 #[test]
+fn box_with_bottom_only_stroke_keeps_a_bottom_only_border() {
+    // `box(height: 20pt, width: 100%, stroke: (bottom: 0.5pt + black))[Heading]`
+    // is the common CV/resume "border as a section-title underline" idiom
+    // (found in a real corpus doc, bwaklog-vita). Reached via a `ParElem` at
+    // block scope, it used to fall through to the run-only inline path's
+    // character border (`w:bdr`, via `mappers::shape::inline_frame`), which is
+    // inherently uniform around all four sides — silently turning the intended
+    // bottom-only underline into a full box. It must now flow as a genuine
+    // paragraph with a `w:pBdr` carrying ONLY the bottom side.
+    let p = parts(
+        "#box(height: 20pt, width: 100%, stroke: (bottom: 0.5pt + black))[Summary]",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("Summary"), "the heading text is extracted");
+    assert!(!doc.contains("<w:bdr"), "no uniform character border is emitted");
+    assert!(!doc.contains("<w:drawing>"), "the box is not rasterized");
+    assert!(doc.contains("<w:pBdr>"), "a paragraph border is used instead");
+    assert!(doc.contains("<w:bottom "), "the bottom side is bordered");
+    assert!(!doc.contains("<w:top "), "the top side is NOT bordered");
+    assert!(!doc.contains("<w:left "), "the left side is NOT bordered");
+    assert!(!doc.contains("<w:right "), "the right side is NOT bordered");
+    assert_all_wellformed(&p);
+
+    // Mid-sentence (genuinely inline, not a paragraph's sole content), the same
+    // partial stroke still can't be a run-level border — it now rasterizes
+    // (preserves the visual) instead of silently becoming a full box.
+    let inline = parts(
+        "before #box(stroke: (bottom: 0.5pt + black))[mid] after",
+    );
+    let doc = &inline["word/document.xml"];
+    assert!(doc.contains("before"), "surrounding text is preserved");
+    assert!(doc.contains("after"), "surrounding text is preserved");
+    assert!(!doc.contains("<w:bdr"), "no uniform character border is emitted");
+    assert_all_wellformed(&inline);
+}
+
+#[test]
 fn block_columns_emit_continuous_sections() {
     // `#columns(n)[..]` is section-scoped in Word: split into a continuous
     // multi-column section for the block, then immediately return to the

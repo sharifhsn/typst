@@ -77,15 +77,15 @@ pub fn convert_children(
             // sitting alone at block scope gets paragraph-wrapped by Typst's
             // own realize (there is no bare-inline-content block variant) —
             // it would otherwise be forced through the run-only inline path
-            // in `handle_inline`, which has no way to carry multi-paragraph
-            // block content and can only rasterize a body that fails
-            // `body_inline_extractable` (see `paragraph_sole_flowing_
-            // container`'s doc comment for the pollux poster regression this
-            // fixes). Detect that narrow, validated-safe shape and route it
-            // through the full block dispatch instead — unless it's a link
-            // target (labels on a redirected block aren't bookmarked below).
+            // in `handle_inline`, which structurally cannot carry
+            // multi-paragraph block content or a non-uniform per-side stroke
+            // (see `paragraph_sole_block_container`'s doc comment for both
+            // regressions this fixes). Detect that narrow, validated-safe
+            // shape and route it through the full block dispatch instead —
+            // unless it's a link target (labels on a redirected block aren't
+            // bookmarked below).
             if child.label().is_none()
-                && let Some(sole) = paragraph_sole_flowing_container(&par.body, *styles)
+                && let Some(sole) = paragraph_sole_block_container(&par.body, *styles)
             {
                 let from = blocks.len();
                 flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
@@ -531,22 +531,26 @@ pub(crate) fn body_is_frameless_flow_container(body: &Content) -> bool {
 
 /// Whether a `ParElem`'s body reduces, after [`peel_wrappers`], to a SOLE
 /// framed container (`#box`/`#rect`/`#square`) that [`handle_block_framed`]
-/// would flatten to flowing blocks — i.e. Typst paragraph-wrapped a bare
-/// inline-level container at block scope (there is no bare-inline-content
-/// block variant) purely because it's nominally inline, not because it sits
-/// alongside real running text. Filing such a container through the
-/// run-only inline path (`handle_inline`) has no way to carry multi-
-/// paragraph block content and can only rasterize a body that fails
-/// `body_inline_extractable` — e.g. `box(inset: ..)[#columns(2, ..)]`
-/// rasterized an entire two-column A0 poster as one page-spanning image
-/// (~26 near-blank pages in Word/LibreOffice; the pollux poster template).
+/// would render MORE faithfully than the run-only inline path can — i.e.
+/// Typst paragraph-wrapped a bare inline-level container at block scope
+/// (there is no bare-inline-content block variant) purely because it's
+/// nominally inline, not because it sits alongside real running text. Two
+/// narrow, independent triggers, each because the run-only inline path
+/// structurally cannot represent the case correctly:
+/// - the body is directly one ordinary flowing container (`body_is_wrap_
+///   figure` / `body_is_frameless_flow_container`) — `handle_inline` has no
+///   way to carry multi-paragraph block content, so e.g. `box(inset:
+///   ..)[#columns(2, ..)]` rasterized an entire two-column A0 poster as one
+///   page-spanning image (~26 near-blank pages; the pollux poster template);
+/// - the stroke is non-uniform across sides (`stroke_sides_nonuniform`) —
+///   the inline path's only bordered-run form (`w:bdr`, via `mappers::
+///   shape::inline_frame`) is inherently a uniform box, so e.g. `box(stroke:
+///   (bottom: ..))` (a common "border as a section-title underline" idiom in
+///   CV/resume templates) silently became a full four-sided box.
 ///
-/// Mirrors `handle_block_framed`'s own frameless-container acceptance
-/// exactly (frameless, `body_extractable`, and — new here —
-/// [`body_is_frameless_flow_container`] or [`body_is_wrap_figure`]) so a
-/// redirect here only ever routes to a call that `handle_block_framed` would
-/// have accepted anyway.
-fn paragraph_sole_flowing_container<'a>(
+/// Mirrors `handle_block_framed`'s own acceptance tests exactly so a
+/// redirect here only ever routes to a call it would have accepted anyway.
+fn paragraph_sole_block_container<'a>(
     body: &'a Content,
     styles: typst_library::foundations::StyleChain,
 ) -> Option<&'a Content> {
@@ -555,13 +559,16 @@ fn paragraph_sole_flowing_container<'a>(
         return None;
     }
     let (fbody, fill, stroke_sides, _inset) = block_framed_parts(inner, styles)?;
+    if !body_extractable(&fbody) {
+        return None;
+    }
+    if stroke_sides_nonuniform(&stroke_sides) {
+        return Some(inner);
+    }
     if fill.is_some() {
         return None;
     }
     if block_borders(&stroke_sides, styles).is_some() {
-        return None;
-    }
-    if !body_extractable(&fbody) {
         return None;
     }
     (body_is_wrap_figure(&fbody) || body_is_frameless_flow_container(&fbody)).then_some(inner)
@@ -1376,12 +1383,20 @@ fn handle_block_framed(
     }
     // Only flowing/block content takes the main-story paragraph path; a short
     // single-line callout stays a (standalone, sized) text box — UNLESS the body
-    // has a footnote (illegal in a text box) or content that is Word-fragile /
-    // mis-laid inside one (figures, images, tables, math, nested frames), in
-    // which case it must flow here to stay correct. Decided before extraction.
+    // has a footnote (illegal in a text box), content that is Word-fragile /
+    // mis-laid inside one (figures, images, tables, math, nested frames), OR the
+    // stroke is non-uniform across sides (`stroke_sides_nonuniform` — e.g.
+    // `box(stroke: (bottom: ..))`, the common "border as a section-title
+    // underline" idiom): a DrawingML shape outline is inherently uniform around
+    // all four sides, so routing a bottom-only stroke through the text-box path
+    // would silently turn it into a full box — only this paragraph border
+    // (`w:pBdr`, via `block_borders` below) can express per-side strokes
+    // independently. In all these cases it must flow here to stay correct.
+    // Decided before extraction.
     if !body_is_flowing(&body, styles)
         && !body_has_footnote(&body)
         && body_textbox_safe(&body)
+        && !stroke_sides_nonuniform(&stroke_sides)
     {
         return Ok(false);
     }
@@ -1507,6 +1522,28 @@ fn nonzero_twip(
     use typst_library::foundations::Resolve;
     let twips = crate::props::abs_to_twip(rel.abs.resolve(styles));
     (twips != 0).then_some(twips)
+}
+
+/// Whether a per-side stroke definition has SOME sides set and others not —
+/// e.g. `box(stroke: (bottom: 1pt + black))`, the common "border as a
+/// section-title underline" idiom. Only a paragraph border (`w:pBdr`, via
+/// [`block_borders`]/`handle_block_framed`'s bordered-paragraph path) can
+/// express this independently per side; both the inline character border
+/// (`w:bdr`, via `mappers::shape::inline_frame`) and a DrawingML shape
+/// outline (the text-box path) are inherently uniform around all four
+/// sides, so either would silently turn a bottom-only stroke into a full box.
+pub(crate) fn stroke_sides_nonuniform(
+    sides: &typst_library::layout::Sides<
+        Option<Option<typst_library::visualize::Stroke>>,
+    >,
+) -> bool {
+    let set = [
+        matches!(sides.top, Some(Some(_))),
+        matches!(sides.right, Some(Some(_))),
+        matches!(sides.bottom, Some(Some(_))),
+        matches!(sides.left, Some(Some(_))),
+    ];
+    set.contains(&true) && set.contains(&false)
 }
 
 /// Maps a block's stroke sides to paragraph borders, or `None` when no side is

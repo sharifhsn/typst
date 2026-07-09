@@ -83,7 +83,7 @@ pub fn text_box(
     let Some(framed) = framed_container(child, styles) else {
         return Ok(None);
     };
-    let Framed { body, fill_paint, stroke, rounded, inset } = framed;
+    let Framed { body, fill_paint, stroke, rounded, inset, nonuniform_stroke: _ } = framed;
 
     // A gradient/tiling fill has no solid-colour text-box form: keep rasterizing
     // it so the visual survives.
@@ -168,6 +168,17 @@ pub fn inline_frame(
     styles: StyleChain,
 ) -> Option<(Content, Option<[u8; 3]>, Option<crate::dom::ParaBorder>)> {
     let framed = framed_container(child, styles)?;
+    // A non-uniform per-side stroke (`box(stroke: (bottom: ..))`, the common
+    // "border as a section-title underline" idiom) has no run-level form: the
+    // character border (`w:bdr`) built below is inherently uniform around all
+    // four sides, so a bottom-only stroke would silently become a full box.
+    // Decline so the caller falls through to the block dispatch (a paragraph-
+    // wrapped sole child, `convert::paragraph_sole_block_container`) or the
+    // rasterize fallback (genuinely mid-line), both of which render it
+    // correctly.
+    if framed.nonuniform_stroke {
+        return None;
+    }
     // A gradient fill approximates to its first stop's colour (as the block box
     // path does, COVERAGE.md §7.1h) so a gradient-filled inline box — e.g. a
     // code-line highlight from a listing package — becomes run-shaded live text
@@ -197,6 +208,10 @@ struct Framed {
     body: Content,
     fill_paint: Option<Paint>,
     stroke: Option<ShapeStroke>,
+    /// Whether the ORIGINAL per-side stroke (before reduction to a uniform
+    /// [`ShapeStroke`]) had some sides set and others not — see
+    /// [`inline_frame`]'s use of this.
+    nonuniform_stroke: bool,
     rounded: bool,
     inset: Sides<Option<Rel<Length>>>,
 }
@@ -207,31 +222,39 @@ fn framed_container(child: &Content, styles: StyleChain) -> Option<Framed> {
     if let Some(e) = child.to_packed::<BoxElem>() {
         let body = e.body.get_cloned(styles)?;
         // A box's stroke has no implicit default: only an explicit side counts.
-        let stroke = sides_stroke_first(&e.stroke.get_cloned(styles), styles);
+        let raw_stroke = e.stroke.get_cloned(styles);
+        let stroke = sides_stroke_first(&raw_stroke, styles);
         Some(Framed {
             body,
             fill_paint: e.fill.get_cloned(styles),
             stroke,
+            nonuniform_stroke: crate::convert::stroke_sides_nonuniform(&raw_stroke),
             rounded: any_radius(&e.radius.get_cloned(styles)),
             inset: e.inset.get_cloned(styles),
         })
     } else if let Some(e) = child.to_packed::<RectElem>() {
         let body = e.body.get_cloned(styles)?;
         let fill = e.fill.get_cloned(styles);
+        let raw_stroke = e.stroke.get_cloned(styles);
         Some(Framed {
-            stroke: shape_stroke(e.stroke.get_cloned(styles), &fill, styles),
+            stroke: shape_stroke(raw_stroke.clone(), &fill, styles),
             body,
             fill_paint: fill,
+            nonuniform_stroke: matches!(&raw_stroke, Smart::Custom(sides)
+                if crate::convert::stroke_sides_nonuniform(sides)),
             rounded: any_radius(&e.radius.get_cloned(styles)),
             inset: e.inset.get_cloned(styles),
         })
     } else if let Some(e) = child.to_packed::<SquareElem>() {
         let body = e.body.get_cloned(styles)?;
         let fill = e.fill.get_cloned(styles);
+        let raw_stroke = e.stroke.get_cloned(styles);
         Some(Framed {
-            stroke: shape_stroke(e.stroke.get_cloned(styles), &fill, styles),
+            stroke: shape_stroke(raw_stroke.clone(), &fill, styles),
             body,
             fill_paint: fill,
+            nonuniform_stroke: matches!(&raw_stroke, Smart::Custom(sides)
+                if crate::convert::stroke_sides_nonuniform(sides)),
             rounded: any_radius(&e.radius.get_cloned(styles)),
             inset: e.inset.get_cloned(styles),
         })
