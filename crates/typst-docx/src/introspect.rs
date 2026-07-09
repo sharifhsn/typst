@@ -280,24 +280,39 @@ impl Introspector for DocxIntrospector {
             if let Some(real_end) = self.real_location(end) {
                 return real.query_count_before(selector, real_end);
             }
-            // `end` has no corresponding real-paged position of its own (for
-            // example, it was produced inside a synthetic rasterization
-            // sub-layout). `query()` still prefers `real`'s matches whenever
-            // it has any for this selector, so the count must stay
-            // consistent with that same source rather than falling through
-            // to `self.elements` — which can record additional/duplicate
-            // updates from rasterization passes that have no counterpart in
-            // the real document. Using `self.elements`'s count here while
-            // `sequence()` (in typst-library's state/counter introspection)
-            // built its sequence from `query()`'s (real-backed) results
-            // previously produced an offset one past the end of that
-            // sequence — an out-of-bounds panic. Approximate "before" via
-            // the element's real page instead, the same page-order strategy
-            // the furniture-override branch above already uses.
-            if !real.query(selector).is_empty()
-                && let Some(page) = self.page(end)
-            {
-                return self.count_matching_up_to_page(selector, page);
+            // `end` has no corresponding real-paged position of its own.
+            // `query()` still prefers `real`'s matches whenever it has any
+            // for this selector, so `sequence()` (typst-library's state/
+            // counter introspection) is built from `real`'s results — the
+            // count returned here indexes into that sequence and must not
+            // exceed its length.
+            //
+            // For ordinary shared content (e.g. headings, which are source
+            // elements present in both realize passes, not synthesized
+            // during realize like citations), `self.elements`'s own count
+            // is realize-invariant: the Nth heading in DOCX's own pass is
+            // the same logical Nth heading in the paged pass, just with a
+            // different Locator-sequence location value — so its precise
+            // count is exactly right (unlike a page-order approximation,
+            // which collapses multiple headings sharing DOCX's coarse
+            // synthetic page onto the same count and froze every heading's
+            // displayed number at whichever heading first landed on that
+            // page — confirmed visually via a LibreOffice render showing
+            // every subsequent heading stuck at the same number). Only
+            // fall back to the page-order approximation when `elements`'s
+            // count would index past the end of `real`'s sequence — the
+            // rasterization-duplicate scenario this fallback was
+            // originally built for (elements can record additional/
+            // duplicate updates from rasterization sub-layouts that have
+            // no counterpart in the real document).
+            if !real.query(selector).is_empty() {
+                let elements_count = self.elements.query_count_before(selector, end);
+                if elements_count < real.query(selector).len() {
+                    return elements_count;
+                }
+                if let Some(page) = self.page(end) {
+                    return self.count_matching_up_to_page(selector, page);
+                }
             }
         }
         self.elements.query_count_before(selector, end)
