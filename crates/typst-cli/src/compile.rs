@@ -384,6 +384,18 @@ fn compile_and_export(
                 Ok(paged_document) => {
                     let primary = Arc::clone(paged_document.introspector());
                     let seed = Arc::clone(&primary);
+                    // Each real page's true frame size, so an `auto` page axis
+                    // (a common ticket/certificate/single-page-diagram idiom)
+                    // resolves to Typst's own content-driven size rather than a
+                    // hardcoded A4 fallback (see `real_section_size` in
+                    // typst-docx).
+                    let page_sizes = Arc::new(
+                        paged_document
+                            .pages()
+                            .iter()
+                            .map(|page| page.frame.size())
+                            .collect::<Vec<_>>(),
+                    );
                     let Warned { output, warnings: docx_warnings } =
                         typst::compile_with::<DocxDocument, _>(
                             world,
@@ -394,6 +406,7 @@ fn compile_and_export(
                                     content,
                                     styles,
                                     Arc::clone(&primary),
+                                    Arc::clone(&page_sizes),
                                 )
                             },
                         );

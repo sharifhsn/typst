@@ -137,6 +137,9 @@ fn compile_docx_with_world(world: &TestWorld) -> DocxDocument {
         .expect("paged compilation failed");
     let primary = Arc::clone(paged.introspector());
     let seed = Arc::clone(&primary);
+    let page_sizes = Arc::new(
+        paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>(),
+    );
     typst::compile_with::<DocxDocument, _>(
         world,
         Some(seed.as_ref()),
@@ -146,6 +149,7 @@ fn compile_docx_with_world(world: &TestWorld) -> DocxDocument {
                 content,
                 styles,
                 Arc::clone(&primary),
+                Arc::clone(&page_sizes),
             )
         },
     )
@@ -160,6 +164,9 @@ fn compile_paged_and_docx(src: &str) -> (PagedDocument, DocxDocument) {
         .expect("paged compilation failed");
     let primary = Arc::clone(paged.introspector());
     let seed = Arc::clone(&primary);
+    let page_sizes = Arc::new(
+        paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>(),
+    );
     let doc = typst::compile_with::<DocxDocument, _>(
         &world,
         Some(seed.as_ref()),
@@ -169,6 +176,7 @@ fn compile_paged_and_docx(src: &str) -> (PagedDocument, DocxDocument) {
                 content,
                 styles,
                 Arc::clone(&primary),
+                Arc::clone(&page_sizes),
             )
         },
     )
@@ -2503,6 +2511,49 @@ fn docx_locations_match_paged_locations_for_source_elements() {
             .expect("docx label has a location");
         assert_eq!(docx_loc, paged_loc, "location mismatch for <{name}>");
     }
+}
+
+#[test]
+fn auto_page_height_uses_the_true_paged_size_not_a4() {
+    // `set page(width: .., height: auto)` is an extremely common ticket/
+    // certificate/single-page-diagram idiom (a majority of a large real-world
+    // corpus sample uses it). DOCX pages are fixed-size, so an `auto` axis
+    // used to fall back to a hardcoded A4 dimension — silently clipping or
+    // misshaping content laid out for a very different true height. It must
+    // now resolve to the size Typst's own paged layout actually computed.
+    let src = "#set page(width: 5cm, height: auto, margin: 0pt)\n\
+               #lorem(2000)";
+    let (paged, docx_doc) = compile_paged_and_docx(src);
+    let real_size = paged.pages().first().expect("one real page").frame.size();
+    let real_h_twips = (real_size.y.to_pt() * 20.0).round() as i32;
+    // A 5cm-wide page filled with 400 lorem-ipsum words needs FAR more than a
+    // standard A4 height (16838 twips) — confirms this doc actually exercises
+    // the auto-height path, not a coincidentally-A4-sized one.
+    assert!(real_h_twips > 16838 * 2, "test doc must need much more than A4 height");
+
+    let bytes =
+        docx(&docx_doc, &DocxOptions { pretty: false }).expect("docx export failed");
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    zip.by_name("word/document.xml").unwrap().read_to_string(&mut xml).unwrap();
+
+    let caps = regex_pgsz(&xml).expect("a w:pgSz element exists");
+    assert_eq!(
+        caps, real_h_twips,
+        "DOCX page height must match the true paged layout's height, not a fallback"
+    );
+}
+
+/// Extracts the `w:h` (height, twips) attribute from the first `<w:pgSz>` in
+/// `xml`, without pulling in a regex dependency for one test.
+fn regex_pgsz(xml: &str) -> Option<i32> {
+    let start = xml.find("<w:pgSz")?;
+    let end = xml[start..].find('>')? + start;
+    let tag = &xml[start..end];
+    let key = "w:h=\"";
+    let h_start = tag.find(key)? + key.len();
+    let h_end = tag[h_start..].find('"')? + h_start;
+    tag[h_start..h_end].parse().ok()
 }
 
 #[test]

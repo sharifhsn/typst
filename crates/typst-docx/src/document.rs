@@ -30,7 +30,7 @@ pub fn docx_document(
     content: &Content,
     styles: StyleChain,
 ) -> SourceResult<DocxDocument> {
-    docx_document_impl(engine, content, styles, None)
+    docx_document_impl(engine, content, styles, None, None)
 }
 
 /// Produces a DOCX document backed by the fixed-point paged introspector.
@@ -40,13 +40,26 @@ pub fn docx_document(
 /// final DOCX introspector delegates to that paged source first. The synthetic
 /// DOCX model remains as a fallback for locations that only exist in the DOCX
 /// realization.
+///
+/// `paged_page_sizes` (each real page's `frame.size()`, indexed by physical
+/// page number minus one) lets an `auto` page axis (`set page(width: ..,
+/// height: auto)`, an extremely common ticket/certificate/single-page-diagram
+/// idiom) resolve to Typst's own true content-driven size instead of a
+/// hardcoded A4 fallback — see [`real_section_size`].
 pub fn docx_document_with_paged_introspector(
     engine: &mut Engine,
     content: &Content,
     styles: StyleChain,
     paged_introspector: Arc<typst_layout::PagedIntrospector>,
+    paged_page_sizes: Arc<Vec<typst_library::layout::Size>>,
 ) -> SourceResult<DocxDocument> {
-    docx_document_impl(engine, content, styles, Some(paged_introspector))
+    docx_document_impl(
+        engine,
+        content,
+        styles,
+        Some(paged_introspector),
+        Some(paged_page_sizes),
+    )
 }
 
 #[typst_macros::time(name = "docx document")]
@@ -55,6 +68,7 @@ fn docx_document_impl(
     content: &Content,
     styles: StyleChain,
     paged_introspector: Option<Arc<typst_layout::PagedIntrospector>>,
+    paged_page_sizes: Option<Arc<Vec<typst_library::layout::Size>>>,
 ) -> SourceResult<DocxDocument> {
     // Mark the external styles as document-level "outside".
     let styles = styles.to_map().outside();
@@ -83,12 +97,14 @@ fn docx_document_impl(
     // a mid-document `set page(..)` change (e.g. a landscape appendix) yields
     // several. This read needs no engine, so it happens before the `DocxCtx`
     // body walk; header/footer *content* is lowered later on the same `ctx`.
-    let sections = resolve_sections(&pairs, styles);
+    let real_ref = paged_introspector.as_deref();
+    let page_sizes_ref = paged_page_sizes.as_deref().map(Vec::as_slice);
+    let sections = resolve_sections(&pairs, styles, real_ref, page_sizes_ref);
     // The width fed to rasterized content comes from the first section.
     let first_geom = sections
         .first()
         .map(|section| section.geom.clone())
-        .unwrap_or_else(|| run_geometry(&[], styles));
+        .unwrap_or_else(|| run_geometry(&[], styles, real_ref, page_sizes_ref));
 
     // Per-section `set page(numbering:)`, in section order — the synthetic page
     // model resolves `loc.page-numbering()` against these (see below).
@@ -809,6 +825,8 @@ struct SectionRun {
 fn resolve_sections(
     pairs: &[(&Content, StyleChain)],
     initial: StyleChain,
+    real: Option<&typst_layout::PagedIntrospector>,
+    page_sizes: Option<&[typst_library::layout::Size]>,
 ) -> Vec<SectionRun> {
     use typst_library::layout::{ColumnsElem, PagebreakElem, Parity};
 
@@ -849,9 +867,16 @@ fn resolve_sections(
         }
         let group = &pairs[start..i];
         if group.iter().any(|(child, _)| child.is::<ColumnsElem>()) {
-            push_column_sections(&mut sections, pairs, start..i, initial);
+            push_column_sections(
+                &mut sections,
+                pairs,
+                start..i,
+                initial,
+                real,
+                page_sizes,
+            );
         } else {
-            let geom = run_geometry(group, initial);
+            let geom = run_geometry(group, initial, real, page_sizes);
             // Merge into the previous section if nothing section-scoped changed;
             // the pagebreaks between them then fall inside the merged range
             // (→ `<w:br>`).
@@ -866,10 +891,12 @@ fn push_column_sections(
     pairs: &[(&Content, StyleChain)],
     range: std::ops::Range<usize>,
     initial: StyleChain,
+    real: Option<&typst_layout::PagedIntrospector>,
+    page_sizes: Option<&[typst_library::layout::Size]>,
 ) {
     use typst_library::layout::ColumnsElem;
 
-    let base_geom = run_geometry(&pairs[range.clone()], initial);
+    let base_geom = run_geometry(&pairs[range.clone()], initial, real, page_sizes);
     let mut segment_start = range.start;
     let mut saw_columns = false;
     for i in range.clone() {
@@ -993,7 +1020,17 @@ fn same_section(a: &SectGeom, b: &SectGeom) -> bool {
 }
 
 /// Resolves one page run's geometry from its group of content pairs.
-fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGeom {
+///
+/// `real`/`page_sizes` (the true converged paged layout and its per-page
+/// frame sizes — see [`real_section_size`]) are consulted only when a page
+/// axis is `auto`; both are `None` unless the hybrid paged-introspector
+/// entry point (`docx_document_with_paged_introspector`) was used.
+fn run_geometry(
+    group: &[(&Content, StyleChain)],
+    initial: StyleChain,
+    real: Option<&typst_layout::PagedIntrospector>,
+    page_sizes: Option<&[typst_library::layout::Size]>,
+) -> SectGeom {
     use typst_library::foundations::{Resolve, Smart, Styles};
     use typst_library::layout::{
         Abs, Binding, Dir, Em, FixAlignment, FixedAlignment, Length, OuterVAlignment,
@@ -1014,13 +1051,32 @@ fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGe
         std::mem::swap(&mut size.x, &mut size.y);
     }
 
+    // `auto` page axes have no DOCX equivalent (pages are fixed-size). Before
+    // falling back to a hardcoded default, try the TRUE content-driven size
+    // Typst's own paged layout already computed for this section's real
+    // page(s) — an extremely common idiom (`set page(width: .., height:
+    // auto)` for tickets/certificates/single-page diagrams/etc., found in a
+    // majority of the real-world corpus) otherwise gets silently clipped or
+    // misshapen to a fixed A4 axis instead of the size the author actually
+    // designed for.
+    if (!size.x.is_finite() || !size.y.is_finite())
+        && let Some(real_size) = real_section_size(group, real, page_sizes)
+    {
+        if !size.x.is_finite() {
+            size.x = real_size.x;
+        }
+        if !size.y.is_finite() {
+            size.y = real_size.y;
+        }
+    }
+
     // The auto-margin reference is the smaller physical dimension.
     let mut minside = size.x.min(size.y);
     if !minside.is_finite() {
         minside = Paper::A4.width();
     }
-    // `auto` page axes have no DOCX equivalent (pages are fixed-size): fall back
-    // to the A4 dimension for that axis.
+    // Still-unresolved (no real page data available, e.g. `docx_document`'s
+    // non-hybrid entry point) axes fall back to the A4 dimension.
     if !size.x.is_finite() {
         size.x = Paper::A4.width();
     }
@@ -1173,6 +1229,38 @@ fn run_geometry(group: &[(&Content, StyleChain)], initial: StyleChain) -> SectGe
         background_color,
         hyphenate,
     }
+}
+
+/// Looks up the TRUE size Typst's real paged layout computed for the real
+/// page(s) this section's content group spans, by finding any locatable
+/// content in the group and asking `real` which physical page it landed on.
+/// Word requires ONE fixed size per section, so when the group spans more
+/// than one real page (an explicit `#pagebreak()` inside an otherwise
+/// unchanged `set page(..)` run) — or when different pages disagree because
+/// an auto axis genuinely varied with content — the maximum across all pages
+/// touched is used, so no page's content is clipped by an undersized guess.
+/// Returns `None` when there's no real data at all (no hybrid paged
+/// introspector, or no locatable content found in the group).
+fn real_section_size(
+    group: &[(&Content, StyleChain)],
+    real: Option<&typst_layout::PagedIntrospector>,
+    page_sizes: Option<&[typst_library::layout::Size]>,
+) -> Option<typst_library::layout::Size> {
+    use typst_library::layout::Size;
+
+    let real = real?;
+    let page_sizes = page_sizes?;
+    let mut max: Option<Size> = None;
+    for (child, _) in group {
+        let Some(loc) = child.location() else { continue };
+        let Some(page) = real.page(loc) else { continue };
+        let Some(&size) = page_sizes.get(page.get() - 1) else { continue };
+        max = Some(match max {
+            Some(m) => Size::new(m.x.max(size.x), m.y.max(size.y)),
+            None => size,
+        });
+    }
+    max
 }
 
 /// Clamps a header/footer band offset into `(0, margin)`, falling back to the
