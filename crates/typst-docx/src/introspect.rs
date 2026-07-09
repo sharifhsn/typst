@@ -159,6 +159,24 @@ impl DocxIntrospector {
             _ => None,
         }
     }
+
+    /// Counts matches for `selector` (via [`Self::query`], so callers stay on
+    /// the same source `query()` itself would use) whose resolved page is at
+    /// or before `page`. This is a page-granularity approximation of "before
+    /// `end`" for callers that only have a page number for `end`, not an
+    /// exact resolvable location — used both when a furniture-page override
+    /// is active and when falling back for a synthetic (unresolvable-in-`real`)
+    /// end location that still has real-backed query results.
+    fn count_matching_up_to_page(&self, selector: &Selector, page: NonZeroUsize) -> usize {
+        self.query(selector)
+            .iter()
+            .filter(|elem| {
+                elem.location()
+                    .and_then(|loc| self.page(loc))
+                    .is_none_or(|elem_page| elem_page <= page)
+            })
+            .count()
+    }
 }
 
 impl Introspector for DocxIntrospector {
@@ -212,20 +230,31 @@ impl Introspector for DocxIntrospector {
 
     fn query_count_before(&self, selector: &Selector, end: Location) -> usize {
         if let Some(page) = self.furniture_page_override(end) {
-            return self
-                .query(selector)
-                .iter()
-                .filter(|elem| {
-                    elem.location()
-                        .and_then(|loc| self.page(loc))
-                        .is_none_or(|elem_page| elem_page <= page)
-                })
-                .count();
+            return self.count_matching_up_to_page(selector, page);
         }
-        if let Some(real) = &self.real
-            && let Some(real_end) = self.real_location(end)
-        {
-            return real.query_count_before(selector, real_end);
+        if let Some(real) = &self.real {
+            if let Some(real_end) = self.real_location(end) {
+                return real.query_count_before(selector, real_end);
+            }
+            // `end` has no corresponding real-paged position of its own (for
+            // example, it was produced inside a synthetic rasterization
+            // sub-layout). `query()` still prefers `real`'s matches whenever
+            // it has any for this selector, so the count must stay
+            // consistent with that same source rather than falling through
+            // to `self.elements` — which can record additional/duplicate
+            // updates from rasterization passes that have no counterpart in
+            // the real document. Using `self.elements`'s count here while
+            // `sequence()` (in typst-library's state/counter introspection)
+            // built its sequence from `query()`'s (real-backed) results
+            // previously produced an offset one past the end of that
+            // sequence — an out-of-bounds panic. Approximate "before" via
+            // the element's real page instead, the same page-order strategy
+            // the furniture-override branch above already uses.
+            if !real.query(selector).is_empty()
+                && let Some(page) = self.page(end)
+            {
+                return self.count_matching_up_to_page(selector, page);
+            }
         }
         self.elements.query_count_before(selector, end)
     }
