@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ecow::{EcoString, eco_format};
 use rustc_hash::{FxHashMap, FxHashSet};
-use typst_library::WorldExt;
+use typst_library::{World, WorldExt};
 use typst_library::diag::{SourceResult, warning};
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Packed, StyleChain};
@@ -936,6 +936,99 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         p
     }
 
+    /// Splits `text` into contiguous spans, each paired with the font family
+    /// that should render it — mirroring Typst's own per-glyph font
+    /// fallback (used during paged layout's shaping, `typst-layout`'s
+    /// `get_font_and_covers`) instead of always using only the first
+    /// declared family. A single declared font commonly can't cover every
+    /// script in a run (e.g. a Latin heading font next to CJK glyphs);
+    /// Typst's PDF path substitutes a covering font per-glyph during frame
+    /// shaping, but typst-docx builds its runs from the pre-layout Content
+    /// tree (a consequence of DOCX needing its own separate flowing
+    /// realize — see `lib.rs`) and has no access to that per-glyph
+    /// decision, so it previously just baked the first family into every
+    /// OOXML font slot (including `w:eastAsia`), producing tofu wherever
+    /// that family didn't cover a character (confirmed visually via a
+    /// LibreOffice render: a Latin-only heading font produced tofu for CJK
+    /// heading text while CJK body text, whose font matched the document's
+    /// hoisted default, rendered fine). This walks `text` character by
+    /// character using the same family list Typst's shaping code consults
+    /// (`typst_library::text::families`), picks the first family (in
+    /// priority order) that covers each character, falls back to the font
+    /// book's script-aware fallback search when none of the declared
+    /// families do, then coalesces consecutive same-font characters into
+    /// maximal spans — so a single-script run (the common case) still
+    /// produces exactly one span.
+    fn split_by_font_coverage(&self, text: &str, styles: StyleChain) -> Vec<(EcoString, EcoString)> {
+        let book = self.engine.world.book();
+        let variant = typst_library::text::variant(styles);
+        let families: Vec<&typst_library::text::FontFamily> =
+            typst_library::text::families(styles).collect();
+        let Some(first) = families.first() else {
+            return vec![(EcoString::new(), text.into())];
+        };
+
+        // If the leading requested family isn't resolvable at all on this
+        // machine, there is no coverage data to justify overriding it: DOCX
+        // preserves font names as portable references for whatever
+        // application eventually opens the file (unlike PDF, which must
+        // embed real glyph outlines from a locally available font and so
+        // is already limited to what's installed here) — a font simply
+        // being absent from the compiling machine's font book is the
+        // ordinary case, not evidence it lacks coverage. Keep the exact
+        // original single-font behavior rather than guessing a local
+        // substitute.
+        let Some(first_info) =
+            book.select(first.as_str(), variant).and_then(|id| book.info(id))
+        else {
+            return vec![(first.as_str().into(), text.into())];
+        };
+
+        // Fast path: the (locally resolvable) leading font already covers
+        // every character — the overwhelming common case.
+        if text.chars().all(|c| first_info.coverage.contains(c as u32)) {
+            return vec![(first.as_str().into(), text.into())];
+        }
+
+        let like = Some(first_info);
+        let mut spans: Vec<(EcoString, EcoString)> = Vec::new();
+        for c in text.chars() {
+            let mut chosen: Option<&str> = None;
+            for family in &families {
+                if let Some(id) = book.select(family.as_str(), variant)
+                    && let Some(info) = book.info(id)
+                    && info.coverage.contains(c as u32)
+                {
+                    chosen = Some(family.as_str());
+                    break;
+                }
+            }
+            let font_name: EcoString = match chosen.or_else(|| {
+                // None of the declared families cover this character — fall
+                // back the same way Typst's own shaping does.
+                book.select_fallback(like, variant, c.encode_utf8(&mut [0; 4]))
+                    .and_then(|id| book.info(id))
+                    .map(|info| info.family.as_str())
+            }) {
+                Some(name) => name.into(),
+                // No installed font covers this character at all — keep the
+                // originally requested family; Word falls back to its own
+                // missing-glyph handling, no worse than before this split.
+                None => families
+                    .first()
+                    .map(|f| f.as_str().into())
+                    .unwrap_or_default(),
+            };
+            match spans.last_mut() {
+                Some((last_font, last_text)) if *last_font == font_name => {
+                    last_text.push(c);
+                }
+                _ => spans.push((font_name, c.into())),
+            }
+        }
+        spans
+    }
+
     /// Applies `TextElem::case` to a string.
     pub fn apply_case(&self, styles: StyleChain, text: &EcoString) -> EcoString {
         match styles.get(TextElem::case) {
@@ -1278,7 +1371,13 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             if self.span_is_raw(elem.span()) {
                 rp.no_proof = true;
             }
-            self.push_text(out, rp, text);
+            for (font, span) in self.split_by_font_coverage(&text, styles) {
+                let mut span_rp = rp.clone();
+                if !font.is_empty() {
+                    span_rp.font = Some(font);
+                }
+                self.push_text(out, span_rp, span);
+            }
         } else if let Some(elem) = child.to_packed::<HElem>() {
             use typst_library::foundations::Resolve;
             use typst_library::layout::Spacing;
