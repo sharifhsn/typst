@@ -1,6 +1,7 @@
 //! The mutable conversion context [`DocxCtx`] and the inline/block flow.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use ecow::{EcoString, eco_format};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -159,6 +160,29 @@ pub struct DocxCtx<'a, 'e> {
     /// it fine, but for cross-consumer fidelity a framed box in this context is
     /// rasterized to a centered image instead.
     pub(crate) suppress_text_box: bool,
+
+    /// Cache for page-overlay rasterization (`Self::rasterize_page_overlay`),
+    /// keyed by a hash of the content, styles, and target box. A page
+    /// background/foreground is lowered up to 5 times per section (to detect
+    /// first/odd/even variance) and DOCX opens a new section on every
+    /// header/footer/numbering change — a slide deck with a per-section
+    /// context-sensitive header (e.g. "current chapter title") but a *static*
+    /// background image re-runs the full layout+render+crop pipeline for
+    /// byte-identical output dozens to hundreds of times (observed: a
+    /// touying-style 50-slide deck went from timing out past 3 minutes to a
+    /// few seconds). Caches the rendered PNG bytes and frame tags, not the
+    /// per-part image relationship (which must stay scoped to that part's own
+    /// `.rels`) — `add_image` is still called on every hit, but its own
+    /// content-hash dedup (`MediaRegistry::add`) makes that cheap.
+    overlay_cache: FxHashMap<u128, Arc<CachedOverlay>>,
+}
+
+/// A cached [`Self::rasterize_page_overlay`] result, keyed on its inputs.
+struct CachedOverlay {
+    png: Arc<[u8]>,
+    size: typst_library::layout::Size,
+    frame_text: String,
+    tags: Vec<Tag>,
 }
 
 impl<'a, 'e> DocxCtx<'a, 'e> {
@@ -201,6 +225,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             line_numbering_active: false,
             in_footnote: false,
             suppress_text_box: false,
+            overlay_cache: FxHashMap::default(),
         }
     }
 
@@ -358,13 +383,24 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         span: Span,
         height: typst_library::layout::Abs,
     ) -> SourceResult<Rasterized> {
+        let key = typst_utils::hash128(&(content, styles, height, self.raster_width));
+        if let Some(cached) = self.overlay_cache.get(&key) {
+            let cached = Arc::clone(cached);
+            self.deferred_tags.extend(cached.tags.iter().cloned());
+            return Ok(Some((
+                self.add_image(&cached.png, "png"),
+                cached.size,
+                cached.frame_text.clone(),
+            )));
+        }
+
         let Some(frame) = self.layout_export_frame_in(content, styles, span, height, true)?
         else {
             return Ok(None);
         };
         let mut tags = Vec::new();
         collect_frame_tags(&frame, &mut tags);
-        self.deferred_tags.extend(tags);
+        self.deferred_tags.extend(tags.iter().cloned());
         let frame_text = frame_to_text(&frame);
         let Some(raster) = render::render_frame_to_png(
             frame,
@@ -372,7 +408,17 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         ) else {
             return Ok(None);
         };
-        Ok(Some((self.add_image(&raster.png, "png"), raster.size, frame_text)))
+        let rel = self.add_image(&raster.png, "png");
+        self.overlay_cache.insert(
+            key,
+            Arc::new(CachedOverlay {
+                png: Arc::from(raster.png),
+                size: raster.size,
+                frame_text: frame_text.clone(),
+                tags,
+            }),
+        );
+        Ok(Some((rel, raster.size, frame_text)))
     }
 
     /// Same as [`Self::rasterize`], but returns the frame tags to the caller
