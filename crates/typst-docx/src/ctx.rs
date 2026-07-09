@@ -243,6 +243,27 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         span: Span,
         height: typst_library::layout::Abs,
     ) -> SourceResult<Option<typst_library::layout::Frame>> {
+        self.layout_export_frame_in(content, styles, span, height, false)
+    }
+
+    /// Like [`Self::layout_export_frame`], but with `expand` control over the
+    /// region: `false` shrink-fits to the content's own extent (the default,
+    /// used when the caller wants to *measure* the content), `true` forces
+    /// the frame to the full requested `(raster_width, height)` box regardless
+    /// of what the content itself measures to. The latter is required for
+    /// page-relative content built purely from `place(..)` (a watermark, a
+    /// full-page background) — `place` positions content absolutely without
+    /// contributing to the parent's measured size, so a shrink-fit region
+    /// collapses such content to a degenerate zero-size frame and the caller
+    /// would wrongly conclude it laid out to nothing.
+    pub(crate) fn layout_export_frame_in(
+        &mut self,
+        content: &Content,
+        styles: StyleChain,
+        span: Span,
+        height: typst_library::layout::Abs,
+        expand: bool,
+    ) -> SourceResult<Option<typst_library::layout::Frame>> {
         use comemo::Track;
         use typst_library::foundations::{Target, TargetElem};
         use typst_library::layout::{Axes, Region, Size};
@@ -250,7 +271,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         let target = TargetElem::target.set(Target::Paged).wrap();
         let styles = styles.chain(&target);
         let region =
-            Region::new(Size::new(self.raster_width, height), Axes::splat(false));
+            Region::new(Size::new(self.raster_width, height), Axes::splat(expand));
         let loc = self.locator.next(&span);
         let layout_frame = self.engine.library.routines.layout_frame;
 
@@ -306,9 +327,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     /// rasterized region stays searchable/selectable/accessible.
     ///
     /// The render is tightened to its ink bounding box (see
-    /// [`Self::rasterize_uncropped`] for the one caller that must not crop): a
-    /// layout region can be far larger than what actually draws in it, and
-    /// embedding the blank expanse would reserve phantom space in the flow.
+    /// [`Self::rasterize_page_overlay`] for the page background/foreground
+    /// caller that must not crop): a layout region can be far larger than
+    /// what actually draws in it, and embedding the blank expanse would
+    /// reserve phantom space in the flow.
     pub fn rasterize(
         &mut self,
         content: &Content,
@@ -320,19 +342,37 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         Ok(rasterized)
     }
 
-    /// Like [`Self::rasterize`], but keeps the full render even when most of it
-    /// is blank. The page-background caller stretches the image to the whole
-    /// page, so an ink-cropped render would distort (a corner watermark would
-    /// be blown up to full-bleed).
-    pub(crate) fn rasterize_uncropped(
+    /// Like [`Self::rasterize`], but for content that is rendered
+    /// purely for its page-relative placement (a page background/foreground
+    /// overlay): the region is forced (expanded) to exactly `(raster_width,
+    /// height)` rather than shrink-fit to the content's own measured extent.
+    /// This is what lets `place(..)`-only content (which reports a degenerate
+    /// zero size under shrink-fit, since `place` doesn't contribute to the
+    /// parent's measured size) still rasterize instead of being silently
+    /// dropped — the caller always stretches the result to the full page box
+    /// anyway, so the content's *own* measured size was never load-bearing.
+    pub(crate) fn rasterize_page_overlay(
         &mut self,
         content: &Content,
         styles: StyleChain,
         span: Span,
+        height: typst_library::layout::Abs,
     ) -> SourceResult<Rasterized> {
-        let (tags, rasterized) = self.rasterize_impl(content, styles, span, false)?;
+        let Some(frame) = self.layout_export_frame_in(content, styles, span, height, true)?
+        else {
+            return Ok(None);
+        };
+        let mut tags = Vec::new();
+        collect_frame_tags(&frame, &mut tags);
         self.deferred_tags.extend(tags);
-        Ok(rasterized)
+        let frame_text = frame_to_text(&frame);
+        let Some(raster) = render::render_frame_to_png(
+            frame,
+            render::RasterOptions { pixel_per_pt: 2.0, crop_to_ink: false },
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some((self.add_image(&raster.png, "png"), raster.size, frame_text)))
     }
 
     /// Same as [`Self::rasterize`], but returns the frame tags to the caller

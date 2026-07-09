@@ -770,12 +770,18 @@ fn block_columns_emit_continuous_sections() {
     assert!(column < doc.rfind("<w:sectPr>").unwrap());
     assert!(after < doc.rfind("<w:sectPr>").unwrap());
 
-    assert!(sects[0].contains("<w:type w:val=\"continuous\"/>"));
-    assert!(sects[1].contains("<w:type w:val=\"continuous\"/>"));
+    // A section's `w:type` describes how *that* section itself starts
+    // (relative to the one before it) — so the type requested for a
+    // transition lives on the section that begins *after* it, not the one
+    // that ends there. The first section has no predecessor, so it carries
+    // no type; the continuous transitions into and out of the column block
+    // land on sections 1 and 2 respectively.
     assert!(
-        !sects[2].contains("<w:type"),
-        "the final restored section has the document-final sectPr"
+        !sects[0].contains("<w:type"),
+        "the first section has no predecessor to transition from"
     );
+    assert!(sects[1].contains("<w:type w:val=\"continuous\"/>"));
+    assert!(sects[2].contains("<w:type w:val=\"continuous\"/>"));
     assert!(
         !sects[0].contains("w:num="),
         "the surrounding section remains single-column"
@@ -803,12 +809,19 @@ fn block_columns_restore_page_level_column_count() {
     let sects = sect_pr_chunks(doc);
     assert_eq!(sects.len(), 3, "block columns split the page-level section");
     assert!(sects[0].contains("<w:cols w:num=\"2\""));
-    assert!(sects[0].contains("<w:type w:val=\"continuous\"/>"));
+    assert!(
+        !sects[0].contains("<w:type"),
+        "the first section has no predecessor to transition from"
+    );
     assert!(sects[1].contains("<w:cols w:num=\"3\""));
     assert!(sects[1].contains("<w:type w:val=\"continuous\"/>"));
     assert!(
         sects[2].contains("<w:cols w:num=\"2\""),
         "the section after #columns() restores page-level columns"
+    );
+    assert!(
+        sects[2].contains("<w:type w:val=\"continuous\"/>"),
+        "returning to page-level columns is also a continuous transition"
     );
     assert_all_wellformed(&p);
 }
@@ -1623,6 +1636,44 @@ fn page_foreground_becomes_a_front_of_text_header_image() {
 }
 
 #[test]
+fn place_only_foreground_still_rasterizes() {
+    // A watermark is commonly built purely from `place(..)`, which positions
+    // content absolutely without contributing to its parent's *measured*
+    // size. Rendering it in a shrink-fit region previously collapsed it to a
+    // degenerate zero-size frame, silently dropping the foreground entirely
+    // (no header part, no drawing, no media at all) — caught only by
+    // opening the export in real Microsoft Word. The overlay must be
+    // rendered into a region expanded to the full page box instead.
+    let raw = package_bytes_with_files(
+        "#set page(foreground: place(center, text(64pt)[DRAFT]))\nBody text.",
+        &[],
+    );
+    // `parts()` drops binary entries (only valid-UTF-8 parts survive), so a
+    // media part's mere presence must be checked against the raw byte map.
+    let p: HashMap<String, String> = raw
+        .iter()
+        .filter_map(|(name, bytes)| {
+            String::from_utf8(bytes.clone()).ok().map(|s| (name.clone(), s))
+        })
+        .collect();
+    let header = p
+        .iter()
+        .find(|(k, xml)| {
+            k.starts_with("word/header")
+                && k.ends_with(".xml")
+                && xml.contains("Foreground")
+        })
+        .map(|(_, xml)| xml)
+        .expect("a header part for the place()-only foreground");
+    assert!(header.contains("<a:blip"), "the foreground is an embedded image");
+    assert!(
+        raw.keys().any(|k| k.starts_with("word/media/")),
+        "the rasterized watermark is embedded as a media part"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn solid_page_fill_becomes_a_native_page_color() {
     // `set page(fill: solid-color)` (Word's "Page Color") maps to the
     // document-level `w:background` element — no image, no header part.
@@ -2124,16 +2175,30 @@ fn leading_page_setup_does_not_emit_a_blank_first_page() {
 
 #[test]
 fn pagebreak_to_parity_emits_odd_even_section_breaks() {
+    // Word's `w:type` describes how *that* section itself starts (relative
+    // to the one before it) — so the oddPage/evenPage constraint requested
+    // by `#pagebreak(to: ..)` must land on the section that begins *after*
+    // the break (here, the final/body-level sectPr), not the one ending at
+    // the break (the first, paragraph-embedded sectPr, which has no
+    // predecessor and so carries no type). Landing it on the wrong section
+    // makes the constraint a no-op in real Word: verified interactively that
+    // only this placement actually makes Word insert a blank page to reach
+    // the next odd page.
     let odd = parts("Before.\n#pagebreak(to: \"odd\")\nAfter.");
     let odd_doc = &odd["word/document.xml"];
+    let odd_sects = sect_pr_chunks(odd_doc);
     assert_eq!(
-        odd_doc.matches("<w:sectPr>").count(),
+        odd_sects.len(),
         2,
         "odd pagebreak should split the document into two sections"
     );
     assert!(
-        odd_doc.contains("<w:type w:val=\"oddPage\"/>"),
-        "odd pagebreak uses an oddPage section break"
+        !odd_sects[0].contains("<w:type"),
+        "the first section has no predecessor to transition from"
+    );
+    assert!(
+        odd_sects[1].contains("<w:type w:val=\"oddPage\"/>"),
+        "the section starting after the break carries the oddPage constraint"
     );
     assert!(
         !odd_doc.contains("w:type=\"page\""),

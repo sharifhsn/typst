@@ -208,10 +208,17 @@ fn docx_document_impl(
                         );
                     header_parts.append(&mut h);
                     footer_parts.append(&mut f);
+                    // A section's `w:type` describes how *that* section itself
+                    // starts (relative to the one before it) — so it must come
+                    // from the *previous* section's `break_after` (the break
+                    // requested between idx-1 and idx), not this section's own
+                    // `break_after` (which describes the break to the *next*
+                    // section instead). The first section has no previous break.
+                    s.sect_type =
+                        idx.checked_sub(1).and_then(|prev| sections[prev].break_after);
                     if idx == last {
                         final_sect = Some(s);
                     } else {
-                        s.sect_type = section.break_after;
                         body.push(Block::SectionBreak(s));
                     }
                 }
@@ -1964,10 +1971,16 @@ fn page_overlay_block(
 
     let saved_w = ctx.raster_width;
     ctx.raster_width = Abs::pt(geom.page_w as f64 / 20.0);
-    // Uncropped: this drawing is stretched to the full page below, so the
-    // render must keep its full extent (ink-cropping a corner watermark would
-    // blow it up to full-bleed).
-    let result = ctx.rasterize_uncropped(content, styles, content.span())?;
+    // Rendered into a region *expanded* to the full page box (not shrink-fit
+    // to the content's own measured size): a watermark/background is commonly
+    // built purely from `place(..)`, which positions content absolutely
+    // without contributing to the parent's measured size, so a shrink-fit
+    // region would collapse it to a degenerate zero-size frame and this would
+    // wrongly conclude there was nothing to draw. The drawing is stretched to
+    // the full page below regardless, so the content's own measured size was
+    // never load-bearing — only the expanded render's pixels are.
+    let page_h = Abs::pt(geom.page_h as f64 / 20.0);
+    let result = ctx.rasterize_page_overlay(content, styles, content.span(), page_h)?;
     ctx.raster_width = saved_w;
     let Some((rel, _size, _text)) = result else {
         return Ok(None);
