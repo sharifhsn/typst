@@ -1551,40 +1551,74 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             match elem.body.get_cloned(styles) {
                 // An empty `#box` (`#box(width: 1em)` spacer): nothing to render.
                 None => {}
-                // A *plain* box — no fill, stroke or clip, so nothing visual to
-                // preserve — is just inline content held together (`#box[..]` to
-                // prevent a line break, `#box(width: ..)[label]`, a baseline
-                // shift). Extract its runs so the text stays selectable instead
-                // of rasterizing it to an image; the only thing lost is the box's
-                // geometric constraint, which has no inline-flow equivalent.
-                // `body_extractable` still guards the one layout-bound case (a
-                // per-line equation label inside).
-                Some(body)
-                    if box_is_plain(elem, styles)
-                        && crate::convert::body_extractable(&body)
-                        && crate::convert::body_inline_extractable(&body) =>
-                {
-                    out.extend(self.inline_runs(&body, styles, props.clone())?);
-                }
                 Some(body) => {
-                    // Rasterize the box (this keeps a styled box's visual and, for
-                    // a box that lays out real content, its labels via the frame
-                    // tag harvest). If it lays out to *nothing* — a degenerate box
-                    // whose rasterization would otherwise be dropped — extract its
-                    // text so the content survives. Such a box has no laid-out
-                    // content and hence no labels to orphan, so plain extraction is
-                    // safe; we discard any partial tag harvest first to be sure.
-                    let mark = self.deferred_tags.len();
-                    let runs = mappers::image::laid_out_fallback(child, styles, self)?;
-                    if !runs.is_empty() {
-                        // Keep Word's figure counter consistent with any
-                        // captioned figure the box rasterized (a hidden
-                        // `SEQ … \h`), as the generic fallback does.
-                        self.emit_rasterized_figure_seqs(mark, styles, out);
-                        out.extend(runs);
-                    } else {
-                        self.deferred_tags.truncate(mark);
+                    // A box whose sole body is a bare image with no size of its
+                    // own (the common icon idiom — `box(height: 10pt,
+                    // image(name))`, Typst's own documented example): the
+                    // *box's* height is the only sizing information for this
+                    // image, but the "plain box" extraction below discards the
+                    // box's geometric constraint entirely (it has no inline-flow
+                    // equivalent for ordinary text) — for an image that means
+                    // falling back to its full intrinsic pixel size, producing a
+                    // giant image where a small inline icon was intended
+                    // (confirmed visually: a CV's tiny GitHub/GitLab/LinkedIn
+                    // icons became half-page-sized images). Propagate the box's
+                    // height onto a cloned image before lowering it — matching
+                    // the aspect-ratio-preserving "height only" branch
+                    // `display_extents` already implements for an image with its
+                    // own explicit height — instead of discarding the
+                    // constraint.
+                    if let Some(image_elem) = body.to_packed::<ImageElem>()
+                        && matches!(
+                            image_elem.height.get(styles),
+                            typst_library::layout::Sizing::Auto
+                        )
+                        && let typst_library::foundations::Smart::Custom(rel) =
+                            elem.height.get(styles)
+                    {
+                        let sized = (**image_elem)
+                            .clone()
+                            .with_height(typst_library::layout::Sizing::Rel(rel));
+                        out.push(mappers::image::image(
+                            &typst_library::foundations::Packed::new(sized),
+                            styles,
+                            self,
+                        )?);
+                    } else if box_is_plain(elem, styles)
+                        && crate::convert::body_extractable(&body)
+                        && crate::convert::body_inline_extractable(&body)
+                    {
+                        // A *plain* box — no fill, stroke or clip, so nothing
+                        // visual to preserve — is just inline content held
+                        // together (`#box[..]` to prevent a line break,
+                        // `#box(width: ..)[label]`, a baseline shift). Extract
+                        // its runs so the text stays selectable instead of
+                        // rasterizing it to an image; the only thing lost is the
+                        // box's geometric constraint, which has no inline-flow
+                        // equivalent. `body_extractable` still guards the one
+                        // layout-bound case (a per-line equation label inside).
                         out.extend(self.inline_runs(&body, styles, props.clone())?);
+                    } else {
+                        // Rasterize the box (this keeps a styled box's visual
+                        // and, for a box that lays out real content, its labels
+                        // via the frame tag harvest). If it lays out to
+                        // *nothing* — a degenerate box whose rasterization would
+                        // otherwise be dropped — extract its text so the content
+                        // survives. Such a box has no laid-out content and hence
+                        // no labels to orphan, so plain extraction is safe; we
+                        // discard any partial tag harvest first to be sure.
+                        let mark = self.deferred_tags.len();
+                        let runs = mappers::image::laid_out_fallback(child, styles, self)?;
+                        if !runs.is_empty() {
+                            // Keep Word's figure counter consistent with any
+                            // captioned figure the box rasterized (a hidden
+                            // `SEQ … \h`), as the generic fallback does.
+                            self.emit_rasterized_figure_seqs(mark, styles, out);
+                            out.extend(runs);
+                        } else {
+                            self.deferred_tags.truncate(mark);
+                            out.extend(self.inline_runs(&body, styles, props.clone())?);
+                        }
                     }
                 }
             }
