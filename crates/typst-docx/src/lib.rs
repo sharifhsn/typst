@@ -4,6 +4,7 @@
 //! registered, so the realized native element tree reaches the converter intact.
 //! The converter walks that tree into a typed OOXML IR and emits an OPC zip.
 
+mod bibliography;
 mod bookmark;
 mod convert;
 mod ctx;

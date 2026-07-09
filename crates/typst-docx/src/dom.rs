@@ -65,6 +65,11 @@ pub struct DocxDocument {
     /// document has no bibliography. Embedded as an inert sidecar part, not
     /// Word-native `CITATION`/`BIBLIOGRAPHY` fields — see `encode.rs`.
     pub(crate) bibliography: Option<String>,
+    /// The same bibliography, mapped onto Word's native `b:Source` schema
+    /// (see `crate::bibliography`), for the `customXml/item1.xml` part that
+    /// backs References → Manage Sources. Empty when the document has no
+    /// bibliography.
+    pub(crate) word_sources: Vec<crate::bibliography::WordSource>,
 }
 
 impl DocxDocument {

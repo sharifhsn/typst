@@ -7,7 +7,7 @@ use crate::dom::{
     TableBox, TableCell, TextBox, TextChild, TextColumns, TextField, TextPara, TextRun,
     TextWrap,
 };
-use crate::xml::XmlWriter;
+use crate::xml::{self, XmlWriter};
 
 /// Relationship hooks needed while emitting slide XML.
 pub(crate) trait SlideRelSink {
@@ -452,14 +452,7 @@ fn field_id(run: &TextRun) -> String {
         run.color,
         run.spc_100pt,
     ));
-    format!(
-        "{{{:08X}-{:04X}-{:04X}-{:04X}-{:012X}}}",
-        (hash >> 96) as u32,
-        (hash >> 80) as u16,
-        (hash >> 64) as u16,
-        (hash >> 48) as u16,
-        hash & 0x0000_FFFF_FFFF_FFFF,
-    )
+    xml::guid_from_hash(hash)
 }
 
 fn write_r_pr(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink) {

@@ -22,6 +22,8 @@ pub const WP14: &str =
     "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing";
 pub const V: &str = "urn:schemas-microsoft-com:vml";
 pub const O: &str = "urn:schemas-microsoft-com:office:office";
+pub const B: &str = "http://schemas.openxmlformats.org/officeDocument/2006/bibliography";
+pub const DS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/customXml";
 
 pub const CP: &str =
     "http://schemas.openxmlformats.org/package/2006/metadata/core-properties";
@@ -78,6 +80,9 @@ pub mod rel {
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/viewProps";
     pub const TABLE_STYLES: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/tableStyles";
+    pub const CUSTOM_XML: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml";
+    pub const CUSTOM_XML_PROPS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps";
 }
 
 pub mod ct {
@@ -125,4 +130,7 @@ pub mod ct {
         "application/vnd.openxmlformats-officedocument.presentationml.viewProps+xml";
     pub const TABLE_STYLES: &str =
         "application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml";
+
+    pub const CUSTOM_XML_PROPS: &str =
+        "application/vnd.openxmlformats-officedocument.customXmlProperties+xml";
 }

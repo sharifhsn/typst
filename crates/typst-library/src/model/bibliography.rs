@@ -13,7 +13,7 @@ use hayagriva::{
     SpecificLocator, TransparentLocator, citationberg,
 };
 use indexmap::IndexMap;
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use typst_syntax::{Span, Spanned, SyntaxMode};
 use typst_utils::{
@@ -322,6 +322,40 @@ impl BibliographyElem {
             out.push_str(&this.sources.derived.to_biblatex_string());
         }
         if out.is_empty() { None } else { Some(out) }
+    }
+
+    /// Find all bibliography entries that are actually cited in the document
+    /// (or every entry, for a bibliography with `full: true`), together with
+    /// the label under which each is cited. Mirrors which entries the
+    /// realized, visible bibliography shows — a `.bib`/`.yaml` source file
+    /// commonly holds far more entries than any one document cites. A label
+    /// appears at most once even if multiple bibliographies share it (e.g.
+    /// several `#bibliography` calls loading the same file). Used by the
+    /// DOCX exporter to populate Word's native `b:Sources` custom XML part
+    /// (References → Manage Sources), alongside the realized, formatted
+    /// citation text that stays in the document body.
+    pub fn entries(
+        introspector: Tracked<dyn Introspector + '_>,
+    ) -> Vec<(Label, hayagriva::Entry)> {
+        let cited: FxHashSet<Label> = introspector
+            .query(&CiteElem::ELEM.select())
+            .iter()
+            .filter_map(|elem| elem.to_packed::<CiteElem>())
+            .map(|cite| cite.key)
+            .collect();
+
+        let mut seen = FxHashSet::default();
+        let mut vec = vec![];
+        for elem in introspector.query(&Self::ELEM.select()).iter() {
+            let this = elem.to_packed::<Self>().unwrap();
+            let full = this.full.get(StyleChain::default());
+            for (key, entry) in this.sources.derived.iter() {
+                if (full || cited.contains(&key)) && seen.insert(key) {
+                    vec.push((key, entry.clone()));
+                }
+            }
+        }
+        vec
     }
 }
 

@@ -139,7 +139,7 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     // A footnote body that holds an image / external link references it by r:id;
     // that id resolves against footnotes.xml's OWN rels part, not the document's.
     // Without this, Word refuses to open the file.
-    write_part_rels(&mut package, "footnotes.xml", &document.footnote_rels);
+    write_part_rels(&mut package, "word/footnotes.xml", &document.footnote_rels);
     package.add_xml("word/endnotes.xml", CT_ENDNOTES, build_endnotes(pretty));
     doc_rels.add(REL_ENDNOTES, "endnotes.xml", RelMode::Internal);
 
@@ -154,12 +154,12 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     for (i, part) in document.header_parts.iter().enumerate() {
         let xml = build_hdrftr(part, 0x1000_0000 + i as u32 * 0x0010_0000, pretty);
         package.add_xml(&format!("word/{}", part.part_name), CT_HEADER, xml);
-        write_part_rels(&mut package, &part.part_name, &part.rels);
+        write_part_rels(&mut package, &format!("word/{}", part.part_name), &part.rels);
     }
     for (i, part) in document.footer_parts.iter().enumerate() {
         let xml = build_hdrftr(part, 0x4000_0000 + i as u32 * 0x0010_0000, pretty);
         package.add_xml(&format!("word/{}", part.part_name), CT_FOOTER, xml);
-        write_part_rels(&mut package, &part.part_name, &part.rels);
+        write_part_rels(&mut package, &format!("word/{}", part.part_name), &part.rels);
     }
 
     // -- media parts --
@@ -173,14 +173,11 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     }
 
     // -- word/typstBibliography.xml (conditional) --
-    // An inert BibLaTeX sidecar, not Word-native CITATION/BIBLIOGRAPHY fields:
-    // Word's citation-field model is proprietary and lossy relative to
-    // Typst/Hayagriva (see the DOCX citation-feasibility research), so the
-    // visible body keeps the realized, formatted citation text as the fidelity
-    // path. This part exists purely so an external tool can recover the
-    // structured bibliography data, under a private relationship type Word
-    // itself does not recognize (so it never interacts with Word's own
-    // Source Manager / citation UI).
+    // A lossless BibLaTeX sidecar for external tools (e.g. `pandoc
+    // --citeproc`), under a private relationship type Word itself does not
+    // recognize. Kept alongside the native `customXml/item1.xml` part below:
+    // that part is lossy (Word's fixed field set can't hold everything
+    // Hayagriva has), so this sidecar remains the full-fidelity channel.
     if let Some(bib) = &document.bibliography {
         package.add_xml(
             "word/typstBibliography.xml",
@@ -192,6 +189,33 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
             "typstBibliography.xml",
             RelMode::Internal,
         );
+    }
+
+    // -- customXml/item1.xml + itemProps1.xml (conditional) --
+    // Word's own native bibliography schema (`b:Sources`/`b:Source`), the
+    // part that backs References → Manage Sources. The visible body keeps the
+    // realized, formatted citation text — Word's own CITATION/BIBLIOGRAPHY
+    // field model is proprietary and would let Word's independent
+    // citation-formatting engine silently reformat it on auto-update — so
+    // this part is metadata only, not live fields. Word always accompanies
+    // `item1.xml` with a schema-association `itemProps1.xml` (see
+    // `crate::bibliography`), so both are emitted together.
+    if !document.word_sources.is_empty() {
+        package.add_xml(
+            "customXml/item1.xml",
+            "application/xml",
+            build_word_sources(&document.word_sources, pretty),
+        );
+        let guid = crate::bibliography::package_guid(&document.word_sources);
+        package.add_xml(
+            "customXml/itemProps1.xml",
+            ns::ct::CUSTOM_XML_PROPS,
+            build_item_props(&guid, pretty),
+        );
+        let mut item_rels = Rels::new();
+        item_rels.add(ns::rel::CUSTOM_XML_PROPS, "itemProps1.xml", RelMode::Internal);
+        write_part_rels(&mut package, "customXml/item1.xml", &item_rels);
+        doc_rels.add(ns::rel::CUSTOM_XML, "../customXml/item1.xml", RelMode::Internal);
     }
 
     // -- word/document.xml --
@@ -1178,17 +1202,20 @@ fn write_sectpr(w: &mut XmlWriter, sect: &SectPr) {
     w.close();
 }
 
-/// Writes a part's own relationships as `word/_rels/<part>.rels`, but only when
-/// the part actually has relationships (images, external links in its content).
-/// OPC associates the `.rels` with its part by the naming convention, so no
-/// explicit reference is needed. An `r:id` in `headerN.xml` / `footnotes.xml`
-/// resolves against THIS part, not `document.xml.rels`.
-fn write_part_rels(package: &mut Package, part_name: &str, rels: &Rels) {
+/// Writes a part's own relationships next to it as `<dir>/_rels/<file>.rels`,
+/// but only when the part actually has relationships (images, external links
+/// in its content). OPC associates a `.rels` part with its part by this
+/// naming convention, so no explicit reference is needed. An `r:id` in the
+/// part's own content resolves against THIS rels part, not
+/// `word/_rels/document.xml.rels`.
+fn write_part_rels(package: &mut Package, part_path: &str, rels: &Rels) {
     if rels.is_empty() {
         return;
     }
+    let (dir, file) =
+        part_path.rsplit_once('/').expect("part_path must include a directory");
     package.add_xml(
-        &format!("word/_rels/{part_name}.rels"),
+        &format!("{dir}/_rels/{file}.rels"),
         "application/vnd.openxmlformats-package.relationships+xml",
         rels.to_xml(),
     );
@@ -1511,6 +1538,117 @@ fn build_typst_bibliography(bib: &str, pretty: bool) -> String {
         .attr("xmlns", "https://typst.app/schema/2026/docx-bibliography")
         .start_children();
     w.elem_text("biblatex", bib);
+    w.close();
+    w.finish()
+}
+
+// ---------------------------------------------------------------------------
+// customXml/item1.xml + itemProps1.xml
+// ---------------------------------------------------------------------------
+
+/// Word's native bibliography schema: a `b:Sources` root holding one
+/// `b:Source` per entry. `SelectedStyle`/`StyleName` mirror what Word itself
+/// always emits (a citation style for Source Manager's own UI, independent
+/// of Typst's realized in-body citation formatting).
+fn build_word_sources(sources: &[crate::bibliography::WordSource], pretty: bool) -> String {
+    let mut w = XmlWriter::new(pretty);
+    w.open("b:Sources")
+        .attr("xmlns:b", ns::B)
+        .attr("xmlns", ns::B)
+        .attr("SelectedStyle", "\\APA.XSL")
+        .attr("StyleName", "APA")
+        .start_children();
+    for source in sources {
+        build_source(&mut w, source);
+    }
+    w.close();
+    w.finish()
+}
+
+fn build_source(w: &mut XmlWriter, source: &crate::bibliography::WordSource) {
+    w.open("b:Source").start_children();
+    w.elem_text("b:Tag", &source.tag);
+    w.elem_text("b:SourceType", source.source_type);
+    w.elem_text("b:Guid", &source.guid);
+    build_author(w, &source.author);
+    if let Some(title) = &source.title {
+        w.elem_text("b:Title", title);
+    }
+    if let Some(year) = &source.year {
+        w.elem_text("b:Year", year);
+    }
+    if let Some(publisher) = &source.publisher {
+        w.elem_text("b:Publisher", publisher);
+    }
+    if let Some(city) = &source.city {
+        w.elem_text("b:City", city);
+    }
+    if let Some(journal) = &source.journal_name {
+        w.elem_text("b:JournalName", journal);
+    }
+    if let Some(volume) = &source.volume {
+        w.elem_text("b:Volume", volume);
+    }
+    if let Some(issue) = &source.issue {
+        w.elem_text("b:Issue", issue);
+    }
+    if let Some(pages) = &source.pages {
+        w.elem_text("b:Pages", pages);
+    }
+    if let Some(url) = &source.url {
+        w.elem_text("b:URL", url);
+    }
+    w.close();
+}
+
+/// Word nests authors as `b:Author/b:Author/b:NameList/b:Person` (persons) or
+/// `b:Author/b:Author/b:Corporate` (an organizational name) — the doubled
+/// `b:Author` wrapper is how Word's own schema/UI distinguishes "the author
+/// field" from "one author entry", confirmed against real Word-authored
+/// sample documents.
+fn build_author(w: &mut XmlWriter, author: &crate::bibliography::WordAuthor) {
+    use crate::bibliography::WordAuthor;
+    match author {
+        WordAuthor::None => {}
+        WordAuthor::Corporate(name) => {
+            w.open("b:Author").start_children();
+            w.open("b:Author").start_children();
+            w.elem_text("b:Corporate", name);
+            w.close();
+            w.close();
+        }
+        WordAuthor::Persons(persons) => {
+            w.open("b:Author").start_children();
+            w.open("b:Author").start_children();
+            w.open("b:NameList").start_children();
+            for person in persons {
+                w.open("b:Person").start_children();
+                w.elem_text("b:Last", &person.last);
+                if let Some(first) = &person.first {
+                    w.elem_text("b:First", first);
+                }
+                w.close();
+            }
+            w.close();
+            w.close();
+            w.close();
+        }
+    }
+}
+
+/// The custom-XML "data store properties" part that associates `item1.xml`
+/// with the bibliography schema, so Word's Source Manager recognizes it as a
+/// bibliography rather than arbitrary custom XML. Every Word-authored
+/// bibliography-bearing docx carries this part alongside `item1.xml`.
+fn build_item_props(guid: &str, pretty: bool) -> String {
+    let mut w = XmlWriter::new(pretty);
+    w.open("ds:datastoreItem")
+        .attr("ds:itemID", guid)
+        .attr("xmlns:ds", ns::DS)
+        .start_children();
+    w.open("ds:schemaRefs").start_children();
+    w.open("ds:schemaRef").attr("ds:uri", ns::B).empty();
+    w.close();
     w.close();
     w.finish()
 }

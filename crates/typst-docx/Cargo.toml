@@ -23,6 +23,7 @@ typst-utils = { workspace = true }
 typst-svg = { workspace = true }
 comemo = { workspace = true }
 ecow = { workspace = true }
+hayagriva = { workspace = true }
 rustc-hash = { workspace = true }
 unicode-math-class = { workspace = true }
 zip = { workspace = true }

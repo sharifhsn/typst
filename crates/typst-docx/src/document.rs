@@ -270,6 +270,17 @@ fn docx_document_impl(
         typst_library::model::BibliographyElem::biblatex(*introspector)
     };
 
+    // The same bibliography, mapped onto Word's native `b:Source` schema (see
+    // `crate::bibliography`) so References → Manage Sources shows real,
+    // correctly-typed sources. Same pure-query justification as above.
+    let word_sources = {
+        let introspector = engine.introspector.access(
+            "querying bibliography elements to populate the native Word sources part is a pure query",
+        );
+        let entries = typst_library::model::BibliographyElem::entries(*introspector);
+        crate::bibliography::map_entries(&entries)
+    };
+
     // Fallback heading list, for documents whose headings are show-ruled or
     // rasterized and so never reach the heading mapper (nothing recorded): query
     // the introspector, which still holds every heading. These entries have no
@@ -405,6 +416,7 @@ fn docx_document_impl(
         mirror_margins,
         rtl_gutter,
         bibliography,
+        word_sources,
     })
 }
 

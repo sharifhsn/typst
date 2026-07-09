@@ -3204,6 +3204,7 @@ dependencies = [
  "comemo",
  "ecow",
  "flate2",
+ "hayagriva",
  "rustc-hash",
  "time",
  "typst-layout",

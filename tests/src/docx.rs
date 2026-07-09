@@ -232,6 +232,31 @@ const REFS_BIB: &[u8] = br#"@article{alpha,
 }
 "#;
 
+/// Same as `REFS_BIB`, plus an entry ("gamma") that no test document below
+/// ever cites — used to verify uncited library entries stay out of the
+/// native Word sources part.
+const REFS_BIB_WITH_UNCITED: &[u8] = br#"@article{alpha,
+  title = {Alpha Source},
+  author = {Able, Alice},
+  year = {2020},
+  journal = {Journal of Sources},
+}
+
+@article{beta,
+  title = {Beta Source},
+  author = {Baker, Bob},
+  year = {2021},
+  journal = {Journal of Sources},
+}
+
+@article{gamma,
+  title = {Gamma Source},
+  author = {Carter, Cara},
+  year = {2022},
+  journal = {Journal of Sources},
+}
+"#;
+
 fn run_fragment_containing<'a>(doc_xml: &'a str, text: &str) -> &'a str {
     for frag in doc_xml.split("<w:r>").skip(1) {
         let Some(end) = frag.find("</w:r>") else { continue };
@@ -2570,6 +2595,139 @@ fn no_bibliography_means_no_sidecar_part() {
         "a document with no bibliography should not get a sidecar part"
     );
     assert!(!p["word/_rels/document.xml.rels"].contains("docx-bibliography"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn bibliography_gets_a_native_word_sources_part() {
+    // Alongside the lossless BibLaTeX sidecar, the document should also carry
+    // Word's own `b:Sources` schema so References -> Manage Sources shows
+    // real, correctly-typed sources — without live CITATION/BIBLIOGRAPHY
+    // fields wrapping the visible (already-realized) body text.
+    let p = parts_with_files(
+        "First @beta and then @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")",
+        &[("refs.bib", REFS_BIB)],
+    );
+
+    let item1 = p
+        .get("customXml/item1.xml")
+        .expect("native b:Sources part should be present");
+    assert!(item1.contains("<b:Sources"));
+    assert!(item1.contains(
+        "xmlns:b=\"http://schemas.openxmlformats.org/officeDocument/2006/bibliography\""
+    ));
+    assert_eq!(item1.matches("<b:Source>").count(), 2, "one b:Source per cited entry");
+    assert!(item1.contains("<b:Tag>alpha</b:Tag>"));
+    assert!(item1.contains("<b:Tag>beta</b:Tag>"));
+    assert!(item1.contains("<b:SourceType>ArticleInAPeriodical</b:SourceType>"));
+    assert!(item1.contains("<b:Title>Alpha Source</b:Title>"));
+    assert!(item1.contains("<b:Title>Beta Source</b:Title>"));
+    assert!(item1.contains("<b:Year>2020</b:Year>"));
+    assert!(item1.contains("<b:Year>2021</b:Year>"));
+    assert!(item1.contains("<b:JournalName>Journal of Sources</b:JournalName>"));
+    assert!(item1.contains("<b:Last>Able</b:Last>"));
+    assert!(item1.contains("<b:First>Alice</b:First>"));
+    assert!(item1.contains("<b:Last>Baker</b:Last>"));
+    assert!(item1.contains("<b:First>Bob</b:First>"));
+    // Two distinct, deterministic GUIDs (repeat exports must be byte-identical).
+    let guids: Vec<&str> = item1.match_indices("<b:Guid>").map(|(i, _)| &item1[i..i + 46]).collect();
+    assert_eq!(guids.len(), 2);
+    assert_ne!(guids[0], guids[1], "each source gets its own GUID");
+
+    let item_props = p
+        .get("customXml/itemProps1.xml")
+        .expect("schema-association part should accompany item1.xml");
+    assert!(item_props.contains("<ds:datastoreItem"));
+    assert!(item_props.contains(
+        "xmlns:ds=\"http://schemas.openxmlformats.org/officeDocument/2006/customXml\""
+    ));
+    assert!(item_props.contains(
+        "ds:uri=\"http://schemas.openxmlformats.org/officeDocument/2006/bibliography\""
+    ));
+
+    let item_rels = p
+        .get("customXml/_rels/item1.xml.rels")
+        .expect("item1.xml needs its own rels part pointing at itemProps1.xml");
+    assert!(item_rels.contains("customXmlProps"));
+    assert!(item_rels.contains("Target=\"itemProps1.xml\""));
+
+    let doc_rels = &p["word/_rels/document.xml.rels"];
+    assert!(
+        doc_rels.contains(
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml"
+        ),
+        "document.xml.rels should reference item1.xml under the real customXml relationship type"
+    );
+    assert!(doc_rels.contains("Target=\"../customXml/item1.xml\""));
+
+    let content_types = &p["[Content_Types].xml"];
+    assert!(content_types.contains("/customXml/itemProps1.xml"));
+    assert!(content_types.contains("customXmlProperties+xml"));
+
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn no_bibliography_means_no_native_word_sources_part() {
+    let p = parts("Just some plain text, no citations at all.");
+    assert!(!p.contains_key("customXml/item1.xml"));
+    assert!(!p.contains_key("customXml/itemProps1.xml"));
+    assert!(!p.contains_key("customXml/_rels/item1.xml.rels"));
+    assert!(!p["word/_rels/document.xml.rels"].contains("customXml"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn native_word_sources_excludes_uncited_library_entries() {
+    // A `.bib` source file commonly holds far more entries than any one
+    // document cites (a shared master reference list). References -> Manage
+    // Sources should reflect what THIS document actually cites, not the
+    // whole backing file.
+    let p = parts_with_files(
+        "Only @alpha is cited here.\n\n#bibliography(\"refs.bib\", style: \"ieee\")",
+        &[("refs.bib", REFS_BIB_WITH_UNCITED)],
+    );
+    let item1 = &p["customXml/item1.xml"];
+    assert_eq!(item1.matches("<b:Source>").count(), 1, "only the cited entry is included");
+    assert!(item1.contains("<b:Tag>alpha</b:Tag>"));
+    assert!(!item1.contains("<b:Tag>beta</b:Tag>"), "beta was never cited");
+    assert!(!item1.contains("<b:Tag>gamma</b:Tag>"), "gamma was never cited");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn native_word_sources_full_flag_includes_uncited_entries() {
+    // `#bibliography(full: true)` prints every reference from the library,
+    // cited or not — the native sources part should mirror that.
+    let p = parts_with_files(
+        "Only @alpha is cited here.\n\n#bibliography(\"refs.bib\", style: \"ieee\", full: true)",
+        &[("refs.bib", REFS_BIB_WITH_UNCITED)],
+    );
+    let item1 = &p["customXml/item1.xml"];
+    assert_eq!(item1.matches("<b:Source>").count(), 3, "full: true includes every entry");
+    assert!(item1.contains("<b:Tag>alpha</b:Tag>"));
+    assert!(item1.contains("<b:Tag>beta</b:Tag>"));
+    assert!(item1.contains("<b:Tag>gamma</b:Tag>"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn native_word_sources_dedupes_across_bibliography_elements() {
+    // Two separate #bibliography() calls loading the same file (e.g. a
+    // shared references list split by chapter) can both decode the same
+    // cited key. The native sources part must not emit `alpha` twice with
+    // the same Tag/Guid.
+    let p = parts_with_files(
+        "First chapter cites @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")\n\n\
+         Second chapter also cites @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")",
+        &[("refs.bib", REFS_BIB_WITH_UNCITED)],
+    );
+    let item1 = &p["customXml/item1.xml"];
+    assert_eq!(
+        item1.matches("<b:Tag>alpha</b:Tag>").count(),
+        1,
+        "the shared cited entry appears exactly once, not once per bibliography element"
+    );
     assert_all_wellformed(&p);
 }
 

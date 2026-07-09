@@ -193,6 +193,23 @@ pub fn escape_attr(s: &str) -> String {
     buf
 }
 
+/// Formats a 128-bit hash as a braced GUID (`{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`),
+/// for the deterministic (not random) IDs OOXML parts sometimes require —
+/// e.g. `b:Guid`/`ds:itemID` in the docx bibliography schema, or a stable
+/// field id in pptx. Byte-reproducible across repeated exports of the same
+/// document, since the hash (typically from [`typst_utils::hash128`]) is
+/// derived from content, not randomness.
+pub fn guid_from_hash(hash: u128) -> String {
+    format!(
+        "{{{:08X}-{:04X}-{:04X}-{:04X}-{:012X}}}",
+        (hash >> 96) as u32,
+        (hash >> 80) as u16,
+        (hash >> 64) as u16,
+        (hash >> 48) as u16,
+        hash & 0xFFFF_FFFF_FFFF,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // OOXML element/attribute name constants.
 // ---------------------------------------------------------------------------
