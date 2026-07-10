@@ -20,6 +20,9 @@ document's predominant **font, size, and language are hoisted into `docDefaults`
 and the body inherits them — each run's formatting carries only what *deviates*
 (bold, a different size, a colour). Editing the `Normal` style (or the theme font)
 in Word therefore restyles the whole document, and `document.xml` stays compact.
+Heading-run deduplication follows Word's `HeadingN -> Normal -> docDefaults`
+cascade: a direct deviation equal to Normal is retained when HeadingN defines a
+different value, so editing or reopening the document cannot change its meaning.
 This makes the docx pleasant both for a human to tweak in Word's GUI and for a
 tool to regenerate by editing the (far more compact) Typst source.
 

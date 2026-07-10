@@ -919,8 +919,12 @@ fn apply_style_inheritance(
             && let Some(style) = heading_styles.iter().find(|style| style.level == level)
         {
             strip_heading_paragraph(para, style);
+            visit_para_run_props(para, &mut |props| {
+                strip_text_defaults_below_heading(props, defaults, &style.rpr)
+            });
+        } else {
+            visit_para_run_props(para, &mut |props| strip_text_defaults(props, defaults));
         }
-        visit_para_run_props(para, &mut |props| strip_text_defaults(props, defaults));
     }
 }
 
@@ -972,6 +976,30 @@ fn strip_text_defaults(props: &mut RunProps, defaults: &TextDefaults) {
         props.color = None;
     }
     if props.lang == defaults.lang {
+        props.lang = None;
+    }
+}
+
+/// Strips Normal/docDefaults only where HeadingN does not define the same
+/// property. A surviving direct value is a deviation from HeadingN and must not
+/// disappear merely because it happens to equal Normal: doing so changes the
+/// effective value back to HeadingN's property in Word's inheritance cascade.
+fn strip_text_defaults_below_heading(
+    props: &mut RunProps,
+    defaults: &TextDefaults,
+    heading: &RunProps,
+) {
+    if heading.font.is_none() && props.font == defaults.font {
+        props.font = None;
+    }
+    if heading.size_half_pt.is_none() && props.size_half_pt == Some(defaults.size_half_pt)
+    {
+        props.size_half_pt = None;
+    }
+    if heading.color.is_none() && props.color == defaults.color {
+        props.color = None;
+    }
+    if heading.lang.is_none() && props.lang == defaults.lang {
         props.lang = None;
     }
 }

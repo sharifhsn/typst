@@ -304,8 +304,6 @@ mechanical cleanup that introduced this document.
 - Some DOCX mapper-specific `Option`/empty fallbacks still conflate unsupported
   content and content loss. Central fallback layout, layout-callback, section,
   and delayed conversion failures are now retained in `FidelityReport`.
-- DOCX style-deduplication can remove a deliberate heading override when it
-  happens to equal the Normal style.
 - PPTX table tags do not carry the resolver's final fill, stroke, inset,
   alignment, gutter, or cell-math contract.
 - PPTX live text is regrouped heuristically and does not carry a complete font,
@@ -389,11 +387,16 @@ mechanical cleanup that introduced this document.
   references, duplicate numbering IDs, and missing abstract/paragraph numbering
   targets before XML serialization. These WordprocessingML rules stay in
   `typst-docx`, while package mechanics remain in `typst-ooxml-core`.
+- Heading inheritance now respects the full `HeadingN -> Normal -> docDefaults`
+  cascade. A direct heading deviation that happens to equal Normal is retained
+  whenever HeadingN defines that property, preventing Word from silently
+  re-inheriting the heading value. Truly inherited properties are still
+  deduplicated from runs.
 
 ## Current implementation evidence (2026-07-10)
 
-- The focused Graphify corpus was refreshed from the live worktree: 3,092 code
-  nodes, 8,565 extracted edges, and 129 communities. `FidelityReport` is linked
+- The focused Graphify corpus was refreshed from the live worktree: 3,095 code
+  nodes, 8,575 extracted edges, and 125 communities. `FidelityReport` is linked
   to `DocxCtx`, `LoweredDocx`, `DocxDocument`, and the public report accessor;
   equation preflight reaches the explicit raster-fallback mapper. The refreshed
   graph also connects `DirectLinkKind` through `LinkElem` to the DOCX paragraph
@@ -419,7 +422,7 @@ mechanical cleanup that introduced this document.
   `execute_table_plan` to native cell lowering, whole-region fallback,
   representative gradient color, structured decisions, and the manifest.
 - `cargo clippy -p typst-docx --all-targets -- -D warnings` passes.
-- The complete structural DOCX test target passes 160 tests. New gates cover
+- The complete structural DOCX test target passes 161 tests. New gates cover
   raster/compatibility/approximation classification, a retained suppressed
   layout-callback error, nested unsupported math choosing one whole-region
   fallback, explicit placed-content planning, native anchored tables, and
@@ -452,6 +455,12 @@ mechanical cleanup that introduced this document.
   The same fixture exposed a missing 10 pt table-to-table gap; after `FlowSpace`
   replaced the paragraph-dependent accumulator, Word and Writer both rendered
   the explicit gap while preserving the editable tables.
+- A style-cascade fixture was compiled through the real CLI to PDF and DOCX.
+  The Heading1 style was blue, while one explicit red 11-point serif span
+  matched Normal. Final XML retained the direct font, size, and color instead of
+  deleting them during deduplication. LibreOffice Writer rendered the same
+  single 150 mm x 80 mm page with the blue heading fragment, red override, and
+  red body aligned to the Typst PDF; all text remained searchable.
 - Placed content now crosses an explicit source-structural `PlacePlan` boundary
   before lowering. Shape-only regions select a native grouped drawing, plain
   text selects an anchored text box, one simple text-only table/grid selects an

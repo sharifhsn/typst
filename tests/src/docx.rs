@@ -2132,6 +2132,37 @@ fn heading_style_owns_matching_run_formatting() {
 }
 
 #[test]
+fn heading_deviation_equal_to_normal_remains_direct() {
+    let p = parts(
+        "#set text(font: \"Liberation Serif\", size: 11pt, fill: rgb(\"AA0000\"))\n\
+         #show heading.where(level: 1): set text(font: \"Liberation Sans\", size: 20pt, fill: rgb(\"224466\"))\n\
+         = Styled #text(font: \"Liberation Serif\", size: 11pt, fill: rgb(\"AA0000\"))[Normal-looking]",
+    );
+    let styles = &p["word/styles.xml"];
+    let doc = &p["word/document.xml"];
+
+    let heading_style = style_fragment(styles, "Heading1");
+    assert!(heading_style.contains("liberation sans"));
+    assert!(heading_style.contains("w:val=\"40\""));
+    assert!(heading_style.contains("w:val=\"224466\""));
+
+    let deviation = run_fragment_containing(doc, "Normal-looking");
+    assert!(
+        deviation.contains("liberation serif"),
+        "font equal to Normal must still override Heading1: {deviation}"
+    );
+    assert!(
+        deviation.contains("w:val=\"22\""),
+        "size equal to Normal must still override Heading1: {deviation}"
+    );
+    assert!(
+        deviation.contains("w:val=\"AA0000\""),
+        "color equal to Normal must still override Heading1: {deviation}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn deviating_heading_run_keeps_only_the_deviation() {
     let p = parts(
         "#show heading.where(level: 1): set text(fill: rgb(\"224466\"))\n\

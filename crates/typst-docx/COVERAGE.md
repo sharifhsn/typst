@@ -1306,3 +1306,25 @@ remain in `typst-docx`; only format-neutral package mechanics live in the shared
 OPC crate. Two crate unit gates cover duplicate drawings and unpaired bookmarks,
 and the full structural suite proves every current exporter path satisfies the
 validator.
+
+## 22. Heading-to-Normal cascade-safe style deduplication
+
+Word resolves a heading run through direct formatting, `HeadingN`, `Normal`,
+and document defaults. The old cleanup treated Normal as if it were always the
+run's immediate parent. In a blue Heading1 inside a red Normal document, an
+explicit red span survived Heading1 deduplication but was then removed because
+it equaled Normal; Word re-inherited blue from Heading1 and changed the span.
+
+`apply_style_inheritance` now strips a Normal/default property from a heading
+run only when HeadingN does not define that property. Values matching HeadingN
+are still moved into the style, while deviations from HeadingN remain direct
+even when they happen to equal Normal. A regression fixture covers font, size,
+and color across this exact three-level cascade. The DOCX structural target now
+passes 161 tests.
+
+A real CLI fixture was compiled to the Typst PDF reference and DOCX. Package
+inspection showed the corrected span retained explicit Libertinus Serif,
+11-point size, and `AA0000` color beside the blue 20-point Heading1. LibreOffice
+Writer 26.2.4.2 opened and rendered the DOCX as the same single 150 mm x 80 mm
+page; the heading, red override, and red body remained visually aligned with the
+PDF, and all text stayed searchable.
