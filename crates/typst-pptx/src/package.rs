@@ -7,7 +7,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use typst_layout::PagedDocument;
 use typst_library::layout::{Abs, Size};
 use typst_ooxml_core::ns;
-use typst_ooxml_core::opc::{Package, PackageOptions, RelMode, Rels};
+use typst_ooxml_core::opc::{Package, PackageError, PackageOptions, RelMode, Rels};
 
 use crate::SpeakerNote;
 use crate::dom::{Placeholder, SlideCtx, SlideIr, SlideShape};
@@ -28,7 +28,6 @@ const REL_TABLE_STYLES: &str = ns::rel::TABLE_STYLES;
 const REL_IMAGE: &str = ns::rel::IMAGE;
 const REL_HYPERLINK: &str = ns::rel::HYPERLINK;
 
-const CT_RELS: &str = ns::ct::RELS;
 const CT_PRESENTATION: &str = ns::ct::PRESENTATION;
 const CT_SLIDE: &str = ns::ct::SLIDE;
 const CT_SLIDE_MASTER: &str = ns::ct::SLIDE_MASTER;
@@ -59,7 +58,7 @@ pub fn write(
     slides: &[SlideIr],
     ctx: &SlideCtx,
     notes: &[SpeakerNote],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, PackageError> {
     let mut package = Package::new(PPTX_PACKAGE_OPTIONS);
     let mut root_rels = Rels::new();
     let mut pres_rels = Rels::new();
@@ -105,7 +104,7 @@ pub fn write(
             cy,
         ),
     );
-    package.add_xml("ppt/_rels/presentation.xml.rels", CT_RELS, pres_rels.to_xml());
+    package.add_relationships("ppt/presentation.xml", &pres_rels)?;
 
     package.add_xml("ppt/presProps.xml", CT_PRES_PROPS, pres_props_xml());
     package.add_xml("ppt/viewProps.xml", CT_VIEW_PROPS, view_props_xml());
@@ -124,11 +123,7 @@ pub fn write(
         RelMode::Internal,
     );
     master_rels.add(REL_THEME, "../theme/theme1.xml", RelMode::Internal);
-    package.add_xml(
-        "ppt/slideMasters/_rels/slideMaster1.xml.rels",
-        CT_RELS,
-        master_rels.to_xml(),
-    );
+    package.add_relationships("ppt/slideMasters/slideMaster1.xml", &master_rels)?;
 
     package.add_xml(
         "ppt/slideLayouts/slideLayout1.xml",
@@ -141,11 +136,7 @@ pub fn write(
         "../slideMasters/slideMaster1.xml",
         RelMode::Internal,
     );
-    package.add_xml(
-        "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
-        CT_RELS,
-        layout_rels.to_xml(),
-    );
+    package.add_relationships("ppt/slideLayouts/slideLayout1.xml", &layout_rels)?;
 
     for (i, slide) in slides.iter().enumerate() {
         let mut slide_rels = Rels::new();
@@ -166,11 +157,8 @@ pub fn write(
             );
         }
         package.add_xml(&format!("ppt/slides/slide{}.xml", i + 1), CT_SLIDE, slide_xml);
-        package.add_xml(
-            &format!("ppt/slides/_rels/slide{}.xml.rels", i + 1),
-            CT_RELS,
-            slide_rels.to_xml(),
-        );
+        package
+            .add_relationships(&format!("ppt/slides/slide{}.xml", i + 1), &slide_rels)?;
     }
 
     if !notes_by_slide.is_empty() {
@@ -181,11 +169,8 @@ pub fn write(
         );
         let mut notes_master_rels = Rels::new();
         notes_master_rels.add(REL_THEME, "../theme/theme1.xml", RelMode::Internal);
-        package.add_xml(
-            "ppt/notesMasters/_rels/notesMaster1.xml.rels",
-            CT_RELS,
-            notes_master_rels.to_xml(),
-        );
+        package
+            .add_relationships("ppt/notesMasters/notesMaster1.xml", &notes_master_rels)?;
 
         for (i, text) in &notes_by_slide {
             package.add_xml(
@@ -199,11 +184,10 @@ pub fn write(
                 "../notesMasters/notesMaster1.xml",
                 RelMode::Internal,
             );
-            package.add_xml(
-                &format!("ppt/notesSlides/_rels/notesSlide{}.xml.rels", i + 1),
-                CT_RELS,
-                notes_slide_rels.to_xml(),
-            );
+            package.add_relationships(
+                &format!("ppt/notesSlides/notesSlide{}.xml", i + 1),
+                &notes_slide_rels,
+            )?;
         }
     }
 

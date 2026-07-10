@@ -132,6 +132,8 @@ fn docx_document_impl(
     // body walk; header/footer *content* is lowered later on the same `ctx`.
     let real_ref = paged_introspector.as_deref();
     let page_sizes_ref = paged_page_sizes.as_deref().map(Vec::as_slice);
+    let export_snapshot =
+        crate::snapshot::ExportSnapshot::build(&pairs, real_ref, page_sizes_ref);
     let sections = resolve_sections(&pairs, styles, real_ref, page_sizes_ref);
     // The width fed to rasterized content comes from the first section.
     let first_geom = sections
@@ -507,6 +509,7 @@ fn docx_document_impl(
         bibliography,
         word_sources,
         fidelity_report,
+        export_snapshot,
     })
 }
 
@@ -1506,6 +1509,20 @@ struct LoweredFurniture {
     emit_empty: bool,
 }
 
+struct FurnitureRefPlan {
+    kind: &'static str,
+    lowered: LoweredFurniture,
+}
+
+/// Whole-region representation selected before header/footer parts are
+/// serialized. Word can express one first-page value plus stable odd/even
+/// values. Anything more page-specific must be admitted as an approximation,
+/// never silently mislabeled as an exact parity split.
+enum FurniturePlan {
+    Exact { title_page: bool, refs: Vec<FurnitureRefPlan> },
+    Sampled { first: LoweredFurniture },
+}
+
 #[derive(Copy, Clone)]
 struct FurnitureSource<'a> {
     content: Option<&'a Content>,
@@ -1522,14 +1539,39 @@ fn build_furniture_refs(
     source: FurnitureSource<'_>,
     styles: StyleChain,
 ) -> SourceResult<()> {
+    match preflight_furniture(ctx, slot, geom, source, styles)? {
+        FurniturePlan::Exact { title_page, refs } => {
+            sect.title_pg |= title_page;
+            for planned in refs {
+                emit_furniture(ctx, sect, parts, slot, planned.kind, planned.lowered);
+            }
+        }
+        FurniturePlan::Sampled { first } => {
+            let affected_text_chars = blocks_text_chars(&first.blocks);
+            record_sampled_furniture(ctx, slot, source, affected_text_chars);
+            emit_furniture(ctx, sect, parts, slot, "default", first);
+        }
+    }
+    Ok(())
+}
+
+fn preflight_furniture(
+    ctx: &mut DocxCtx,
+    slot: FurnitureSlot,
+    geom: &SectGeom,
+    source: FurnitureSource<'_>,
+    styles: StyleChain,
+) -> SourceResult<FurniturePlan> {
     let context_sensitive = source.content.is_some_and(contains_context)
         || source.background.is_some_and(contains_context)
         || source.foreground.is_some_and(contains_context);
 
     let first = lower_furniture(ctx, slot, geom, source, styles, 1)?;
     if !context_sensitive {
-        emit_furniture(ctx, sect, parts, slot, "default", first);
-        return Ok(());
+        return Ok(FurniturePlan::Exact {
+            title_page: false,
+            refs: vec![FurnitureRefPlan { kind: "default", lowered: first }],
+        });
     }
 
     let even = lower_furniture(ctx, slot, geom, source, styles, 2)?;
@@ -1542,41 +1584,160 @@ fn build_furniture_refs(
     // changes on page 3 vs page 5 and must not be represented as one odd-page
     // default header that repeats page 3 forever.
     if even.signature != even_again.signature || odd.signature != odd_again.signature {
-        emit_furniture(ctx, sect, parts, slot, "default", first);
-        return Ok(());
+        return Ok(FurniturePlan::Sampled { first });
     }
 
     let needs_even = even.signature != odd.signature;
     let needs_first = first.signature != odd.signature;
 
     if !needs_even && !needs_first {
-        emit_furniture(ctx, sect, parts, slot, "default", first);
-        return Ok(());
+        return Ok(FurniturePlan::Exact {
+            title_page: false,
+            refs: vec![FurnitureRefPlan { kind: "default", lowered: first }],
+        });
     }
 
-    let mut first = Some(first);
-    let mut even = Some(even);
-    let mut odd = Some(odd);
-
-    if needs_first {
-        sect.title_pg = true;
-        emit_furniture(ctx, sect, parts, slot, "first", first.take().unwrap());
-    }
-
-    if needs_even {
-        emit_furniture(ctx, sect, parts, slot, "even", even.take().unwrap());
-    }
-
-    let default = if needs_first {
-        odd.take().unwrap()
-    } else if first.as_ref().unwrap().signature == odd.as_ref().unwrap().signature {
-        first.take().unwrap()
-    } else {
-        odd.take().unwrap()
+    let refs = match (needs_first, needs_even) {
+        (true, true) => vec![
+            FurnitureRefPlan { kind: "first", lowered: first },
+            FurnitureRefPlan { kind: "even", lowered: even },
+            FurnitureRefPlan { kind: "default", lowered: odd },
+        ],
+        (true, false) => vec![
+            FurnitureRefPlan { kind: "first", lowered: first },
+            FurnitureRefPlan { kind: "default", lowered: odd },
+        ],
+        (false, true) => vec![
+            FurnitureRefPlan { kind: "even", lowered: even },
+            FurnitureRefPlan { kind: "default", lowered: first },
+        ],
+        (false, false) => unreachable!(),
     };
-    emit_furniture(ctx, sect, parts, slot, "default", default);
+    Ok(FurniturePlan::Exact { title_page: needs_first, refs })
+}
 
-    Ok(())
+fn record_sampled_furniture(
+    ctx: &mut DocxCtx,
+    slot: FurnitureSlot,
+    source: FurnitureSource<'_>,
+    sampled_text_chars: usize,
+) {
+    let contextual = [source.content, source.background, source.foreground]
+        .into_iter()
+        .flatten()
+        .filter(|content| contains_context(content));
+    let mut warning_span = None;
+    let mut sampled_chars_unattributed = sampled_text_chars;
+    for content in contextual {
+        warning_span.get_or_insert(content.span());
+        let source_chars = content_text_chars(content);
+        let affected_text_chars = if source_chars == 0 {
+            std::mem::take(&mut sampled_chars_unattributed)
+        } else {
+            sampled_chars_unattributed =
+                sampled_chars_unattributed.saturating_sub(source_chars);
+            source_chars
+        };
+        ctx.record_content_decision(
+            content,
+            Representation::Approximate,
+            DecisionReason::PageFurnitureSampled,
+            LossSet::PAGE_FURNITURE_SAMPLED,
+            affected_text_chars,
+        );
+    }
+
+    if let Some(span) = warning_span {
+        let kind = if slot.is_header() { "header" } else { "footer" };
+        ctx.warn_message(
+            format!(
+                "page-varying {kind} cannot be represented by Word's first/even/default model; the page 1 value will repeat"
+            ),
+            span,
+        );
+    }
+}
+
+fn content_text_chars(content: &Content) -> usize {
+    use std::ops::ControlFlow;
+    use typst_library::text::TextElem;
+
+    let mut chars = 0;
+    let _ = content.traverse(&mut |element: Content| {
+        if let Some(text) = element.to_packed::<TextElem>() {
+            chars += text.text.chars().count();
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    chars
+}
+
+fn blocks_text_chars(blocks: &[Block]) -> usize {
+    blocks.iter().map(block_text_chars).sum()
+}
+
+fn block_text_chars(block: &Block) -> usize {
+    match block {
+        Block::Para(para) => para.content.iter().map(para_child_text_chars).sum(),
+        Block::Table(table) => table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .map(|cell| blocks_text_chars(&cell.blocks))
+            .sum(),
+        Block::Toc(toc) => {
+            let entries: usize = toc
+                .entries
+                .iter()
+                .flat_map(|para| &para.content)
+                .map(para_child_text_chars)
+                .sum();
+            entries + toc.fallback.iter().map(run_text_chars).sum::<usize>()
+        }
+        Block::FlowSpace { .. } | Block::SectionBreak(_) | Block::Tag(_) => 0,
+    }
+}
+
+fn para_child_text_chars(child: &ParaChild) -> usize {
+    match child {
+        ParaChild::Run(run) => run_text_chars(run),
+        ParaChild::Hyperlink { runs, .. } => runs.iter().map(run_text_chars).sum(),
+        ParaChild::OmmlPara(_)
+        | ParaChild::BookmarkStart { .. }
+        | ParaChild::BookmarkEnd { .. }
+        | ParaChild::Tag(_) => 0,
+    }
+}
+
+fn run_text_chars(run: &Run) -> usize {
+    match run {
+        Run::Text { text, .. } => text.chars().count(),
+        Run::Field(field) => field.result.iter().map(run_text_chars).sum(),
+        Run::Drawing(drawing) => {
+            let shape = drawing
+                .shape
+                .as_ref()
+                .and_then(|shape| shape.txbx.as_ref())
+                .map_or(0, |text_box| blocks_text_chars(&text_box.blocks));
+            let group = drawing.group.as_ref().map_or(0, |group| {
+                group
+                    .children
+                    .iter()
+                    .filter_map(|child| child.shape.txbx.as_ref())
+                    .map(|text_box| blocks_text_chars(&text_box.blocks))
+                    .sum()
+            });
+            shape + group
+        }
+        Run::Break
+        | Run::PageBreak
+        | Run::ColumnBreak
+        | Run::Tab
+        | Run::FillTab
+        | Run::FootnoteRef { .. }
+        | Run::FootnoteRefMark
+        | Run::OmmlInline(_) => 0,
+    }
 }
 
 fn lower_furniture(

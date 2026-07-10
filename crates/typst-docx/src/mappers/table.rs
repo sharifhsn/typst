@@ -16,25 +16,35 @@
 use std::sync::Arc;
 
 use typst_library::diag::SourceResult;
-use typst_library::foundations::{Packed, Smart, StyleChain};
+use typst_library::foundations::{Content, Packed, Smart, StyleChain};
 use typst_library::layout::resolve::{Cell as ResolvedCell, CellGrid, Entry};
 use typst_library::layout::{Abs, Alignment, Sizing, VAlignment};
 use typst_library::layout::{GridCell, GridElem};
 use typst_library::model::{TableCell, TableElem};
 use typst_library::visualize::{Color, Paint, Stroke};
+use typst_utils::Numeric;
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
     Block, Border, Cell, CellBorders, Jc, Para, ParaChild, ParaProps, Row, RowHeight,
     Run, RunProps, Tbl, TblProps, VAlign, VMerge,
 };
+use crate::report::{DecisionReason, LossSet, Representation};
+
+enum TablePlan<'a> {
+    Native(&'a CellGrid),
+    Approximate(&'a CellGrid),
+    Empty,
+    Raster,
+}
 
 pub fn table(
     elem: &Packed<TableElem>,
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Vec<Block>> {
-    cellgrid(elem.grid.as_ref().unwrap(), styles, ctx)
+    let source = elem.clone().pack();
+    execute_table_plan(&source, preflight_table(elem.grid.as_deref()), styles, ctx)
 }
 
 /// A layout grid (`#grid`) resolves to the same [`CellGrid`] as a table, so it
@@ -47,10 +57,132 @@ pub fn grid(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Vec<Block>> {
-    let Some(grid) = elem.grid.as_ref() else {
-        return Ok(Vec::new());
+    let source = elem.clone().pack();
+    execute_table_plan(&source, preflight_table(elem.grid.as_deref()), styles, ctx)
+}
+
+fn preflight_table(grid: Option<&CellGrid>) -> TablePlan<'_> {
+    let Some(grid) = grid else { return TablePlan::Raster };
+    if grid.non_gutter_column_count() == 0 || grid.entries.is_empty() {
+        return TablePlan::Empty;
+    }
+    if table_geometry_is_approximate(grid) {
+        TablePlan::Approximate(grid)
+    } else {
+        TablePlan::Native(grid)
+    }
+}
+
+fn execute_table_plan(
+    source: &Content,
+    plan: TablePlan<'_>,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Vec<Block>> {
+    match plan {
+        TablePlan::Native(grid) => {
+            ctx.record_content_decision(
+                source,
+                Representation::Native,
+                DecisionReason::NativeTable,
+                LossSet::default(),
+                content_text_chars(source),
+            );
+            cellgrid(grid, styles, ctx)
+        }
+        TablePlan::Approximate(grid) => {
+            ctx.record_content_decision(
+                source,
+                Representation::Approximate,
+                DecisionReason::TableGeometryApproximation,
+                LossSet::VISUAL_ONLY,
+                content_text_chars(source),
+            );
+            cellgrid(grid, styles, ctx)
+        }
+        TablePlan::Empty => Ok(Vec::new()),
+        TablePlan::Raster => {
+            let runs = crate::mappers::image::laid_out_fallback(source, styles, ctx)?;
+            if runs.is_empty() {
+                ctx.record_content_decision(
+                    source,
+                    Representation::Drop,
+                    DecisionReason::TableResolutionUnavailable,
+                    LossSet::DROP,
+                    content_text_chars(source),
+                );
+                ctx.warn_message(
+                    "table/grid resolution and whole-region fallback produced no output",
+                    source.span(),
+                );
+                Ok(Vec::new())
+            } else {
+                Ok(vec![Block::Para(Para {
+                    props: ParaProps::default(),
+                    content: runs.into_iter().map(ParaChild::Run).collect(),
+                })])
+            }
+        }
+    }
+}
+
+fn table_geometry_is_approximate(grid: &CellGrid) -> bool {
+    let column_sizing = grid.cols.iter().any(|sizing| match sizing {
+        Sizing::Auto | Sizing::Fr(_) => true,
+        Sizing::Rel(rel) => rel.rel.get() != 0.0 || !rel.abs.em.is_zero(),
+    });
+    let row_sizing = grid.rows.iter().any(|sizing| match sizing {
+        Sizing::Fr(_) => true,
+        Sizing::Rel(rel) => rel.rel.get() != 0.0 || !rel.abs.em.is_zero(),
+        Sizing::Auto => false,
+    });
+    let cell_visuals = grid.entries.iter().any(|entry| {
+        let Some(cell) = entry.as_cell() else { return false };
+        cell.fill.as_ref().is_some_and(paint_is_approximate)
+            || [
+                &cell.stroke.top,
+                &cell.stroke.bottom,
+                &cell.stroke.left,
+                &cell.stroke.right,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|stroke| stroke_is_approximate(stroke))
+    });
+    column_sizing || row_sizing || cell_visuals || grid.footer.is_some()
+}
+
+fn paint_is_approximate(paint: &Paint) -> bool {
+    match paint {
+        Paint::Solid(color) => color.to_vec4_u8()[3] != u8::MAX,
+        _ => true,
+    }
+}
+
+fn stroke_is_approximate(stroke: &Stroke<Abs>) -> bool {
+    let paint = match &stroke.paint {
+        Smart::Custom(paint) => paint_is_approximate(paint),
+        Smart::Auto => false,
     };
-    cellgrid(grid, styles, ctx)
+    paint
+        || matches!(stroke.dash, Smart::Custom(Some(_)))
+        || matches!(stroke.cap, Smart::Custom(_))
+        || matches!(stroke.join, Smart::Custom(_))
+        || matches!(stroke.miter_limit, Smart::Custom(_))
+}
+
+fn content_text_chars(content: &Content) -> usize {
+    use std::ops::ControlFlow;
+    use typst_library::text::TextElem;
+
+    let mut chars = 0;
+    let _ = content.traverse(&mut |element: Content| {
+        if let Some(text) = element.to_packed::<TextElem>() {
+            chars += text.text.chars().count();
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    chars
 }
 
 /// Lowers a resolved [`CellGrid`] (shared by `#table` and `#grid`) into a
@@ -405,13 +537,40 @@ fn stroke_to_border(stroke: &Stroke<Abs>) -> Border {
 fn paint_to_rgb(paint: &Paint) -> Option<[u8; 3]> {
     match paint {
         Paint::Solid(color) => Some(color_to_rgb(color)),
-        _ => None,
+        // Word cell shading cannot carry a gradient. A midpoint color retains
+        // the source's visual tone instead of silently turning the cell white;
+        // `TablePlan` reports the approximation before this executes.
+        Paint::Gradient(gradient) => representative_gradient_rgb(gradient.stops_ref()),
+        Paint::Tiling(_) => None,
     }
 }
 
+fn representative_gradient_rgb(
+    stops: &[(Color, typst_library::layout::Ratio)],
+) -> Option<[u8; 3]> {
+    if stops.is_empty() {
+        return None;
+    }
+    let mut sums = [0_u64; 3];
+    for (color, _) in stops {
+        for (sum, channel) in sums.iter_mut().zip(color_to_rgb(color)) {
+            *sum += channel as u64;
+        }
+    }
+    let count = stops.len() as u64;
+    Some(sums.map(|sum| ((sum + count / 2) / count) as u8))
+}
+
 fn color_to_rgb(color: &Color) -> [u8; 3] {
-    let [r, g, b, _] = color.to_vec4_u8();
-    [r, g, b]
+    let (r, g, b, a) = color.to_rgb().into_format::<u8, u8>().into_components();
+    // `w:shd` and table borders have no alpha. Composite over Word's default
+    // white page/cell background rather than dropping alpha or making a
+    // translucent color unexpectedly opaque and too dark.
+    let composite = |channel: u8| -> u8 {
+        let value = channel as u32 * a as u32 + 255 * (255 - a as u32);
+        ((value + 127) / 255) as u8
+    };
+    [composite(r), composite(g), composite(b)]
 }
 
 /// Per-track widths in dxa for `w:tblGrid`, including Typst gutter tracks.

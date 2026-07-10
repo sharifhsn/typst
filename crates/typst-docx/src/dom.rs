@@ -16,6 +16,7 @@ pub use typst_ooxml_core::media::MediaPart;
 use crate::introspect::DocxIntrospector;
 use crate::package::Rels;
 use crate::report::FidelityReport;
+use crate::snapshot::ExportSnapshot;
 
 /// Output document: realized native tree lowered to the OOXML IR + metadata +
 /// introspector.
@@ -73,6 +74,9 @@ pub struct DocxDocument {
     /// Structured representation decisions and deliberately suppressed
     /// diagnostics collected while lowering the document.
     pub(crate) fidelity_report: FidelityReport,
+    /// Owned semantic/paged identity and geometry sidecar captured before
+    /// target-specific lowering.
+    pub(crate) export_snapshot: ExportSnapshot,
 }
 
 impl DocxDocument {
@@ -98,6 +102,17 @@ impl DocxDocument {
     /// Structured fidelity decisions made while lowering this document.
     pub fn fidelity_report(&self) -> &FidelityReport {
         &self.fidelity_report
+    }
+
+    /// Stable semantic nodes and their converged paged geometry.
+    pub fn export_snapshot(&self) -> &ExportSnapshot {
+        &self.export_snapshot
+    }
+
+    /// Versioned machine-readable snapshot and fidelity report embedded in the
+    /// package as `customXml/typstFidelity.xml`.
+    pub fn fidelity_manifest_xml(&self) -> String {
+        crate::manifest::build(self)
     }
 }
 

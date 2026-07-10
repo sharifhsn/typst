@@ -401,6 +401,100 @@ fn package_is_wellformed_and_minimal() {
 }
 
 #[test]
+fn docx_export_is_byte_deterministic() {
+    let document = compile_docx(
+        "= Stable package\n\n#link(\"https://example.com\")[external link]",
+        &[],
+    );
+    let options = DocxOptions { pretty: false };
+    let first = docx(&document, &options).expect("first DOCX export failed");
+    let second = docx(&document, &options).expect("second DOCX export failed");
+    assert_eq!(first, second, "the complete OPC zip must be byte deterministic");
+}
+
+#[test]
+fn export_snapshot_stabilizes_semantic_ids_and_paged_positions() {
+    let src = "= First heading\n\nBody.\n#pagebreak()\n= Second heading\n\nMore body.";
+    let first = compile_docx(src, &[]);
+    let second = compile_docx(src, &[]);
+    let snapshot = first.export_snapshot();
+
+    assert_eq!(snapshot.pages().len(), 2, "the converged paged oracle is retained");
+    assert_eq!(snapshot.logical_id(), second.export_snapshot().logical_id());
+    assert_eq!(
+        snapshot
+            .nodes()
+            .iter()
+            .map(|node| node.source.logical_id)
+            .collect::<Vec<_>>(),
+        second
+            .export_snapshot()
+            .nodes()
+            .iter()
+            .map(|node| node.source.logical_id)
+            .collect::<Vec<_>>(),
+        "semantic IDs must survive independent DOCX compilations"
+    );
+
+    let heading_pages = snapshot
+        .nodes()
+        .iter()
+        .filter(|node| node.source.element == "heading")
+        .flat_map(|node| node.paged_positions.iter().map(|position| position.page))
+        .collect::<Vec<_>>();
+    assert!(heading_pages.contains(&1), "the first heading keeps paged geometry");
+    assert!(heading_pages.contains(&2), "the second heading keeps paged geometry");
+}
+
+#[test]
+fn fidelity_manifest_is_persisted_and_related() {
+    let p = parts("#place(top + left, table(columns: 1, [$x + 1$]))");
+    let manifest = &p["customXml/typstFidelity.xml"];
+    assert!(manifest.contains("version=\"1\""));
+    assert!(manifest.contains("<typst:pages>"));
+    assert!(manifest.contains("<typst:nodes>"));
+    assert!(manifest.contains("<typst:decisions>"));
+    assert!(manifest.contains("reason=\"PositionedContentFlowFallback\""));
+    assert!(manifest.contains("affectedTextChars="));
+    assert!(manifest.contains("affectedSemanticNodes=\"1\""));
+
+    let rels = &p["word/_rels/document.xml.rels"];
+    assert!(rels.contains("../customXml/typstFidelity.xml"));
+    assert!(rels.contains("relationships/fidelity"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn table_preflight_reports_native_and_approximate_geometry() {
+    let native =
+        compile_docx("#table(columns: (40pt, 40pt), [Native left], [Native right])", &[]);
+    assert!(native.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::NativeTable
+            && decision.representation == Representation::Native
+            && decision.affected_semantic_nodes == 1
+    }));
+
+    let approximate_src = "#table(columns: (1fr, 2fr), fill: gradient.linear(red, blue), [Gradient], [Tracks])";
+    let approximate = compile_docx(approximate_src, &[]);
+    let decision = approximate
+        .fidelity_report()
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::TableGeometryApproximation)
+        .expect("unsupported paint/flexible tracks must be reported before lowering");
+    assert_eq!(decision.representation, Representation::Approximate);
+    assert!(decision.losses.visual_fidelity);
+    assert!(decision.affected_text_chars > 0);
+    assert_eq!(decision.affected_semantic_nodes, 1);
+
+    let p = parts(approximate_src);
+    assert!(
+        p["word/document.xml"].contains("<w:shd "),
+        "a gradient cell keeps a representative solid tone instead of losing its fill"
+    );
+}
+
+#[test]
 fn heading_maps_to_heading_style() {
     let p = parts("= Introduction\n\nBody text.");
     let doc = &p["word/document.xml"];
@@ -3309,6 +3403,22 @@ fn per_page_literal_header_does_not_fake_an_odd_even_split() {
         1,
         "non-parity-stable furniture stays a single sampled header"
     );
+
+    let compiled = compile_docx(
+        "#set page(header: context [HEAD-#here().page()-END])\n\
+         One.\n#pagebreak()\nTwo.\n#pagebreak()\nThree.\n#pagebreak()\nFour.\n#pagebreak()\nFive.",
+        &[],
+    );
+    let decision = compiled
+        .fidelity_report()
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::PageFurnitureSampled)
+        .expect("page-specific furniture must be reported, not silently frozen");
+    assert_eq!(decision.representation, Representation::Approximate);
+    assert!(decision.losses.visual_fidelity);
+    assert!(decision.losses.dynamic_behavior);
+    assert!(decision.affected_text_chars > 0);
     assert_all_wellformed(&p);
 }
 
@@ -3448,7 +3558,9 @@ fn no_bibliography_means_no_native_word_sources_part() {
     assert!(!p.contains_key("customXml/item1.xml"));
     assert!(!p.contains_key("customXml/itemProps1.xml"));
     assert!(!p.contains_key("customXml/_rels/item1.xml.rels"));
-    assert!(!p["word/_rels/document.xml.rels"].contains("customXml"));
+    let rels = &p["word/_rels/document.xml.rels"];
+    assert!(!rels.contains("Target=\"../customXml/item1.xml\""));
+    assert!(!rels.contains("relationships/customXml\""));
     assert_all_wellformed(&p);
 }
 

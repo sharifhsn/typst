@@ -68,6 +68,19 @@ pub enum DecisionReason {
     /// Non-native placed content was rasterized as one anchored region so its
     /// position and appearance survived atomically.
     PositionedContentRasterFallback,
+    /// Contextual page furniture varied beyond Word's first/even/default
+    /// header model, so one sampled value is repeated rather than pretending
+    /// that a page-specific value is parity-stable.
+    PageFurnitureSampled,
+    /// A resolved table/grid was emitted as native editable `w:tbl` without a
+    /// known table-level representation loss.
+    NativeTable,
+    /// A table/grid stayed native and editable, but its cell paint, border
+    /// nuance, or track sizing cannot be reproduced exactly by Word.
+    TableGeometryApproximation,
+    /// A table/grid had no resolved `CellGrid`, and both native lowering and
+    /// whole-region fallback produced no representation.
+    TableResolutionUnavailable,
 }
 
 /// Independent dimensions in which a representation can lose information.
@@ -136,6 +149,17 @@ impl LossSet {
         portability: false,
     };
 
+    /// Page furniture stays native and editable, but later pages can display a
+    /// sampled value and the source's per-page dynamic behavior is frozen.
+    pub const PAGE_FURNITURE_SAMPLED: Self = Self {
+        visual_fidelity: true,
+        semantic_structure: false,
+        editability: false,
+        dynamic_behavior: true,
+        accessibility: false,
+        portability: false,
+    };
+
     /// Section geometry survives, but its failed furniture/content does not.
     pub const SECTION_GEOMETRY_ONLY: Self = Self {
         visual_fidelity: true,
@@ -172,7 +196,7 @@ pub struct ExportSource {
 }
 
 impl ExportSource {
-    fn from_content(content: &Content) -> Self {
+    pub(crate) fn from_content(content: &Content) -> Self {
         Self::new(content.elem().name(), content.span(), content.location())
     }
 
@@ -182,7 +206,14 @@ impl ExportSource {
         location: Option<Location>,
     ) -> Self {
         let element = element.into();
-        let logical_id = typst_utils::hash128(&(span, location, &element));
+        // Source spans survive independent paged/DOCX realizations; Typst
+        // locations do not. Keep locations as useful evidence, but exclude
+        // them from the stable identity unless the source is detached.
+        let logical_id = if span.is_detached() {
+            typst_utils::hash128(&(span, location, &element))
+        } else {
+            typst_utils::hash128(&(span, &element))
+        };
         Self { logical_id, element, span, location }
     }
 }
@@ -199,6 +230,9 @@ pub struct ExportDecision {
     pub occurrences: usize,
     /// Searchable text characters recovered alongside a raster fallback.
     pub affected_text_chars: usize,
+    /// Logical semantic regions affected by this decision. This is one for a
+    /// first occurrence and grows with aggregated repeated realizations.
+    pub affected_semantic_nodes: usize,
 }
 
 /// Stage at which a diagnostic was suppressed to keep best-effort export going.
@@ -318,6 +352,7 @@ impl FidelityReport {
         }) {
             existing.occurrences += 1;
             existing.affected_text_chars += affected_text_chars;
+            existing.affected_semantic_nodes += 1;
             return;
         }
         self.decisions.push(ExportDecision {
@@ -327,6 +362,7 @@ impl FidelityReport {
             losses,
             occurrences: 1,
             affected_text_chars,
+            affected_semantic_nodes: 1,
         });
     }
 
@@ -410,6 +446,7 @@ mod tests {
         assert_eq!(report.decisions.len(), 1);
         assert_eq!(report.decisions[0].occurrences, 2);
         assert_eq!(report.decisions[0].affected_text_chars, 11);
+        assert_eq!(report.decisions[0].affected_semantic_nodes, 2);
         assert_eq!(report.counts().raster, 2);
     }
 }

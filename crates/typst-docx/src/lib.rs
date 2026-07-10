@@ -13,12 +13,14 @@ mod dom;
 mod encode;
 mod fallback;
 mod introspect;
+mod manifest;
 mod mappers;
 mod package;
 mod parts;
 mod props;
 mod report;
 mod rules;
+mod snapshot;
 mod styles_part;
 mod xml;
 
@@ -33,3 +35,4 @@ pub use self::report::{
     Representation, RepresentationCounts, SuppressedDiagnostic, SuppressedKind,
 };
 pub use self::rules::register;
+pub use self::snapshot::{ExportSnapshot, SnapshotNode, SnapshotPage, SnapshotPosition};

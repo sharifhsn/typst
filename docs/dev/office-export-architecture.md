@@ -165,7 +165,15 @@ semantics from frames. The shared compiler product should instead contain:
 - resolved semantic regions for tables, columns, equations, page furniture,
   and placed content.
 
-DOCX would use semantics as primary and paged geometry as an oracle. PPTX would
+The first DOCX slice now captures an owned `ExportSnapshot` before lowering.
+Logical IDs are span/element based rather than target-specific-location based;
+top-level lowering regions and nested located semantic nodes aggregate their
+semantic occurrences and every matching converged paged position. The snapshot
+also owns every converged page size and a deterministic document ID. Counter,
+link, bibliography, and fallback-specific resolved payload enrollment remains
+incomplete.
+
+DOCX uses semantics as primary and paged geometry as an oracle. PPTX would
 use frames as primary and semantic regions as a sidecar. Pandoc would use only
 the semantic side.
 
@@ -205,9 +213,11 @@ The default CLI can remain quiet for lossless documents. A `--diagnostic-format`
 or dedicated export report can expose the details without coupling them to
 stderr strings.
 
-DOCX now retains this information in memory on `DocxDocument`. Persisting it as
-a CLI-selected JSON/text artifact, enrolling every native region and dynamic
-field, and adding consumer/font facts remain open work.
+DOCX now retains this information on `DocxDocument` and persists a versioned XML
+manifest inside every package at `customXml/typstFidelity.xml`, related from the
+main document part. A public serializer supports external tooling. Enrolling
+every native region and dynamic field, adding consumer/font facts, and an
+optional CLI-selected standalone JSON/text sidecar remain open work.
 
 ## Consumer rendering realities
 
@@ -285,8 +295,10 @@ mechanical cleanup that introduced this document.
 
 ### High
 
-- DOCX text-bearing `place` content can stay editable by discarding placement.
-- DOCX page-varying furniture can silently freeze to an early sampled value.
+- DOCX contextual furniture that varies beyond Word's first/even/default model
+  still freezes to a page-1 sample. The approximation is now preflighted,
+  warned, and reported with affected text instead of being silent; a fully
+  resolved per-page representation remains open design work.
 - Some DOCX mapper-specific `Option`/empty fallbacks still conflate unsupported
   content and content loss. Central fallback layout, layout-callback, section,
   and delayed conversion failures are now retained in `FidelityReport`.
@@ -310,8 +322,9 @@ mechanical cleanup that introduced this document.
   ownership is not visible from exporter crates;
 - math lowering has three implementations with different access to styles and
   resolved IR;
-- package tests prove XML well-formedness but not all OPC relationship,
-  content-type, uniqueness, schema, or consumer-repair invariants;
+- shared package finalization now proves part/content-type uniqueness and typed
+  internal relationship targets, but full OOXML schema and consumer-repair
+  invariants still need broader gates;
 - current feature matrices and comparison measurements drift behind the code.
 
 ### Resolved on the rearchitecture branch
@@ -322,8 +335,17 @@ mechanical cleanup that introduced this document.
   omit that child.
 - The first typed loss-accounting layer is live: raster, compatibility,
   approximation, drop, and suppressed-diagnostic evidence is attached to the
-  in-memory `DocxDocument`. Native enrollment and persisted manifests are not
+  `DocxDocument` and its versioned embedded manifest. Native enrollment is not
   yet complete.
+- `ExportSnapshot` now gives semantic nodes and converged paged geometry one
+  owned pre-lowering sidecar. Source-backed IDs exclude target-specific
+  locations, repeated semantic occurrences aggregate, and matching paged
+  positions/page sizes survive into the final document and manifest.
+- Tables and grids now cross an explicit `TablePlan` before cell lowering.
+  Fixed-track/solid regions enroll as native; flexible/relative track sizing,
+  unsupported cell paints, border nuance, and repeating footers enroll as one
+  attributable visual approximation. A missing resolved grid selects atomic
+  raster fallback and can only drop after that fallback also produces nothing.
 - DOCX field ownership is explicit. Reference intent now survives the library's
   `RefElem -> DirectLinkElem -> LinkMarker/style` realization path; the old
   mapper-only policy was bypassed in final output. Normal references remain
@@ -346,11 +368,16 @@ mechanical cleanup that introduced this document.
   flow), while stack spacing becomes vertical flow blocks or horizontal table
   tracks. Fractional stack gaps remain editable, are represented as flexible
   tracks, and carry a structured visual-approximation decision.
+- Shared OPC finalization rejects duplicate/reserved/traversing part names,
+  conflicting default or override content types, missing relationship owners,
+  and missing/invalid internal targets. Relationship mode participates in rId
+  deduplication, parts/overrides are canonicalized, ZIP failures propagate as
+  typed errors, and DOCX/PPTX no longer panic during package finalization.
 
 ## Current implementation evidence (2026-07-10)
 
-- The focused Graphify corpus was refreshed from the live worktree: 2,954 code
-  nodes, 8,150 extracted edges, and 122 communities. `FidelityReport` is linked
+- The focused Graphify corpus was refreshed from the live worktree: 3,048 code
+  nodes, 8,433 extracted edges, and 121 communities. `FidelityReport` is linked
   to `DocxCtx`, `LoweredDocx`, `DocxDocument`, and the public report accessor;
   equation preflight reaches the explicit raster-fallback mapper. The refreshed
   graph also connects `DirectLinkKind` through `LinkElem` to the DOCX paragraph
@@ -359,12 +386,29 @@ mechanical cleanup that introduced this document.
   `resolve_column_widths` through `DocxCtx`, making the section-to-table
   authority visible instead of implicit. `push_vertical_spacing` reaches the
   encoder through the typed DOM, and `record_flexible_spacing` reaches
-  `FidelityReport` through `DocxCtx`.
+  `FidelityReport` through `DocxCtx`. A focused placed-content query connects
+  `preflight_place` and `PlacePlan` to `place`, table lowering, anchored drawing
+  serialization, and the structured report path. A furniture query connects
+  `build_furniture_refs` through `preflight_furniture` and `FurniturePlan` to
+  `lower_furniture`, native part emission, and `FidelityReport` recording. The
+  OPC query connects both public exporters through `Package::add_relationships`
+  and `Package::finish` to target validation, canonical ordering,
+  `PackageError`, and detached export diagnostics. The snapshot query connects
+  `PagedIntrospector` and `matched_positions` through `ExportSnapshot` and
+  `DocxDocument` to the public APIs, embedded manifest builder, typed package
+  relationship, and final OPC validation. The table query connects
+  `TableElem`/`GridElem` through `preflight_table`, `TablePlan`, and
+  `execute_table_plan` to native cell lowering, whole-region fallback,
+  representative gradient color, structured decisions, and the manifest.
 - `cargo clippy -p typst-docx --all-targets -- -D warnings` passes.
-- The complete structural DOCX test target passes 147 tests. New gates cover
+- The complete structural DOCX test target passes 158 tests. New gates cover
   raster/compatibility/approximation classification, a retained suppressed
-  layout-callback error, and nested unsupported math choosing one whole-region
-  fallback.
+  layout-callback error, nested unsupported math choosing one whole-region
+  fallback, explicit placed-content planning, native anchored tables, and
+  complete DOCX byte determinism, stable semantic IDs/paged positions, and the
+  embedded manifest relationship/content. Seven shared OPC unit gates cover duplicate
+  and invalid parts, content-type conflicts, relative target resolution,
+  missing targets, relationship-mode identity, and insertion-order independence.
 - The atomic-math fixture was compiled through the real CLI to PDF and DOCX,
   then the DOCX was rendered through LibreOffice Writer 26.2.4.2. Both outputs
   remained one 160 mm × 90 mm page; the boxed fraction and surrounding equation
@@ -388,6 +432,38 @@ mechanical cleanup that introduced this document.
   The same fixture exposed a missing 10 pt table-to-table gap; after `FlowSpace`
   replaced the paragraph-dependent accumulator, Word and Writer both rendered
   the explicit gap while preserving the editable tables.
+- Placed content now crosses an explicit source-structural `PlacePlan` boundary
+  before lowering. Shape-only regions select a native grouped drawing, plain
+  text selects an anchored text box, one simple text-only table/grid selects an
+  anchored text box containing native `w:tbl`, and richer regions lower exactly
+  once before choosing an anchored drawing or reported flow/raster fallback.
+  A real placed-table fixture opened in Microsoft Word without repair. Word's
+  accessibility tree exposed `Placed Text Box 1`, a 2-row/2-column table, and
+  each individual cell; selecting and replacing one cell value succeeded while
+  the table remained positioned. LibreOffice Writer rendered the same package
+  on the expected 160 mm x 120 mm page with native searchable table text and
+  geometry closely matching the Typst PDF reference.
+- Page furniture now crosses an explicit `FurniturePlan` boundary. Static,
+  first-page, and parity-stable content produces exact native references;
+  contextual content that changes between pages 3/5 or 2/4 selects a sampled
+  approximation. That branch records `PageFurnitureSampled` with visual and
+  dynamic-behavior losses, affected searchable-text characters, and emits a
+  source-located CLI warning. A five-page real CLI fixture produced one native
+  header part containing the page-1 value and the expected warning instead of
+  silently implying exact export.
+- The stable-snapshot/manifest package was rebuilt through the real CLI from
+  the placed-table fixture. Microsoft Word opened it without repair and still
+  exposed the anchored textbox, 2-row/2-column native table, and individual
+  cells. LibreOffice Writer rendered one 453.543 x 340.157 pt page. Package
+  inspection found the deterministic snapshot ID, page geometry, and native
+  `PositionedTextBox` decision in `customXml/typstFidelity.xml`.
+- A table-planning fixture compared one PDF gradient/fractional table with the
+  native DOCX result. Word opened without repair and exposed an editable
+  3-row/2-column table and every cell; Writer rendered one page with matching
+  normalized table width and 1:2 columns. The unsupported gradient is now a
+  representative purple solid (`854E9D`) rather than a missing fill, and the
+  manifest reports `Approximate/TableGeometryApproximation`, 96 affected text
+  characters, and one semantic node.
 
 ## Validation model
 
@@ -435,14 +511,26 @@ backgrounds, footnotes, citations, and mixed page sizes.
    normalization in focused modules. No intended output change.
 2. **Loss accounting — in progress.** Typed report and central lossy paths are
    implemented; field ownership and non-equivalent numbering decisions are now
-   enrolled. Migrate remaining mapper-specific `Option`/empty fallbacks, native
-   regions, and CLI manifest output.
-3. **Stable semantic sidecar.** Carry resolved semantic regions and stable IDs
-   alongside paged frames.
-4. **Capability planning — first slice implemented.** Equations plan atomically;
-   extend the same whole-region decision boundary to tables, placed content,
-   furniture, fields, and consumer profiles.
-5. **Cross-consumer gates.** Make Microsoft Office plus LibreOffice render and
+   enrolled. Migrate remaining mapper-specific `Option`/empty fallbacks,
+   native/dynamic-field facts, and optional standalone CLI manifest output. The
+   versioned manifest is already embedded in every DOCX.
+3. **Stable semantic sidecar — first slice implemented.** `ExportSnapshot`
+   carries stable source-backed IDs, semantic occurrences, converged page sizes,
+   and matched paged positions. Enroll resolved counters, links, bibliography
+   payloads, fallback regions, and reuse the sidecar across PPTX/Pandoc.
+4. **Capability planning — equations, placed content, furniture, and table slices
+   implemented.** Equations plan atomically. Placed content preflights native
+   shape groups, plain text boxes, simple native tables, and a lower-once
+   fallback. Furniture preflights exact static/first/parity variants versus a
+   warned sampled approximation. Tables/grids preflight native fixed geometry,
+   reported editable approximations, and missing-grid atomic fallback. Extend
+   the same whole-region boundary to field groups and consumer profiles, and
+   replace approximate table tracks with measured snapshot geometry.
+5. **OPC invariants — first slice implemented.** Shared finalization validates
+   unique/legal parts, content-type consistency, typed relationship owners and
+   internal targets, deterministic ordering, and propagates ZIP failures.
+   Continue with schema/order validation and per-part referenced-ID checks.
+6. **Cross-consumer gates.** Make Microsoft Office plus LibreOffice render and
    interaction results part of release evidence.
 
 ## Primary references

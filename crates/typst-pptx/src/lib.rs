@@ -27,9 +27,10 @@ mod text;
 mod xml;
 
 use typst_layout::PagedDocument;
-use typst_library::diag::SourceResult;
+use typst_library::diag::{SourceResult, bail};
 use typst_library::foundations::{Label, Selector, Value};
 use typst_library::introspection::Introspector;
+use typst_syntax::Span;
 
 use crate::dom::SlideCtx;
 
@@ -64,7 +65,10 @@ pub fn pptx(document: &PagedDocument, options: &PptxOptions) -> SourceResult<Vec
             &extracted
         }
     };
-    Ok(package::write(document, &slides, &ctx, notes))
+    match package::write(document, &slides, &ctx, notes) {
+        Ok(bytes) => Ok(bytes),
+        Err(err) => bail!(Span::detached(), "failed to finalize PPTX package: {err}"),
+    }
 }
 
 /// Extract Touying/pdfpc speaker notes from `#metadata(..) <pdfpc-file>`.

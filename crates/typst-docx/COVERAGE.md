@@ -1028,7 +1028,7 @@ caption/reference text on one 170 mm x 120 mm page. A manual select-all/F9
 update followed by a real Word save kept the Typst-owned hyperlink and hidden
 counter intact while updating live field caches; Writer rendered that Word-saved
 round trip with the same visible text. Structural gates now cover all ownership
-branches; the DOCX target passes 147 tests and clippy with warnings denied.
+branches; the DOCX target passes 158 tests and clippy with warnings denied.
 
 ## 14. Scoped width ownership and physical grid gutters
 
@@ -1092,5 +1092,177 @@ default, a 12 pt horizontal-stack track, and a retained/reported `1fr` gap. The
 two-section fixture was rebuilt and reopened in Word and LibreOffice; the 10 pt
 gap is now visible in both consumers and all table content remains editable.
 
-The structural DOCX target passes 147 tests; the crate library test and clippy
+The structural DOCX target passes 158 tests; the crate library test and clippy
 with warnings denied also pass.
+
+## 16. Whole-region preflight for placed text and tables
+
+`#place` used to discover its representation while lowering. Separate branches
+would independently ask whether the body was shape-only, whether it happened to
+fit a text box, or whether the first lowered child was a drawing. That made the
+policy implicit and made it easy for a future mapper change to admit a Word-
+hostile child into `wps:txbx` or to consume only part of a rich placed body.
+
+`mappers::image::PlacePlan` is now selected before any placed-body lowering:
+
+- `NativeShapeGroup` handles source-structural shape-only compositions;
+- `NativeTextBox(TextBoxWrap::None)` handles plain extractable text;
+- `NativeTextBox(TextBoxWrap::Square)` handles exactly one root text-only
+  table/grid, rejecting nested tables, notes, math, drawings, lists, figures,
+  and other consumer-sensitive children;
+- `LowerOnce` lowers every other body exactly once, then accepts only a sole
+  native drawing as an anchor. Rich editable blocks flow in document order with
+  `PositionedContentFlowFallback`; empty/unrecoverable visual regions retain the
+  existing whole-region raster path.
+
+This is intentionally a narrow capability admission, not a claim that every
+`w:tbl` is safe in every drawing container. A table containing OMML remains on
+the explicit fallback path until that combination has its own Word and Writer
+evidence. The structural tests assert native `w:tbl` inside `wps:txbx`, absence
+of `a:blip`, a native `PositionedTextBox` decision, and a reported fallback for
+the table-plus-math case.
+
+The real CLI fixture was compared with its Typst PDF and rendered through
+LibreOffice Writer. Microsoft Word opened it without repair, exposed the
+anchored object as `Placed Text Box 1` containing a 2-row/2-column table and
+individually selectable cells, and accepted an in-cell text replacement while
+retaining the native table. This validates the authoring path in addition to
+the package structure. The structural DOCX target passes 158 tests; the crate
+library test and clippy with warnings denied also pass.
+
+## 17. Explicit preflight for page-varying furniture
+
+Word sections can reference at most three header/footer variants: first page,
+even pages, and the default odd-page value. Typst contextual furniture can vary
+on every page. The earlier implementation sampled pages 1 through 5 to avoid
+misclassifying literal page numbers as a stable odd/even pattern, but when the
+samples proved unstable it silently repeated page 1.
+
+`document::FurniturePlan` now owns that whole-region decision before any part
+is serialized:
+
+- `Exact` carries native default, first/default, even/default, or
+  first/even/default references after proving the sampled signatures stable;
+- `Sampled` carries the page-1 region only when pages 2/4 or 3/5 disagree.
+
+The sampled branch stays native and editable, but records
+`Approximate/PageFurnitureSampled` with visual and dynamic-behavior losses and
+the character count of the emitted region. It also emits a source-located CLI
+warning explaining that the page-1 value repeats. This closes the silent-loss
+failure mode without pretending the remaining visual limitation is solved.
+
+The structural gates prove that exact first-page and odd/even furniture still
+produce the correct `w:titlePg` and reference types, while a five-page literal
+page-number header produces one default part and one structured approximation.
+A real CLI fixture emitted the warning at the contextual header span; package
+inspection confirmed one native `header1.xml` containing the page-1 value.
+
+## 18. Validated, deterministic OPC finalization
+
+The shared `typst-ooxml-core::opc::Package` previously accumulated unchecked
+vectors and called `expect` for `start_file`, `write_all`, and ZIP finalization.
+A duplicate part, conflicting extension content type, or I/O failure therefore
+produced either a corrupt package or a process panic. Relationship XML was
+serialized early, leaving finalization unable to prove its targets existed.
+
+Finalization now returns `Result<Vec<u8>, PackageError>` and validates before
+writing any bytes:
+
+- part names are unique, relative, non-reserved, and contain no empty,
+  traversal, or backslash component;
+- default and override content types cannot conflict;
+- part-owned relationships remain typed through `Package::add_relationships`;
+- every relationship owner exists and every internal target normalizes relative
+  to that owner to an existing part; external targets are intentionally exempt;
+- relationship mode participates in deduplication, so identical internal and
+  external URIs cannot accidentally share one rId;
+- content-type overrides and package parts are sorted canonically before ZIP
+  emission, while timestamps and permissions remain fixed.
+
+DOCX and PPTX translate `PackageError` into detached export diagnostics instead
+of panicking. Seven shared OPC unit tests cover the invariant failures and
+insertion-order independence. The complete DOCX package is byte-identical over
+repeated exports, all 158 DOCX structural tests and all 41 PPTX structural tests
+pass, and clippy is clean with warnings denied across the three Office crates.
+
+## 19. Stable export snapshot and embedded fidelity manifest
+
+Representation decisions previously used a logical ID hashed from source span,
+element name, and Typst `Location`. Locations are realization-specific, so the
+same source node could receive different IDs in the paged and DOCX universes—the
+exact reconciliation failure the architecture is meant to remove.
+
+`ExportSource` now uses source span plus element identity for source-backed
+nodes, retaining `Location` as evidence rather than identity. Detached nodes
+still include location to avoid collapsing unrelated generated content.
+Before lowering, `ExportSnapshot` owns:
+
+- top-level semantic lowering regions and nested located semantic nodes;
+- aggregated semantic occurrence counts;
+- every paged element with matching source span/element identity, recorded as
+  page plus resolved x/y points;
+- all converged page sizes and a deterministic snapshot ID.
+
+No arena-backed `Content` or `StyleChain` escapes realization. Two independent
+DOCX compilations of a two-page heading fixture produce identical snapshot and
+node IDs, with each heading associated to its correct converged page.
+
+The report is no longer process-local. Every DOCX contains the versioned
+`customXml/typstFidelity.xml` part and a typed relationship from
+`word/document.xml`. The manifest includes snapshot/pages/nodes/positions,
+representation counts and decisions, every independent loss dimension,
+occurrence and affected-text counts, plus retained suppressed-diagnostic stage,
+kind, count, and message. `DocxDocument::fidelity_manifest_xml()` exposes the
+same artifact to external tooling. The schema marks enrollment as `partial` so
+consumers cannot mistake the current lossy-path coverage for complete native,
+font, field, or compatibility accounting.
+
+The real CLI rebuilt the placed-table fixture with the manifest. Microsoft Word
+opened the package without repair and retained the editable anchored textbox,
+2-row/2-column table, and individual cell accessibility. LibreOffice Writer
+rendered the package as one 453.543 x 340.157 pt page. The custom relationship
+and manifest therefore survive both primary consumers without perturbing the
+native authoring surface.
+
+## 20. Whole-region table/grid preflight and representative cell paint
+
+The table mapper previously unwrapped `TableElem.grid`, silently returned no
+blocks when `GridElem.grid` was absent, and discovered visual limitations only
+while encoding cells. Auto/fractional/relative tracks were distributed against
+the scoped flowing width without recording that this was not Typst's measured
+paged geometry. Gradient/tiling fills returned `None`, so a visually important
+cell could silently become unfilled.
+
+`mappers::table::TablePlan` now selects before cell lowering:
+
+- `Native` for a resolved, non-empty grid with fixed absolute tracks and
+  representable solid cell/border paint;
+- `Approximate` for auto/fractional/relative/em tracks, relative row geometry,
+  gradients/tiling/transparency, unsupported stroke dash/cap/join/miter nuance,
+  or repeatable footers;
+- `Empty` for a source region with no visual cells;
+- `Raster` when no resolved grid exists. Whole-region fallback runs before a
+  `Drop/TableResolutionUnavailable` decision can be emitted.
+
+Native and approximate paths remain real `w:tbl` structures. The report records
+`NativeTable` or `TableGeometryApproximation` against the stable source ID, with
+affected searchable characters and semantic-node count. `ExportDecision` now
+tracks `affected_semantic_nodes`; repeated source realizations aggregate it just
+like occurrence and text counts, and the embedded manifest persists it.
+
+Word cell shading cannot carry gradients or alpha. Instead of deleting the
+fill, the mapper converts every stop into sRGB, composites transparency over
+Word's default white cell, and averages the stop colors into one representative
+solid. Non-RGB internal color spaces are converted before byte extraction—an
+early real-fixture pass caught the previous component-space mistake, which had
+turned a red/blue gradient into dark red `8E1600`. The corrected representative
+is purple `854E9D`.
+
+The PDF/DOCX table kernel uses a 1:2 fractional table with a red-to-blue heading
+gradient. Word opened it without repair and exposed a native editable
+3-row/2-column table plus individual cells. LibreOffice Writer rendered one page
+with the same normalized table width and 1:2 column geometry. The Typst PDF keeps
+the full gradient; Word and Writer show the representative purple tone, while
+the manifest records `Approximate/TableGeometryApproximation`, 96 affected text
+characters, and one semantic node. The structural gate separately proves a
+fixed-track solid table enrolls as `Native/NativeTable`.

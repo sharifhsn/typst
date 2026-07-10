@@ -1,10 +1,11 @@
 //! Serializes the typed DOCX IR into an OPC zip package.
 
 use ecow::EcoString;
-use typst_library::diag::SourceResult;
+use typst_library::diag::{SourceResult, bail};
 use typst_library::foundations::Smart;
 use typst_library::model::DocumentInfo;
 use typst_ooxml_core::{dml, ns};
+use typst_syntax::Span;
 
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, DocxDocument,
@@ -140,7 +141,7 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     // A footnote body that holds an image / external link references it by r:id;
     // that id resolves against footnotes.xml's OWN rels part, not the document's.
     // Without this, Word refuses to open the file.
-    write_part_rels(&mut package, "word/footnotes.xml", &document.footnote_rels);
+    write_part_rels(&mut package, "word/footnotes.xml", &document.footnote_rels)?;
     package.add_xml("word/endnotes.xml", CT_ENDNOTES, build_endnotes(pretty));
     doc_rels.add(REL_ENDNOTES, "endnotes.xml", RelMode::Internal);
 
@@ -155,12 +156,12 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     for (i, part) in document.header_parts.iter().enumerate() {
         let xml = build_hdrftr(part, 0x1000_0000 + i as u32 * 0x0010_0000, pretty);
         package.add_xml(&format!("word/{}", part.part_name), CT_HEADER, xml);
-        write_part_rels(&mut package, &format!("word/{}", part.part_name), &part.rels);
+        write_part_rels(&mut package, &format!("word/{}", part.part_name), &part.rels)?;
     }
     for (i, part) in document.footer_parts.iter().enumerate() {
         let xml = build_hdrftr(part, 0x4000_0000 + i as u32 * 0x0010_0000, pretty);
         package.add_xml(&format!("word/{}", part.part_name), CT_FOOTER, xml);
-        write_part_rels(&mut package, &format!("word/{}", part.part_name), &part.rels);
+        write_part_rels(&mut package, &format!("word/{}", part.part_name), &part.rels)?;
     }
 
     // -- media parts --
@@ -215,20 +216,31 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
         );
         let mut item_rels = Rels::new();
         item_rels.add(ns::rel::CUSTOM_XML_PROPS, "itemProps1.xml", RelMode::Internal);
-        write_part_rels(&mut package, "customXml/item1.xml", &item_rels);
+        write_part_rels(&mut package, "customXml/item1.xml", &item_rels)?;
         doc_rels.add(ns::rel::CUSTOM_XML, "../customXml/item1.xml", RelMode::Internal);
     }
+
+    // -- customXml/typstFidelity.xml ---------------------------------------
+    // Versioned, machine-readable export evidence. This stays inside the
+    // package so CLI output, corpus artifacts, and consumer round trips retain
+    // the exact snapshot/decision record that produced the document.
+    package.add_xml(
+        crate::manifest::PART_NAME,
+        "application/xml",
+        document.fidelity_manifest_xml(),
+    );
+    doc_rels.add(
+        crate::manifest::REL_TYPE,
+        "../customXml/typstFidelity.xml",
+        RelMode::Internal,
+    );
 
     // -- word/document.xml --
     let document_xml = build_document(document, pretty);
     package.add_xml("word/document.xml", CT_DOCUMENT, document_xml);
 
     // -- word/_rels/document.xml.rels --
-    package.add_xml(
-        "word/_rels/document.xml.rels",
-        "application/vnd.openxmlformats-package.relationships+xml",
-        doc_rels.to_xml(),
-    );
+    write_part_rels(&mut package, "word/document.xml", &doc_rels)?;
 
     // -- docProps/core.xml + app.xml --
     package.add_xml("docProps/core.xml", CT_CORE, build_core(&document.info, pretty));
@@ -239,7 +251,10 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     root_rels.add(REL_CORE_PROPS, "docProps/core.xml", RelMode::Internal);
     root_rels.add(REL_EXTENDED_PROPS, "docProps/app.xml", RelMode::Internal);
 
-    Ok(package.finish(&root_rels))
+    match package.finish(&root_rels) {
+        Ok(bytes) => Ok(bytes),
+        Err(err) => bail!(Span::detached(), "failed to finalize DOCX package: {err}"),
+    }
 }
 
 /// Clones the conversion-time `doc_rels` so `encode` can append the static
@@ -1257,18 +1272,15 @@ fn write_sectpr(w: &mut XmlWriter, sect: &SectPr) {
 /// naming convention, so no explicit reference is needed. An `r:id` in the
 /// part's own content resolves against THIS rels part, not
 /// `word/_rels/document.xml.rels`.
-fn write_part_rels(package: &mut Package, part_path: &str, rels: &Rels) {
-    if rels.is_empty() {
-        return;
+fn write_part_rels(
+    package: &mut Package,
+    part_path: &str,
+    rels: &Rels,
+) -> SourceResult<()> {
+    match package.add_relationships(part_path, rels) {
+        Ok(()) => Ok(()),
+        Err(err) => bail!(Span::detached(), "failed to register relationships: {err}"),
     }
-    let (dir, file) = part_path
-        .rsplit_once('/')
-        .expect("part_path must include a directory");
-    package.add_xml(
-        &format!("{dir}/_rels/{file}.rels"),
-        "application/vnd.openxmlformats-package.relationships+xml",
-        rels.to_xml(),
-    );
 }
 
 /// Serializes a header (`w:hdr`) or footer (`w:ftr`) part. Never emits an empty

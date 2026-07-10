@@ -29,6 +29,11 @@ the modern compatibility block (so Word opens it natively, not in "Compatibility
 Mode"), and wraps newer constructs such as text boxes in `mc:AlternateContent`
 with a legacy fallback for older consumers.
 
+Shared OPC finalization validates unique and legal part names, content-type
+consistency, relationship owners, and every internal relationship target before
+writing. Parts and overrides are canonicalized for byte-deterministic output,
+and ZIP failures propagate as export diagnostics instead of panicking.
+
 ## How content is mapped
 
 Every element falls into one of four user-visible tiers:
@@ -81,9 +86,10 @@ stays consistent.
 
 | Feature | | Notes |
 |---|:--:|---|
-| Tables | ✅ | `w:tbl` — borders, alignment, cell shading, merged cells, row heights; flexible tracks use the active section width and nested tables inherit their cell width |
+| Tables | ✅ | `w:tbl` — borders, alignment, cell shading, merged cells, row heights; fixed tracks are native, while auto/fractional/relative tracks stay editable against the active scoped width and are explicitly reported as approximate |
 | Layout grids (`#grid`) | ✅ | also `w:tbl` (content stays editable); column and row gutters become physical spacer tracks |
 | `stroke: none` cells | ✅ | explicit `w:val="nil"` |
+| Gradient/translucent cell fills and non-solid border nuance | ⚠️ | native editable cells with a representative composited solid tone / solid border; the visual difference is recorded before lowering |
 
 ### Math (OMML)
 
@@ -133,7 +139,9 @@ the user edits the document.
 | `#curve` (straight + cubic-Bézier segments) | ✅ | native `a:custGeom` — `a:lnTo`/`a:cubicBezTo`/`a:close`, 1:1 with Typst's own Move/Line/Cubic/Close vocabulary |
 | Stroke dash pattern + line cap (on the above) | ✅ | `a:prstDash` (approximated to the nearest OOXML preset) + `a:ln cap` |
 | `#place(…)` around one representable drawing | ✅ | `wp:anchor` float |
-| `#place(…)` around flowing text or mixed content | ⚠️ | can flow in document order and lose exact placement; a planned whole-region fallback should make this explicit |
+| `#place(…)` around plain text | ✅ | editable/searchable `wps:txbx` in a `wp:anchor`, with source alignment and offsets |
+| `#place(…)` around one simple text-only table/grid | ✅ | native editable `w:tbl` inside the anchored text box; validated in Word and Writer |
+| `#place(…)` around richer mixed content | ⚠️ | lowered once as a whole region; native single drawings stay anchored, while unsupported mixtures flow in document order with an explicit `PositionedContentFlowFallback` report instead of silently losing content |
 | Tiling / pattern fills | ✅ | DrawingML tile fill when the source can be represented |
 | Radial / conic gradient fills | 🖼️ | OOXML's radial model cannot represent Typst's free center/radius exactly |
 | Selected `#move`, rotation, and uniform scale on representable shapes/text | ✅ | transform is baked into native geometry or a Word text-position primitive |
@@ -147,7 +155,7 @@ the user edits the document.
 | Page size, orientation, margins | ✅ | `w:sectPr` |
 | Columns | ✅ | `w:cols` |
 | `#colbreak()` | ✅ | `<w:br w:type="column"/>` |
-| Headers / footers | ✅ | header/footer parts |
+| Headers / footers | ✅ | native parts with exact static, first-page, and parity-stable variants; contextual values that vary beyond Word's first/even/default model repeat a page-1 sample with an explicit warning and fidelity decision |
 | Page numbering | ✅ | `PAGE` field + `pgNumType` |
 | `set page(background: image)` | ✅ | full-page `behindDoc` header image |
 | `set page(fill: solid-color)` | ✅ | document-level `w:background` (Word's "Page Color") — a gradient/tiling fill is not (yet) representable this way and stays unset |
@@ -191,9 +199,12 @@ The target is also selected automatically from a `.docx` output extension.
 `DocxDocument::fidelity_report()` exposes structured representation decisions
 (`NativeWithFallback`, `Approximate`, `Raster`, and `Drop` as they are enrolled),
 independent loss dimensions, affected searchable-text counts, stable source
-identities, and diagnostics suppressed by best-effort fallback conversion. The
-current phase records lossy and compatibility decisions; complete native-region
-enrollment and a persisted CLI manifest remain migration work.
+identities, and diagnostics suppressed by best-effort fallback conversion.
+`DocxDocument::export_snapshot()` exposes owned semantic nodes matched to the
+converged paged oracle, and `fidelity_manifest_xml()` serializes both records.
+Every package persists that versioned manifest at
+`customXml/typstFidelity.xml`. Complete native-region, field, font, and consumer
+enrollment plus an optional standalone CLI sidecar remain migration work.
 
 For the cross-export pipeline, fidelity model, verified failure modes, and
 proposed preflight architecture, see
