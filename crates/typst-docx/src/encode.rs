@@ -701,13 +701,7 @@ fn write_inline_envelope(w: &mut XmlWriter, d: &Drawing) {
         .attr("r", "0")
         .attr("b", "0")
         .empty();
-    w.open("wp:docPr")
-        .attr("id", &d.docpr_id.to_string())
-        .attr("name", &d.name);
-    if let Some(alt) = &d.alt {
-        w.attr("descr", alt);
-    }
-    w.empty();
+    write_drawing_doc_properties(w, d);
     w.open("wp:cNvGraphicFramePr").start_children();
     w.open("a:graphicFrameLocks")
         .attr("xmlns:a", ns::A)
@@ -756,13 +750,7 @@ fn write_anchor_envelope(w: &mut XmlWriter, d: &Drawing, a: &Anchor) {
         }
         AnchorWrap::None => w.leaf("wp:wrapNone"),
     }
-    w.open("wp:docPr")
-        .attr("id", &d.docpr_id.to_string())
-        .attr("name", &d.name);
-    if let Some(alt) = &d.alt {
-        w.attr("descr", alt);
-    }
-    w.empty();
+    write_drawing_doc_properties(w, d);
     w.open("wp:cNvGraphicFramePr").start_children();
     w.open("a:graphicFrameLocks")
         .attr("xmlns:a", ns::A)
@@ -771,6 +759,34 @@ fn write_anchor_envelope(w: &mut XmlWriter, d: &Drawing, a: &Anchor) {
     w.close(); // wp:cNvGraphicFramePr
     write_pic_payload(w, d);
     w.close(); // wp:anchor
+}
+
+/// Emits the drawing's document-level non-visual properties and accessibility
+/// intent. Office's decorative flag is an extension child of `wp:docPr`, not an
+/// attribute on the picture payload.
+fn write_drawing_doc_properties(w: &mut XmlWriter, d: &Drawing) {
+    w.open("wp:docPr")
+        .attr("id", &d.docpr_id.to_string())
+        .attr("name", &d.name);
+    if let Some(alt) = &d.alt {
+        w.attr("descr", alt);
+    }
+    if !d.decorative {
+        w.empty();
+        return;
+    }
+    w.start_children();
+    w.open("a:extLst").attr("xmlns:a", ns::A).start_children();
+    w.open("a:ext")
+        .attr("uri", "{C183D7F6-B498-43B3-948B-1728B52AA6E4}")
+        .start_children();
+    w.open("adec:decorative")
+        .attr("xmlns:adec", ns::ADEC)
+        .attr("val", "1")
+        .empty();
+    w.close(); // a:ext
+    w.close(); // a:extLst
+    w.close(); // wp:docPr
 }
 
 /// Emits one `<wp:positionH>` / `<wp:positionV>` carrying exactly one of

@@ -417,6 +417,11 @@ mechanical cleanup that introduced this document.
   and a `missingFonts` count. Its exact payload is duplicated into
   `docProps/custom.xml`; a Writer 26.2.4.2 open/save removed the canonical
   `customXml` part but preserved this property byte-for-byte after XML decoding.
+- Finalized drawing facts classify each `wp:docPr` as described, carrying native
+  text, explicitly decorative, or unlabeled. Bodyless vector art and page
+  backgrounds emit Office 2019's `adec:decorative`; page-foreground text becomes
+  alt text instead of being discarded. A final-IR invariant forbids decorative
+  drawings from also carrying alternative or native text.
 
 ## Current implementation evidence (2026-07-10)
 
@@ -611,6 +616,7 @@ backgrounds, footnotes, citations, and mixed page sizes.
 - [Microsoft: Structure of a PresentationML document](https://learn.microsoft.com/en-us/office/open-xml/presentation/structure-of-a-presentationml-document)
 - [Microsoft: Introduction to Open XML markup compatibility](https://learn.microsoft.com/en-us/office/open-xml/general/introduction-to-markup-compatibility)
 - [Microsoft: Shape AutoFit](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.shapeautofit)
+- [Microsoft: Office drawing decorative semantics](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-odrawxml/1c5cfa5e-0042-48e3-ba41-2cc88fcc0266)
 - [Microsoft: Word field updates](https://learn.microsoft.com/en-us/office/vba/api/word.fields.update)
 - [LibreOffice: Using Microsoft Office and LibreOffice](https://help.libreoffice.org/latest/en-US/text/shared/guide/ms_user.html)
 - [LibreOffice issue 76022: DOCX floating-object/table wrapping](https://bugs.documentfoundation.org/show_bug.cgi?id=76022)

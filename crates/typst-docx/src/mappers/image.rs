@@ -107,6 +107,7 @@ pub fn image(
                 w_emu: crate::props::abs_to_emu(size.x),
                 h_emu: crate::props::abs_to_emu(size.y),
                 alt,
+                decorative: false,
                 docpr_id,
                 name,
                 anchor: None,
@@ -153,6 +154,7 @@ pub fn image(
         w_emu,
         h_emu,
         alt,
+        decorative: false,
         docpr_id,
         name,
         anchor: None,
@@ -989,6 +991,7 @@ fn fallback_runs(
         h_emu: crate::props::abs_to_emu(size.y),
         alt: Some(text.replace('\n', " ").into())
             .filter(|s: &EcoString| !s.trim().is_empty()),
+        decorative: false,
         docpr_id,
         name,
         anchor: None,

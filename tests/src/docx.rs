@@ -1039,6 +1039,31 @@ fn svg_image_embeds_native_svg_with_png_fallback() {
     ));
     assert!(doc.contains("descr=\"Brand mark\""));
 
+    let described = compile_docx_with_world(&TestWorld::with_files(
+        r#"#image("logo.svg", width: 40pt, alt: "Brand mark")"#,
+        &[("logo.svg", SVG)],
+    ));
+    let fact = described
+        .fidelity_report()
+        .drawings()
+        .iter()
+        .find(|fact| fact.alternative_text.as_deref() == Some("Brand mark"))
+        .expect("described SVG drawing fact");
+    assert!(!fact.decorative && !fact.unlabeled());
+
+    let unlabeled = compile_docx_with_world(&TestWorld::with_files(
+        r#"#image("logo.svg", width: 40pt)"#,
+        &[("logo.svg", SVG)],
+    ));
+    assert!(
+        unlabeled
+            .fidelity_report()
+            .drawings()
+            .iter()
+            .any(|fact| fact.unlabeled()),
+        "a non-decorative image with no alt text is explicitly inventoried"
+    );
+
     let png_rel = doc
         .split("<a:blip r:embed=\"")
         .nth(1)
@@ -2398,6 +2423,7 @@ fn page_background_becomes_a_behind_text_header_image() {
     assert!(header.contains("behindDoc=\"1\""), "background sits behind the text");
     assert!(header.contains("relativeFrom=\"page\""), "positioned against the page");
     assert!(header.contains("<a:blip"), "the background is an embedded image");
+    assert!(header.contains("<adec:decorative"), "background is marked decorative");
     // The body text is unaffected.
     assert!(p["word/document.xml"].contains("Body text"));
     assert_all_wellformed(&p);
@@ -2420,6 +2446,11 @@ fn page_foreground_becomes_a_front_of_text_header_image() {
     assert!(header.contains("behindDoc=\"0\""), "foreground sits in front of text");
     assert!(header.contains("relativeFrom=\"page\""), "positioned against the page");
     assert!(header.contains("<a:blip"), "the foreground is an embedded image");
+    assert!(header.contains("descr=\"DRAFT\""), "recovered foreground text is alt text");
+    assert!(
+        !header.contains("<adec:decorative"),
+        "meaningful foreground is not decorative"
+    );
     assert!(p["word/document.xml"].contains("Body text"), "body text remains in flow");
     assert_all_wellformed(&p);
 }
@@ -2833,6 +2864,22 @@ fn decorative_shape_becomes_a_vector_drawing() {
     assert!(doc.contains("prst=\"rect\""), "with rectangle preset geometry");
     assert!(!doc.contains("a:blip"), "and is not an embedded raster image");
     assert!(doc.contains("a:solidFill"), "the solid fill is carried");
+    assert!(doc.contains("<adec:decorative"), "bodyless art is explicitly decorative");
+    let compiled = compile_docx(
+        "#rect(width: 2cm, height: 1cm, fill: blue, stroke: 1pt + red)",
+        &[],
+    );
+    let fact = compiled
+        .fidelity_report()
+        .drawings()
+        .iter()
+        .find(|fact| fact.decorative)
+        .expect("decorative drawing fact");
+    assert!(!fact.unlabeled());
+    let manifest = compiled.fidelity_manifest_xml();
+    assert!(manifest.contains("drawings=\"1\""));
+    assert!(manifest.contains("unlabeledDrawings=\"0\""));
+    assert!(manifest.contains("decorative=\"true\""));
     assert_all_wellformed(&p);
 }
 
@@ -2873,6 +2920,16 @@ fn rect_with_text_becomes_a_text_box() {
     assert!(doc.contains("wps:txbx"), "a rect with text is a text box");
     assert!(doc.contains("A boxed callout note"), "its text is real and editable");
     assert!(!p.keys().any(|k| k.starts_with("word/media/")), "and nothing is rasterized");
+    assert!(!doc.contains("<adec:decorative"), "text-bearing shape is not decorative");
+    let compiled =
+        compile_docx("#rect(fill: aqua, inset: 6pt)[A boxed callout note.]", &[]);
+    let fact = compiled
+        .fidelity_report()
+        .drawings()
+        .iter()
+        .find(|fact| fact.native_text)
+        .expect("native text-box drawing fact");
+    assert!(!fact.decorative && !fact.unlabeled());
     assert_all_wellformed(&p);
 }
 

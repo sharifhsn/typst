@@ -537,6 +537,14 @@ fn docx_document_impl(
         &footer_parts,
         &footnotes,
     );
+    record_drawing_inventory(
+        &mut fidelity_report,
+        export_snapshot.logical_id(),
+        &body,
+        &header_parts,
+        &footer_parts,
+        &footnotes,
+    );
 
     Ok(DocxDocument {
         info,
@@ -818,6 +826,109 @@ fn record_font(
     family: &str,
 ) {
     report.record_font(snapshot_id, family, book.contains_family(&family.to_lowercase()));
+}
+
+fn record_drawing_inventory(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    body: &[Block],
+    headers: &[HdrFtrPart],
+    footers: &[HdrFtrPart],
+    footnotes: &[Footnote],
+) {
+    record_block_drawings(report, snapshot_id, body);
+    for part in headers.iter().chain(footers) {
+        record_block_drawings(report, snapshot_id, &part.blocks);
+    }
+    for footnote in footnotes {
+        record_block_drawings(report, snapshot_id, &footnote.blocks);
+    }
+}
+
+fn record_block_drawings(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    blocks: &[Block],
+) {
+    for block in blocks {
+        match block {
+            Block::Para(para) => record_para_drawings(report, snapshot_id, para),
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        record_block_drawings(report, snapshot_id, &cell.blocks);
+                    }
+                }
+            }
+            Block::Toc(toc) => {
+                for entry in &toc.entries {
+                    record_para_drawings(report, snapshot_id, entry);
+                }
+                for run in &toc.fallback {
+                    record_run_drawings(report, snapshot_id, run);
+                }
+            }
+            Block::FlowSpace { .. } | Block::SectionBreak(_) | Block::Tag(_) => {}
+        }
+    }
+}
+
+fn record_para_drawings(report: &mut FidelityReport, snapshot_id: u128, para: &Para) {
+    for child in &para.content {
+        match child {
+            ParaChild::Run(run) => record_run_drawings(report, snapshot_id, run),
+            ParaChild::Hyperlink { runs, .. } => {
+                for run in runs {
+                    record_run_drawings(report, snapshot_id, run);
+                }
+            }
+            ParaChild::OmmlPara(_)
+            | ParaChild::BookmarkStart { .. }
+            | ParaChild::BookmarkEnd { .. }
+            | ParaChild::Tag(_) => {}
+        }
+    }
+}
+
+fn record_run_drawings(report: &mut FidelityReport, snapshot_id: u128, run: &Run) {
+    match run {
+        Run::Drawing(drawing) => {
+            report.record_drawing(
+                snapshot_id,
+                drawing.docpr_id,
+                &drawing.name,
+                drawing.alt.as_deref(),
+                drawing.decorative,
+                drawing.has_native_text(),
+            );
+            if let Some(text_box) =
+                drawing.shape.as_ref().and_then(|shape| shape.txbx.as_ref())
+            {
+                record_block_drawings(report, snapshot_id, &text_box.blocks);
+            }
+            if let Some(group) = &drawing.group {
+                for child in &group.children {
+                    if let Some(text_box) = &child.shape.txbx {
+                        record_block_drawings(report, snapshot_id, &text_box.blocks);
+                    }
+                }
+            }
+        }
+        Run::Field(field) => {
+            for result in &field.result {
+                record_run_drawings(report, snapshot_id, result);
+            }
+        }
+        Run::Text { .. }
+        | Run::Break
+        | Run::PageBreak
+        | Run::ColumnBreak
+        | Run::Tab
+        | Run::FillTab
+        | Run::FootnoteRef { .. }
+        | Run::FootnoteRefMark
+        | Run::OmmlInline(_) => {}
+    }
 }
 
 fn section_uses_even_furniture(sect: &SectPr) -> bool {
@@ -2669,7 +2780,7 @@ fn page_overlay_block(
     let page_h = Abs::pt(geom.page_h as f64 / 20.0);
     let result = ctx.rasterize_page_overlay(content, styles, content.span(), page_h)?;
     ctx.available_width = saved_w;
-    let Some((rel, _size, _text)) = result else {
+    let Some((rel, _size, text)) = result else {
         return Ok(None);
     };
 
@@ -2679,7 +2790,10 @@ fn page_overlay_block(
         svg_rel: None,
         w_emu: geom.page_w as i64 * EMU_PER_TWIP,
         h_emu: geom.page_h as i64 * EMU_PER_TWIP,
-        alt: None,
+        alt: (!behind)
+            .then(|| text.replace('\n', " ").into())
+            .filter(|text: &ecow::EcoString| !text.trim().is_empty()),
+        decorative: behind,
         docpr_id,
         name: ecow::eco_format!("{name} {docpr_id}"),
         anchor: Some(Anchor {

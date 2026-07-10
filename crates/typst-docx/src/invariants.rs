@@ -16,6 +16,7 @@ use crate::dom::{Block, DocxDocument, Para, ParaChild, Run};
 pub(crate) enum DocumentInvariantError {
     ZeroDrawingId,
     DuplicateDrawingId(u32),
+    DecorativeDrawingHasAccessibleContent(u32),
     DuplicateBookmarkId(u32),
     DuplicateBookmarkName(EcoString),
     OrphanBookmarkEnd(u32),
@@ -34,6 +35,10 @@ impl Display for DocumentInvariantError {
         match self {
             Self::ZeroDrawingId => write!(f, "drawing ID must be greater than zero"),
             Self::DuplicateDrawingId(id) => write!(f, "duplicate drawing ID `{id}`"),
+            Self::DecorativeDrawingHasAccessibleContent(id) => write!(
+                f,
+                "decorative drawing `{id}` also carries alternative or native text"
+            ),
             Self::DuplicateBookmarkId(id) => write!(f, "duplicate bookmark ID `{id}`"),
             Self::DuplicateBookmarkName(name) => {
                 write!(f, "duplicate bookmark name `{name}`")
@@ -187,6 +192,15 @@ impl State {
             }
             Run::Drawing(drawing) => {
                 self.register_drawing_id(drawing.docpr_id)?;
+                if drawing.decorative
+                    && (drawing.alt.is_some() || drawing.has_native_text())
+                {
+                    return Err(
+                        DocumentInvariantError::DecorativeDrawingHasAccessibleContent(
+                            drawing.docpr_id,
+                        ),
+                    );
+                }
                 if let Some(text_box) =
                     drawing.shape.as_ref().and_then(|shape| shape.txbx.as_ref())
                 {
@@ -245,6 +259,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dom::Drawing;
 
     #[test]
     fn duplicate_drawing_ids_are_rejected() {
@@ -261,5 +276,27 @@ mod tests {
         let mut state = State::default();
         state.bookmark_start_ids.insert(3);
         assert_eq!(state.finish(), Err(DocumentInvariantError::MissingBookmarkEnd(3)));
+    }
+
+    #[test]
+    fn decorative_drawing_cannot_also_have_alt_text() {
+        let mut state = State::default();
+        let run = Run::Drawing(Drawing {
+            rel: EcoString::new(),
+            svg_rel: None,
+            w_emu: 1,
+            h_emu: 1,
+            alt: Some("meaningful".into()),
+            decorative: true,
+            docpr_id: 9,
+            name: "Shape 9".into(),
+            anchor: None,
+            shape: None,
+            group: None,
+        });
+        assert_eq!(
+            state.visit_run(&run),
+            Err(DocumentInvariantError::DecorativeDrawingHasAccessibleContent(9))
+        );
     }
 }

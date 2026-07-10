@@ -143,6 +143,7 @@ the user edits the document.
 | **PNG / JPEG / GIF** images | ✅ | embedded **verbatim** (no re-encode) |
 | **SVG** images | ✅ | native SVG with a PNG compatibility fallback |
 | **PDF / WebP** images | 🖼️ | rasterized to PNG |
+| Drawing accessibility | ✅ | image `alt` becomes the Word description; text boxes expose native text; bodyless art and page backgrounds are explicitly decorative; unresolved non-decorative images are counted as unlabeled |
 | Rect, square, circle, ellipse, polygon (solid **or linear-gradient** fill) | ✅ | **native vector** `wps:wsp` DrawingML — solid → `a:solidFill`, linear gradient → `a:gradFill` |
 | Framed text boxes (`#box`/`#rect[text]`) | ✅ | editable `wps:txbx`, or flowing shaded paragraphs |
 | Horizontal rules (`#line`) | ✅ | paragraph bottom border |
@@ -221,8 +222,10 @@ finalized IR inventory records every dynamic field's instruction, update owner,
 visibility, and occurrence count, plus every referenced font, whether it was
 available on the export machine, and its current non-embedded status. The same
 font inventory drives `fontTable.xml`, including fonts used only by individual
-runs. Complete native-region and consumer-profile enrollment plus an optional
-standalone CLI sidecar remain migration work.
+runs. Drawing facts independently classify described, native-text,
+Office-decorative, and unlabeled objects. Complete native-region and
+consumer-profile enrollment plus an optional standalone CLI sidecar remain
+migration work.
 
 For the cross-export pipeline, fidelity model, verified failure modes, and
 proposed preflight architecture, see

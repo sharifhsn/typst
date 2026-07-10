@@ -25,6 +25,9 @@ pub fn build(document: &DocxDocument) -> String {
         .filter(|font| !font.available_at_export)
         .map(|font| font.occurrences)
         .sum();
+    let drawing_count = report.drawings().len();
+    let unlabeled_drawing_count =
+        report.drawings().iter().filter(|drawing| drawing.unlabeled()).count();
     let mut out = String::from(XML_DECL);
     let _ = write!(
         out,
@@ -33,7 +36,7 @@ pub fn build(document: &DocxDocument) -> String {
     );
     let _ = write!(
         out,
-        "<typst:counts native=\"{}\" nativeWithFallback=\"{}\" approximate=\"{}\" raster=\"{}\" drop=\"{}\" dynamicFields=\"{}\" referencedFonts=\"{}\" missingFonts=\"{}\" measuredTables=\"{}\"/>",
+        "<typst:counts native=\"{}\" nativeWithFallback=\"{}\" approximate=\"{}\" raster=\"{}\" drop=\"{}\" dynamicFields=\"{}\" referencedFonts=\"{}\" missingFonts=\"{}\" drawings=\"{}\" unlabeledDrawings=\"{}\" measuredTables=\"{}\"/>",
         counts.native,
         counts.native_with_fallback,
         counts.approximate,
@@ -42,6 +45,8 @@ pub fn build(document: &DocxDocument) -> String {
         dynamic_field_count,
         referenced_font_count,
         missing_font_count,
+        drawing_count,
+        unlabeled_drawing_count,
         snapshot.tables().len()
     );
 
@@ -143,7 +148,24 @@ pub fn build(document: &DocxDocument) -> String {
             font.occurrences
         );
     }
-    out.push_str("</typst:fonts><typst:suppressedDiagnostics>");
+    out.push_str("</typst:fonts><typst:drawings>");
+    for drawing in report.drawings() {
+        let _ = write!(
+            out,
+            "<typst:drawing id=\"{:032x}\" docPrId=\"{}\" name=\"{}\" decorative=\"{}\" nativeText=\"{}\" unlabeled=\"{}\"",
+            drawing.logical_id,
+            drawing.docpr_id,
+            escape_attr(&drawing.name),
+            drawing.decorative,
+            drawing.native_text,
+            drawing.unlabeled()
+        );
+        if let Some(alt) = &drawing.alternative_text {
+            let _ = write!(out, " alternativeText=\"{}\"", escape_attr(alt));
+        }
+        out.push_str("/>");
+    }
+    out.push_str("</typst:drawings><typst:suppressedDiagnostics>");
     for suppressed in report.suppressed_diagnostics() {
         let _ = write!(
             out,

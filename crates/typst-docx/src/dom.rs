@@ -542,6 +542,10 @@ pub struct Drawing {
     pub w_emu: i64,
     pub h_emu: i64,
     pub alt: Option<EcoString>,
+    /// Office 2019+ accessibility intent. Decorative drawings are deliberately
+    /// skipped by assistive technology and therefore must not also carry alt
+    /// text or native text-box content.
+    pub decorative: bool,
     pub docpr_id: u32,
     pub name: EcoString,
     /// `None` = inline (`<wp:inline>`); `Some` = floating (`<wp:anchor>`).
@@ -555,6 +559,15 @@ pub struct Drawing {
     /// one coordinate space), taking priority over `shape`/`rel`. `None` for
     /// every other drawing.
     pub group: Option<GroupSpec>,
+}
+
+impl Drawing {
+    pub(crate) fn has_native_text(&self) -> bool {
+        self.shape.as_ref().is_some_and(|shape| shape.txbx.is_some())
+            || self.group.as_ref().is_some_and(|group| {
+                group.children.iter().any(|child| child.shape.txbx.is_some())
+            })
+    }
 }
 
 /// Several native shapes sharing one local coordinate space (a `wpg:wgp`

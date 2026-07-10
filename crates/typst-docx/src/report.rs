@@ -314,6 +314,27 @@ pub struct FontFact {
     pub occurrences: usize,
 }
 
+/// Accessibility semantics for one finalized drawing.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct DrawingAccessibilityFact {
+    pub logical_id: u128,
+    pub docpr_id: u32,
+    pub name: EcoString,
+    pub alternative_text: Option<EcoString>,
+    /// Explicit Office decorative intent: assistive technology should skip it.
+    pub decorative: bool,
+    /// The drawing carries real editable text-box content.
+    pub native_text: bool,
+}
+
+impl DrawingAccessibilityFact {
+    /// True when a non-decorative drawing exposes neither a description nor
+    /// native text content.
+    pub fn unlabeled(&self) -> bool {
+        !self.decorative && self.alternative_text.is_none() && !self.native_text
+    }
+}
+
 /// Structured, queryable evidence about DOCX fidelity decisions.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct FidelityReport {
@@ -321,6 +342,7 @@ pub struct FidelityReport {
     suppressed: Vec<SuppressedDiagnostic>,
     dynamic_fields: Vec<DynamicFieldFact>,
     fonts: Vec<FontFact>,
+    drawings: Vec<DrawingAccessibilityFact>,
 }
 
 impl FidelityReport {
@@ -342,6 +364,11 @@ impl FidelityReport {
     /// Font families referenced by defaults, styles, and concrete runs.
     pub fn fonts(&self) -> &[FontFact] {
         &self.fonts
+    }
+
+    /// Finalized drawing accessibility facts in document traversal order.
+    pub fn drawings(&self) -> &[DrawingAccessibilityFact] {
+        &self.drawings
     }
 
     /// Aggregate representation counts, including repeated occurrences.
@@ -500,6 +527,25 @@ impl FidelityReport {
             available_at_export,
             embedded: false,
             occurrences: 1,
+        });
+    }
+
+    pub(crate) fn record_drawing(
+        &mut self,
+        snapshot_id: u128,
+        docpr_id: u32,
+        name: &str,
+        alternative_text: Option<&str>,
+        decorative: bool,
+        native_text: bool,
+    ) {
+        self.drawings.push(DrawingAccessibilityFact {
+            logical_id: typst_utils::hash128(&(snapshot_id, docpr_id, name)),
+            docpr_id,
+            name: name.into(),
+            alternative_text: alternative_text.map(Into::into),
+            decorative,
+            native_text,
         });
     }
 

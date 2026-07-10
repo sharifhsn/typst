@@ -7,6 +7,7 @@ pub const CONTENT_TYPES: &str =
 
 pub const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 pub const A14: &str = "http://schemas.microsoft.com/office/drawing/2010/main";
+pub const ADEC: &str = "http://schemas.microsoft.com/office/drawing/2017/decorative";
 pub const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
 pub const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 pub const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";

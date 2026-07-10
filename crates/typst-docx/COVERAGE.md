@@ -1492,3 +1492,47 @@ produced the same 1,730-byte manifest and SHA-256
 `511dbf865d506b860da306c5c2bf19ab1b099a18daeced015b586c5a3fcb356d` as the
 original canonical part. This proves exact evidence survival for this fixture,
 not a blanket guarantee across future Writer versions.
+
+## 27. Explicit drawing accessibility semantics and inventory
+
+Drawing accessibility previously depended only on optional image alt text.
+Bodyless vector art, page backgrounds, text boxes, described pictures, and an
+unlabeled meaningful picture could all serialize with the same empty
+`wp:docPr@descr`, while page-foreground rasterization discarded recovered text.
+That made the exporter unable to distinguish intentional decoration from an
+accessibility defect.
+
+`Drawing` now owns explicit `decorative` intent. Bodyless native shapes/groups
+and behind-text page backgrounds emit Office 2019's `adec:decorative val="1"`
+inside the standard drawing extension list. Native text boxes remain
+non-decorative because their editable text is the accessible content. Images
+with Typst `alt` retain that description; images without it stay
+non-decorative and are reported as unlabeled rather than being falsely hidden
+from assistive technology. Recovered text from a page foreground now becomes
+its description instead of being dropped. A final-IR invariant rejects a
+decorative drawing that also carries alternative or native text.
+
+The finalized fidelity inventory recursively traverses body, tables, TOCs,
+field results, nested text boxes/groups, headers, footers, and footnotes. Each
+`DrawingAccessibilityFact` records stable ID, `docPr` ID, name, optional alt
+text, decorative intent, native-text presence, and computed unlabeled state.
+The manifest adds drawing/unlabeled counts and a `<typst:drawings>` collection.
+Existing structural tests now cover described and unlabeled SVG pictures,
+native text boxes, decorative vector shapes, decorative backgrounds, and a
+described foreground; one new invariant unit gate covers contradictory intent.
+The DOCX target remains at 164 structural tests and now has 10 crate unit tests.
+
+A 2026-07-10 mixed fixture produced five drawings: one described SVG, one
+unlabeled SVG, one native text box, one decorative orange shape, and one
+decorative page background. The embedded report counted exactly five drawings
+and one unlabeled drawing. Typst PDF and Writer rendered one identically sized
+160 x 120 mm page with all four visible objects and searchable text; Writer's
+flow model shortened the text-box height but retained its editable content.
+
+Current Word opened without repair. Its accessibility tree identified the
+background and orange shape as `Decorative`, exposed the described image by its
+alt text, exposed the callout as a textbox with native text, and left the second
+picture as `Picture 2`. Word's Accessibility Assistant reported exactly one
+`Missing alt text` issue, matching `unlabeledDrawings="1"`; all other media,
+contrast, table, structure, and access categories reported zero issues. This is
+the intended correlation between package evidence and the consumer UX.
