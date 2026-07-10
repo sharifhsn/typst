@@ -469,8 +469,8 @@ fn target_mismatch_warning(
 }
 
 /// PPTX has a single global slide size, so a deck whose exported pages differ
-/// in size will have its off-size slides scaled to the first page's dimensions.
-/// Warn when that happens; `None` for any other format or a uniform deck.
+/// in size cannot be represented without an explicit per-page transform. Warn
+/// when that happens; `None` for any other format or a uniform deck.
 fn mixed_page_size_warning(
     document: &PagedDocument,
     config: &CompileConfig,
@@ -498,7 +498,9 @@ fn mixed_page_size_warning(
             Span::detached(),
             "the presentation mixes pages of different sizes",
         )
-        .with_hint("every slide is sized to the first page; off-size slides are scaled")
+        .with_hint(
+            "every slide uses the first page's canvas; off-size content may crop or leave extra space",
+        )
     })
 }
 

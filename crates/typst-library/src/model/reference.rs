@@ -13,7 +13,8 @@ use crate::introspection::{
 };
 use crate::math::EquationElem;
 use crate::model::{
-    BibliographyElem, CiteElem, DirectLinkElem, Figurable, FootnoteElem, Numbering,
+    BibliographyElem, CiteElem, DirectLinkElem, DirectLinkKind, Figurable, FootnoteElem,
+    Numbering,
 };
 use crate::text::TextElem;
 
@@ -357,7 +358,13 @@ fn realize_reference(
 
     content = content.spanned(span);
 
-    Ok(DirectLinkElem::new(loc, content, Some(alt)).pack().spanned(span))
+    let kind = match reference.form.get(styles) {
+        RefForm::Normal => DirectLinkKind::Reference,
+        RefForm::Page => DirectLinkKind::PageReference,
+    };
+    Ok(DirectLinkElem::new(loc, content, Some(alt), kind)
+        .pack()
+        .spanned(span))
 }
 
 /// Turn a reference into a citation.

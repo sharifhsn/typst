@@ -8,8 +8,9 @@ use typst_ooxml_core::{dml, ns};
 
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, DocxDocument,
-    Drawing, Field, Footnote, GroupSpec, HdrFtrPart, Para, ParaChild, Row, Run, SectPr,
-    SectType, ShapeFill, ShapeGeom, ShapeSpec, Tbl, Toc, VAlign, VMerge,
+    Drawing, Field, FieldDisplay, FieldMode, Footnote, GroupSpec, HdrFtrPart, Para,
+    ParaChild, ParaProps, Row, Run, SectPr, SectType, ShapeFill, ShapeGeom, ShapeSpec,
+    Spacing, Tbl, Toc, VAlign, VMerge,
 };
 use crate::package::{DOCX_PACKAGE_OPTIONS, Package, RelMode, Rels};
 use crate::styles_part;
@@ -331,6 +332,25 @@ fn write_block(w: &mut XmlWriter, block: &Block) -> bool {
             // paragraph" so the body terminator inserts one if this is the last
             // block.
             false
+        }
+        Block::FlowSpace { dxa } => {
+            write_para(
+                w,
+                &Para {
+                    props: ParaProps {
+                        spacing: Some(Spacing {
+                            before: Some(0),
+                            after: Some(0),
+                            line: Some((*dxa).max(1)),
+                            line_rule_auto: false,
+                            line_rule_at_least: false,
+                        }),
+                        ..ParaProps::default()
+                    },
+                    content: Vec::new(),
+                },
+            );
+            true
         }
         Block::Toc(toc) => {
             write_toc(w, toc);
@@ -910,8 +930,12 @@ fn write_wsp(
             w.close(); // wps:txbx
             // Reproduce the box inset as the text-frame insets, and auto-fit the
             // frame to the text so Word can re-flow it when edited.
+            let wrap = match tb.wrap {
+                crate::dom::TextBoxWrap::Square => "square",
+                crate::dom::TextBoxWrap::None => "none",
+            };
             w.open("wps:bodyPr")
-                .attr("wrap", "square")
+                .attr("wrap", wrap)
                 .attr("lIns", &tb.ins[0].to_string())
                 .attr("tIns", &tb.ins[1].to_string())
                 .attr("rIns", &tb.ins[2].to_string())
@@ -1013,30 +1037,74 @@ fn write_run(w: &mut XmlWriter, run: &Run) {
 }
 
 fn write_field(w: &mut XmlWriter, field: &Field) {
-    // begin
+    write_field_begin(w, &field.instr, field.mode, field.display);
+    // cached result
+    if field.display == FieldDisplay::Hidden {
+        debug_assert!(field.result.is_empty(), "hidden fields have no visible cache");
+        write_hidden_field_run(w, None);
+    } else {
+        for run in &field.result {
+            write_run(w, run);
+        }
+    }
+    write_field_end(w, field.display);
+}
+
+fn write_field_run_start(w: &mut XmlWriter, display: FieldDisplay) {
     w.open(xml::W_R).start_children();
+    if display == FieldDisplay::Hidden {
+        w.open(xml::W_RPR).start_children();
+        w.leaf("w:vanish");
+        w.close();
+    }
+}
+
+fn write_hidden_field_run(w: &mut XmlWriter, instr: Option<&str>) {
+    write_field_run_start(w, FieldDisplay::Hidden);
+    if let Some(instr) = instr {
+        w.open("w:instrText").attr("xml:space", "preserve").start_children();
+        w.text(instr);
+        w.close();
+    } else {
+        // Give consumers a result run whose character formatting they can
+        // retain when recalculating the field. A zero-width space avoids an
+        // empty run being discarded during import before recalculation.
+        w.open(xml::W_T).attr("xml:space", "preserve").start_children();
+        w.text("\u{200b}");
+        w.close();
+    }
+    w.close();
+}
+
+fn write_field_begin(
+    w: &mut XmlWriter,
+    instr: &str,
+    mode: FieldMode,
+    display: FieldDisplay,
+) {
+    write_field_run_start(w, display);
     let fld = w.open("w:fldChar").attr("w:fldCharType", "begin");
-    if field.dirty {
-        fld.attr("w:dirty", "true");
+    if mode.locked() {
+        fld.attr("w:fldLock", "true");
     }
     w.empty();
     w.close();
-    // instrText
-    w.open(xml::W_R).start_children();
-    w.open("w:instrText").attr("xml:space", "preserve").start_children();
-    w.text(&field.instr);
-    w.close();
-    w.close();
-    // separate
-    w.open(xml::W_R).start_children();
+    if display == FieldDisplay::Hidden {
+        write_hidden_field_run(w, Some(instr));
+    } else {
+        w.open(xml::W_R).start_children();
+        w.open("w:instrText").attr("xml:space", "preserve").start_children();
+        w.text(instr);
+        w.close();
+        w.close();
+    }
+    write_field_run_start(w, display);
     w.open("w:fldChar").attr("w:fldCharType", "separate").empty();
     w.close();
-    // cached result
-    for run in &field.result {
-        write_run(w, run);
-    }
-    // end
-    w.open(xml::W_R).start_children();
+}
+
+fn write_field_end(w: &mut XmlWriter, display: FieldDisplay) {
+    write_field_run_start(w, display);
     w.open("w:fldChar").attr("w:fldCharType", "end").empty();
     w.close();
 }
@@ -1075,26 +1143,7 @@ fn write_toc(w: &mut XmlWriter, toc: &Toc) {
 fn write_toc_body(w: &mut XmlWriter, toc: &Toc) {
     // Emits the field `begin` + instruction + `separate` run sequence.
     let write_begin = |w: &mut XmlWriter| {
-        w.open(xml::W_R).start_children();
-        let fld = w.open("w:fldChar").attr("w:fldCharType", "begin");
-        if toc.dirty {
-            fld.attr("w:dirty", "true");
-        }
-        w.empty();
-        w.close();
-        w.open(xml::W_R).start_children();
-        w.open("w:instrText").attr("xml:space", "preserve").start_children();
-        w.text(&toc.instr);
-        w.close();
-        w.close();
-        w.open(xml::W_R).start_children();
-        w.open("w:fldChar").attr("w:fldCharType", "separate").empty();
-        w.close();
-    };
-    let write_end = |w: &mut XmlWriter| {
-        w.open(xml::W_R).start_children();
-        w.open("w:fldChar").attr("w:fldCharType", "end").empty();
-        w.close();
+        write_field_begin(w, &toc.instr, toc.mode, FieldDisplay::Visible);
     };
 
     if toc.entries.is_empty() {
@@ -1103,7 +1152,7 @@ fn write_toc_body(w: &mut XmlWriter, toc: &Toc) {
         for run in &toc.fallback {
             write_run(w, run);
         }
-        write_end(w);
+        write_field_end(w, FieldDisplay::Visible);
         w.close();
         return;
     }
@@ -1119,7 +1168,7 @@ fn write_toc_body(w: &mut XmlWriter, toc: &Toc) {
             write_para_child(w, child);
         }
         if i == last {
-            write_end(w);
+            write_field_end(w, FieldDisplay::Visible);
         }
         w.close(); // w:p
     }
@@ -1212,8 +1261,9 @@ fn write_part_rels(package: &mut Package, part_path: &str, rels: &Rels) {
     if rels.is_empty() {
         return;
     }
-    let (dir, file) =
-        part_path.rsplit_once('/').expect("part_path must include a directory");
+    let (dir, file) = part_path
+        .rsplit_once('/')
+        .expect("part_path must include a directory");
     package.add_xml(
         &format!("{dir}/_rels/{file}.rels"),
         "application/vnd.openxmlformats-package.relationships+xml",
@@ -1285,9 +1335,6 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
     w.open("w:characterSpacingControl")
         .attr(xml::W_VAL, "doNotCompress")
         .empty();
-    if document.uses_fields {
-        w.open("w:updateFields").attr(xml::W_VAL, "true").empty();
-    }
     // Header drawing-canvas defaults (the header sibling of shapeDefaults).
     w.raw(
         "<w:hdrShapeDefaults><o:shapedefaults v:ext=\"edit\" spidmax=\"1026\"/>\
@@ -1550,7 +1597,10 @@ fn build_typst_bibliography(bib: &str, pretty: bool) -> String {
 /// `b:Source` per entry. `SelectedStyle`/`StyleName` mirror what Word itself
 /// always emits (a citation style for Source Manager's own UI, independent
 /// of Typst's realized in-body citation formatting).
-fn build_word_sources(sources: &[crate::bibliography::WordSource], pretty: bool) -> String {
+fn build_word_sources(
+    sources: &[crate::bibliography::WordSource],
+    pretty: bool,
+) -> String {
     let mut w = XmlWriter::new(pretty);
     w.open("b:Sources")
         .attr("xmlns:b", ns::B)

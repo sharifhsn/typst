@@ -6,9 +6,29 @@ already-covered noise. Validated against the 627-document `typst-corpus`
 (`bench/docx_batch.py` for validity, `bench/docx_oracle.py` for content
 correctness). Steady state: **616/627 export, 0 invalid XML.**
 
-The three feature tiers (Native / Rasterized / Unsupported) and the per-feature
-mapping live in the [README](README.md); this file is the *decision record* —
+The four feature tiers (Native / Approximate / Rasterized / Unsupported) and
+the per-feature mapping live in the [README](README.md); this file is the
+*decision record* —
 the rationale behind each disposition and the catalogue of noise.
+
+> **Historical ledger.** Corpus counts and dispositions below describe the
+> exporter snapshot in which each audit was run. They are valuable evidence,
+> but not a substitute for the current cross-export issue register and design in
+> [`../../docs/dev/office-export-architecture.md`](../../docs/dev/office-export-architecture.md).
+
+## Current rearchitecture foundation
+
+The current branch now carries a structured `FidelityReport` on every
+`DocxDocument`. Whole-region raster decisions, native SVG plus PNG compatibility
+fallbacks, approximated positional links, dropped content, and suppressed
+fallback/layout diagnostics are queryable without parsing warning strings.
+Repeated page-furniture decisions aggregate by source identity.
+
+Equation lowering is the first real capability-planning migration: the resolved
+math IR is preflighted recursively before OMML emission. Any `MathKind::Box` or
+`MathKind::External` descendant selects one whole-equation raster fallback, with
+recovered searchable text, so the native emitter can no longer silently omit a
+child from otherwise-valid OMML.
 
 ## 1. Rasterization causes — disposition of every element that reaches `ctx.rasterize`
 
@@ -963,3 +983,114 @@ identical to base; every oracle flag proven to be a gain (recovered
 cross-refs, phantom-duplication removal — one book's docx dropped from 2.2× the
 PDF's word count to near-parity), byte-neutral, or pandoc `[]`
 placeholder-noise from correctly-dropped blank images. Zero real content loss.
+
+## 13. Field ownership: exact Typst semantics without hostile open-time updates
+
+The old field design had two architectural problems. First, every field set one
+document-wide `uses_fields` bit, which emitted `w:updateFields`: Word then
+recalculated *all* fields even when only pagination/TOC behavior was live.
+Second, the `RefElem` mapper was not the final reference path. Ordinary
+realization had already converted references into `DirectLinkElem` and then
+linked style state, so a mapper-only `REF`/`PAGEREF` policy was bypassed by the
+output users actually received.
+
+The replacement is explicit and survives realization:
+
+- `DirectLinkKind::{Reference, PageReference, Other}` and a source span are
+  carried through the library/layout direct-link rule. DOCX keeps normal
+  reference text as Typst-computed clickable hyperlinks and emits one live
+  `PAGEREF` for each logical page reference (multi-run supplements/results are
+  coalesced instead of duplicating the field).
+- `FieldMode::{Static, Live}` records value ownership. Static complex fields
+  encode `w:fldLock`; live fields stay consumer-updateable. `FieldDisplay`
+  separately records visible versus hidden behavior.
+- Figure `SEQ` is visible/live only for a single Typst numbering component that
+  exactly matches Word's Arabic/alphabetic/roman format switches. Prefixes,
+  suffixes, multiple components, padding, and functions remain exact Typst text
+  plus one hidden `SEQ` counter so Word's caption/list ecosystem still counts
+  the paragraph.
+- LibreOffice 26.2.4.2 exposed that `SEQ \h` alone is not portable: its first
+  render appended a visible `1` to `Figure (i)`. Hidden fields now apply
+  `w:vanish` to their begin/instruction/separator/cache/end runs, and the Writer
+  render returns to exactly `Figure (i)`.
+- Native TOCs bake entry text and Typst-computed page-number field caches, stay
+  unlocked, and expose Word's ordinary **Update Table** command. TOCs containing
+  Typst-only fallback entries are locked because Word cannot rebuild them.
+  Neither `w:updateFields` nor `w:dirty` is emitted: real Word validation showed
+  both variants trigger disruptive external-field and TOC dialogs on open.
+
+The field-policy kernel was compiled through the real CLI, opened in Microsoft
+Word, round-tripped/rendered through LibreOffice, and compared with the Typst
+PDF reference. Final Word first-open had no modal dialog and showed a populated
+TOC/page cache, `Figure (i)`, a clickable static `Figure i` reference, one live
+page reference, and a live footer `PAGE` field. LibreOffice showed the same
+caption/reference text on one 170 mm x 120 mm page. A manual select-all/F9
+update followed by a real Word save kept the Typst-owned hyperlink and hidden
+counter intact while updating live field caches; Writer rendered that Word-saved
+round trip with the same visible text. Structural gates now cover all ownership
+branches; the DOCX target passes 147 tests and clippy with warnings denied.
+
+## 14. Scoped width ownership and physical grid gutters
+
+The previous table, grid, and horizontal-stack mappers assumed a 9,360-twip
+US-Letter text area regardless of the document's page geometry. Equation-number
+tabs separately assumed 8,640 twips, while raster fallback already used a
+page-derived width. That split authority produced over-wide tables on narrow
+pages, under-wide tables after a wider section change, and nested tables sized
+as if they were still at document scope. Typst's resolved gutter tracks were
+discarded entirely.
+
+`DocxCtx::available_width` is now the single scoped width budget:
+
+- each section installs `page width - left margin - right margin` before its
+  body is lowered;
+- nested table and horizontal-stack cells lower their bodies under their own
+  track width and restore the parent budget even on an error;
+- flexible table/grid tracks, horizontal stacks, equation-number tabs, fill
+  tabs, outline tabs, relative shapes, and raster layout read that same value;
+- column gutters become borderless `w:tc` tracks, row gutters become exact
+  spacer rows, and a colspan includes every internal gutter track;
+- `CellGrid` internally doubles both axes when either axis has a gutter. The
+  DOCX mapper filters normalization-only zero tracks, so a row-only gutter does
+  not create a phantom column and a column-only gutter does not create a row.
+
+The width kernel covers narrow and wide sections in one document, flexible
+tracks, mixed row/column gutters, axis-only gutters, gutter-aware colspans,
+nested tables, horizontal stacks, and equation-number tabs. It was also built
+through the real CLI and opened in Microsoft Word: Word's accessibility tree
+reported the expected editable 4-row/3-column gutter table plus the nested
+table, and the visual view showed both section widths and the 1:2 track ratio.
+LibreOffice Writer rendered the same two-page DOCX with the same horizontal
+edges, gutter gaps, and nested-cell constraint. Comparison with the Typst PDF
+also exposed a separate pre-existing flow issue: fixed `#v` between two table
+blocks had no paragraph to carry its spacing. The explicit flow policy in §15
+now preserves it rather than hiding the defect inside width mapping.
+
+## 15. Explicit block-flow spacing and stack gaps
+
+`#v` was previously held in a converter-local integer until the next paragraph
+appeared. A paragraph could absorb it as `w:spacing/@w:before`, but a table could
+not. In `table; #v(10pt); table`, the accumulator skipped the second table and
+either moved the gap to a later paragraph or dropped it at the end of the body.
+
+The typed IR now has `Block::FlowSpace { dxa }`. Paragraph-adjacent gaps still
+use ordinary paragraph spacing; when the next visible block is a table or TOC,
+the converter emits a flow-space paragraph with an exact line height. This is a
+representation decision in the lowering layer, not an encoder guess, and works
+inside table cells as well as at document scope.
+
+Stacks now preserve their own spacing contract too:
+
+- fixed vertical gaps become `FlowSpace` blocks;
+- fixed horizontal gaps become exact borderless table tracks;
+- fractional horizontal gaps become flexible tracks instead of disappearing;
+- fractional/region-relative stack geometry is marked
+  `Approximate/FlexibleStackSpacing` with visual loss in `FidelityReport`.
+
+The structural gates cover a 10 pt gap between two tables, a 6 pt vertical-stack
+default, a 12 pt horizontal-stack track, and a retained/reported `1fr` gap. The
+two-section fixture was rebuilt and reopened in Word and LibreOffice; the 10 pt
+gap is now visible in both consumers and all table content remains editable.
+
+The structural DOCX target passes 147 tests; the crate library test and clippy
+with warnings denied also pass.

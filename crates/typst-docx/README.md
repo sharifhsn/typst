@@ -31,19 +31,21 @@ with a legacy fallback for older consumers.
 
 ## How content is mapped
 
-Every element falls into one of three tiers:
+Every element falls into one of four user-visible tiers:
 
 | | Tier | Meaning |
 |---|---|---|
 | ✅ | **Native** | Real, editable OOXML (text runs, `w:tbl`, OMML, fields, …). |
+| ⚠️ | **Approximate** | Editable OOXML with a known visual or behavioral difference. |
 | 🖼️ | **Rasterized** | Embedded PNG. The visual is preserved exactly, but it is not editable. Used **only** when no OOXML construct can carry the content. |
 | ❌ | **Unsupported** | Dropped, with a warning. Reserved for things with no flowing-document equivalent. |
 
-Rasterization is a genuine last resort: it is bounded to non-solid fills,
-vector/SVG/PDF/WebP images, transforms, and external drawing packages (CeTZ,
-fletcher, …). Everything structural stays native. Cross-references and labels
-**inside** rasterized regions are still harvested, so `@ref` to them resolves and
-figure numbering stays consistent.
+Rasterization is a genuine last resort: it is bounded to unsupported fills,
+PDF/WebP images, transforms, and external drawing packages (CeTZ, fletcher, …).
+SVG is embedded natively with a PNG compatibility fallback. Everything
+structural stays native. Cross-references and labels **inside** rasterized
+regions are still harvested, so `@ref` to them resolves and figure numbering
+stays consistent.
 
 ### Text & inline formatting
 
@@ -70,16 +72,17 @@ figure numbering stays consistent.
 | Term lists (`/ term: desc`) | ✅ | bold term + definition |
 | Block quotes (+ attribution) | ✅ | `Quote` style; multi-paragraph quotes preserved |
 | Code / raw blocks | ✅ | monospace + per-token syntax colours + line breaks |
-| Outline / table of contents | ✅ | `TOC` field in a content control |
+| Outline / table of contents | ✅ | baked entries + page-number caches in a native `TOC` content control; updateable in Word without modal refresh-on-open prompts |
 | Bibliography & citations | ✅ | native text + clickable back-references |
-| Fixed vertical space (`#v(2cm)`) | ✅ | folds into paragraph spacing |
+| Fixed vertical space (`#v(2cm)`) | ✅ | paragraph spacing when possible; otherwise an exact flow-space paragraph (for example between tables) |
+| Vertical / horizontal stacks | ⚠️ | editable flow / borderless table; fixed gaps are exact, fractional gaps remain an explicitly reported width approximation |
 
 ### Tables
 
 | Feature | | Notes |
 |---|:--:|---|
-| Tables | ✅ | `w:tbl` — borders, alignment, cell shading, merged cells, row heights |
-| Layout grids (`#grid`) | ✅ | also `w:tbl` (content stays editable) |
+| Tables | ✅ | `w:tbl` — borders, alignment, cell shading, merged cells, row heights; flexible tracks use the active section width and nested tables inherit their cell width |
+| Layout grids (`#grid`) | ✅ | also `w:tbl` (content stays editable); column and row gutters become physical spacer tracks |
 | `stroke: none` cells | ✅ | explicit `w:val="nil"` |
 
 ### Math (OMML)
@@ -93,34 +96,48 @@ figure numbering stays consistent.
 | Multi-line `&` alignment | ✅ | right/left-justified matrix |
 | Coloured math, upright/italic letters | ✅ | |
 | Per-line equation labels | 🖼️ | layout-only anchors can't survive native extraction |
-| Non-math content inside `$…$` | 🖼️ | |
+| Non-math content inside `$…$` | 🖼️ | whole-equation preflight selects one raster fallback; unsupported descendants are never omitted from partial OMML |
 
 ### Links, references & footnotes
 
 | Feature | | |
 |---|:--:|---|
 | `#link(url)` | ✅ | external hyperlink (blue + underline) |
-| `@ref` to heading / figure / equation / labelled element | ✅ | clickable hyperlink → bookmark |
+| `@ref` to heading / figure / equation / labelled element | ✅ | Typst-computed text in a clickable hyperlink → bookmark; Word cannot rewrite it as non-equivalent `REF` text |
 | Footnotes | ✅ | `footnotes.xml` |
 | `#link` to a page *coordinate* | ❌ | text kept, link dropped |
-| `@ref` to a **page number** | ✅ | resolves against the fixed-point paged introspector; DOCX-only/fallback locations use a synthetic explicit-break model |
+| `@ref` to a **page number** | ✅ | live `PAGEREF` field with Typst's fixed-point result as its cache; DOCX-only/fallback locations use a synthetic explicit-break model |
+
+Word fields are live document objects, not frozen paint. The IR therefore marks
+value ownership explicitly. Normal references are Typst-owned static hyperlinks;
+page references and pagination fields are consumer-owned; a TOC is live only
+when Word can reconstruct all of its entries (otherwise it is locked around the
+baked result). The exporter deliberately omits document-wide `updateFields` and
+per-field `dirty` flags because current Word presents disruptive external-field
+and TOC dialogs on open. Baked results make first-open output complete, while
+Word's normal **Update Table / Update Field** commands remain available after
+the user edits the document.
 
 ### Figures, images & graphics
 
 | Feature | | Notes |
 |---|:--:|---|
-| Figures (caption + cross-reference) | ✅ | caption via `SEQ` field + bookmark |
+| Figures (caption + cross-reference) | ✅ | equivalent single-component `1`/`a`/`A`/`i`/`I` numbering stays a live `SEQ`; richer Typst patterns/functions stay exact text plus a hidden Word counter |
 | **PNG / JPEG / GIF** images | ✅ | embedded **verbatim** (no re-encode) |
-| **SVG / PDF / WebP** images | 🖼️ | rasterized to PNG (no native Word form) |
+| **SVG** images | ✅ | native SVG with a PNG compatibility fallback |
+| **PDF / WebP** images | 🖼️ | rasterized to PNG |
 | Rect, square, circle, ellipse, polygon (solid **or linear-gradient** fill) | ✅ | **native vector** `wps:wsp` DrawingML — solid → `a:solidFill`, linear gradient → `a:gradFill` |
 | Framed text boxes (`#box`/`#rect[text]`) | ✅ | editable `wps:txbx`, or flowing shaded paragraphs |
 | Horizontal rules (`#line`) | ✅ | paragraph bottom border |
 | Diagonal / endpoint `#line` | ✅ | native open `a:custGeom` path |
 | `#curve` (straight + cubic-Bézier segments) | ✅ | native `a:custGeom` — `a:lnTo`/`a:cubicBezTo`/`a:close`, 1:1 with Typst's own Move/Line/Cubic/Close vocabulary |
 | Stroke dash pattern + line cap (on the above) | ✅ | `a:prstDash` (approximated to the nearest OOXML preset) + `a:ln cap` |
-| `#place(…)` (floating) | ✅ | `wp:anchor` float |
-| Radial / conic gradient, tiling / pattern fills | 🖼️ | no flat OOXML form (radial is anchored to the shape's bounding box in OOXML, not free center+radius — scoped out, see the README's shape-mapping notes below) |
-| Transforms (`#rotate`, `#scale`, `#move`, skew) | 🖼️ | |
+| `#place(…)` around one representable drawing | ✅ | `wp:anchor` float |
+| `#place(…)` around flowing text or mixed content | ⚠️ | can flow in document order and lose exact placement; a planned whole-region fallback should make this explicit |
+| Tiling / pattern fills | ✅ | DrawingML tile fill when the source can be represented |
+| Radial / conic gradient fills | 🖼️ | OOXML's radial model cannot represent Typst's free center/radius exactly |
+| Selected `#move`, rotation, and uniform scale on representable shapes/text | ✅ | transform is baked into native geometry or a Word text-position primitive |
+| Skew, non-uniform scale, or mixed transformed content | 🖼️ | whole-region picture fallback |
 | CeTZ / fletcher / canvas drawings, diagrams | 🖼️ | the main rasterize category — the individual shapes/lines/curves such a diagram draws are native *only* when they reach the exporter as standalone top-level elements; a diagram composed of many shapes inside one drawing callback still rasterizes as one image (see COVERAGE.md's forward-design notes for the `wpg:wgp` group-shape idea that would lift this) |
 
 ### Page layout
@@ -170,3 +187,14 @@ typst compile --format docx document.typ document.docx
 ```
 
 The target is also selected automatically from a `.docx` output extension.
+
+`DocxDocument::fidelity_report()` exposes structured representation decisions
+(`NativeWithFallback`, `Approximate`, `Raster`, and `Drop` as they are enrolled),
+independent loss dimensions, affected searchable-text counts, stable source
+identities, and diagnostics suppressed by best-effort fallback conversion. The
+current phase records lossy and compatibility decisions; complete native-region
+enrollment and a persisted CLI manifest remain migration work.
+
+For the cross-export pipeline, fidelity model, verified failure modes, and
+proposed preflight architecture, see
+[`../../docs/dev/office-export-architecture.md`](../../docs/dev/office-export-architecture.md).

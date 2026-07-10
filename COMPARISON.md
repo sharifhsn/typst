@@ -14,6 +14,12 @@ per-pixel agreement in [0, 1] — the same oracle this exporter is validated wit
 corpus-wide. **Structure metrics** are counted from the raw OOXML. The scoring and
 audit scripts are in [`crates/typst-pptx/compare/`](crates/typst-pptx/compare/), so every number here is reproducible.
 
+> **Dated benchmark snapshot (2026-07-03).** These measurements compare the
+> revisions and installed renderers used on that date. They are regression
+> evidence, not the current feature contract; see
+> [`docs/dev/office-export-architecture.md`](docs/dev/office-export-architecture.md)
+> for the current issue register.
+
 ## PPTX: vs typ2pptx and touying-exporter
 
 **Fidelity (gold-PDF agreement, higher is better):**
@@ -60,12 +66,13 @@ failures are frequently silent (`except Exception: pass` around notes, images, a
 math-glyph insertion). Its README calls itself "a vibe coding project… many
 conversion errors and edge cases remain." This exporter consumes Typst's own
 laid-out page frames, so every position, font, size, weight, color, and space is the
-compiler's ground truth — there is nothing to infer.
+compiler's ground truth rather than reconstructing it from SVG. The exporter
+still has to choose DrawingML text-box bounds and relies on recipient fonts, so
+editable text can reflow differently in PowerPoint or LibreOffice.
 
 **Fairness notes:** typ2pptx handled all four decks including the non-Touying ones,
 installs from PyPI in seconds, and runs fast (0.2–0.9 s/deck; this exporter
-0.07–0.12 s). It reconstructs Touying speaker notes, which this exporter doesn't do
-yet. It's a reasonable tool; the architectural ceiling is just lower.
+0.07–0.12 s). It's a reasonable tool; the architectural ceiling is just lower.
 
 ## Rasterization is audited, not hidden
 
@@ -142,8 +149,9 @@ Existing converters work *backwards from rendered output* — typ2docx reconstru
 Word file from the PDF, typ2pptx reconstructs slides from SVG with font-guessing
 heuristics, touying-exporter screenshots each slide. This exporter works *forwards
 from the compiler*: DOCX walks Typst's realized element tree (real heading styles,
-live REF/TOC fields, native tables/footnotes/math), and PPTX takes the laid-out page
-frames (exact positions, live text, native shapes/gradients, working hyperlinks).
+live REF/TOC fields, native tables/footnotes/math), and PPTX takes the laid-out
+page frames (direct Typst-computed positions, live text, native
+shapes/gradients, working hyperlinks).
 Measured on the same corpus with the same oracle, it beats typ2pptx on visual
 fidelity on every deck tested and is the only PPTX path with working hyperlinks;
 typ2docx scores higher on raw pixels (it ships a page facsimile) but has zero
@@ -153,7 +161,6 @@ Python/pandoc/Adobe pipeline, ~0.1 s per document.
 
 ## Where the other tools are genuinely ahead
 
-- **typ2pptx**: reconstructs Touying speaker notes (this exporter has none yet).
 - **typ2docx with the Adobe Acrobat backend** (not benchmarked here — needs
   Acrobat): likely narrows the visual gap, and its facsimile approach is exactly
   right if your goal is "a docx that looks identical" rather than "a docx I can

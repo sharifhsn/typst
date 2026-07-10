@@ -105,6 +105,7 @@ pub fn heading(
         if !text.is_empty() {
             ctx.toc_headings.push(crate::dom::TocHeading {
                 level,
+                location: elem.location(),
                 anchor: bookmark.map(|(_, name)| name),
                 text: text.into(),
             });

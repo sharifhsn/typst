@@ -6,6 +6,5 @@ pub mod media;
 pub mod ns;
 pub mod omml;
 pub mod opc;
-pub mod render;
 pub mod units;
 pub mod xml;

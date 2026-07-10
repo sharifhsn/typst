@@ -7,18 +7,51 @@ use std::sync::Arc;
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, NativeElement, Selector, StyleChain};
-use typst_library::introspection::{Introspector, Locator, PagedPosition, Tag};
+use typst_library::introspection::{Introspector, Location, Locator, PagedPosition, Tag};
+use typst_library::layout::Abs;
 use typst_library::model::{DocumentInfo, HeadingElem};
 use typst_library::routines::{Arenas, RealizationKind};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, DocxDocument, Field, HdrFtrPart, HdrFtrRef, HeadingStyle, HeadingStyleSample,
-    LineNumbering, Para, ParaChild, ParaProps, PgNumType, Run, RunProps, SectPr,
-    SectType, Spacing, TextDefaults, TocHeading,
+    Block, BookmarkTable, DocxDocument, Field, FieldDisplay, FieldMode, Footnote,
+    HdrFtrPart, HdrFtrRef, HeadingStyle, HeadingStyleSample, LineNumbering, MediaPart,
+    NumberingTable, Para, ParaChild, ParaProps, PgNumType, Run, RunProps, SectPr,
+    SectType, Spacing, TextDefaults, TocFigure, TocHeading,
 };
 use crate::introspect::DocxIntrospector;
+use crate::package::Rels;
 use crate::props;
+use crate::report::{
+    DecisionReason, ExportSource, ExportStage, FidelityReport, LossSet, Representation,
+    SuppressedKind,
+};
+
+/// The complete product of the lowering walk before document-wide postpasses.
+///
+/// Keeping this named avoids the previous nineteen-field tuple and gives new
+/// planning/reporting state an explicit home before it is frozen into
+/// [`DocxDocument`].
+struct LoweredDocx {
+    body: Vec<Block>,
+    sect: SectPr,
+    header_parts: Vec<HdrFtrPart>,
+    footer_parts: Vec<HdrFtrPart>,
+    footnotes: Vec<Footnote>,
+    numbering: NumberingTable,
+    media: Vec<MediaPart>,
+    doc_rels: Rels,
+    footnote_rels: Rels,
+    bookmarks: BookmarkTable,
+    max_heading_level: u8,
+    heading_style_samples: Vec<HeadingStyleSample>,
+    uses_math: bool,
+    deferred_tags: Vec<Tag>,
+    real_alias_locations: rustc_hash::FxHashSet<Location>,
+    toc_headings: Vec<TocHeading>,
+    toc_figures: Vec<TocFigure>,
+    fidelity_report: FidelityReport,
+}
 
 /// Produces a DOCX document (in-memory IR) from content.
 ///
@@ -129,7 +162,7 @@ fn docx_document_impl(
     };
 
     // Walk the native element tree into the typed IR.
-    let (
+    let LoweredDocx {
         mut body,
         sect,
         header_parts,
@@ -142,13 +175,13 @@ fn docx_document_impl(
         bookmarks,
         max_heading_level,
         heading_style_samples,
-        uses_fields,
         uses_math,
         deferred_tags,
         real_alias_locations,
         toc_headings,
         toc_figures,
-    ) = {
+        fidelity_report,
+    } = {
         // Isolate the conversion walk's error sink. Lowering already-realized
         // content (figure/table/grid cells, …) can surface *delayed* errors for
         // values that only resolve during layout — e.g. a date `display(auto)`
@@ -159,7 +192,7 @@ fn docx_document_impl(
         // this walk's own delayed-error reporting is discarded. Warnings are
         // forwarded to the real sink.
         let mut conv_sink = typst_library::engine::Sink::new();
-        let converted = {
+        let mut converted = {
             use comemo::Track;
             let mut sub = typst_library::engine::Engine {
                 world: engine.world,
@@ -172,19 +205,7 @@ fn docx_document_impl(
                 route: typst_library::engine::Route::extend(engine.route.track()),
             };
             let mut ctx = DocxCtx::new(&mut sub, &mut locator);
-            // Give rasterized content the real page content width (page minus L/R
-            // margins, converted from twips → pt) so width-relative content does
-            // not blow up under an infinite region. Guard a degenerate width.
-            let content_twip =
-                first_geom.page_w - first_geom.margin_left - first_geom.margin_right;
-            if content_twip > 0 {
-                ctx.raster_width =
-                    typst_library::layout::Abs::pt(content_twip as f64 / 20.0);
-            }
-            if first_geom.page_h > 0 {
-                ctx.raster_height =
-                    typst_library::layout::Abs::pt(first_geom.page_h as f64 / 20.0);
-            }
+            set_ctx_geometry(&mut ctx, &first_geom);
             // Record raw/code source ranges up front: inline raw is unwrapped to
             // styled `TextElem`s before the walker sees a `RawElem`, so runs are
             // tagged `w:noProof` by matching their source span, not the mono font.
@@ -198,7 +219,10 @@ fn docx_document_impl(
             let (body, sect, header_parts, footer_parts) = if sections.len() <= 1 {
                 ctx.line_numbering_active = first_geom.line_numbers.is_some();
                 let body = crate::convert::run(&mut ctx, &pairs)?;
-                let (sect, h, f) = build_section(&mut ctx, &first_geom, styles)?;
+                let full_width = ctx.page_content_width_dxa();
+                let (sect, h, f) = ctx.with_available_width(full_width, |ctx| {
+                    build_section(ctx, &first_geom, styles)
+                })?;
                 (body, sect, h, f)
             } else {
                 // Each section builds its OWN header/footer parts (a landscape
@@ -214,14 +238,44 @@ fn docx_document_impl(
                 let mut final_sect = None;
                 let last = sections.len() - 1;
                 for (idx, section) in sections.iter().enumerate() {
+                    set_ctx_geometry(&mut ctx, &section.geom);
                     ctx.line_numbering_active = section.geom.line_numbers.is_some();
                     let mut blocks =
                         crate::convert::run(&mut ctx, &pairs[section.range.clone()])?;
                     body.append(&mut blocks);
-                    let (mut s, mut h, mut f) =
-                        build_section(&mut ctx, &section.geom, styles).unwrap_or_else(
-                            |_| (sectpr_geometry(&section.geom), Vec::new(), Vec::new()),
-                        );
+                    let full_width = ctx.page_content_width_dxa();
+                    let (mut s, mut h, mut f) = match ctx
+                        .with_available_width(full_width, |ctx| {
+                            build_section(ctx, &section.geom, styles)
+                        }) {
+                        Ok(parts) => parts,
+                        Err(errors) => {
+                            let source =
+                                ecow::eco_format!("section {} properties", idx + 1);
+                            for diagnostic in errors {
+                                ctx.fidelity_report.suppress_span(
+                                    source.clone(),
+                                    typst_syntax::Span::detached(),
+                                    None,
+                                    ExportStage::SectionLowering,
+                                    SuppressedKind::Error,
+                                    diagnostic,
+                                );
+                            }
+                            ctx.fidelity_report.record_span(
+                                ExportSource::new(
+                                    source,
+                                    typst_syntax::Span::detached(),
+                                    None,
+                                ),
+                                Representation::Approximate,
+                                DecisionReason::SectionGeometryFallback,
+                                LossSet::SECTION_GEOMETRY_ONLY,
+                                0,
+                            );
+                            (sectpr_geometry(&section.geom), Vec::new(), Vec::new())
+                        }
+                    };
                     header_parts.append(&mut h);
                     footer_parts.append(&mut f);
                     // A section's `w:type` describes how *that* section itself
@@ -245,33 +299,43 @@ fn docx_document_impl(
                     footer_parts,
                 )
             };
-            (
+            LoweredDocx {
                 body,
                 sect,
                 header_parts,
                 footer_parts,
-                std::mem::take(&mut ctx.footnotes),
-                std::mem::take(&mut ctx.numbering),
-                std::mem::replace(
+                footnotes: std::mem::take(&mut ctx.footnotes),
+                numbering: std::mem::take(&mut ctx.numbering),
+                media: std::mem::replace(
                     &mut ctx.media,
                     typst_ooxml_core::media::MediaRegistry::new("word/media"),
                 )
                 .into_parts(),
-                std::mem::take(&mut ctx.doc_rels),
-                std::mem::take(&mut ctx.footnote_rels),
-                std::mem::take(&mut ctx.bookmarks),
-                ctx.max_heading_level,
-                std::mem::take(&mut ctx.heading_style_samples),
-                ctx.uses_fields,
-                ctx.uses_math,
-                std::mem::take(&mut ctx.deferred_tags),
-                std::mem::take(&mut ctx.real_alias_locations),
-                std::mem::take(&mut ctx.toc_headings),
-                std::mem::take(&mut ctx.toc_figures),
-            )
+                doc_rels: std::mem::take(&mut ctx.doc_rels),
+                footnote_rels: std::mem::take(&mut ctx.footnote_rels),
+                bookmarks: std::mem::take(&mut ctx.bookmarks),
+                max_heading_level: ctx.max_heading_level,
+                heading_style_samples: std::mem::take(&mut ctx.heading_style_samples),
+                uses_math: ctx.uses_math,
+                deferred_tags: std::mem::take(&mut ctx.deferred_tags),
+                real_alias_locations: std::mem::take(&mut ctx.real_alias_locations),
+                toc_headings: std::mem::take(&mut ctx.toc_headings),
+                toc_figures: std::mem::take(&mut ctx.toc_figures),
+                fidelity_report: std::mem::take(&mut ctx.fidelity_report),
+            }
         };
-        // Forward conversion warnings to the real sink (delayed errors stay
-        // isolated in `conv_sink` and are dropped).
+        // Forward warnings, but retain delayed errors in the fidelity report so
+        // best-effort conversion is observable rather than silent.
+        for diagnostic in conv_sink.delayed() {
+            converted.fidelity_report.suppress_span(
+                "document conversion",
+                typst_syntax::Span::detached(),
+                None,
+                ExportStage::DocumentConversion,
+                SuppressedKind::DelayedError,
+                diagnostic,
+            );
+        }
         for w in conv_sink.warnings() {
             engine.sink.warn(w);
         }
@@ -329,6 +393,7 @@ fn docx_document_impl(
                 text.push_str(&h.body.plain_text());
                 (!text.is_empty()).then(|| TocHeading {
                     level,
+                    location: h.location(),
                     anchor: None,
                     text: text.into(),
                 })
@@ -346,6 +411,8 @@ fn docx_document_impl(
         &toc_headings,
         &toc_fallback,
         &toc_figures,
+        engine,
+        styles,
     );
 
     // Synthetic page model: a flowing document has no real pages, but templates
@@ -428,7 +495,6 @@ fn docx_document_impl(
         max_heading_level,
         text_defaults,
         heading_styles,
-        uses_fields,
         uses_math,
         introspector: Arc::new(introspector),
         header_parts,
@@ -440,6 +506,7 @@ fn docx_document_impl(
         rtl_gutter,
         bibliography,
         word_sources,
+        fidelity_report,
     })
 }
 
@@ -719,7 +786,10 @@ fn collect_default_votes(blocks: &[Block], votes: &mut DefaultVotes) {
                     }
                 }
             }
-            Block::Toc(_) | Block::SectionBreak(_) | Block::Tag(_) => {}
+            Block::FlowSpace { .. }
+            | Block::Toc(_)
+            | Block::SectionBreak(_)
+            | Block::Tag(_) => {}
         }
     }
 }
@@ -808,6 +878,28 @@ struct SectGeom {
     /// (`#set text(hyphenate: ..)`, `auto` following justification). Emitted
     /// document-wide as `w:autoHyphenation` (OOXML has no per-section form).
     hyphenate: bool,
+}
+
+/// Installs one section's geometry as the current lowering region. This must be
+/// updated before lowering each section: native tables/stacks and fallback
+/// layout now share this budget, so leaving the first section installed would
+/// size a landscape appendix against the front matter.
+fn set_ctx_geometry(ctx: &mut DocxCtx, geom: &SectGeom) {
+    let content_twip = geom.page_w - geom.margin_left - geom.margin_right;
+    if content_twip > 0 {
+        ctx.page_content_width = Abs::pt(content_twip as f64 / 20.0);
+        let columns = geom.columns.max(1) as i32;
+        let total_gutter = geom.col_space.max(0) * (columns - 1);
+        let column_twip = ((content_twip - total_gutter).max(columns)) / columns;
+        ctx.available_width = Abs::pt(column_twip as f64 / 20.0);
+    }
+    let content_height = geom.page_h - geom.margin_top - geom.margin_bottom;
+    if content_height > 0 {
+        ctx.available_height = Abs::pt(content_height as f64 / 20.0);
+    }
+    if geom.page_h > 0 {
+        ctx.raster_height = Abs::pt(geom.page_h as f64 / 20.0);
+    }
 }
 
 /// Splits the document into page-geometry sections, mirroring
@@ -1351,7 +1443,11 @@ fn build_section(
             &mut footer_parts,
             FurnitureSlot::Footer,
             geom,
-            FurnitureSource { content: Some(content), background: None, foreground: None },
+            FurnitureSource {
+                content: Some(content),
+                background: None,
+                foreground: None,
+            },
             styles,
         )?;
     }
@@ -1370,7 +1466,6 @@ fn build_section(
                 blocks: vec![para],
                 rels: crate::package::Rels::new(),
             });
-            ctx.mark_field();
         } else if !geom.number_in_header
             && geom.footer.is_none()
             && !geom.footer_suppressed
@@ -1386,7 +1481,6 @@ fn build_section(
                 blocks: vec![para],
                 rels: crate::package::Rels::new(),
             });
-            ctx.mark_field();
         }
     }
 
@@ -1501,7 +1595,8 @@ fn lower_furniture(
 
         if slot.is_header()
             && let Some(bg) = source.background
-            && let Some(block) = page_overlay_block(ctx, bg, geom, styles, true, "Background")?
+            && let Some(block) =
+                page_overlay_block(ctx, bg, geom, styles, true, "Background")?
         {
             blocks.push(block);
         }
@@ -1527,7 +1622,8 @@ fn lower_furniture(
 
         if slot.is_header()
             && let Some(fg) = source.foreground
-            && let Some(block) = page_overlay_block(ctx, fg, geom, styles, false, "Foreground")?
+            && let Some(block) =
+                page_overlay_block(ctx, fg, geom, styles, false, "Foreground")?
         {
             blocks.push(block);
         }
@@ -1644,11 +1740,14 @@ fn sig_block(block: &Block, out: &mut String) {
             }
             out.push(')');
         }
+        Block::FlowSpace { dxa } => {
+            let _ = write!(out, "space({dxa})");
+        }
         Block::Toc(toc) => {
             let _ = write!(
                 out,
-                "toc(instr={},dirty={},depth={:?},cat={:?},tab={})",
-                toc.instr, toc.dirty, toc.depth, toc.caption_category, toc.tab_pos
+                "toc(instr={},mode={:?},depth={:?},cat={:?},tab={})",
+                toc.instr, toc.mode, toc.depth, toc.caption_category, toc.tab_pos
             );
             for entry in &toc.entries {
                 sig_para(entry, out);
@@ -1735,7 +1834,11 @@ fn sig_run(run: &Run, out: &mut String) {
             let _ = write!(out, "ommli({xml})");
         }
         Run::Field(field) => {
-            let _ = write!(out, "field({},dirty={}", field.instr, field.dirty);
+            let _ = write!(
+                out,
+                "field({},mode={:?},display={:?}",
+                field.instr, field.mode, field.display
+            );
             for run in &field.result {
                 sig_run(run, out);
             }
@@ -2057,8 +2160,8 @@ fn page_overlay_block(
     // EMU per twip = 914400 / 1440.
     const EMU_PER_TWIP: i64 = 635;
 
-    let saved_w = ctx.raster_width;
-    ctx.raster_width = Abs::pt(geom.page_w as f64 / 20.0);
+    let saved_w = ctx.available_width;
+    ctx.available_width = Abs::pt(geom.page_w as f64 / 20.0);
     // Rendered into a region *expanded* to the full page box (not shrink-fit
     // to the content's own measured size): a watermark/background is commonly
     // built purely from `place(..)`, which positions content absolutely
@@ -2069,7 +2172,7 @@ fn page_overlay_block(
     // never load-bearing — only the expanded render's pixels are.
     let page_h = Abs::pt(geom.page_h as f64 / 20.0);
     let result = ctx.rasterize_page_overlay(content, styles, content.span(), page_h)?;
-    ctx.raster_width = saved_w;
+    ctx.available_width = saved_w;
     let Some((rel, _size, _text)) = result else {
         return Ok(None);
     };
@@ -2178,7 +2281,8 @@ fn page_number_para(
         ParaChild::Run(Run::Field(Field {
             instr,
             result: vec![Run::Text { props: RunProps::default(), text: "1".into() }],
-            dirty: false,
+            mode: FieldMode::Live,
+            display: FieldDisplay::Visible,
         }))
     };
     let literal = |text: ecow::EcoString| {
@@ -2239,7 +2343,7 @@ pub(crate) fn collect_tags(blocks: &[Block], out: &mut Vec<Tag>) {
                     }
                 }
             }
-            Block::SectionBreak(_) => {}
+            Block::FlowSpace { .. } | Block::SectionBreak(_) => {}
         }
     }
 }
@@ -2316,6 +2420,9 @@ fn collect_positioned_tags(
                         );
                     }
                 }
+                *y += 1;
+            }
+            Block::FlowSpace { .. } => {
                 *y += 1;
             }
             Block::Toc(toc) => {

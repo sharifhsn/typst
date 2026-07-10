@@ -6,7 +6,7 @@ use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Output, StyleChain, Target};
-use typst_library::introspection::{Introspector, Tag};
+use typst_library::introspection::{Introspector, Location, Tag};
 use typst_library::model::{Document, DocumentInfo};
 pub use typst_ooxml_core::dml::{
     FillSpec as ShapeFill, PathSegment, StrokeSpec as ShapeStroke,
@@ -15,6 +15,7 @@ pub use typst_ooxml_core::media::MediaPart;
 
 use crate::introspect::DocxIntrospector;
 use crate::package::Rels;
+use crate::report::FidelityReport;
 
 /// Output document: realized native tree lowered to the OOXML IR + metadata +
 /// introspector.
@@ -35,7 +36,6 @@ pub struct DocxDocument {
     pub(crate) text_defaults: TextDefaults,
     /// Document-derived heading style definitions (`Heading1..HeadingN`).
     pub(crate) heading_styles: Vec<HeadingStyle>,
-    pub(crate) uses_fields: bool,
     pub(crate) uses_math: bool,
     pub(crate) introspector: Arc<DocxIntrospector>,
     /// Header parts (`word/headerN.xml`) referenced by the section(s).
@@ -70,6 +70,9 @@ pub struct DocxDocument {
     /// backs References → Manage Sources. Empty when the document has no
     /// bibliography.
     pub(crate) word_sources: Vec<crate::bibliography::WordSource>,
+    /// Structured representation decisions and deliberately suppressed
+    /// diagnostics collected while lowering the document.
+    pub(crate) fidelity_report: FidelityReport,
 }
 
 impl DocxDocument {
@@ -90,6 +93,11 @@ impl DocxDocument {
     /// (1 pt = 20 twips).
     pub fn page_size_pt(&self) -> (f64, f64) {
         (self.sect.page_w as f64 / 20.0, self.sect.page_h as f64 / 20.0)
+    }
+
+    /// Structured fidelity decisions made while lowering this document.
+    pub fn fidelity_report(&self) -> &FidelityReport {
+        &self.fidelity_report
     }
 }
 
@@ -121,6 +129,12 @@ impl Output for DocxDocument {
 pub enum Block {
     Para(Para),
     Table(Tbl),
+    /// Exact vertical flow space that cannot be attached to a neighboring
+    /// paragraph (most commonly between two tables). Encodes as an empty
+    /// paragraph with an exact line height.
+    FlowSpace {
+        dxa: i32,
+    },
     /// A table of contents: a `TOC` complex field whose cached result is a set
     /// of baked entry paragraphs (so it shows without a manual field update).
     Toc(Toc),
@@ -136,7 +150,7 @@ pub enum Block {
 /// runs are shown inside a single-paragraph field instead.
 pub struct Toc {
     pub instr: EcoString,
-    pub dirty: bool,
+    pub mode: FieldMode,
     /// Heading depth (`\o "1-N"`) to populate from after the body is converted.
     /// `Some` marks a heading table of contents.
     pub depth: Option<usize>,
@@ -155,6 +169,7 @@ pub struct Toc {
 /// once every heading's real bookmark is known.
 pub struct TocHeading {
     pub level: usize,
+    pub location: Option<Location>,
     /// The heading's bookmark name, when it emitted one (else a plain entry).
     pub anchor: Option<EcoString>,
     pub text: EcoString,
@@ -165,6 +180,7 @@ pub struct TocHeading {
 pub struct TocFigure {
     /// The caption category (`Figure`/`Table`/…), matched against a `\c` switch.
     pub category: EcoString,
+    pub location: Option<Location>,
     /// The figure's bookmark name, when it emitted one (else a plain entry).
     pub anchor: Option<EcoString>,
     pub text: EcoString,
@@ -460,11 +476,45 @@ pub enum TabLeader {
     Underscore,
 }
 
-/// A complex field code run sequence.
+/// Who owns the value of a Word field after export.
+///
+/// Word's document-level `updateFields` setting recalculates *all* unlocked
+/// fields. Keeping this policy on every field prevents a live TOC or page
+/// reference from silently replacing a Typst-computed semantic reference or
+/// custom figure number.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum FieldMode {
+    /// Typst owns the cached result. Emit `w:fldLock="true"` so a global field
+    /// refresh cannot replace it with a non-equivalent Word interpretation.
+    Static,
+    /// The consumer owns the value and updates it through its normal layout or
+    /// explicit field-update behavior. Does not request a global open refresh.
+    Live,
+}
+
+/// Whether a field result participates in the visible document.
+///
+/// Word's `SEQ \h` switch hides a sequence result, but LibreOffice does not
+/// honor that switch consistently. Hidden fields therefore also carry hidden
+/// run formatting in their OOXML representation.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum FieldDisplay {
+    Visible,
+    Hidden,
+}
+
+impl FieldMode {
+    pub(crate) fn locked(self) -> bool {
+        self == Self::Static
+    }
+}
+
+/// A complex field code run sequence with an explicit value-ownership policy.
 pub struct Field {
     pub instr: EcoString,
     pub result: Vec<Run>,
-    pub dirty: bool,
+    pub mode: FieldMode,
+    pub display: FieldDisplay,
 }
 
 /// An image. Inline (`anchor: None`) or floating (`anchor: Some`).
@@ -530,6 +580,15 @@ pub struct ShapeSpec {
 pub struct TextBox {
     pub ins: [i64; 4],
     pub blocks: Vec<Block>,
+    pub wrap: TextBoxWrap,
+}
+
+#[derive(Copy, Clone)]
+pub enum TextBoxWrap {
+    /// Respect the measured frame width and reflow text within it.
+    Square,
+    /// Natural-width placed text: do not introduce consumer-side line wraps.
+    None,
 }
 
 /// A shape's geometry. Coordinates for [`ShapeGeom::Path`] are in EMU within the
@@ -860,7 +919,6 @@ impl MultiLevelType {
 // ---------------------------------------------------------------------------
 
 use rustc_hash::FxHashMap;
-use typst_library::introspection::Location;
 
 /// Maps `Location`s to their assigned bookmark `(name, id)`.
 #[derive(Default)]

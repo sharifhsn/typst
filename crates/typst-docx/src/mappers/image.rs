@@ -35,18 +35,19 @@
 
 use ecow::EcoString;
 use typst_library::diag::SourceResult;
-use typst_library::foundations::{Content, Packed, Smart, StyleChain};
+use typst_library::foundations::{Content, Packed, Resolve, Smart, StyleChain};
 use typst_library::layout::{Abs, OuterVAlignment, Sizing, VAlignment};
-use typst_library::model::{FigureElem, FigureKind};
+use typst_library::model::{FigureElem, FigureKind, Numbering};
 use typst_library::text::TextElem;
 use typst_library::visualize::{Image, ImageElem, ImageKind, SvgImage};
 use typst_ooxml_core::media;
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Anchor, AnchorPos, AnchorWrap, Block, Drawing, Field, Jc, Para, ParaChild, ParaProps,
-    Run, RunProps,
+    Anchor, AnchorPos, AnchorWrap, Block, Drawing, Field, FieldDisplay, FieldMode, Jc,
+    Para, ParaChild, ParaProps, Run, RunProps,
 };
+use crate::report::{DecisionReason, LossSet, Representation};
 
 /// English Metric Units per point, as an `i64` factor for whole-point offsets.
 const EMU_PER_PT_I: i64 = 12700;
@@ -77,6 +78,13 @@ pub fn image(
     if let Some(svg) = svg_image(&decoded) {
         let content = elem.clone().pack();
         if let Some((png_rel, size, _text)) = ctx.rasterize(&content, styles, span)? {
+            ctx.record_content_decision(
+                &content,
+                Representation::NativeWithFallback,
+                DecisionReason::SvgWithPngFallback,
+                LossSet::default(),
+                0,
+            );
             let svg_rel = ctx.add_image(svg.data().as_slice(), "svg");
             let docpr_id = ctx.next_drawing_id();
             let name: EcoString = ecow::eco_format!("Picture {docpr_id}");
@@ -201,6 +209,7 @@ pub fn figure(
         if !text.is_empty() {
             ctx.toc_figures.push(crate::dom::TocFigure {
                 category: seq_name(elem, styles),
+                location: elem.location(),
                 anchor: bookmark.as_ref().map(|(_, name)| name.clone()),
                 text,
             });
@@ -293,15 +302,13 @@ pub fn caption(
 /// - A body that is a single native/rasterized drawing (an image, a shape
 ///   composition, a rasterized canvas) → one `<wp:anchor>`ed drawing whose
 ///   position follows the place alignment + `dx`/`dy` offsets.
-/// - A `float: true` body that is NOT a single drawing (a figure body +
-///   caption, a table, flowing text) → those blocks emitted in place, so the
-///   text stays live. `float` is Typst's own "remove from normal flow and
-///   reflow to the top/bottom of the region" — exactly the DOCX figure-flow
-///   model — so this is a semantic mapping, not an approximation, and it
-///   avoids rasterizing the whole floated body to a flat (text-dead) image.
-/// - Any other non-drawing body (a non-float, absolutely-positioned overlay /
-///   watermark / decoration) keeps its position by rasterizing the whole body
-///   and anchoring it.
+/// - Plain text/inline formatting that is legal inside a Word text box → an
+///   unframed anchored `wps:txbx`, retaining both live text and position.
+/// - Rich content that is unsafe in a Word text box stays in the main story and
+///   carries an explicit flow-fallback fidelity decision. This is still an
+///   approximation until floating tables/rich regions have their own plans.
+/// - A body that lowers to nothing uses one anchored whole-region raster
+///   fallback with searchable hidden text.
 ///
 /// Returns an empty `Vec` if the body lays out to nothing.
 pub fn place(
@@ -310,6 +317,7 @@ pub fn place(
     ctx: &mut DocxCtx,
 ) -> SourceResult<Vec<Block>> {
     let body = &elem.body;
+    let placed = elem.clone().pack();
 
     // A placed body whose ENTIRE content is a composition of native shapes —
     // e.g. a decorative background pattern built from many `#polygon`s in a
@@ -324,6 +332,31 @@ pub fn place(
             crate::mappers::shape::transformed(body, styles, ctx)?
     {
         set_place_anchor(&mut drawing, elem, styles, ctx);
+        ctx.record_content_decision(
+            &placed,
+            Representation::Native,
+            DecisionReason::PositionedDrawing,
+            LossSet::default(),
+            0,
+        );
+        return Ok(vec![para_drawing(drawing)]);
+    }
+
+    // Plain text belongs in a real anchored Word text box. This keeps it
+    // editable/searchable while preserving the source alignment and offsets;
+    // footnotes, tables, figures, math, and nested drawings are deliberately
+    // excluded because Word either forbids or destabilizes them in `wps:txbx`.
+    if let Some(Run::Drawing(mut drawing)) =
+        crate::mappers::shape::unframed_text_box(body, styles, ctx)?
+    {
+        set_place_anchor(&mut drawing, elem, styles, ctx);
+        ctx.record_content_decision(
+            &placed,
+            Representation::Native,
+            DecisionReason::PositionedTextBox,
+            LossSet::default(),
+            0,
+        );
         return Ok(vec![para_drawing(drawing)]);
     }
 
@@ -340,6 +373,13 @@ pub fn place(
     );
     if is_solely_one_drawing && let Some(mut drawing) = take_first_drawing(&mut blocks) {
         set_place_anchor(&mut drawing, elem, styles, ctx);
+        ctx.record_content_decision(
+            &placed,
+            Representation::Native,
+            DecisionReason::PositionedDrawing,
+            LossSet::default(),
+            0,
+        );
         return Ok(vec![para_drawing(drawing)]);
     }
 
@@ -352,6 +392,13 @@ pub fn place(
     // placed content — a bare shape, a canvas — lowered to a single drawing
     // above and never reaches here.
     if !blocks.is_empty() {
+        ctx.record_content_decision(
+            &placed,
+            Representation::Approximate,
+            DecisionReason::PositionedContentFlowFallback,
+            LossSet::VISUAL_ONLY,
+            0,
+        );
         return Ok(blocks);
     }
 
@@ -359,7 +406,13 @@ pub fn place(
     // visual with no extractable content): rasterize the whole body and anchor
     // it so the visual survives, keeping any frame-recovered hidden text (the
     // trailing runs) beside it so the placed content stays searchable.
-    let mut runs = laid_out_fallback(body, styles, ctx)?.into_iter();
+    let mut runs = laid_out_fallback_with_reason(
+        body,
+        styles,
+        ctx,
+        DecisionReason::PositionedContentRasterFallback,
+    )?
+    .into_iter();
     match runs.next() {
         Some(Run::Drawing(mut drawing)) => {
             set_place_anchor(&mut drawing, elem, styles, ctx);
@@ -390,18 +443,20 @@ fn set_place_anchor(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) {
-    use typst_library::layout::HAlignment;
+    use typst_library::layout::{HAlignment, PlacementScope};
 
-    let font_size = styles.resolve(TextElem::size);
     let align = elem.alignment.get(styles);
     let float = elem.float.get(styles);
+    let scope = elem.scope.get(styles);
 
-    let dx = elem.dx.get(styles);
-    let dy = elem.dy.get(styles);
-    let dx_abs = if dx.rel.is_zero() { dx.abs.at(font_size) } else { Abs::zero() };
-    let dy_abs = if dy.rel.is_zero() { dy.abs.at(font_size) } else { Abs::zero() };
-    let dx_emu = (dx_abs != Abs::zero()).then(|| crate::props::abs_to_emu(dx_abs));
-    let dy_emu = (dy_abs != Abs::zero()).then(|| crate::props::abs_to_emu(dy_abs));
+    let reference_w = match scope {
+        PlacementScope::Column => ctx.available_width,
+        PlacementScope::Parent => ctx.page_content_width,
+    };
+    let reference_h = ctx.available_height;
+
+    let dx = elem.dx.get(styles).resolve(styles).relative_to(reference_w);
+    let dy = elem.dy.get(styles).resolve(styles).relative_to(reference_h);
 
     let h_comp = match align {
         Smart::Custom(a) => a.x(),
@@ -412,54 +467,102 @@ fn set_place_anchor(
         Smart::Auto => None,
     };
 
-    let h_align: &'static str = match h_comp {
+    let h_align = match h_comp {
         Some(HAlignment::Center) => "center",
         Some(HAlignment::Right | HAlignment::End) => "right",
         _ => "left",
     };
-    let pos_h = match dx_emu {
-        Some(off) => AnchorPos { rel_from: "margin", align: None, offset: Some(off) },
-        None => AnchorPos {
-            rel_from: "margin",
-            align: Some(h_align),
-            offset: None,
-        },
+    let h_rel_from = match scope {
+        PlacementScope::Column => "column",
+        PlacementScope::Parent => "margin",
     };
+    let pos_h = anchor_axis(
+        h_rel_from,
+        h_align,
+        h_comp.map(|alignment| match alignment {
+            HAlignment::Center => 0.5,
+            HAlignment::Right | HAlignment::End => 1.0,
+            _ => 0.0,
+        }),
+        dx,
+        reference_w,
+        drawing.w_emu,
+    );
 
-    let v_align: &'static str = match v_comp {
+    let v_align = match v_comp {
         Some(VAlignment::Bottom) => "bottom",
         Some(VAlignment::Horizon) => "center",
         _ => "top",
     };
-    let pos_v = match dy_emu {
-        Some(off) => AnchorPos { rel_from: "margin", align: None, offset: Some(off) },
-        None => AnchorPos {
-            rel_from: "margin",
-            align: Some(v_align),
-            offset: None,
-        },
+    let pos_v = if v_comp.is_none() && !float {
+        // Typst's missing vertical alignment means "at the current flow
+        // position", not "at the top margin".
+        AnchorPos {
+            rel_from: "paragraph",
+            align: None,
+            offset: Some(crate::props::abs_to_emu(dy)),
+        }
+    } else {
+        anchor_axis(
+            "margin",
+            v_align,
+            v_comp.map_or(Some(0.0), |alignment| {
+                Some(match alignment {
+                    VAlignment::Horizon => 0.5,
+                    VAlignment::Bottom => 1.0,
+                    VAlignment::Top => 0.0,
+                })
+            }),
+            dy,
+            reference_h,
+            drawing.h_emu,
+        )
     };
 
     let wrap = if float { AnchorWrap::TopAndBottom } else { AnchorWrap::None };
+    let clearance =
+        if float { crate::props::abs_to_emu(elem.clearance.resolve(styles)) } else { 0 };
     drawing.anchor = Some(Anchor {
         z: ctx.next_z(),
         pos_h,
         pos_v,
         wrap,
-        dist: [0, 0, 0, 0],
+        dist: [clearance, clearance, 0, 0],
         behind: false,
     });
+}
+
+/// Builds one anchor axis. With no displacement Word keeps semantic alignment;
+/// once `dx`/`dy` is nonzero, alignment and displacement are combined into one
+/// exact offset because OOXML permits only one of `wp:align` and `wp:posOffset`.
+fn anchor_axis(
+    rel_from: &'static str,
+    align: &'static str,
+    factor: Option<f64>,
+    displacement: Abs,
+    reference: Abs,
+    extent_emu: i64,
+) -> AnchorPos {
+    if displacement == Abs::zero() {
+        return AnchorPos { rel_from, align: Some(align), offset: None };
+    }
+
+    let reference_emu = crate::props::abs_to_emu(reference);
+    let base = factor.unwrap_or(0.0) * (reference_emu - extent_emu) as f64;
+    AnchorPos {
+        rel_from,
+        align: None,
+        offset: Some(base.round() as i64 + crate::props::abs_to_emu(displacement)),
+    }
 }
 
 /// Builds the caption runs with a `SEQ` field carrying the number (G9).
 ///
 /// When the figure is numbered, the caption is reconstructed as
-/// `supplement` + `{ SEQ Kind \* ARABIC }` + `separator` + `body`, where the
-/// SEQ field caches the realized number as its result so the caption reads
-/// correctly before Word recomputes fields. The `SEQ` name follows the figure
-/// `kind` (image→`Figure`, table→`Table`, raw→`Listing`, else the name) so
-/// distinct kinds keep independent counters. Unnumbered captions fall back to
-/// the plain realized text.
+/// `supplement` + number + `separator` + `body`. A Word `SEQ` field owns the
+/// visible number only when its format is provably equivalent to Typst's
+/// numbering pattern. Otherwise the exact Typst number stays as text and a
+/// hidden `SEQ \h` advances Word's per-kind counter for list-of-figures support.
 fn caption_runs(
     elem: &Packed<FigureElem>,
     cap: &Packed<typst_library::model::FigureCaption>,
@@ -468,11 +571,10 @@ fn caption_runs(
 ) -> SourceResult<Vec<Run>> {
     // Only emit SEQ for actually-numbered figures; otherwise plain realized text
     // (byte-identical to the previous behaviour for unnumbered captions).
-    let numbered = elem.numbering.get_ref(styles).is_some();
-    if !numbered {
+    let Some(numbering) = elem.numbering.get_ref(styles) else {
         let realized = cap.realize(ctx.engine(), styles)?;
         return ctx.inline_runs(&realized, styles, RunProps::default());
-    }
+    };
 
     let mut runs: Vec<Run> = Vec::new();
 
@@ -515,14 +617,46 @@ fn caption_runs(
             _ => Vec::new(),
         };
 
-    // The SEQ complex field. Word recomputes the number on open / field update.
     let seq = seq_name(elem, styles);
-    runs.push(Run::Field(Field {
-        instr: ecow::eco_format!(" SEQ {seq} \\* ARABIC "),
-        result: number_runs,
-        dirty: false,
-    }));
-    ctx.mark_field();
+    if let Some(format) = word_seq_format(numbering, ctx, cap.span()) {
+        // Word can exactly reproduce this single-component numeral system, so
+        // preserve a genuinely live, editable caption sequence.
+        runs.push(Run::Field(Field {
+            instr: ecow::eco_format!(" SEQ {seq} \\* {format} "),
+            result: number_runs,
+            mode: FieldMode::Live,
+            display: FieldDisplay::Visible,
+        }));
+    } else if number_runs.is_empty() {
+        // If Typst itself could not evaluate a user numbering function, retain
+        // the previous useful fallback: let Word provide a visible decimal.
+        runs.push(Run::Field(Field {
+            instr: ecow::eco_format!(" SEQ {seq} \\* ARABIC "),
+            result: Vec::new(),
+            mode: FieldMode::Live,
+            display: FieldDisplay::Visible,
+        }));
+    } else {
+        // Prefixes/suffixes, multi-component patterns, and functions have no
+        // generally equivalent SEQ instruction. Keep Typst's exact output and
+        // advance a hidden Word counter once so later live captions and `TOC
+        // \c` fields still see the correct sequence position.
+        runs.extend(number_runs);
+        runs.push(Run::Field(Field {
+            instr: ecow::eco_format!(" SEQ {seq} \\h "),
+            result: Vec::new(),
+            mode: FieldMode::Live,
+            display: FieldDisplay::Hidden,
+        }));
+        let content = elem.clone().pack();
+        ctx.record_content_decision(
+            &content,
+            Representation::Approximate,
+            DecisionReason::TypstOwnedFigureNumber,
+            LossSet::DYNAMIC_BEHAVIOR,
+            0,
+        );
+    }
 
     // Separator (e.g. ": "). Synthesized into the `separator` field by
     // `FigureCaption`'s `Synthesize` impl, so read it off the chain.
@@ -534,6 +668,30 @@ fn caption_runs(
     runs.extend(ctx.inline_runs(&cap.body, styles, RunProps::default())?);
 
     Ok(runs)
+}
+
+/// A Word `SEQ` numeric-format switch when one field can exactly reproduce the
+/// Typst numbering pattern. Decorations, multiple components, decimal padding,
+/// and functions stay Typst-owned instead of being silently coerced.
+fn word_seq_format(
+    numbering: &Numbering,
+    ctx: &mut DocxCtx,
+    span: typst_syntax::Span,
+) -> Option<&'static str> {
+    let Numbering::Pattern(pattern) = numbering else { return None };
+    if pattern.pieces() != 1 {
+        return None;
+    }
+    let one = pattern.apply_kth(ctx.engine(), span, 0, 1);
+    let four = pattern.apply_kth(ctx.engine(), span, 0, 4);
+    match (one.as_str(), four.as_str()) {
+        ("1", "4") => Some("ARABIC"),
+        ("a", "d") => Some("alphabetic"),
+        ("A", "D") => Some("ALPHABETIC"),
+        ("i", "iv") => Some("roman"),
+        ("I", "IV") => Some("ROMAN"),
+        _ => None,
+    }
 }
 
 /// Maps a figure's `kind` to a `SEQ` field name (a stable per-kind counter
@@ -684,9 +842,26 @@ pub fn laid_out_fallback(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Vec<Run>> {
+    laid_out_fallback_with_reason(content, styles, ctx, DecisionReason::RasterFallback)
+}
+
+/// Whole-region raster fallback with an explicit capability-planning reason.
+pub(crate) fn laid_out_fallback_with_reason(
+    content: &Content,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+    reason: DecisionReason,
+) -> SourceResult<Vec<Run>> {
     let Some((rel, size, text)) = ctx.rasterize(content, styles, content.span())? else {
         return Ok(Vec::new());
     };
+    ctx.record_content_decision(
+        content,
+        Representation::Raster,
+        reason,
+        LossSet::RASTER,
+        text.chars().count(),
+    );
     Ok(fallback_runs(ctx, rel, size, &text))
 }
 
@@ -703,6 +878,13 @@ pub fn laid_out_fallback_with_tags(
     let Some((rel, size, text)) = rasterized else {
         return Ok((tags, Vec::new()));
     };
+    ctx.record_content_decision(
+        content,
+        Representation::Raster,
+        DecisionReason::RasterFallback,
+        LossSet::RASTER,
+        text.chars().count(),
+    );
     Ok((tags, fallback_runs(ctx, rel, size, &text)))
 }
 

@@ -11,21 +11,26 @@
 //!      `TOC \o "1-N" \h \z \u` (headings) or `TOC \h \z \c "Figure"` /
 //!      `\c "Table"` (list-of-figures / list-of-tables).
 //!
-//! The field carries `w:dirty` so Word refreshes it on open; combined with the
-//! integration phase's `<w:updateFields w:val="true"/>` in `settings.xml`
-//! (driven by `ctx.mark_field()`), the user gets a fully populated TOC without
-//! manual intervention. The cached field result is an italic "update field"
-//! placeholder, matching what every real-world emitter ships.
+//! A TOC built entirely from native Word headings/captions stays live and can
+//! be rebuilt through Word's "Update Table" affordance. It is not marked dirty
+//! on open because Word turns that into a disruptive external-field warning.
+//! If the baked result includes Typst-only fallback entries, the field is locked:
+//! Word cannot reconstruct those entries and must not erase them on update.
 
 use ecow::{EcoString, eco_format};
 use typst_library::diag::SourceResult;
+use typst_library::engine::Engine;
 use typst_library::foundations::{Element, Packed, Repr, Selector, StyleChain};
+use typst_library::introspection::{
+    Counter, CounterKey, Location, PageNumberingIntrospection,
+};
 use typst_library::model::{HeadingElem, OutlineElem};
+use typst_syntax::Span;
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, Field, Para, ParaChild, ParaProps, Run, RunProps, TabAlign, TabLeader,
-    TabStop, Toc, TocFigure, TocHeading,
+    Block, Field, FieldDisplay, FieldMode, Para, ParaChild, ParaProps, Run, RunProps,
+    TabAlign, TabLeader, TabStop, Toc, TocFigure, TocHeading,
 };
 
 /// The default outline depth used for the `\o "1-N"` switch when the outline
@@ -73,14 +78,13 @@ pub fn outline(
     // entry paragraphs are filled in a post-conversion pass ([`fill_tocs`]),
     // once every heading/figure's real bookmark exists. A heading TOC carries the
     // depth to populate from; a list-of-figures/tables carries its caption
-    // category. The field stays `dirty` so Word refreshes page numbers when able.
+    // category. The postpass below chooses whether Word can safely rebuild it.
     let instr = toc_instruction(elem, styles);
-    ctx.mark_field();
 
     let caption_category = toc_category(elem, styles);
     let depth = caption_category.is_none().then(|| toc_depth(elem, styles));
     // Right-tab position (page content width, in twips) for the dot leader.
-    let tab_pos = (ctx.raster_width.to_pt() * 20.0) as i32;
+    let tab_pos = ctx.available_width_dxa();
 
     // Shown only when no entries are baked (a list whose figures had no captions,
     // or a document with no headings): an italic "update me" placeholder.
@@ -91,7 +95,7 @@ pub fn outline(
 
     blocks.push(Block::Toc(Toc {
         instr,
-        dirty: true,
+        mode: FieldMode::Live,
         depth,
         caption_category,
         tab_pos,
@@ -113,21 +117,50 @@ pub(crate) fn fill_tocs(
     recorded: &[TocHeading],
     fallback: &[TocHeading],
     figures: &[TocFigure],
+    engine: &mut Engine,
+    styles: StyleChain,
 ) {
     let headings = if recorded.is_empty() { fallback } else { recorded };
     for block in blocks.iter_mut() {
         let Block::Toc(toc) = block else { continue };
         if let Some(depth) = toc.depth {
-            toc.entries = headings
+            let selected: Vec<_> = headings.iter().filter(|h| h.level <= depth).collect();
+            toc.mode = if selected.iter().all(|h| h.anchor.is_some()) {
+                FieldMode::Live
+            } else {
+                FieldMode::Static
+            };
+            toc.entries = selected
                 .iter()
-                .filter(|h| h.level <= depth)
-                .map(|h| entry_para(h.level, &h.anchor, &h.text, toc.tab_pos))
+                .map(|h| {
+                    entry_para(
+                        h.level,
+                        &h.anchor,
+                        &h.text,
+                        cached_page_text(engine, styles, h.location),
+                        toc.tab_pos,
+                    )
+                })
                 .collect();
         } else if let Some(category) = &toc.caption_category {
-            toc.entries = figures
+            let selected: Vec<_> =
+                figures.iter().filter(|f| &f.category == category).collect();
+            toc.mode = if selected.iter().all(|f| f.anchor.is_some()) {
+                FieldMode::Live
+            } else {
+                FieldMode::Static
+            };
+            toc.entries = selected
                 .iter()
-                .filter(|f| &f.category == category)
-                .map(|f| entry_para(1, &f.anchor, &f.text, toc.tab_pos))
+                .map(|f| {
+                    entry_para(
+                        1,
+                        &f.anchor,
+                        &f.text,
+                        cached_page_text(engine, styles, f.location),
+                        toc.tab_pos,
+                    )
+                })
                 .collect();
         }
     }
@@ -140,6 +173,7 @@ fn entry_para(
     level: usize,
     anchor: &Option<EcoString>,
     text: &EcoString,
+    page_text: EcoString,
     tab_pos: i32,
 ) -> Para {
     let text_run = Run::Text { props: RunProps::default(), text: text.clone() };
@@ -156,8 +190,9 @@ fn entry_para(
     if let Some(name) = anchor {
         content.push(ParaChild::Run(Run::Field(Field {
             instr: eco_format!(" PAGEREF {name} \\h "),
-            result: Vec::new(),
-            dirty: false,
+            result: vec![Run::Text { props: RunProps::default(), text: page_text }],
+            mode: FieldMode::Live,
+            display: FieldDisplay::Visible,
         })));
     }
     Para {
@@ -172,6 +207,29 @@ fn entry_para(
         },
         content,
     }
+}
+
+/// Typst's own page-reference text for a TOC entry, used as the field cache.
+/// This keeps the baked TOC visually complete without Word's modal
+/// document-wide update workflow; the live PAGEREF can still be refreshed by
+/// the user after editing/reflow.
+fn cached_page_text(
+    engine: &mut Engine,
+    styles: StyleChain,
+    location: Option<Location>,
+) -> EcoString {
+    let Some(location) = location else { return "1".into() };
+    let span = Span::detached();
+    let Some(numbering) = engine.introspect(PageNumberingIntrospection(location, span))
+    else {
+        return "1".into();
+    };
+    Counter::new(CounterKey::Page)
+        .display_at(engine, location, styles, &numbering.trimmed(), span)
+        .map(|content| content.plain_text())
+        .ok()
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "1".into())
 }
 
 /// The TOC depth (`\o "1-N"`): the outline's `depth`, or Word's default of 3,

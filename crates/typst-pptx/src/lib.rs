@@ -21,6 +21,7 @@ mod image;
 mod package;
 mod shape;
 mod slide;
+mod table;
 mod text;
 #[allow(dead_code)]
 mod xml;

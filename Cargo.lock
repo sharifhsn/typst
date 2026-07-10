@@ -3207,6 +3207,7 @@ dependencies = [
  "hayagriva",
  "rustc-hash",
  "time",
+ "typst-export-common",
  "typst-layout",
  "typst-library",
  "typst-macros",
@@ -3235,6 +3236,16 @@ dependencies = [
  "typst-timing",
  "typst-utils",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "typst-export-common"
+version = "0.15.0"
+dependencies = [
+ "tiny-skia",
+ "typst-layout",
+ "typst-library",
+ "typst-render",
 ]
 
 [[package]]
@@ -3445,10 +3456,9 @@ version = "0.15.0"
 dependencies = [
  "ecow",
  "rustc-hash",
- "tiny-skia",
+ "typst-export-common",
  "typst-layout",
  "typst-library",
- "typst-render",
  "typst-utils",
  "zip",
 ]
@@ -3462,10 +3472,10 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
+ "typst-export-common",
  "typst-layout",
  "typst-library",
  "typst-macros",
- "typst-render",
  "typst-syntax",
  "typst-timing",
  "typst-utils",
@@ -3506,6 +3516,7 @@ dependencies = [
  "ecow",
  "rustc-hash",
  "time",
+ "typst-export-common",
  "typst-layout",
  "typst-library",
  "typst-ooxml-core",

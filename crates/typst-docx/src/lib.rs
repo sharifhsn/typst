@@ -11,11 +11,13 @@ mod ctx;
 mod document;
 mod dom;
 mod encode;
+mod fallback;
 mod introspect;
 mod mappers;
 mod package;
 mod parts;
 mod props;
+mod report;
 mod rules;
 mod styles_part;
 mod xml;
@@ -26,4 +28,8 @@ pub use self::dom::DocxDocument;
 pub use self::encode::{DocxOptions, docx};
 pub use self::introspect::DocxIntrospector;
 pub use self::mappers::math::equation_omml_fragment;
+pub use self::report::{
+    DecisionReason, ExportDecision, ExportSource, ExportStage, FidelityReport, LossSet,
+    Representation, RepresentationCounts, SuppressedDiagnostic, SuppressedKind,
+};
 pub use self::rules::register;

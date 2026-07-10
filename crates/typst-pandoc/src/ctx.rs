@@ -9,6 +9,7 @@
 //! re-numbers.
 
 use ecow::EcoString;
+use typst_export_common::raster;
 use typst_library::diag::{SourceResult, warning};
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, StyleChain};
@@ -44,8 +45,8 @@ pub struct PandocCtx<'a, 'e> {
 
     /// Maps a bibliography entry's anchor id (the `ref-<hash>` / label form an
     /// in-text citation `Link` targets) to its citation key. Populated once, up
-    /// front, from the document's `Works`. Used by the post-walk cite pass
-    /// ([`crate::convert::structure_cites`]) to recover the cite key behind a
+    /// front, from the document's `Works`. Used by the post-lowering
+    /// normalization pass to recover the cite key behind a
     /// realized in-text citation and emit a structured `Cite` node that
     /// `pandoc --citeproc` can re-resolve. Empty when the document has no
     /// bibliography.
@@ -122,8 +123,8 @@ impl<'a, 'e> PandocCtx<'a, 'e> {
         styles: StyleChain,
         span: Span,
     ) -> SourceResult<Option<(EcoString, Size)>> {
-        use typst_library::foundations::{Smart, Target, TargetElem};
-        use typst_library::layout::{Axes, Region, Sides};
+        use typst_library::foundations::{Target, TargetElem};
+        use typst_library::layout::{Axes, Region};
 
         // Lay out under the paged target: layout rules (shapes, images, …) are
         // only registered for `Target::Paged`, so the content would otherwise be
@@ -182,30 +183,14 @@ impl<'a, 'e> PandocCtx<'a, 'e> {
             return Ok(None);
         }
 
-        // Render to a pixmap at 2× for crispness, then PNG-encode.
-        let page = typst_layout::Page {
-            frame,
-            bleed: Sides::splat(Abs::zero()),
-            fill: Smart::Custom(None),
-            numbering: None,
-            supplement: Content::empty(),
-            number: 1,
+        // Use the shared exporter raster path, but keep Pandoc's historical
+        // full-frame semantics rather than ink-cropping: relative whitespace
+        // is part of an inline image's layout in downstream writers.
+        let Some(rendered) = raster::render_full_frame_to_png(frame, 2.0) else {
+            return Ok(None);
         };
-        let options = typst_render::RenderOptions {
-            pixel_per_pt: 2.0.into(),
-            ..Default::default()
-        };
-        // The rasterizer can panic on pathological sub-frames (a gradient/tiling
-        // that resolves to a zero-dimension pixmap: `tiny-skia` asserts "Canvas
-        // length must be != 0"). Such a panic must not abort the whole export —
-        // this is a best-effort fallback. Catch it and drop just this one image;
-        // the introspection tags were already harvested above.
-        let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            typst_render::render(&page, &options).encode_png()
-        }));
-        let Ok(Ok(png)) = rendered else { return Ok(None) };
 
-        Ok(Some((self.add_image(&png, "png"), size)))
+        Ok(Some((self.add_image(&rendered.png, "png"), rendered.size)))
     }
 
     /// Embeds image bytes as a self-contained `data:` URI (base64), suitable as

@@ -49,13 +49,14 @@ use unicode_math_class::MathClass;
 
 use crate::ctx::DocxCtx;
 use crate::dom::{Block, Para, ParaChild, ParaProps, Run, RunProps, TabAlign, TabStop};
+use crate::report::{DecisionReason, LossSet, Representation};
 
 /// The result of lowering an equation: inline run or block paragraph(s).
 // The inline `Run` is large but the common case; this IR is transient, so boxing
 // to shrink the enum isn't worthwhile (see the `Run`/`ParaChild` note in `dom`).
 #[allow(clippy::large_enum_variant)]
 pub enum EquationOut {
-    Inline(Run),
+    Inline(Vec<Run>),
     Block(Vec<Block>),
 }
 
@@ -65,7 +66,6 @@ pub fn equation(
     ctx: &mut DocxCtx,
 ) -> SourceResult<EquationOut> {
     let block = elem.block.get(styles);
-    ctx.mark_math();
 
     // Resolve the equation body to the math IR. The `MathItem` borrows from
     // `arenas`, which lives only for this function — fine, because we serialize
@@ -77,12 +77,22 @@ pub fn equation(
     // during realization for any real document element); fall back to alt/empty
     // in that case so export never fails.
     let Some(loc) = elem.location() else {
-        return Ok(fallback(elem, styles, block));
+        return Ok(text_fallback(elem, styles, block, ctx));
     };
 
     let arenas = Arenas::default();
     let item =
         resolve_equation(elem, ctx.engine(), Locator::synthesize(loc), &arenas, styles)?;
+
+    // Capability planning is atomic at the logical equation boundary. A native
+    // OMML subtree may not simply omit one unsupported descendant: that changes
+    // the equation's meaning while leaving a plausible-looking result. Select a
+    // whole-equation raster representation before the emitter writes any XML.
+    if let Some(unsupported) = first_unsupported_math(&item) {
+        return raster_fallback(elem, styles, block, unsupported, ctx);
+    }
+
+    ctx.mark_math();
 
     // Walk the IR into an `<m:oMath>…</m:oMath>` fragment. `ctx` is reborrowed
     // for the emitter and released when the block ends.
@@ -95,7 +105,7 @@ pub fn equation(
     };
 
     if !block {
-        return Ok(EquationOut::Inline(Run::OmmlInline(omath)));
+        return Ok(EquationOut::Inline(vec![Run::OmmlInline(omath)]));
     }
 
     // Block equation: wrap the `m:oMath` in an `m:oMathPara` (centered), which
@@ -114,15 +124,17 @@ pub fn equation(
     // Append the equation number, if numbered, as a tab + run on the same line.
     // OOXML has no first-class equation-number element; Word's own convention is
     // a right tab stop with the number text, all in the one paragraph. We do not
-    // know the page width here, so we use a right-aligned tab stop near the
-    // right margin (≈ 6.0" in twips for the default Letter text width).
+    // use the same scoped width budget as tables, stacks, TOCs, and fallback
+    // layout, so a nested or non-Letter equation reaches its actual right edge.
     let mut props = ParaProps::default();
     if let Some(number) = equation_number(elem, styles, ctx)? {
         content.push(ParaChild::Run(Run::Tab));
         content.extend(number.into_iter().map(ParaChild::Run));
-        props
-            .tabs
-            .push(TabStop { val: TabAlign::End, leader: None, pos: 8640 });
+        props.tabs.push(TabStop {
+            val: TabAlign::End,
+            leader: None,
+            pos: ctx.available_width_dxa(),
+        });
     }
 
     Ok(EquationOut::Block(vec![Block::Para(Para { props, content })]))
@@ -158,10 +170,28 @@ fn equation_number(
     Ok(Some(runs))
 }
 
-/// The graceful fallback when the IR cannot be resolved: emit the equation's
-/// `alt` text (or nothing) as a plain run/paragraph so the document still opens.
-fn fallback(elem: &Packed<EquationElem>, styles: StyleChain, block: bool) -> EquationOut {
+/// Last-resort readable fallback when neither native OMML nor raster output is
+/// available: emit the equation's alternate text and report the semantic loss.
+fn text_fallback(
+    elem: &Packed<EquationElem>,
+    styles: StyleChain,
+    block: bool,
+    ctx: &mut DocxCtx,
+) -> EquationOut {
     let alt = elem.alt.get_cloned(styles).unwrap_or_default();
+    let content = elem.clone().pack();
+    let (representation, losses) = if alt.is_empty() {
+        (Representation::Drop, LossSet::DROP)
+    } else {
+        (Representation::Approximate, LossSet::MATH_TEXT)
+    };
+    ctx.record_content_decision(
+        &content,
+        representation,
+        DecisionReason::EquationTextFallback,
+        losses,
+        alt.chars().count(),
+    );
     let run = Run::Text { props: RunProps::default(), text: alt };
     if block {
         EquationOut::Block(vec![Block::Para(Para {
@@ -169,7 +199,139 @@ fn fallback(elem: &Packed<EquationElem>, styles: StyleChain, block: bool) -> Equ
             content: vec![ParaChild::Run(run)],
         })])
     } else {
-        EquationOut::Inline(run)
+        EquationOut::Inline(vec![run])
+    }
+}
+
+/// One unsupported descendant found by the whole-equation capability preflight.
+#[derive(Debug, Copy, Clone)]
+struct UnsupportedMath {
+    kind: UnsupportedMathKind,
+    span: typst_syntax::Span,
+}
+
+#[derive(Debug, Copy, Clone)]
+enum UnsupportedMathKind {
+    Box,
+    External,
+}
+
+impl UnsupportedMathKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Box => "inline box",
+            Self::External => "external content",
+        }
+    }
+}
+
+fn raster_fallback(
+    elem: &Packed<EquationElem>,
+    styles: StyleChain,
+    block: bool,
+    unsupported: UnsupportedMath,
+    ctx: &mut DocxCtx,
+) -> SourceResult<EquationOut> {
+    let content = elem.clone().pack();
+    let runs = crate::mappers::image::laid_out_fallback_with_reason(
+        &content,
+        styles,
+        ctx,
+        DecisionReason::UnsupportedMathRasterFallback,
+    )?;
+    if !runs.is_empty() {
+        ctx.warn_message(
+            eco_format!(
+                "equation was rasterized because its {} cannot be represented safely in native Word math",
+                unsupported.kind.label()
+            ),
+            unsupported.span,
+        );
+        return Ok(if block {
+            EquationOut::Block(vec![Block::Para(Para {
+                props: ParaProps::default(),
+                content: runs.into_iter().map(ParaChild::Run).collect(),
+            })])
+        } else {
+            EquationOut::Inline(runs)
+        });
+    }
+
+    ctx.warn_message(
+        eco_format!(
+            "equation containing {} could not be rasterized; alternate text was used",
+            unsupported.kind.label()
+        ),
+        unsupported.span,
+    );
+    Ok(text_fallback(elem, styles, block, ctx))
+}
+
+/// Finds the first descendant that cannot be represented in native OMML.
+fn first_unsupported_math(item: &MathItem) -> Option<UnsupportedMath> {
+    let MathItem::Component(comp) = item else { return None };
+    let span = comp.props.span;
+    match &comp.kind {
+        MathKind::Box(_) => {
+            Some(UnsupportedMath { kind: UnsupportedMathKind::Box, span })
+        }
+        MathKind::External(_) => {
+            Some(UnsupportedMath { kind: UnsupportedMathKind::External, span })
+        }
+        MathKind::Group(group) => group.items.iter().find_map(first_unsupported_math),
+        MathKind::Multiline(multi) => multi
+            .rows
+            .iter()
+            .flat_map(|row| row.iter())
+            .find_map(first_unsupported_math),
+        MathKind::Radical(rad) => {
+            [Some(&rad.radicand), rad.index.as_ref(), Some(&rad.sqrt)]
+                .into_iter()
+                .flatten()
+                .find_map(first_unsupported_math)
+        }
+        MathKind::Fenced(fenced) => {
+            [fenced.open.as_ref(), fenced.close.as_ref(), Some(&*fenced.body)]
+                .into_iter()
+                .flatten()
+                .find_map(first_unsupported_math)
+        }
+        MathKind::Fraction(frac) => [&frac.numerator, &frac.denominator]
+            .into_iter()
+            .find_map(first_unsupported_math),
+        MathKind::SkewedFraction(frac) => {
+            [&frac.numerator, &frac.denominator, &frac.slash]
+                .into_iter()
+                .find_map(first_unsupported_math)
+        }
+        MathKind::Table(table) => table
+            .cells
+            .iter()
+            .flatten()
+            .flat_map(|cell| cell.iter())
+            .find_map(first_unsupported_math),
+        MathKind::Scripts(scripts) => [
+            Some(&scripts.base),
+            scripts.top.as_ref(),
+            scripts.bottom.as_ref(),
+            scripts.top_left.as_ref(),
+            scripts.bottom_left.as_ref(),
+            scripts.top_right.as_ref(),
+            scripts.bottom_right.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(first_unsupported_math),
+        MathKind::Accent(accent) => [&accent.base, &accent.accent]
+            .into_iter()
+            .find_map(first_unsupported_math),
+        MathKind::Cancel(cancel) => first_unsupported_math(&cancel.base),
+        MathKind::Line(line) => first_unsupported_math(&line.base),
+        MathKind::Mathml(item) => item.body.as_ref().and_then(first_unsupported_math),
+        MathKind::Glyph(_)
+        | MathKind::Number(_)
+        | MathKind::Text(_)
+        | MathKind::Primes(_) => None,
     }
 }
 
@@ -308,23 +470,8 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
             // strike but still show the base). This is a faithful mapping, not a
             // degradation, so it does not warn.
             MathKind::Cancel(item) => self.emit_borderbox(&item.base, item.cross),
-            MathKind::Box(_) => {
-                // Inline boxed content inside math: not expressible as native
-                // OMML without laying it out. Drop with a warning rather than
-                // corrupt the run.
-                //
-                // INTEGRATION-NEEDED: a true image fallback for `box(..)` inside
-                // an equation would need the box laid out to a frame
-                // (typst-layout) + `ctx.add_image`; typst-docx does not depend on
-                // typst-layout, so this is deferred to integration.
-                self.warn(comp, "inline box in equation");
-                Ok(())
-            }
-            MathKind::External(_) => {
-                // External content (e.g. a placed element) cannot be inlined as
-                // OMML. See the box note above.
-                self.warn(comp, "external content in equation");
-                Ok(())
+            MathKind::Box(_) | MathKind::External(_) => {
+                unreachable!("unsupported math must be caught by equation preflight")
             }
             MathKind::Mathml(item) => {
                 // The `Mathml` variant only carries content for the HTML target;
@@ -867,12 +1014,6 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
             Some(item) => Ok(Some(self.render(item)?)),
             None => Ok(None),
         }
-    }
-
-    /// Emits a non-fatal warning that a math construct was degraded.
-    fn warn(&mut self, comp: &MathComponent, what: &str) {
-        self.ctx
-            .warn_ignored(&eco_format!("{what} (in equation)"), comp.props.span);
     }
 }
 

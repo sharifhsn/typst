@@ -18,7 +18,10 @@ use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
 use typst::utils::{LazyHash, PicoStr};
 use typst::{Library, LibraryExt, World};
-use typst_docx::{DocxDocument, DocxOptions, docx};
+use typst_docx::{
+    DecisionReason, DocxDocument, DocxOptions, ExportStage, Representation,
+    SuppressedKind, docx,
+};
 use typst_layout::PagedDocument;
 
 /// A minimal world: the embedded Typst fonts and a single detached source.
@@ -137,9 +140,8 @@ fn compile_docx_with_world(world: &TestWorld) -> DocxDocument {
         .expect("paged compilation failed");
     let primary = Arc::clone(paged.introspector());
     let seed = Arc::clone(&primary);
-    let page_sizes = Arc::new(
-        paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>(),
-    );
+    let page_sizes =
+        Arc::new(paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>());
     typst::compile_with::<DocxDocument, _>(
         world,
         Some(seed.as_ref()),
@@ -157,6 +159,21 @@ fn compile_docx_with_world(world: &TestWorld) -> DocxDocument {
     .expect("docx compilation failed")
 }
 
+/// Returns the opening `w:fldChar` tag for the complex field whose instruction
+/// contains `needle`.
+fn field_begin_tag<'a>(document_xml: &'a str, needle: &str) -> &'a str {
+    let instruction = document_xml
+        .find(needle)
+        .unwrap_or_else(|| panic!("missing field instruction {needle:?}"));
+    let begin = document_xml[..instruction]
+        .rfind("<w:fldChar")
+        .expect("field instruction has no opening fldChar");
+    let end = begin
+        + document_xml[begin..].find('>').expect("unterminated opening fldChar")
+        + 1;
+    &document_xml[begin..end]
+}
+
 fn compile_paged_and_docx(src: &str) -> (PagedDocument, DocxDocument) {
     let world = TestWorld::new(src);
     let paged = typst::compile::<PagedDocument>(&world)
@@ -164,9 +181,8 @@ fn compile_paged_and_docx(src: &str) -> (PagedDocument, DocxDocument) {
         .expect("paged compilation failed");
     let primary = Arc::clone(paged.introspector());
     let seed = Arc::clone(&primary);
-    let page_sizes = Arc::new(
-        paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>(),
-    );
+    let page_sizes =
+        Arc::new(paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>());
     let doc = typst::compile_with::<DocxDocument, _>(
         &world,
         Some(seed.as_ref()),
@@ -210,6 +226,57 @@ fn visible_text(xml: &str) -> String {
                     )
         })
         .filter_map(|node| node.text())
+        .collect()
+}
+
+fn element_fragments<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
+    let open = format!("<w:{tag}");
+    let close = format!("</w:{tag}>");
+    let find_open = |haystack: &str, from: usize| {
+        haystack[from..].match_indices(&open).find_map(|(relative, _)| {
+            let at = from + relative;
+            let delimiter = haystack.as_bytes().get(at + open.len()).copied()?;
+            matches!(delimiter, b'>' | b' ' | b'\t' | b'\r' | b'\n' | b'/').then_some(at)
+        })
+    };
+    let mut fragments = Vec::new();
+    let mut search = 0usize;
+    while let Some(start) = find_open(xml, search) {
+        let from_start = &xml[start..];
+        let mut cursor = open.len();
+        let mut depth = 1usize;
+        while depth > 0 {
+            let next_open = find_open(from_start, cursor);
+            let next_close = from_start[cursor..].find(&close).map(|at| cursor + at);
+            match (next_open, next_close) {
+                (Some(open_at), Some(close_at)) if open_at < close_at => {
+                    depth += 1;
+                    cursor = open_at + open.len();
+                }
+                (_, Some(close_at)) => {
+                    depth -= 1;
+                    cursor = close_at + close.len();
+                }
+                _ => panic!("unterminated w:{tag}"),
+            }
+        }
+        let end = cursor;
+        fragments.push(&from_start[..end]);
+        search = start + open.len();
+    }
+    fragments
+}
+
+fn grid_widths(table_xml: &str) -> Vec<i32> {
+    let grid_end = table_xml.find("</w:tblGrid>").expect("table has tblGrid");
+    table_xml[..grid_end]
+        .match_indices("<w:gridCol w:w=\"")
+        .map(|(index, marker)| {
+            let rest = &table_xml[index + marker.len()..];
+            rest[..rest.find('"').expect("gridCol width closes")]
+                .parse()
+                .expect("gridCol width is decimal")
+        })
         .collect()
 }
 
@@ -438,6 +505,157 @@ fn table_maps_to_wtbl() {
 }
 
 #[test]
+fn fixed_vertical_space_between_tables_is_an_explicit_flow_block() {
+    let p = parts(
+        "#table(columns: 1, [Before])\n\
+         #v(10pt)\n\
+         #table(columns: 1, [After])",
+    );
+    let doc = &p["word/document.xml"];
+    let tables = element_fragments(doc, "tbl");
+    assert_eq!(tables.len(), 2);
+    let first_start = doc.find(tables[0]).expect("first table");
+    let first_end = first_start + tables[0].len();
+    let second_start = doc[first_end..]
+        .find(tables[1])
+        .map(|relative| first_end + relative)
+        .expect("second table");
+    let between = &doc[first_end..second_start];
+    assert!(
+        between.contains(
+            "<w:spacing w:before=\"0\" w:after=\"0\" w:line=\"200\" w:lineRule=\"exact\"/>"
+        ),
+        "10pt survives without borrowing a table-cell paragraph: {between}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn flexible_table_columns_use_the_active_section_width() {
+    // 120mm page - 10mm margins on both sides = 100mm = ~5669 twips. The old
+    // mapper hard-coded 9360 twips (US Letter's default text area).
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #table(columns: (1fr, 1fr), [Left], [Right])",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 2);
+    assert!((widths.iter().sum::<i32>() - 5669).abs() <= 2, "{widths:?}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn each_section_installs_its_own_table_width_budget() {
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #table(columns: (1fr, 1fr), [Narrow], [A])\n\n\
+         #set page(width: 200mm, height: 100mm, margin: 20mm)\n\
+         #table(columns: (1fr, 1fr), [Wide], [B])",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    assert_eq!(tables.len(), 2);
+    let narrow: i32 = grid_widths(tables[0]).iter().sum();
+    let wide: i32 = grid_widths(tables[1]).iter().sum();
+    assert!((narrow - 5669).abs() <= 2, "narrow={narrow}");
+    assert!((wide - 9071).abs() <= 2, "wide={wide}");
+    assert!(wide > narrow + 3000);
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn grid_column_and_row_gutters_become_real_spacer_tracks() {
+    let p = parts(
+        "#grid(\n\
+           columns: (1fr, 1fr),\n\
+           column-gutter: 12pt,\n\
+           row-gutter: 8pt,\n\
+           [A], [B], [C], [D],\n\
+         )",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 3, "content, gutter, content: {widths:?}");
+    assert_eq!(widths[1], 240, "12pt column gutter in twips");
+    assert_eq!(tables[0].matches("<w:tr>").count(), 3, "row spacer is physical");
+    assert!(
+        tables[0].contains("<w:trHeight w:val=\"160\" w:hRule=\"exact\"/>"),
+        "8pt row gutter is an exact spacer row"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn row_only_gutter_does_not_create_phantom_columns() {
+    let p = parts(
+        "#grid(\n\
+           columns: (1fr, 1fr),\n\
+           row-gutter: 8pt,\n\
+           [A], [B], [C], [D],\n\
+         )",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 2, "row normalization must not leak a zero column");
+    assert_eq!(tables[0].matches("<w:tr>").count(), 3, "two rows plus gutter");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn column_only_gutter_does_not_create_phantom_rows() {
+    let p = parts(
+        "#grid(\n\
+           columns: (1fr, 1fr),\n\
+           column-gutter: 12pt,\n\
+           [A], [B], [C], [D],\n\
+         )",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 3, "content, gutter, content");
+    assert_eq!(tables[0].matches("<w:tr>").count(), 2, "no zero-height row");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn colspan_includes_internal_gutter_tracks() {
+    let p = parts(
+        "#grid(\n\
+           columns: (1fr, 1fr, 1fr),\n\
+           column-gutter: 10pt,\n\
+           grid.cell(colspan: 2)[Wide], [Tail],\n\
+         )",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 5, "three content + two gutter tracks");
+    assert!(
+        tables[0].contains("<w:gridSpan w:val=\"3\"/>"),
+        "two source columns span content + gutter + content"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn nested_table_uses_its_parent_cell_width() {
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #table(\n\
+           columns: (1fr, 1fr),\n\
+           [#table(columns: (1fr, 1fr), [A], [B])],\n\
+           [Outer],\n\
+         )",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    assert_eq!(tables.len(), 2, "outer and nested tables");
+    let outer: i32 = grid_widths(tables[0]).iter().sum();
+    let inner: i32 = grid_widths(tables[1]).iter().sum();
+    assert!((outer - 5669).abs() <= 2, "outer={outer}");
+    assert!((inner * 2 - outer).abs() <= 2, "inner={inner}, outer={outer}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn stroke_none_table_has_no_cell_borders() {
     // `stroke: none` must turn borders OFF — every cell side becomes an explicit
     // `w:val="nil"` (not left to inherit the table's default border).
@@ -595,6 +813,20 @@ fn rasterized_content_keeps_its_text_as_hidden_runs() {
     // The image also gets the recovered text as accessibility alt text.
     assert!(doc.contains("descr=\"HiddenSkewWord\""), "the drawing carries alt text");
     assert_all_wellformed(&p);
+
+    let compiled = compile_docx("#skew(ax: 20deg)[HiddenSkewWord]", &[]);
+    let report = compiled.fidelity_report();
+    assert_eq!(report.counts().raster, 1);
+    let decision = report
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::RasterFallback)
+        .expect("the whole-region raster fallback is reported");
+    assert_eq!(decision.representation, Representation::Raster);
+    assert_eq!(decision.source.element.as_str(), "skew");
+    assert!(decision.losses.semantic_structure);
+    assert!(decision.losses.editability);
+    assert!(decision.affected_text_chars >= "HiddenSkewWord".len());
 }
 
 #[test]
@@ -654,6 +886,127 @@ fn svg_image_embeds_native_svg_with_png_fallback() {
         "package declares the SVG media content type"
     );
     assert_all_wellformed(&p);
+
+    let compiled = compile_docx(
+        r#"#image("logo.svg", width: 40pt, alt: "Brand mark")"#,
+        &[("logo.svg", SVG)],
+    );
+    let report = compiled.fidelity_report();
+    assert_eq!(report.counts().native_with_fallback, 1);
+    assert_eq!(report.counts().raster, 0, "the PNG is a compatibility branch");
+    let decision = report
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::SvgWithPngFallback)
+        .expect("SVG compatibility fallback is reported");
+    assert_eq!(decision.representation, Representation::NativeWithFallback);
+    assert_eq!(decision.source.element.as_str(), "image");
+}
+
+#[test]
+fn positional_link_reports_approximation_not_content_drop() {
+    let src = "#link((page: 1, x: 10pt, y: 20pt))[Jump text]";
+    let compiled = compile_docx(src, &[]);
+    let report = compiled.fidelity_report();
+    assert_eq!(report.counts().approximate, 1);
+    assert_eq!(report.counts().drop, 0);
+    let decision = report
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::PositionalLinkTarget)
+        .expect("lost positional target is reported");
+    assert_eq!(decision.representation, Representation::Approximate);
+    assert!(decision.losses.dynamic_behavior);
+
+    let p = parts(src);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("Jump text"), "the link body remains visible");
+    assert!(!document.contains("<w:hyperlink"), "the unsupported target is absent");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn placed_text_is_an_editable_anchored_text_box() {
+    let src = "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+               #place(top + left, dx: 10pt, dy: 20pt)[Placed live text]";
+    let p = parts(src);
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<wp:anchor"), "placed text is floating");
+    assert!(doc.contains("<wps:txbx>"), "the text remains editable");
+    assert!(doc.contains("<wps:bodyPr wrap=\"none\""));
+    assert!(doc.contains("Placed live text"));
+    assert!(
+        doc.contains(
+            "<wp:positionH relativeFrom=\"column\"><wp:posOffset>127000</wp:posOffset>"
+        ),
+        "10pt dx is relative to the current column"
+    );
+    assert!(
+        doc.contains(
+            "<wp:positionV relativeFrom=\"margin\"><wp:posOffset>254000</wp:posOffset>"
+        ),
+        "20pt dy combines with top alignment"
+    );
+    assert!(!doc.contains("<a:blip"), "plain placed text is not rasterized");
+
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedTextBox
+            && decision.representation == Representation::Native
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn placed_percentage_offset_resolves_against_the_column() {
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #place(top + left, dx: 10%)[Ten percent]",
+    );
+    assert!(
+        p["word/document.xml"].contains("<wp:posOffset>359982</wp:posOffset>"),
+        "10% resolves against the twip-rounded 100mm text area"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn placed_text_without_vertical_alignment_stays_paragraph_relative() {
+    let p = parts("Before.\n#place(left, dy: 10pt)[Beside flow]\nAfter.");
+    assert!(
+        p["word/document.xml"].contains(
+            "<wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>127000</wp:posOffset>"
+        ),
+        "missing vertical alignment means current flow position, not page top"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn floating_placed_text_keeps_clearance_and_wrap_policy() {
+    let p = parts("#place(top + center, float: true, clearance: 6pt)[Floating text]");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("distT=\"76200\" distB=\"76200\""));
+    assert!(doc.contains("<wp:wrapTopAndBottom/>"));
+    assert!(doc.contains("<wp:align>center</wp:align>"));
+    assert!(doc.contains("<wps:txbx>"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn rich_placed_content_flow_fallback_is_reported() {
+    let src = "#place(top + left, table(columns: 1, [Flowing table]))";
+    let p = parts(src);
+    assert!(p["word/document.xml"].contains("Flowing table"));
+    assert!(p["word/document.xml"].contains("<w:tbl>"));
+
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedContentFlowFallback
+            && decision.representation == Representation::Approximate
+            && decision.losses.visual_fidelity
+    }));
+    assert_all_wellformed(&p);
 }
 
 fn relationship_target(rels_xml: &str, id: &str) -> String {
@@ -689,6 +1042,10 @@ fn vertical_stack_lowers_to_sequential_paragraphs() {
     assert!(doc.contains("First entry"), "stack child text is kept");
     assert!(doc.contains("Second entry"), "all stack children are kept");
     assert!(!doc.contains("<w:drawing>"), "a text stack is not rasterized");
+    assert!(
+        doc.contains("w:line=\"120\" w:lineRule=\"exact\""),
+        "the stack's 6pt default spacing is explicit"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -701,6 +1058,51 @@ fn horizontal_stack_lowers_to_a_table_row() {
     assert!(doc.contains("<w:tbl>"), "a horizontal stack becomes a table");
     assert!(doc.contains("Left col") && doc.contains("Right col"), "both columns kept");
     assert!(!doc.contains("<w:drawing>"), "not rasterized");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn horizontal_stack_uses_the_active_section_width() {
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #stack(dir: ltr, [Left], [Right])",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let width: i32 = grid_widths(tables[0]).iter().sum();
+    assert!((width - 5669).abs() <= 2, "stack width={width}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn horizontal_stack_fixed_spacing_is_a_physical_track() {
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #stack(dir: ltr, spacing: 12pt, [Left], [Right])",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 3, "body, fixed gap, body");
+    assert_eq!(widths[1], 240, "12pt spacing in twips");
+    assert!((widths.iter().sum::<i32>() - 5669).abs() <= 2, "{widths:?}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn horizontal_stack_fractional_spacing_is_retained_and_reported() {
+    let src = "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+               #stack(dir: ltr, [Left], 1fr, [Right])";
+    let p = parts(src);
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 3, "fractional spacing is a real middle track");
+    assert!((widths.iter().sum::<i32>() - 5669).abs() <= 2, "{widths:?}");
+
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::FlexibleStackSpacing
+            && decision.representation == Representation::Approximate
+            && decision.losses.visual_fidelity
+    }));
     assert_all_wellformed(&p);
 }
 
@@ -774,9 +1176,8 @@ fn frameless_box_wrapping_columns_flows_instead_of_rasterizing() {
     // A box with a fill/stroke around the SAME body is intentionally NOT
     // widened by this change (only the frameless case is validated safe here)
     // — it keeps its pre-existing rasterize behavior, preserving the visual.
-    let framed = parts(
-        "#box(inset: 1cm, fill: yellow)[#columns(2, [Framed section text.])]",
-    );
+    let framed =
+        parts("#box(inset: 1cm, fill: yellow)[#columns(2, [Framed section text.])]");
     let doc = &framed["word/document.xml"];
     assert!(doc.contains("<w:drawing>"), "a filled box still rasterizes its visual");
     assert_all_wellformed(&framed);
@@ -809,9 +1210,7 @@ fn box_with_bottom_only_stroke_keeps_a_bottom_only_border() {
     // Mid-sentence (genuinely inline, not a paragraph's sole content), the same
     // partial stroke still can't be a run-level border — it now rasterizes
     // (preserves the visual) instead of silently becoming a full box.
-    let inline = parts(
-        "before #box(stroke: (bottom: 0.5pt + black))[mid] after",
-    );
+    let inline = parts("before #box(stroke: (bottom: 0.5pt + black))[mid] after");
     let doc = &inline["word/document.xml"];
     assert!(doc.contains("before"), "surrounding text is preserved");
     assert!(doc.contains("after"), "surrounding text is preserved");
@@ -1022,6 +1421,46 @@ fn math_maps_to_omml() {
 }
 
 #[test]
+fn equation_number_tab_uses_the_active_section_width() {
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #set math.equation(numbering: \"(1)\")\n\
+         $ x = 1 $",
+    );
+    assert!(
+        p["word/document.xml"].contains("<w:tab w:val=\"end\" w:pos=\"5669\"/>"),
+        "equation number aligns to the active text edge"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn unsupported_math_child_rasterizes_the_whole_equation_atomically() {
+    let src = "$frac(1, #box[BoxedTerm]) + y$";
+    let compiled = compile_docx(src, &[]);
+    let report = compiled.fidelity_report();
+    let decision = report
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::UnsupportedMathRasterFallback)
+        .expect("unsupported math triggers a whole-equation decision");
+    assert_eq!(decision.representation, Representation::Raster);
+    assert_eq!(decision.source.element.as_str(), "equation");
+    assert_eq!(report.counts().drop, 0, "no descendant is silently dropped");
+
+    let p = parts(src);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("<a:blip"), "the whole equation is a picture");
+    assert!(document.contains("<w:vanish/>"), "searchable fallback text remains");
+    assert!(document.contains("BoxedTerm"), "the previously lost child survives");
+    assert!(
+        !document.contains("<m:oMath"),
+        "no plausible-looking partial OMML subtree is emitted"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn nary_operator_nests_its_operand() {
     // The integrand must sit inside the n-ary's `m:e`, not after an empty one
     // (an empty `<m:e/>` renders as a spurious box).
@@ -1152,6 +1591,18 @@ fn heading_outline_is_a_toc_content_control() {
         "with the Table of Contents docPart gallery"
     );
     assert!(doc.contains("<w:sdtContent>"), "and its entries live in sdtContent");
+    let begin = field_begin_tag(doc, " TOC ");
+    assert!(!begin.contains("w:dirty"), "opening must stay modal-free: {begin}");
+    assert!(!begin.contains("w:fldLock"), "native TOC remains editable: {begin}");
+    assert!(
+        !p["word/settings.xml"].contains("w:updateFields"),
+        "opening the document must not trigger Word's modal global-update workflow"
+    );
+    let page_ref = doc.find(" PAGEREF ").expect("TOC page field");
+    assert!(
+        doc[page_ref..].contains(">1</w:t>"),
+        "the TOC page number is useful before any optional field refresh"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -1611,6 +2062,23 @@ fn page_level_columns_stay_a_single_section() {
 }
 
 #[test]
+fn table_inside_page_columns_uses_the_column_width() {
+    // 100mm text area, two columns, default 4%-of-page (~272 twip) gap:
+    // (5669 - 272) / 2 = ~2698 twips per column.
+    let p = parts(
+        "#set page(\n\
+           width: 120mm, height: 100mm, margin: 10mm,\n\
+           columns: 2,\n\
+         )\n\
+         #table(columns: (1fr, 1fr), [A], [B])",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let width: i32 = grid_widths(tables[0]).iter().sum();
+    assert!((width - 2698).abs() <= 2, "column table width={width}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn multi_paragraph_block_quote_keeps_its_paragraphs() {
     // A two-paragraph block quote must stay two paragraphs — the internal parbreak
     // is real separation, not something to silently drop (which would merge them).
@@ -1972,6 +2440,16 @@ fn outline_falls_back_to_introspected_headings() {
     assert!(doc.contains("Alpha"), "the heading title appears in the TOC");
     // No bookmark to target, so no PAGEREF and nothing to dangle.
     assert!(!doc.contains("PAGEREF"), "fallback entries carry no PAGEREF");
+    let begin = field_begin_tag(doc, " TOC ");
+    assert!(
+        begin.contains("w:fldLock=\"true\""),
+        "Word cannot reconstruct fallback entries: {begin}"
+    );
+    assert!(!begin.contains("w:dirty"));
+    assert!(
+        !p["word/settings.xml"].contains("w:updateFields"),
+        "a locked fallback TOC must not request global recalculation"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -2408,6 +2886,86 @@ fn figure_emits_seq_field() {
 }
 
 #[test]
+fn typst_owned_reference_text_stays_static_beside_a_live_toc() {
+    // A native TOC remains manually updateable. The normal reference in the
+    // same document nevertheless stays Typst-owned: Word's REF evaluator would
+    // return bookmarked figure content instead of the supplement + number.
+    let src = "#outline()\n\n= Heading\n\n\
+               #figure(rect(width: 20pt, height: 20pt), caption: [A box]) <f>\n\n\
+               See #ref(<f>).";
+    let p = parts(src);
+    assert!(!p["word/settings.xml"].contains("w:updateFields"));
+    let doc = &p["word/document.xml"];
+    assert!(!doc.contains(" REF "), "normal refs must not become Word REF fields");
+    let para = doc.split("<w:p>").find(|p| p.contains("See")).expect("ref para");
+    assert!(para.contains("<w:hyperlink"), "the static result stays navigable");
+    assert!(visible_text(doc).contains("Figure\u{a0}1"));
+
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::TypstOwnedReferenceText
+            && decision.representation == Representation::Approximate
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn page_reference_remains_live_and_unlocked() {
+    let p = parts(
+        "#set page(numbering: \"1\")\n\
+         #figure(rect(width: 20pt, height: 20pt), caption: [A box]) <f>\n\n\
+         See page #ref(<f>, form: \"page\").",
+    );
+    let begin = field_begin_tag(&p["word/document.xml"], " PAGEREF ");
+    assert!(!begin.contains("w:fldLock"), "PAGEREF belongs to Word: {begin}");
+    assert_eq!(
+        p["word/document.xml"].matches(" PAGEREF ").count(),
+        1,
+        "one semantic page reference must emit one complex field"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn equivalent_roman_figure_numbering_stays_live() {
+    let p = parts(
+        "#set figure(numbering: \"i\")\n\
+         #figure(rect(width: 20pt, height: 20pt), caption: [Roman])",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("SEQ Figure \\* roman"));
+    let begin = field_begin_tag(doc, "SEQ Figure");
+    assert!(!begin.contains("w:fldLock"), "equivalent SEQ stays live: {begin}");
+    assert!(
+        !p["word/settings.xml"].contains("w:updateFields"),
+        "a live sequence alone does not require global recalculation"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn non_equivalent_figure_numbering_keeps_typst_text_and_hidden_counter() {
+    let src = "#set figure(numbering: \"(i)\")\n\
+               #figure(rect(width: 20pt, height: 20pt), caption: [Decorated])";
+    let p = parts(src);
+    let doc = &p["word/document.xml"];
+    assert!(visible_text(doc).contains("(i)"), "Typst's decorated number survives");
+    assert!(doc.contains("SEQ Figure \\h"), "a hidden counter keeps Word in sync");
+    assert!(!doc.contains("SEQ Figure \\* ARABIC"), "Word must not coerce it");
+    assert!(
+        doc.matches("<w:vanish/>").count() >= 5,
+        "every structural/result run of the hidden field stays hidden in LibreOffice"
+    );
+
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::TypstOwnedFigureNumber
+            && decision.representation == Representation::Approximate
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn image_in_header_declares_drawing_namespaces() {
     // An image in a header part used to leave `wp:`/`a:`/`pic:` undeclared on
     // the header root, making Word/LibreOffice refuse to open the document.
@@ -2535,7 +3093,10 @@ fn auto_page_height_uses_the_true_paged_size_not_a4() {
         docx(&docx_doc, &DocxOptions { pretty: false }).expect("docx export failed");
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     let mut xml = String::new();
-    zip.by_name("word/document.xml").unwrap().read_to_string(&mut xml).unwrap();
+    zip.by_name("word/document.xml")
+        .unwrap()
+        .read_to_string(&mut xml)
+        .unwrap();
 
     let caps = regex_pgsz(&xml).expect("a w:pgSz element exists");
     assert_eq!(
@@ -2815,7 +3376,10 @@ fn bibliography_gets_a_native_word_sources_part() {
     assert!(item1.contains("<b:Last>Baker</b:Last>"));
     assert!(item1.contains("<b:First>Bob</b:First>"));
     // Two distinct, deterministic GUIDs (repeat exports must be byte-identical).
-    let guids: Vec<&str> = item1.match_indices("<b:Guid>").map(|(i, _)| &item1[i..i + 46]).collect();
+    let guids: Vec<&str> = item1
+        .match_indices("<b:Guid>")
+        .map(|(i, _)| &item1[i..i + 46])
+        .collect();
     assert_eq!(guids.len(), 2);
     assert_ne!(guids[0], guids[1], "each source gets its own GUID");
 
@@ -2873,7 +3437,11 @@ fn native_word_sources_excludes_uncited_library_entries() {
         &[("refs.bib", REFS_BIB_WITH_UNCITED)],
     );
     let item1 = &p["customXml/item1.xml"];
-    assert_eq!(item1.matches("<b:Source>").count(), 1, "only the cited entry is included");
+    assert_eq!(
+        item1.matches("<b:Source>").count(),
+        1,
+        "only the cited entry is included"
+    );
     assert!(item1.contains("<b:Tag>alpha</b:Tag>"));
     assert!(!item1.contains("<b:Tag>beta</b:Tag>"), "beta was never cited");
     assert!(!item1.contains("<b:Tag>gamma</b:Tag>"), "gamma was never cited");
@@ -3031,13 +3599,31 @@ fn failing_figure_numbering_closure_does_not_abort_the_export() {
     // A user numbering closure that errors (e.g. reads introspection state that
     // only exists in a paged model) must not abort the export: the caption's
     // cached number is best-effort — the SEQ field is the live truth in Word.
-    let p = parts(
-        "#set figure(numbering: _ => if target() == \"docx\" { (1,).at(9) } else { \"1\" })\n\
-         #figure(rect(), caption: [Survives])",
-    );
+    let src = "#set figure(numbering: _ => if target() == \"docx\" { (1,).at(9) } else { \"1\" })\n\
+               #figure(rect(), caption: [Survives])";
+    let p = parts(src);
     let doc = &p["word/document.xml"];
     assert!(doc.contains("Survives"), "the caption text is kept");
     assert!(doc.contains(" SEQ "), "the live SEQ field is still emitted");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn suppressed_layout_callback_error_is_retained_in_fidelity_report() {
+    let src = "#layout(size => if target() == \"docx\" { (1,).at(9) } else { [Paged fallback] })";
+    let compiled = compile_docx(src, &[]);
+    let suppressed = compiled.fidelity_report().suppressed_diagnostics();
+    assert!(
+        suppressed.iter().any(|entry| {
+            entry.stage == ExportStage::LayoutCallback
+                && entry.kind == SuppressedKind::Error
+        }),
+        "the standalone callback failure remains inspectable: {suppressed:?}"
+    );
+
+    let p = parts(src);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("Paged fallback"), "the paged fallback survives");
     assert_all_wellformed(&p);
 }
 

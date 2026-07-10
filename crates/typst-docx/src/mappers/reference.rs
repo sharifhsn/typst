@@ -23,7 +23,8 @@ use typst_library::introspection::Location;
 use typst_library::model::{Destination, LinkElem, RefElem, RefForm};
 
 use crate::ctx::DocxCtx;
-use crate::dom::{Field, ParaChild, Run, RunProps};
+use crate::dom::{Field, FieldDisplay, FieldMode, ParaChild, Run, RunProps};
+use crate::report::{DecisionReason, LossSet, Representation};
 
 /// The `Hyperlink` character style name (defined in `styles.xml`).
 const HYPERLINK_STYLE: &str = "Hyperlink";
@@ -77,7 +78,12 @@ pub fn link(
         Destination::Position(_) => {
             // Positional (page + x/y) links have no DOCX equivalent; emit the
             // body without a hyperlink wrapper so the text is preserved.
-            ctx.warn_ignored("positional link", span);
+            ctx.warn_approximate(
+                "positional link",
+                span,
+                DecisionReason::PositionalLinkTarget,
+                LossSet::LINK_TARGET,
+            );
             let runs = ctx.inline_runs(&elem.body, styles, props)?;
             Ok(runs.into_iter().map(ParaChild::Run).collect())
         }
@@ -134,21 +140,33 @@ pub fn reference(
     // In-document reference → REF (text) or PAGEREF (page number) complex
     // field targeting the element's bookmark.
     let (_id, name) = ctx.add_bookmark(loc);
-    let keyword = match form {
-        RefForm::Page => "PAGEREF",
-        RefForm::Normal => "REF",
+    let (keyword, mode) = match form {
+        // Page locations belong to the consumer's pagination model and are
+        // therefore safe to keep live.
+        RefForm::Page => ("PAGEREF", FieldMode::Live),
+        // Word's REF evaluator returns bookmarked content; it cannot reproduce
+        // Typst's supplement + numbering rules. Keep the native field/link UX,
+        // but lock the exact Typst-computed cached result against global update.
+        RefForm::Normal => {
+            let content = elem.clone().pack();
+            ctx.record_content_decision(
+                &content,
+                Representation::Approximate,
+                DecisionReason::TypstOwnedReferenceText,
+                LossSet::DYNAMIC_BEHAVIOR,
+                0,
+            );
+            ("REF", FieldMode::Static)
+        }
     };
     // ` REF _Ref7 \h ` — `\h` makes the field result a hyperlink to the
     // bookmark. Leading/trailing spaces match every real-world emitter.
     let instr: EcoString = ecow::eco_format!(" {keyword} {name} \\h ");
 
-    ctx.mark_field();
-
     Ok(vec![Run::Field(Field {
         instr,
         result: result_runs,
-        // `dirty` tells Word to recompute the result (esp. page numbers) on
-        // open, since our cached result is a realize-time placeholder.
-        dirty: true,
+        mode,
+        display: FieldDisplay::Visible,
     })])
 }

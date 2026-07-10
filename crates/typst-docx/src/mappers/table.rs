@@ -29,17 +29,6 @@ use crate::dom::{
     Run, RunProps, Tbl, TblProps, VAlign, VMerge,
 };
 
-/// Default content width (in dxa / twips) used to size flexible (`fr`/`auto`)
-/// columns when no absolute width is given. 9360 dxa = 6.5in = US Letter width
-/// (8.5in) minus the default 1in left/right margins. The true laid-out widths
-/// are not available at this (post-realize, pre-layout) stage.
-//
-// INTEGRATION-NEEDED: thread the active `SectPr` content width (page_w minus
-// left/right margins) down to the table mapper so flexible columns size against
-// the real text area instead of this US-Letter assumption. A `ctx` accessor
-// returning the current section's content width would suffice.
-const DEFAULT_CONTENT_DXA: f64 = 9360.0;
-
 pub fn table(
     elem: &Packed<TableElem>,
     styles: StyleChain,
@@ -78,7 +67,12 @@ fn cellgrid(
     let nrows = grid.entries.len() / ncols;
 
     // -- Column widths (dxa) for `w:tblGrid` -------------------------------
-    let col_dxa = resolve_column_widths(grid, ncols);
+    // `CellGrid` doubles both axes when either axis has gutters, inserting
+    // zero-sized tracks on the other axis. Do not leak those normalization-only
+    // tracks into Word: a row-only gutter must not create phantom columns.
+    let has_column_gutter = has_nonzero_column_gutter(grid);
+    let col_dxa =
+        resolve_column_widths(grid, ctx.available_width_dxa(), has_column_gutter);
     let width_dxa: i32 = col_dxa.iter().copied().sum();
 
     // -- Header rows (mark `table.header` rows for `w:tblHeader`) -----------
@@ -99,7 +93,7 @@ fn cellgrid(
     // -- Rows --------------------------------------------------------------
     let mut rows = Vec::with_capacity(nrows);
     for y in 0..nrows {
-        let mut cells = Vec::with_capacity(ncols);
+        let mut cells = Vec::with_capacity(col_dxa.len());
 
         let mut x = 0;
         while x < ncols {
@@ -109,9 +103,10 @@ fn cellgrid(
                     let colspan = cell.colspan.get().max(1);
                     let rowspan = cell.rowspan.get().max(1);
 
-                    // Cell preferred width = sum of the spanned column widths.
                     let span_end = (x + colspan).min(ncols);
-                    let w_dxa: i32 = col_dxa[x..span_end].iter().copied().sum();
+                    let (grid_start, grid_end) =
+                        spanned_grid_range(has_column_gutter, x, span_end);
+                    let w_dxa: i32 = col_dxa[grid_start..grid_end].iter().copied().sum();
 
                     let v_merge = (rowspan > 1).then_some(VMerge::Restart);
 
@@ -119,7 +114,7 @@ fn cellgrid(
                         ctx,
                         cell,
                         styles,
-                        colspan as u32,
+                        (grid_end - grid_start) as u32,
                         v_merge,
                         Some(w_dxa),
                     )?);
@@ -137,7 +132,10 @@ fn cellgrid(
                         let origin = parent_cell(grid, *parent);
                         let colspan = origin.map_or(1, |c| c.colspan.get().max(1));
                         let span_end = (x + colspan).min(ncols);
-                        let w_dxa: i32 = col_dxa[x..span_end].iter().copied().sum();
+                        let (grid_start, grid_end) =
+                            spanned_grid_range(has_column_gutter, x, span_end);
+                        let w_dxa: i32 =
+                            col_dxa[grid_start..grid_end].iter().copied().sum();
 
                         // A vMerge continuation still carries the merged region's
                         // SIDE borders on every row (left/right), its BOTTOM only
@@ -161,7 +159,7 @@ fn cellgrid(
                         });
 
                         cells.push(continuation_cell(
-                            colspan as u32,
+                            (grid_end - grid_start) as u32,
                             Some(w_dxa),
                             borders,
                         ));
@@ -173,6 +171,15 @@ fn cellgrid(
                     }
                 }
             }
+
+            // A Typst column gutter is a real track, not width that vanishes.
+            // Emit a borderless empty cell after the source cell/span so the
+            // following content starts at the same x-position as in Typst.
+            if let Some(gutter_width) =
+                column_gutter_after(has_column_gutter, &col_dxa, x, ncols)
+            {
+                cells.push(spacer_cell(gutter_width, 1));
+            }
         }
 
         rows.push(Row {
@@ -181,6 +188,12 @@ fn cellgrid(
             height: row_height(grid, y),
             cells,
         });
+
+        if y + 1 < nrows
+            && let Some(height) = row_gutter_height(grid, y, ctx.raster_height)
+        {
+            rows.push(gutter_row(grid, y, ncols, &col_dxa, has_column_gutter, height));
+        }
     }
 
     let tbl = Tbl {
@@ -218,7 +231,7 @@ fn build_cell(
 
     // Cell body → blocks. The body is the packed `TableCell`; lower its inner
     // `body` content through the shared block pipeline.
-    let mut blocks = cell_blocks(ctx, cell, styles, jc)?;
+    let mut blocks = cell_blocks(ctx, cell, styles, jc, w_dxa)?;
 
     // §0/§2: every `w:tc` must contain ≥1 block and END in a `w:p`.
     ensure_ends_in_para(&mut blocks);
@@ -249,6 +262,18 @@ fn continuation_cell(grid_span: u32, w_dxa: Option<i32>, borders: CellBorders) -
     }
 }
 
+fn spacer_cell(width_dxa: i32, grid_span: u32) -> Cell {
+    Cell {
+        w_dxa: Some(width_dxa.max(1)),
+        grid_span: grid_span.max(1),
+        v_merge: None,
+        borders: CellBorders::default(),
+        shd_fill: None,
+        valign: None,
+        blocks: vec![empty_para_block()],
+    }
+}
+
 /// Lowers a resolved cell's inner body into blocks, applying the cell's
 /// horizontal alignment to each resulting top-level paragraph (Word puts
 /// horizontal alignment on the cell paragraph's `w:jc`, not on `w:tcPr`).
@@ -257,6 +282,7 @@ fn cell_blocks(
     cell: &ResolvedCell,
     styles: StyleChain,
     jc: Option<Jc>,
+    width_dxa: Option<i32>,
 ) -> SourceResult<Vec<Block>> {
     // The resolved cell body is a packed `TableCell`; its `body` field is the
     // actual content. Fall back to the body content directly if it is not a
@@ -268,7 +294,11 @@ fn cell_blocks(
         .or_else(|| cell.body.to_packed::<GridCell>().map(|gc| gc.body.clone()))
         .unwrap_or_else(|| cell.body.clone());
 
-    let mut blocks = ctx.blocks(&content, styles)?;
+    let mut blocks = if let Some(width_dxa) = width_dxa {
+        ctx.with_available_width(width_dxa, |ctx| ctx.blocks(&content, styles))?
+    } else {
+        ctx.blocks(&content, styles)?
+    };
 
     if let Some(jc) = jc {
         for block in &mut blocks {
@@ -384,33 +414,31 @@ fn color_to_rgb(color: &Color) -> [u8; 3] {
     [r, g, b]
 }
 
-/// Per-column widths in dxa for the `w:tblGrid`. Absolute (`Rel`) columns use
-/// their resolved width; flexible (`fr`/`auto`) columns share the remaining
-/// content width — `fr` proportionally to its fraction, `auto` with weight 1.
-fn resolve_column_widths(grid: &CellGrid, ncols: usize) -> Vec<i32> {
-    // Iterate the non-gutter column tracks. `grid.cols` includes gutter tracks
-    // (every other entry) when `has_gutter`; the content columns are the even
-    // indices.
-    let content_cols: Vec<Sizing> = if grid.has_gutter {
-        grid.cols.iter().copied().step_by(2).take(ncols).collect()
+/// Per-track widths in dxa for `w:tblGrid`, including Typst gutter tracks.
+/// Absolute/relative tracks resolve against the current scoped width; `fr` and
+/// `auto` share what remains.
+fn resolve_column_widths(
+    grid: &CellGrid,
+    available_dxa: i32,
+    has_column_gutter: bool,
+) -> Vec<i32> {
+    let tracks: Vec<_> = if grid.has_gutter && !has_column_gutter {
+        grid.cols.iter().step_by(2).copied().collect()
     } else {
-        grid.cols.iter().copied().take(ncols).collect()
+        grid.cols.clone()
     };
-
-    // First pass: fixed widths + flexible weights.
-    let mut widths = vec![0.0_f64; ncols];
+    let available_dxa = available_dxa.max(1) as f64;
+    let mut widths = vec![0.0_f64; tracks.len()];
     let mut fixed_total = 0.0;
     let mut flex_weight = 0.0;
     let mut flex_indices = Vec::new();
 
-    for (i, sizing) in content_cols.iter().enumerate().take(ncols) {
+    for (i, sizing) in tracks.iter().enumerate() {
         match sizing {
             Sizing::Rel(rel) => {
-                // Absolute part (pt → dxa) plus relative part against the
-                // default content width. `em` is ignored (rare in column
-                // tracks; no font context available here).
+                // `em` is ignored (rare in grid tracks; no font context here).
                 let abs_dxa = rel.abs.abs.to_pt() * 20.0;
-                let rel_dxa = rel.rel.get() * DEFAULT_CONTENT_DXA;
+                let rel_dxa = rel.rel.get() * available_dxa;
                 let w = abs_dxa + rel_dxa;
                 widths[i] = w;
                 fixed_total += w;
@@ -429,7 +457,7 @@ fn resolve_column_widths(grid: &CellGrid, ncols: usize) -> Vec<i32> {
 
     // Distribute the remaining content width across flexible columns.
     if !flex_indices.is_empty() {
-        let remaining = (DEFAULT_CONTENT_DXA - fixed_total).max(0.0);
+        let remaining = (available_dxa - fixed_total).max(0.0);
         if flex_weight > 0.0 && remaining > 0.0 {
             for (i, weight) in &flex_indices {
                 widths[*i] = remaining * weight / flex_weight;
@@ -445,6 +473,105 @@ fn resolve_column_widths(grid: &CellGrid, ncols: usize) -> Vec<i32> {
     }
 
     widths.into_iter().map(|w| (w.round() as i32).max(1)).collect()
+}
+
+/// Output-grid range occupied by source content columns `start..end`. With
+/// gutters, a colspan includes each gutter between its content tracks.
+fn spanned_grid_range(
+    has_column_gutter: bool,
+    start: usize,
+    end: usize,
+) -> (usize, usize) {
+    if has_column_gutter { (start * 2, end * 2 - 1) } else { (start, end) }
+}
+
+fn column_gutter_after(
+    has_column_gutter: bool,
+    widths: &[i32],
+    next_content_x: usize,
+    ncols: usize,
+) -> Option<i32> {
+    (has_column_gutter && next_content_x < ncols)
+        .then(|| widths.get(next_content_x * 2 - 1).copied())
+        .flatten()
+}
+
+fn has_nonzero_column_gutter(grid: &CellGrid) -> bool {
+    grid.has_gutter
+        && grid
+            .cols
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .any(|track| !matches!(track, Sizing::Rel(rel) if rel.is_zero()))
+}
+
+fn row_gutter_height(grid: &CellGrid, y: usize, reference: Abs) -> Option<RowHeight> {
+    if !grid.has_gutter {
+        return None;
+    }
+    let Sizing::Rel(rel) = *grid.rows.get(y * 2 + 1)? else { return None };
+    let dxa = rel.abs.abs.to_pt() * 20.0 + rel.rel.get() * reference.to_pt() * 20.0;
+    (dxa > 0.0).then_some(RowHeight {
+        val: dxa.round() as i32,
+        // This is an actual spatial gap, not a minimum content row.
+        exact: true,
+    })
+}
+
+/// A physical spacer row for a Typst row gutter. Vertical merges that cross the
+/// gap receive another `vMerge continue` cell so Word does not terminate the
+/// merge at the inserted row.
+fn gutter_row(
+    grid: &CellGrid,
+    y: usize,
+    ncols: usize,
+    widths: &[i32],
+    has_column_gutter: bool,
+    height: RowHeight,
+) -> Row {
+    let next_y = y + 1;
+    let mut cells = Vec::with_capacity(widths.len());
+    let mut x = 0;
+    while x < ncols {
+        let entry = &grid.entries[next_y * ncols + x];
+        if let Entry::Merged { parent } = entry
+            && parent / ncols <= y
+            && let Some(origin) = parent_cell(grid, *parent)
+        {
+            let colspan = origin.colspan.get().max(1);
+            let end = (x + colspan).min(ncols);
+            let (grid_start, grid_end) = spanned_grid_range(has_column_gutter, x, end);
+            let width = widths[grid_start..grid_end].iter().copied().sum();
+            cells.push(continuation_cell(
+                (grid_end - grid_start) as u32,
+                Some(width),
+                CellBorders {
+                    top: None,
+                    bottom: None,
+                    left: side_border(&origin.stroke.left),
+                    right: side_border(&origin.stroke.right),
+                },
+            ));
+            x = end;
+        } else {
+            let grid_x = if has_column_gutter { x * 2 } else { x };
+            cells.push(spacer_cell(widths[grid_x], 1));
+            x += 1;
+        }
+        if let Some(gutter_width) =
+            column_gutter_after(has_column_gutter, widths, x, ncols)
+        {
+            cells.push(spacer_cell(gutter_width, 1));
+        }
+    }
+
+    Row {
+        header: false,
+        cant_split: true,
+        height: Some(height),
+        cells,
+    }
 }
 
 /// Row height from the resolved row track, if it is an absolute size. `fr`/

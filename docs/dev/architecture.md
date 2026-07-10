@@ -12,6 +12,8 @@ Let's start with a broad overview of the directories in this repository:
 - `crates/typst-cli`: Typst's command line interface. This is a relatively small
   layer on top of the compiler and the exporters.
 - `crates/typst-eval`: The interpreter for the Typst language.
+- `crates/typst-export-common`: Format-neutral mechanics shared by exporters,
+  currently safe raster-fallback rendering.
 - `crates/typst-html`: The HTML exporter.
 - `crates/typst-ide`: Exposes IDE functionality.
 - `crates/typst-kit`: Contains various default implementation of
@@ -20,6 +22,12 @@ Let's start with a broad overview of the directories in this repository:
 - `crates/typst-library`: Typst's standard library.
 - `crates/typst-macros`: Procedural macros for the compiler.
 - `crates/typst-pdf`: The PDF exporter.
+- `crates/typst-docx`: The experimental Microsoft Word exporter in this fork.
+- `crates/typst-ooxml-core`: Shared OOXML package, DrawingML, media, and math
+  primitives for Word and PowerPoint.
+- `crates/typst-pandoc`: The experimental Pandoc JSON-AST exporter in this fork.
+- `crates/typst-pptx`: The experimental Microsoft PowerPoint exporter in this
+  fork.
 - `crates/typst-realize`: Typst's realization subsystem.
 - `crates/typst-render`: A renderer for Typst frames.
 - `crates/typst-svg`: The SVG exporter.
@@ -152,9 +160,19 @@ format.
 - The PDF exporter takes layouted frames and turns them into a PDF file.
 - The SVG exporter takes a frame and turns it into an SVG.
 - The built-in renderer takes a frame and turns it into a pixel buffer.
-- HTML export does not exist yet, but will in the future. However, this requires
-  some complex compiler work because the export will start with `Content`
-  instead of `Frames` (layout is the browser's job).
+- The HTML exporter starts from semantic content because layout is the browser's
+  job.
+- The DOCX exporter starts from realized semantic content, with the converged
+  paged document acting as an introspection and geometry oracle.
+- The PPTX exporter starts from laid-out page frames and recovers selected
+  semantics through layout tags.
+- The Pandoc exporter starts from realized semantic content and emits a typed
+  JSON AST.
+
+The additional exporters have different layout models and fidelity tradeoffs.
+Their shared architecture, compatibility goals, known issues, and validation
+model are documented in
+[`office-export-architecture.md`](office-export-architecture.md).
 
 
 ## IDE

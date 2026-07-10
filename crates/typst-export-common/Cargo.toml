@@ -1,6 +1,6 @@
 [package]
-name = "typst-pptx"
-description = "Typst's PPTX (Microsoft PowerPoint) exporter."
+name = "typst-export-common"
+description = "Shared infrastructure for Typst exporters."
 version = { workspace = true }
 rust-version = { workspace = true }
 authors = { workspace = true }
@@ -10,20 +10,13 @@ repository = { workspace = true }
 license = { workspace = true }
 categories = { workspace = true }
 keywords = { workspace = true }
-readme = { workspace = true }
+readme = "README.md"
 
 [dependencies]
-typst-export-common = { workspace = true }
-typst-ooxml-core = { workspace = true }
+tiny-skia = { workspace = true }
 typst-layout = { workspace = true }
 typst-library = { workspace = true }
 typst-render = { workspace = true }
-typst-syntax = { workspace = true }
-typst-utils = { workspace = true }
-ecow = { workspace = true }
-rustc-hash = { workspace = true }
-time = { workspace = true }
-zip = { workspace = true }
 
 [lints]
 workspace = true

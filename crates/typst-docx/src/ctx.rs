@@ -5,15 +5,15 @@ use std::sync::Arc;
 
 use ecow::{EcoString, eco_format};
 use rustc_hash::{FxHashMap, FxHashSet};
-use typst_library::{World, WorldExt};
 use typst_library::diag::{SourceResult, warning};
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Packed, StyleChain};
 use typst_library::introspection::{Locator, SplitLocator, Tag, TagElem};
-use typst_library::layout::{Abs, Frame, FrameItem, HElem};
+use typst_library::layout::{Abs, HElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    Destination, DirectLinkElem, FootnoteElem, LinkElem, LinkMarker, RefElem,
+    Destination, DirectLinkElem, DirectLinkKind, FootnoteElem, LinkElem, LinkMarker,
+    RefElem,
 };
 use typst_library::model::{EmphElem, StrongElem};
 use typst_library::routines::{Arenas, FragmentKind, RealizationKind};
@@ -23,24 +23,26 @@ use typst_library::text::{
     SmartQuotes, SpaceElem, SubElem, SuperElem, TextElem,
 };
 use typst_library::visualize::{ImageElem, Paint};
+use typst_library::{World, WorldExt};
 use typst_ooxml_core::media::MediaRegistry;
-use typst_ooxml_core::{ns, render};
+use typst_ooxml_core::ns;
 use typst_syntax::{FileId, Span};
 
 use crate::dom::{
-    Block, BookmarkTable, Footnote, HeadingStyleSample, ListSpec, NumberingTable,
-    ParaProps, Run, RunProps, TocFigure, TocHeading, Underline, VertAlign,
+    Block, BookmarkTable, Field, FieldDisplay, FieldMode, Footnote, HeadingStyleSample,
+    ListSpec, NumberingTable, ParaProps, Run, RunProps, TocFigure, TocHeading, Underline,
+    VertAlign,
 };
+use crate::fallback::CachedOverlay;
 use crate::mappers;
 use crate::package::{RelMode, Rels};
 use crate::props;
+use crate::report::{
+    DecisionReason, ExportSource, ExportStage, FidelityReport, LossSet, Representation,
+    SuppressedKind,
+};
 
 use typst_library::introspection::Location;
-
-/// What [`DocxCtx::rasterize`] produces for renderable content: the media
-/// relationship id, the drawing size, and the plain text recovered from the
-/// laid-out frame (for hidden searchable runs).
-pub(crate) type Rasterized = Option<(EcoString, typst_library::layout::Size, String)>;
 
 #[derive(Clone, PartialEq)]
 struct RawRange {
@@ -87,8 +89,9 @@ pub struct DocxCtx<'a, 'e> {
     /// Monotonic `relativeHeight` z-order for floating drawings (`<wp:anchor>`).
     next_z: u32,
     pub(crate) max_heading_level: u8,
-    pub(crate) uses_fields: bool,
     pub(crate) uses_math: bool,
+    /// Structured representation choices and suppressed diagnostics.
+    pub(crate) fidelity_report: FidelityReport,
 
     pub(crate) bookmarks: BookmarkTable,
 
@@ -112,14 +115,22 @@ pub struct DocxCtx<'a, 'e> {
     /// list of figures/tables once each figure's real bookmark exists.
     pub(crate) toc_figures: Vec<TocFigure>,
 
-    /// The finite width to give content that we rasterize (see
-    /// [`Self::rasterize`]). Width-relative content (`layout(size => ..)`,
-    /// `width: 100%`, gradients sized to the container) must lay out against a
-    /// real page width: laying it out under an *infinite* width makes such a
-    /// closure produce pathologically wide output (observed: a single
-    /// `layout()` rendering a 2040pt-wide frame for ~100s). Set from the page
-    /// geometry in [`crate::document::docx_document`].
-    pub(crate) raster_width: Abs,
+    /// Width available to the current lowering scope. At document level this is
+    /// the active section's text area; nested table/stack cells temporarily
+    /// narrow it to their own track. Native width planning, relative shapes,
+    /// tabs, TOCs, and raster fallback all read the same value so they cannot
+    /// drift onto different hard-coded page assumptions.
+    pub(crate) available_width: Abs,
+
+    /// Full text-area width for the active page section, before page columns
+    /// narrow [`Self::available_width`]. Headers, footers, and parent-scoped
+    /// floats use this authority.
+    pub(crate) page_content_width: Abs,
+
+    /// Text-area height for the active section (page height minus top/bottom
+    /// margins). Positioned content resolves vertical alignment and percentage
+    /// offsets against this rather than the full paper height.
+    pub(crate) available_height: Abs,
 
     /// The finite page height, used only as a *retry* bound when rasterizing
     /// content that does not lay out under an infinite-height region — page-
@@ -174,15 +185,7 @@ pub struct DocxCtx<'a, 'e> {
     /// per-part image relationship (which must stay scoped to that part's own
     /// `.rels`) — `add_image` is still called on every hit, but its own
     /// content-hash dedup (`MediaRegistry::add`) makes that cheap.
-    overlay_cache: FxHashMap<u128, Arc<CachedOverlay>>,
-}
-
-/// A cached [`Self::rasterize_page_overlay`] result, keyed on its inputs.
-struct CachedOverlay {
-    png: Arc<[u8]>,
-    size: typst_library::layout::Size,
-    frame_text: String,
-    tags: Vec<Tag>,
+    pub(crate) overlay_cache: FxHashMap<u128, Arc<CachedOverlay>>,
 }
 
 impl<'a, 'e> DocxCtx<'a, 'e> {
@@ -206,8 +209,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             next_hdrftr_id: 1,
             next_z: 1,
             max_heading_level: 0,
-            uses_fields: false,
             uses_math: false,
+            fidelity_report: FidelityReport::default(),
             bookmarks: BookmarkTable::default(),
             deferred_tags: Vec::new(),
             real_alias_locations: FxHashSet::default(),
@@ -216,7 +219,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             toc_figures: Vec::new(),
             // A sane finite default (~A4 text width); overridden from the real
             // page geometry by `docx_document` before any conversion happens.
-            raster_width: Abs::pt(450.0),
+            available_width: Abs::pt(450.0),
+            page_content_width: Abs::pt(450.0),
+            available_height: Abs::pt(698.0),
             raster_height: Abs::pt(842.0),
             quoter: SmartQuoter::new(),
             last_char: None,
@@ -241,269 +246,29 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         self.locator.next(&span)
     }
 
-    /// Lays `content` out to a single frame for export: under the `Paged` target
-    /// (so layout rules — shapes, images, … — fire instead of being dropped),
-    /// against the page's content width (height unbounded), through a sub-engine
-    /// with a THROWAWAY sink.
-    ///
-    /// A *finite* width is essential: width-relative content (`layout(size =>
-    /// ..)`, `width: 100%`) laid out under an infinite width produces
-    /// pathologically wide output. `Axes::splat(false)` keeps the region
-    /// non-expanding, so fixed-size content takes its natural size.
-    ///
-    /// The throwaway sink isolates this re-layout's *delayed errors*: it
-    /// re-realizes the content under `Paged` with its own pass, and packages that
-    /// compute layout-coupled values during it (algo's `#i` indent-state assert,
-    /// a margin-note needing page properties, a cetz canvas whose size hasn't
-    /// stabilized) raise errors that never clear here — this universe, unlike the
-    /// main document, can't feed those values back to itself. They must not fail
-    /// the whole export; the shared introspector (reads) is untouched, so
-    /// labels/refs/bibliography convergence is unaffected. Returns `None` if the
-    /// content cannot be laid out in this context (e.g. a pagebreak with no page
-    /// flow). Does not harvest tags or render — callers decide what to do.
-    pub(crate) fn layout_export_frame(
-        &mut self,
-        content: &Content,
-        styles: StyleChain,
-        span: Span,
-        height: typst_library::layout::Abs,
-    ) -> SourceResult<Option<typst_library::layout::Frame>> {
-        self.layout_export_frame_in(content, styles, span, height, false)
+    /// Current width budget in Word's dxa/twip unit.
+    pub(crate) fn available_width_dxa(&self) -> i32 {
+        ((self.available_width.to_pt() * 20.0).round() as i64).clamp(1, i32::MAX as i64)
+            as i32
     }
 
-    /// Like [`Self::layout_export_frame`], but with `expand` control over the
-    /// region: `false` shrink-fits to the content's own extent (the default,
-    /// used when the caller wants to *measure* the content), `true` forces
-    /// the frame to the full requested `(raster_width, height)` box regardless
-    /// of what the content itself measures to. The latter is required for
-    /// page-relative content built purely from `place(..)` (a watermark, a
-    /// full-page background) — `place` positions content absolutely without
-    /// contributing to the parent's measured size, so a shrink-fit region
-    /// collapses such content to a degenerate zero-size frame and the caller
-    /// would wrongly conclude it laid out to nothing.
-    pub(crate) fn layout_export_frame_in(
-        &mut self,
-        content: &Content,
-        styles: StyleChain,
-        span: Span,
-        height: typst_library::layout::Abs,
-        expand: bool,
-    ) -> SourceResult<Option<typst_library::layout::Frame>> {
-        use comemo::Track;
-        use typst_library::foundations::{Target, TargetElem};
-        use typst_library::layout::{Axes, Region, Size};
-
-        let target = TargetElem::target.set(Target::Paged).wrap();
-        let styles = styles.chain(&target);
-        let region =
-            Region::new(Size::new(self.raster_width, height), Axes::splat(expand));
-        let loc = self.locator.next(&span);
-        let layout_frame = self.engine.library.routines.layout_frame;
-
-        // Lay the content out in an isolated sub-engine. The layouter can *panic*
-        // (not just error) on content it cannot handle frame-wise — e.g. a
-        // presentation-package slide whose absolute placement resolves against the
-        // infinite region height and trips `assert!(size.is_finite())` deep in flow
-        // distribution. That is a raw Rust panic that would otherwise abort the
-        // entire export with no usable message. Since rasterization is a
-        // best-effort fallback, catch it and degrade: drop just this one piece of
-        // content (and warn), so the rest of the document still exports. The panic
-        // hook is silenced for the duration so no scary backtrace reaches the user.
-        let (frame, panicked) = {
-            let mut throwaway = typst_library::engine::Sink::new();
-            let mut sub = typst_library::engine::Engine {
-                world: self.engine.world,
-                library: self.engine.library,
-                introspector: typst_utils::Protected::from_raw(
-                    self.engine.introspector.into_raw(),
-                ),
-                traced: self.engine.traced,
-                sink: throwaway.track_mut(),
-                route: typst_library::engine::Route::extend(self.engine.route.track()),
-            };
-            let prev_hook = std::panic::take_hook();
-            std::panic::set_hook(Box::new(|_| {}));
-            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                layout_frame(&mut sub, content, loc, styles, region)
-            }));
-            std::panic::set_hook(prev_hook);
-            match caught {
-                // A layout *error* (vs panic) means the content does not lay out on
-                // this iteration — common and benign during introspection
-                // convergence — so degrade quietly.
-                Ok(result) => (result.ok(), false),
-                Err(_) => (None, true),
-            }
-        };
-        if panicked {
-            self.warn_ignored("content that could not be laid out", span);
-        }
-        Ok(frame)
+    pub(crate) fn page_content_width_dxa(&self) -> i32 {
+        ((self.page_content_width.to_pt() * 20.0).round() as i64)
+            .clamp(1, i32::MAX as i64) as i32
     }
 
-    /// Lays out arbitrary content and rasterizes it to a PNG, embedding it as a
-    /// media part. Returns the media relationship id and the content's size, or
-    /// `None` if the content lays out to nothing. This is the universal fallback
-    /// for content that has no idiomatic OOXML representation (drawn shapes,
-    /// PDF images, externally-rendered figures, …).
-    /// Rasterizes `content` to a PNG media part and returns its relationship
-    /// id, size, and the plain text recovered from the laid-out frame (empty if
-    /// none) — the caller can attach that text as hidden runs so the
-    /// rasterized region stays searchable/selectable/accessible.
-    ///
-    /// The render is tightened to its ink bounding box (see
-    /// [`Self::rasterize_page_overlay`] for the page background/foreground
-    /// caller that must not crop): a layout region can be far larger than
-    /// what actually draws in it, and embedding the blank expanse would
-    /// reserve phantom space in the flow.
-    pub fn rasterize(
+    /// Runs a nested lowering scope against a narrower width budget, restoring
+    /// the parent budget even when lowering returns an error.
+    pub(crate) fn with_available_width<T>(
         &mut self,
-        content: &Content,
-        styles: StyleChain,
-        span: Span,
-    ) -> SourceResult<Rasterized> {
-        let (tags, rasterized) = self.rasterize_with_tags(content, styles, span)?;
-        self.deferred_tags.extend(tags);
-        Ok(rasterized)
-    }
-
-    /// Like [`Self::rasterize`], but for content that is rendered
-    /// purely for its page-relative placement (a page background/foreground
-    /// overlay): the region is forced (expanded) to exactly `(raster_width,
-    /// height)` rather than shrink-fit to the content's own measured extent.
-    /// This is what lets `place(..)`-only content (which reports a degenerate
-    /// zero size under shrink-fit, since `place` doesn't contribute to the
-    /// parent's measured size) still rasterize instead of being silently
-    /// dropped — the caller always stretches the result to the full page box
-    /// anyway, so the content's *own* measured size was never load-bearing.
-    pub(crate) fn rasterize_page_overlay(
-        &mut self,
-        content: &Content,
-        styles: StyleChain,
-        span: Span,
-        height: typst_library::layout::Abs,
-    ) -> SourceResult<Rasterized> {
-        let key = typst_utils::hash128(&(content, styles, height, self.raster_width));
-        if let Some(cached) = self.overlay_cache.get(&key) {
-            let cached = Arc::clone(cached);
-            self.deferred_tags.extend(cached.tags.iter().cloned());
-            return Ok(Some((
-                self.add_image(&cached.png, "png"),
-                cached.size,
-                cached.frame_text.clone(),
-            )));
-        }
-
-        let Some(frame) = self.layout_export_frame_in(content, styles, span, height, true)?
-        else {
-            return Ok(None);
-        };
-        let mut tags = Vec::new();
-        collect_frame_tags(&frame, &mut tags);
-        self.deferred_tags.extend(tags.iter().cloned());
-        let frame_text = frame_to_text(&frame);
-        let Some(raster) = render::render_frame_to_png(
-            frame,
-            render::RasterOptions { pixel_per_pt: 2.0, crop_to_ink: false },
-        ) else {
-            return Ok(None);
-        };
-        let rel = self.add_image(&raster.png, "png");
-        self.overlay_cache.insert(
-            key,
-            Arc::new(CachedOverlay {
-                png: Arc::from(raster.png),
-                size: raster.size,
-                frame_text: frame_text.clone(),
-                tags,
-            }),
-        );
-        Ok(Some((rel, raster.size, frame_text)))
-    }
-
-    /// Same as [`Self::rasterize`], but returns the frame tags to the caller
-    /// instead of appending them to `deferred_tags` — paragraph-level callers
-    /// use this to keep state/counter updates ordered at their exact position.
-    pub(crate) fn rasterize_with_tags(
-        &mut self,
-        content: &Content,
-        styles: StyleChain,
-        span: Span,
-    ) -> SourceResult<(Vec<Tag>, Rasterized)> {
-        self.rasterize_impl(content, styles, span, true)
-    }
-
-    fn rasterize_impl(
-        &mut self,
-        content: &Content,
-        styles: StyleChain,
-        span: Span,
-        crop: bool,
-    ) -> SourceResult<(Vec<Tag>, Rasterized)> {
-        use typst_library::layout::Abs;
-
-        if std::env::var_os("DOCX_DEBUG_RASTER").is_some() {
-            eprintln!("RASTERIZE: {}", content.elem().name());
-        }
-
-        // First lay out in an infinite-height region (so a tall figure is captured
-        // whole, not page-clipped).
-        let inf_frame = self.layout_export_frame(content, styles, span, Abs::inf())?;
-
-        // Harvest introspection tags from the laid-out frame so that labels and
-        // references on elements inside the rasterized content stay resolvable
-        // (otherwise `@label` to something inside a drawn box fails to converge).
-        //
-        // This must happen *before* the size check below: content can lay out to
-        // a degenerate (zero) size precisely *because* an introspecting element
-        // inside it (a bibliography, a cite, a counter display) has not yet
-        // stabilized — on the first iteration it renders empty, collapsing the
-        // box. If we dropped such a frame without harvesting, its tags would
-        // never reach the introspector, the element would never stabilize, and
-        // the box would stay zero forever: a convergence deadlock. We harvest from
-        // the infinite frame (it always holds the laid-out content, even when its
-        // *size* is infinite); the page-height retry below is render-only, so tags
-        // are collected exactly once.
-        let mut tags = Vec::new();
-        if let Some(f) = &inf_frame {
-            collect_frame_tags(f, &mut tags);
-        }
-
-        // Use the infinite frame when it has a usable size. Otherwise — page-
-        // relative content such as a `place(bottom, ..)` cover, a slide, or a
-        // full-page background collapses or runs to infinity under an unbounded
-        // height — retry bounded by the real page height, which lets such content
-        // resolve and rasterize instead of being dropped.
-        let frame = match inf_frame {
-            Some(frame) if usable_size(frame.size()) => frame,
-            _ => match self.layout_export_frame(
-                content,
-                styles,
-                span,
-                self.raster_height,
-            )? {
-                Some(frame) if usable_size(frame.size()) => frame,
-                _ => return Ok((tags, None)),
-            },
-        };
-        // Recover the rasterized region's text (reading-order reconstructed from
-        // the laid-out frame) so the caller can keep it searchable/accessible as
-        // hidden runs alongside the image.
-        let frame_text = frame_to_text(&frame);
-
-        let Some(raster) = render::render_frame_to_png(
-            frame,
-            render::RasterOptions { pixel_per_pt: 2.0, crop_to_ink: crop },
-        ) else {
-            return Ok((tags, None));
-        };
-        Ok((tags, Some((self.add_image(&raster.png, "png"), raster.size, frame_text))))
-    }
-
-    /// Forward introspection tags from a laid-out frame whose visual is consumed
-    /// by a non-raster fallback (for example a native DrawingML shape group).
-    pub(crate) fn defer_frame_tags(&mut self, frame: &Frame) {
-        collect_frame_tags(frame, &mut self.deferred_tags);
+        width_dxa: i32,
+        f: impl FnOnce(&mut Self) -> SourceResult<T>,
+    ) -> SourceResult<T> {
+        let previous = self.available_width;
+        self.available_width = Abs::pt(width_dxa.max(1) as f64 / 20.0);
+        let result = f(self);
+        self.available_width = previous;
+        result
     }
 
     /// Evaluates a realized `#layout(size => ..)` callback with the synthetic
@@ -519,30 +284,23 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
 
         let context = Context::new(elem.location(), Some(styles));
         let args =
-            [dict! { "width" => self.raster_width, "height" => self.raster_height }];
-        elem.func
-            .call(self.engine, context.track(), args)
-            .ok()
-            .map(|value| value.display())
-    }
-
-    /// Lays content out and returns its outer size, without rasterizing or
-    /// harvesting tags. Used to size a text box whose text is extracted (and so
-    /// re-introspected) separately, so the frame's own tags would double-count.
-    /// Returns `None` if the content lays out to nothing usable.
-    pub fn measure(
-        &mut self,
-        content: &Content,
-        styles: StyleChain,
-        span: Span,
-    ) -> SourceResult<Option<typst_library::layout::Size>> {
-        use typst_library::layout::Abs;
-        let Some(frame) = self.layout_export_frame(content, styles, span, Abs::inf())?
-        else {
-            return Ok(None);
-        };
-        let size = frame.size();
-        Ok(usable_size(size).then_some(size))
+            [dict! { "width" => self.available_width, "height" => self.raster_height }];
+        match elem.func.call(self.engine, context.track(), args) {
+            Ok(value) => Some(value.display()),
+            Err(errors) => {
+                for diagnostic in errors {
+                    self.fidelity_report.suppress_span(
+                        elem.pack_ref().elem().name(),
+                        elem.span(),
+                        elem.location(),
+                        ExportStage::LayoutCallback,
+                        SuppressedKind::Error,
+                        diagnostic,
+                    );
+                }
+                None
+            }
+        }
     }
 
     /// Emits a hidden `SEQ \h` field (increment-without-display) for each
@@ -577,17 +335,76 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             out.push(Run::Field(crate::dom::Field {
                 instr: eco_format!(" SEQ {name} \\h "),
                 result: Vec::new(),
-                dirty: false,
+                mode: crate::dom::FieldMode::Live,
+                display: crate::dom::FieldDisplay::Hidden,
             }));
-            self.uses_fields = true;
         }
     }
 
     /// Emits a non-fatal "X was ignored during DOCX export" warning.
     pub fn warn_ignored(&mut self, what: &str, span: Span) {
+        self.fidelity_report.record_span(
+            ExportSource::new(what, span, None),
+            Representation::Drop,
+            DecisionReason::UnsupportedContent,
+            LossSet::DROP,
+            0,
+        );
         self.engine
             .sink
             .warn(warning!(span, "{what} was ignored during DOCX export"));
+    }
+
+    /// Emits an ignored-feature warning while recording that surrounding text
+    /// survived in an approximate representation.
+    pub(crate) fn warn_approximate(
+        &mut self,
+        what: &str,
+        span: Span,
+        reason: DecisionReason,
+        losses: LossSet,
+    ) {
+        self.fidelity_report.record_span(
+            ExportSource::new(what, span, None),
+            Representation::Approximate,
+            reason,
+            losses,
+            0,
+        );
+        self.engine
+            .sink
+            .warn(warning!(span, "{what} was ignored during DOCX export"));
+    }
+
+    /// Emits a warning already represented by a structured suppressed
+    /// diagnostic, without adding a second representation decision.
+    pub(crate) fn warn_without_decision(&mut self, what: &str, span: Span) {
+        self.engine
+            .sink
+            .warn(warning!(span, "{what} was ignored during DOCX export"));
+    }
+
+    /// Emits a non-fatal exporter warning whose exact wording does not fit the
+    /// legacy "was ignored" form.
+    pub(crate) fn warn_message(&mut self, message: impl Into<EcoString>, span: Span) {
+        self.engine.sink.warn(warning!(span, "{}", message.into()));
+    }
+
+    pub(crate) fn record_content_decision(
+        &mut self,
+        content: &Content,
+        representation: Representation,
+        reason: DecisionReason,
+        losses: LossSet,
+        affected_text_chars: usize,
+    ) {
+        self.fidelity_report.record_content(
+            content,
+            representation,
+            reason,
+            losses,
+            affected_text_chars,
+        );
     }
 
     // -- Allocators ---------------------------------------------------------
@@ -728,11 +545,6 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     /// returns the rId for the matching `<w:footerReference>`.
     pub fn add_footer_rel(&mut self, target: &str) -> EcoString {
         self.doc_rels.add(REL_FOOTER, target, RelMode::Internal)
-    }
-
-    /// Marks that a complex field was emitted.
-    pub fn mark_field(&mut self) {
-        self.uses_fields = true;
     }
 
     /// Marks that math was emitted.
@@ -959,7 +771,11 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     /// families do, then coalesces consecutive same-font characters into
     /// maximal spans — so a single-script run (the common case) still
     /// produces exactly one span.
-    fn split_by_font_coverage(&self, text: &str, styles: StyleChain) -> Vec<(EcoString, EcoString)> {
+    fn split_by_font_coverage(
+        &self,
+        text: &str,
+        styles: StyleChain,
+    ) -> Vec<(EcoString, EcoString)> {
         let book = self.engine.world.book();
         let variant = typst_library::text::variant(styles);
         let families: Vec<&typst_library::text::FontFamily> =
@@ -1014,10 +830,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 // No installed font covers this character at all — keep the
                 // originally requested family; Word falls back to its own
                 // missing-glyph handling, no worse than before this split.
-                None => families
-                    .first()
-                    .map(|f| f.as_str().into())
-                    .unwrap_or_default(),
+                None => families.first().map(|f| f.as_str().into()).unwrap_or_default(),
             };
             match spans.last_mut() {
                 Some((last_font, last_text)) if *last_font == font_name => {
@@ -1201,6 +1014,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         let pairs: Vec<_> = children.to_vec();
 
         let mut out: Vec<ParaChild> = Vec::new();
+        // One semantic page reference can realize into multiple styled text
+        // children (supplement, separator, number). They must share one complex
+        // PAGEREF field, not become several fields that repeat the page number.
+        let mut page_field: Option<(Span, Location, usize)> = None;
         for (child, child_styles) in pairs {
             // A labeled inline element (`… text <spot>`) is a valid `#link(<spot>)`
             // target; bracket the runs it produces with a bookmark so the link
@@ -1209,6 +1026,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 .then(|| child.location().filter(|_| child.label().is_some()))
                 .flatten();
             let child_out_start = out.len();
+            let direct_span = child_styles
+                .get_cloned(LinkElem::direct_span)
+                .unwrap_or_else(|| child.span());
 
             if let Some(elem) = child.to_packed::<TagElem>() {
                 // Preserve inline introspection tags. These are how the
@@ -1220,11 +1040,35 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             } else if let Some(elem) = child.to_packed::<LinkElem>() {
                 out.extend(self.link_children(elem, child_styles, &props)?);
             } else if let Some(elem) = child.to_packed::<DirectLinkElem>() {
-                // Realized ref/footnote link wrapper: emit an internal hyperlink
-                // to the target's bookmark wrapping the body runs.
                 let (_id, name) = self.add_bookmark(elem.loc);
                 let runs = self.inline_runs(&elem.body, child_styles, props.clone())?;
-                out.push(ParaChild::Hyperlink { rel: None, anchor: Some(name), runs });
+                match elem.kind {
+                    DirectLinkKind::PageReference => {
+                        out.push(ParaChild::Run(Run::Field(Field {
+                            instr: eco_format!(" PAGEREF {name} \\h "),
+                            result: runs,
+                            mode: FieldMode::Live,
+                            display: FieldDisplay::Visible,
+                        })));
+                    }
+                    DirectLinkKind::Reference | DirectLinkKind::Other => {
+                        if elem.kind == DirectLinkKind::Reference {
+                            let content = elem.clone().pack();
+                            self.record_content_decision(
+                                &content,
+                                Representation::Approximate,
+                                DecisionReason::TypstOwnedReferenceText,
+                                LossSet::DYNAMIC_BEHAVIOR,
+                                0,
+                            );
+                        }
+                        out.push(ParaChild::Hyperlink {
+                            rel: None,
+                            anchor: Some(name),
+                            runs,
+                        });
+                    }
+                }
             } else if let Some((fbody, fill, bdr)) =
                 mappers::shape::inline_frame(child, child_styles)
                 && (fill.is_some() || bdr.is_some())
@@ -1259,11 +1103,51 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 match dest {
                     Destination::Location(loc) => {
                         let (_id, name) = self.add_bookmark(loc);
-                        out.push(ParaChild::Hyperlink {
-                            rel: None,
-                            anchor: Some(name),
-                            runs,
-                        });
+                        match child_styles
+                            .get_cloned(LinkElem::direct_kind)
+                            .unwrap_or(DirectLinkKind::Other)
+                        {
+                            DirectLinkKind::PageReference => {
+                                if let Some((span, previous_loc, index)) = page_field
+                                    && span == direct_span
+                                    && previous_loc == loc
+                                    && let Some(ParaChild::Run(Run::Field(field))) =
+                                        out.get_mut(index)
+                                {
+                                    field.result.extend(runs);
+                                } else {
+                                    let index = out.len();
+                                    out.push(ParaChild::Run(Run::Field(Field {
+                                        instr: eco_format!(" PAGEREF {name} \\h "),
+                                        result: runs,
+                                        mode: FieldMode::Live,
+                                        display: FieldDisplay::Visible,
+                                    })));
+                                    page_field = Some((direct_span, loc, index));
+                                }
+                            }
+                            DirectLinkKind::Reference => {
+                                self.record_content_decision(
+                                    child,
+                                    Representation::Approximate,
+                                    DecisionReason::TypstOwnedReferenceText,
+                                    LossSet::DYNAMIC_BEHAVIOR,
+                                    0,
+                                );
+                                out.push(ParaChild::Hyperlink {
+                                    rel: None,
+                                    anchor: Some(name),
+                                    runs,
+                                });
+                            }
+                            DirectLinkKind::Other => {
+                                out.push(ParaChild::Hyperlink {
+                                    rel: None,
+                                    anchor: Some(name),
+                                    runs,
+                                });
+                            }
+                        }
                     }
                     Destination::Url(url) => {
                         let rel = self.add_external_rel(url.as_str());
@@ -1482,7 +1366,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             && !elem.block.get(styles)
         {
             match mappers::math::equation(elem, styles, self)? {
-                mappers::math::EquationOut::Inline(run) => out.push(run),
+                mappers::math::EquationOut::Inline(runs) => out.extend(runs),
                 mappers::math::EquationOut::Block(_) => {}
             }
         } else if let Some(elem) = child.to_packed::<ImageElem>() {
@@ -1499,10 +1383,28 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 out.push(mappers::footnote::footnote(elem, styles, self)?);
             }
         } else if let Some(elem) = child.to_packed::<DirectLinkElem>() {
-            // A `DirectLinkElem` is the realized link-wrapper around ref/footnote
-            // content. In a run-only context we keep just the body; the enclosing
-            // REF/PAGEREF field (or footnote mark) already provides the jump.
-            out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
+            let runs = self.inline_runs(&elem.body, styles, props.clone())?;
+            match elem.kind {
+                DirectLinkKind::PageReference => {
+                    let (_id, name) = self.add_bookmark(elem.loc);
+                    out.push(Run::Field(Field {
+                        instr: eco_format!(" PAGEREF {name} \\h "),
+                        result: runs,
+                        mode: FieldMode::Live,
+                        display: FieldDisplay::Visible,
+                    }));
+                }
+                DirectLinkKind::Reference => {
+                    let (_id, name) = self.add_bookmark(elem.loc);
+                    out.push(Run::Field(Field {
+                        instr: eco_format!(" REF {name} \\h "),
+                        result: runs,
+                        mode: FieldMode::Static,
+                        display: FieldDisplay::Visible,
+                    }));
+                }
+                DirectLinkKind::Other => out.extend(runs),
+            }
         } else if let Some(elem) = child.to_packed::<LinkMarker>() {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<typst_library::layout::LayoutElem>()
@@ -1608,7 +1510,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                         // no labels to orphan, so plain extraction is safe; we
                         // discard any partial tag harvest first to be sure.
                         let mark = self.deferred_tags.len();
-                        let runs = mappers::image::laid_out_fallback(child, styles, self)?;
+                        let runs =
+                            mappers::image::laid_out_fallback(child, styles, self)?;
                         if !runs.is_empty() {
                             // Keep Word's figure counter consistent with any
                             // captioned figure the box rasterized (a hidden
@@ -1876,16 +1779,6 @@ fn box_is_plain(
     s.top.is_none() && s.bottom.is_none() && s.left.is_none() && s.right.is_none()
 }
 
-/// Whether a laid-out size is finite and strictly positive on both axes (Word
-/// rejects zero/degenerate drawing extents).
-fn usable_size(size: typst_library::layout::Size) -> bool {
-    use typst_library::layout::Abs;
-    size.x.to_pt().is_finite()
-        && size.y.to_pt().is_finite()
-        && size.x > Abs::zero()
-        && size.y > Abs::zero()
-}
-
 /// Derives a Word underline style + colour from a resolved line stroke.
 ///
 /// The dash pattern maps to `w:val` (a dotted/dashed/dot-dashed line); a paint
@@ -2000,82 +1893,4 @@ fn classify_dash(array: &[typst_library::visualize::DashLength<Abs>]) -> &'stati
         (true, false) => "dotted",
         _ => "dash",
     }
-}
-
-/// Recursively collects introspection tags from a laid-out frame.
-fn collect_frame_tags(frame: &Frame, out: &mut Vec<Tag>) {
-    for (_, item) in frame.items() {
-        match item {
-            FrameItem::Group(group) => collect_frame_tags(&group.frame, out),
-            FrameItem::Tag(tag) => out.push(tag.clone()),
-            _ => {}
-        }
-    }
-}
-
-/// Collects each laid-out text run as `(top-left position, text, font size,
-/// run width)`, recursing through groups by their translation (a
-/// rotate/scale/skew is ignored — good enough for reading-order recovery).
-fn collect_frame_text(
-    frame: &Frame,
-    offset: typst_library::layout::Point,
-    out: &mut Vec<(typst_library::layout::Point, EcoString, Abs, Abs)>,
-) {
-    use typst_library::layout::Point;
-    for (pos, item) in frame.items() {
-        let p = offset + *pos;
-        match item {
-            FrameItem::Group(group) => {
-                let t = &group.transform;
-                collect_frame_text(&group.frame, p + Point::new(t.tx, t.ty), out);
-            }
-            FrameItem::Text(text) if !text.text.is_empty() => {
-                out.push((p, text.text.clone(), text.size, text.width()));
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Reconstructs approximate reading-order text from a laid-out frame's text
-/// runs. Every word is present (each `TextItem` carries its plain `text`);
-/// lines are recovered by clustering on the y-position and inter-word spaces
-/// from x-gaps. Precise structure/formatting is lost, but the text is fully
-/// recovered — this is what lets content a *layout closure* produced (which
-/// yields an opaque `Frame`, not re-realizable blocks) still contribute
-/// searchable/selectable text rather than being a pure image. Returned as a
-/// single string with `\n` line separators; the caller decides visibility.
-fn frame_to_text(frame: &Frame) -> String {
-    use typst_library::layout::Point;
-    let mut items: Vec<(Point, EcoString, Abs, Abs)> = Vec::new();
-    collect_frame_text(frame, Point::zero(), &mut items);
-    if items.is_empty() {
-        return String::new();
-    }
-    // Reading order: top-to-bottom, then left-to-right.
-    items.sort_by(|a, b| {
-        a.0.y
-            .partial_cmp(&b.0.y)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.0.x.partial_cmp(&b.0.x).unwrap_or(std::cmp::Ordering::Equal))
-    });
-    let mut s = String::new();
-    let mut last_y: Option<Abs> = None;
-    let mut last_x_end: Option<Abs> = None;
-    for (pos, text, size, width) in items {
-        if let Some(ly) = last_y
-            && (pos.y - ly).abs() > size * 0.6
-        {
-            s.push('\n');
-        } else if let Some(xe) = last_x_end
-            && pos.x - xe > size * 0.25
-            && !s.ends_with(char::is_whitespace)
-        {
-            s.push(' ');
-        }
-        s.push_str(&text);
-        last_y = Some(pos.y);
-        last_x_end = Some(pos.x + width);
-    }
-    s
 }
