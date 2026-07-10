@@ -3201,6 +3201,52 @@ fn fidelity_report_enrolls_referenced_fonts() {
 }
 
 #[test]
+fn cjk_and_rtl_languages_use_word_script_slots() {
+    let p = parts(
+        "#set text(lang: \"en\")\n\
+         A long English baseline keeps the document default language stable.\n\
+         #text(lang: \"ja\")[日本語]\n\
+         \n\
+         #set text(lang: \"ar\", dir: rtl)\n\
+         مرحبا",
+    );
+    let doc = &p["word/document.xml"];
+
+    let japanese = run_fragment_containing(doc, "日本語");
+    assert!(
+        japanese.contains("<w:lang w:val=\"ja\" w:eastAsia=\"ja\"/>"),
+        "Japanese uses Word's East Asian proofing/font slot: {japanese}"
+    );
+
+    let arabic = run_fragment_containing(doc, "مرحبا");
+    assert!(arabic.contains("<w:rtl/>"), "Arabic run is RTL: {arabic}");
+    assert!(arabic.contains("<w:cs/>"), "Arabic run uses complex-script props: {arabic}");
+    assert!(
+        arabic.contains("<w:lang w:val=\"ar\" w:bidi=\"ar\"/>"),
+        "Arabic uses Word's bidi proofing/font slot: {arabic}"
+    );
+    let arabic_para = para_fragment_containing(doc, "مرحبا");
+    assert!(arabic_para.contains("<w:bidi/>"), "Arabic paragraph is bidi: {arabic_para}");
+    assert!(
+        arabic_para.contains("<w:jc w:val=\"start\"/>"),
+        "RTL logical-start alignment is explicit: {arabic_para}"
+    );
+    assert_all_wellformed(&p);
+
+    let japanese_default = parts("#set text(lang: \"ja\")\n日本語の本文");
+    assert!(
+        japanese_default["word/styles.xml"]
+            .contains("<w:lang w:val=\"ja\" w:eastAsia=\"ja\"/>"),
+        "docDefaults uses the East Asian language slot"
+    );
+    assert!(
+        japanese_default["word/settings.xml"]
+            .contains("<w:themeFontLang w:val=\"ja\" w:eastAsia=\"ja\"/>"),
+        "theme font language uses the East Asian slot"
+    );
+}
+
+#[test]
 fn equivalent_roman_figure_numbering_stays_live() {
     let p = parts(
         "#set figure(numbering: \"i\")\n\

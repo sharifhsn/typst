@@ -874,6 +874,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         use typst_library::text::TextElem;
 
         let mut p = ParaProps::default();
+        let rtl = !styles.resolve(TextElem::dir).is_positive();
 
         if self.line_numbering_active && styles.get_ref(ParLine::numbering).is_none() {
             p.suppress_line_numbers = true;
@@ -887,13 +888,22 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         } else {
             match styles.resolve(AlignElem::alignment).x {
                 FixedAlignment::Center => p.jc = Some(crate::dom::Jc::Center),
+                // Typst's fixed alignment is physical (Start = global left,
+                // End = global right), while Word's `start`/`end` values are
+                // logical and flip under `w:bidi`. Translate between the two.
+                FixedAlignment::End if rtl => {
+                    p.jc = Some(crate::dom::Jc::Start);
+                }
                 FixedAlignment::End => p.jc = Some(crate::dom::Jc::End),
+                FixedAlignment::Start if rtl => {
+                    p.jc = Some(crate::dom::Jc::End);
+                }
                 FixedAlignment::Start => {}
             }
         }
 
         // G6 paragraph base reading order (the run-level `w:rtl` is Slice C).
-        if !styles.resolve(TextElem::dir).is_positive() {
+        if rtl {
             p.bidi = true;
         }
 

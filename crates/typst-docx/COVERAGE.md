@@ -1409,3 +1409,39 @@ is validation of every emitted part against the chosen Office-version schemas,
 plus a maintained allowlist for Microsoft extension namespaces and compatibility
 markup; consumer open/save tests remain independent evidence rather than a
 substitute for that work.
+
+## 25. CJK/RTL language slots and physical paragraph alignment
+
+The exporter already split text by installed glyph coverage, emitted every
+resolved fallback family into `fontTable.xml`, and carried `w:rtl`/`w:cs` on RTL
+runs plus `w:bidi` on RTL paragraphs. Two consumer-visible gaps remained:
+
+- `w:lang` populated only the default `w:val` slot. Word has separate
+  `w:eastAsia` and `w:bidi` slots for East Asian and complex-script font and
+  proofing behavior; it does not reliably infer them from `w:val`.
+- Typst resolves horizontal alignment into global physical coordinates, while
+  Word's `w:jc="start"`/`"end"` are logical values that reverse under
+  `w:bidi`. Mapping physical right directly to logical end placed default RTL
+  paragraphs at the left margin in LibreOffice Writer.
+
+Language serialization now mirrors Typst's RTL-language set and writes the
+script-specific slot for Japanese, Korean, Chinese, Arabic, Divehi, Persian,
+Hebrew, Kashmiri, Punjabi, Pashto, Sindhi, Uyghur, Urdu, and Yiddish. The same
+helper drives direct run properties, `docDefaults`, and `themeFontLang`.
+Paragraph lowering now translates Typst's physical left/right alignment into
+Word's logical start/end after considering the paragraph direction.
+
+One structural regression covers Japanese and Arabic language slots, RTL run
+and paragraph properties, and explicit logical-start alignment. The DOCX target
+passes 163 tests.
+
+A dated 160 x 120 mm fixture (2026-07-10) combines English, Japanese, Hebrew,
+Arabic, and mixed inline text. Typst PDF and Writer DOCX renders both stayed on
+one identically sized page. The first render exposed the left-margin RTL bug;
+after the fix, Writer and current Word placed the standalone Hebrew and Arabic
+paragraphs at the same physical right edge as Typst. `pdftotext` recovered all
+four scripts from the Writer PDF. Package inspection showed `w:eastAsia="ja"`,
+`w:bidi="he"`/`"ar"`, `w:jc="start"`, and the actual Hiragino Sans, Arial
+Hebrew, and Geeza Pro fallback families. Word opened without repair and its
+accessibility tree exposed the complete multilingual content as native document
+text.

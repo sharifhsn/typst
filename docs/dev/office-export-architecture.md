@@ -402,6 +402,12 @@ mechanical cleanup that introduced this document.
   whenever HeadingN defines that property, preventing Word from silently
   re-inheriting the heading value. Truly inherited properties are still
   deduplicated from runs.
+- DOCX language and direction policy now fills Word's `w:eastAsia` and `w:bidi`
+  language slots alongside `w:val`, consistently across direct runs,
+  `docDefaults`, and theme language. Paragraph alignment translates Typst's
+  physical left/right result into Word's logical start/end after applying
+  `w:bidi`; this fixed Writer placing default Hebrew/Arabic paragraphs at the
+  left margin while Typst PDF placed them at physical right.
 
 ## Current implementation evidence (2026-07-10)
 

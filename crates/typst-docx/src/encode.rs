@@ -1409,7 +1409,7 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
     w.close(); // mathPr
     // Spell-check language for the theme fonts.
     let lang = document.text_defaults.lang.as_deref().unwrap_or("en-US");
-    w.open("w:themeFontLang").attr(xml::W_VAL, lang).empty();
+    crate::props::write_language(&mut w, "w:themeFontLang", lang);
     // Map the colour-scheme slots to the theme (what Word writes for a doc using
     // the Office theme).
     w.open("w:clrSchemeMapping")

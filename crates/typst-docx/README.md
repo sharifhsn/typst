@@ -73,6 +73,7 @@ stays consistent.
 | Highlight | ✅ | `w:highlight` / `w:shd` |
 | Small caps | ✅ | `w:smallCaps` |
 | Text colour, font family, size | ✅ | `w:color`, `w:rFonts`, `w:sz` |
+| Language and RTL/CJK text | ✅ | `w:lang` with `w:eastAsia`/`w:bidi` script slots, `w:rtl`, `w:cs`, paragraph `w:bidi`, and direction-aware logical justification |
 | Smart quotes | ✅ | resolved to curly quotes |
 | `#hide[…]` | ✅ | content is **removed** from the file (redaction semantics, like PDF); only introspection traces (labels) are kept |
 
