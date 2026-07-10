@@ -275,11 +275,48 @@ pub struct RepresentationCounts {
     pub drop: usize,
 }
 
+/// Who is allowed to recalculate a dynamic field after export.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum FieldOwner {
+    Typst,
+    Consumer,
+}
+
+/// Whether a field's cached result participates in visible document content.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum FieldVisibility {
+    Visible,
+    Hidden,
+}
+
+/// One stable field group in the finalized DOCX IR.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct DynamicFieldFact {
+    pub logical_id: u128,
+    pub kind: EcoString,
+    pub instruction: EcoString,
+    pub owner: FieldOwner,
+    pub visibility: FieldVisibility,
+    pub occurrences: usize,
+}
+
+/// One font family referenced by the finalized DOCX IR.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct FontFact {
+    pub logical_id: u128,
+    pub family: EcoString,
+    /// DOCX currently references fonts but does not embed font programs.
+    pub embedded: bool,
+    pub occurrences: usize,
+}
+
 /// Structured, queryable evidence about DOCX fidelity decisions.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct FidelityReport {
     decisions: Vec<ExportDecision>,
     suppressed: Vec<SuppressedDiagnostic>,
+    dynamic_fields: Vec<DynamicFieldFact>,
+    fonts: Vec<FontFact>,
 }
 
 impl FidelityReport {
@@ -291,6 +328,16 @@ impl FidelityReport {
     /// Diagnostics deliberately suppressed by best-effort conversion.
     pub fn suppressed_diagnostics(&self) -> &[SuppressedDiagnostic] {
         &self.suppressed
+    }
+
+    /// Dynamic field groups in the finalized typed IR.
+    pub fn dynamic_fields(&self) -> &[DynamicFieldFact] {
+        &self.dynamic_fields
+    }
+
+    /// Font families referenced by defaults, styles, and concrete runs.
+    pub fn fonts(&self) -> &[FontFact] {
+        &self.fonts
     }
 
     /// Aggregate representation counts, including repeated occurrences.
@@ -391,6 +438,59 @@ impl FidelityReport {
             kind,
             diagnostic,
         );
+    }
+
+    pub(crate) fn record_dynamic_field(
+        &mut self,
+        snapshot_id: u128,
+        instruction: &str,
+        owner: FieldOwner,
+        visibility: FieldVisibility,
+    ) {
+        let instruction = instruction.trim();
+        let kind: EcoString = instruction
+            .split_whitespace()
+            .next()
+            .unwrap_or("UNKNOWN")
+            .to_ascii_uppercase()
+            .into();
+        let logical_id =
+            typst_utils::hash128(&(snapshot_id, instruction, owner, visibility));
+        if let Some(existing) = self
+            .dynamic_fields
+            .iter_mut()
+            .find(|field| field.logical_id == logical_id)
+        {
+            existing.occurrences += 1;
+            return;
+        }
+        self.dynamic_fields.push(DynamicFieldFact {
+            logical_id,
+            kind,
+            instruction: instruction.into(),
+            owner,
+            visibility,
+            occurrences: 1,
+        });
+    }
+
+    pub(crate) fn record_font(&mut self, snapshot_id: u128, family: &str) {
+        if family.is_empty() {
+            return;
+        }
+        let logical_id = typst_utils::hash128(&(snapshot_id, family));
+        if let Some(existing) =
+            self.fonts.iter_mut().find(|font| font.logical_id == logical_id)
+        {
+            existing.occurrences += 1;
+            return;
+        }
+        self.fonts.push(FontFact {
+            logical_id,
+            family: family.into(),
+            embedded: false,
+            occurrences: 1,
+        });
     }
 
     fn suppress(

@@ -3047,6 +3047,55 @@ fn page_reference_remains_live_and_unlocked() {
 }
 
 #[test]
+fn fidelity_report_enrolls_dynamic_field_ownership() {
+    let src = "#set page(numbering: \"1\")\n#outline()\n\n= Intro\n\n#figure(rect(width: 20pt, height: 20pt), caption: [A box]) <f>\n\nSee page #ref(<f>, form: \"page\").";
+    let compiled = compile_docx(src, &[]);
+    let fields = compiled.fidelity_report().dynamic_fields();
+
+    for kind in ["TOC", "PAGEREF", "SEQ", "PAGE"] {
+        assert!(
+            fields.iter().any(|field| {
+                field.kind == kind && field.owner == typst_docx::FieldOwner::Consumer
+            }),
+            "{kind} must be inventoried as consumer-owned"
+        );
+    }
+    assert!(fields.iter().all(|field| field.occurrences > 0));
+
+    let p = parts(src);
+    let manifest = &p["customXml/typstFidelity.xml"];
+    assert!(manifest.contains("<typst:dynamicFields>"));
+    assert!(manifest.contains("kind=\"TOC\""));
+    assert!(manifest.contains("kind=\"PAGEREF\""));
+    assert!(manifest.contains("owner=\"Consumer\""));
+    assert!(manifest.contains("dynamicFields="));
+}
+
+#[test]
+fn fidelity_report_enrolls_referenced_fonts() {
+    let src = "#set text(font: \"Libertinus Serif\")\nBody and #text(font: \"DejaVu Sans Mono\")[code].";
+    let compiled = compile_docx(src, &[]);
+    let fonts = compiled.fidelity_report().fonts();
+
+    for family in ["libertinus serif", "dejavu sans mono"] {
+        assert!(
+            fonts.iter().any(|font| {
+                font.family == family && !font.embedded && font.occurrences > 0
+            }),
+            "{family} must be inventoried as a referenced, non-embedded font: {fonts:?}"
+        );
+    }
+
+    let p = parts(src);
+    let manifest = &p["customXml/typstFidelity.xml"];
+    assert!(manifest.contains("<typst:fonts>"));
+    assert!(manifest.contains("family=\"dejavu sans mono\""));
+    assert!(manifest.contains("embedded=\"false\""));
+    assert!(manifest.contains("referencedFonts="));
+    assert!(p["word/fontTable.xml"].contains("w:name=\"dejavu sans mono\""));
+}
+
+#[test]
 fn equivalent_roman_figure_numbering_stays_live() {
     let p = parts(
         "#set figure(numbering: \"i\")\n\

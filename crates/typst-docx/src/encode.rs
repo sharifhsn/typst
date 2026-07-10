@@ -94,15 +94,10 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     doc_rels.add(REL_THEME, "theme/theme1.xml", RelMode::Internal);
 
     // -- word/fontTable.xml --
-    // The document font + the standard auxiliary fonts (bullet glyphs, math).
+    // Every font referenced by the finalized IR + standard auxiliary fonts.
     let mut fonts: Vec<String> = Vec::new();
-    if let Some(f) = &document.text_defaults.font {
-        push_font(&mut fonts, f);
-    }
-    for style in &document.heading_styles {
-        if let Some(f) = &style.rpr.font {
-            push_font(&mut fonts, f);
-        }
+    for font in document.fidelity_report().fonts() {
+        push_font(&mut fonts, &font.family);
     }
     for f in ["Symbol", "Courier New"] {
         push_font(&mut fonts, f);

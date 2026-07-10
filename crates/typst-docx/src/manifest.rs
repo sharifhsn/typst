@@ -15,6 +15,10 @@ pub fn build(document: &DocxDocument) -> String {
     let report = document.fidelity_report();
     let snapshot = document.export_snapshot();
     let counts = report.counts();
+    let dynamic_field_count: usize =
+        report.dynamic_fields().iter().map(|field| field.occurrences).sum();
+    let referenced_font_count: usize =
+        report.fonts().iter().map(|font| font.occurrences).sum();
     let mut out = String::from(XML_DECL);
     let _ = write!(
         out,
@@ -23,12 +27,14 @@ pub fn build(document: &DocxDocument) -> String {
     );
     let _ = write!(
         out,
-        "<typst:counts native=\"{}\" nativeWithFallback=\"{}\" approximate=\"{}\" raster=\"{}\" drop=\"{}\"/>",
+        "<typst:counts native=\"{}\" nativeWithFallback=\"{}\" approximate=\"{}\" raster=\"{}\" drop=\"{}\" dynamicFields=\"{}\" referencedFonts=\"{}\"/>",
         counts.native,
         counts.native_with_fallback,
         counts.approximate,
         counts.raster,
-        counts.drop
+        counts.drop,
+        dynamic_field_count,
+        referenced_font_count
     );
 
     out.push_str("<typst:pages>");
@@ -79,7 +85,31 @@ pub fn build(document: &DocxDocument) -> String {
             losses.portability
         );
     }
-    out.push_str("</typst:decisions><typst:suppressedDiagnostics>");
+    out.push_str("</typst:decisions><typst:dynamicFields>");
+    for field in report.dynamic_fields() {
+        let _ = write!(
+            out,
+            "<typst:field id=\"{:032x}\" kind=\"{}\" instruction=\"{}\" owner=\"{:?}\" visibility=\"{:?}\" occurrences=\"{}\"/>",
+            field.logical_id,
+            escape_attr(&field.kind),
+            escape_attr(&field.instruction),
+            field.owner,
+            field.visibility,
+            field.occurrences
+        );
+    }
+    out.push_str("</typst:dynamicFields><typst:fonts>");
+    for font in report.fonts() {
+        let _ = write!(
+            out,
+            "<typst:font id=\"{:032x}\" family=\"{}\" embedded=\"{}\" occurrences=\"{}\"/>",
+            font.logical_id,
+            escape_attr(&font.family),
+            font.embedded,
+            font.occurrences
+        );
+    }
+    out.push_str("</typst:fonts><typst:suppressedDiagnostics>");
     for suppressed in report.suppressed_diagnostics() {
         let _ = write!(
             out,

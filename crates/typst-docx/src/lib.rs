@@ -31,7 +31,8 @@ pub use self::encode::{DocxOptions, docx};
 pub use self::introspect::DocxIntrospector;
 pub use self::mappers::math::equation_omml_fragment;
 pub use self::report::{
-    DecisionReason, ExportDecision, ExportSource, ExportStage, FidelityReport, LossSet,
+    DecisionReason, DynamicFieldFact, ExportDecision, ExportSource, ExportStage,
+    FidelityReport, FieldOwner, FieldVisibility, FontFact, LossSet,
     Representation, RepresentationCounts, SuppressedDiagnostic, SuppressedKind,
 };
 pub use self::rules::register;

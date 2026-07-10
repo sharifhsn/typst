@@ -23,8 +23,8 @@ use crate::introspect::DocxIntrospector;
 use crate::package::Rels;
 use crate::props;
 use crate::report::{
-    DecisionReason, ExportSource, ExportStage, FidelityReport, LossSet, Representation,
-    SuppressedKind,
+    DecisionReason, ExportSource, ExportStage, FidelityReport, FieldOwner,
+    FieldVisibility, LossSet, Representation, SuppressedKind,
 };
 
 /// The complete product of the lowering walk before document-wide postpasses.
@@ -182,7 +182,7 @@ fn docx_document_impl(
         real_alias_locations,
         toc_headings,
         toc_figures,
-        fidelity_report,
+        mut fidelity_report,
     } = {
         // Isolate the conversion walk's error sink. Lowering already-realized
         // content (figure/table/grid cells, …) can surface *delayed* errors for
@@ -485,6 +485,26 @@ fn docx_document_impl(
             matches!(block, Block::SectionBreak(sect) if section_uses_even_furniture(sect))
         });
 
+    record_dynamic_field_inventory(
+        &mut fidelity_report,
+        export_snapshot.logical_id(),
+        &body,
+        &header_parts,
+        &footer_parts,
+        &footnotes,
+    );
+    record_font_inventory(
+        &mut fidelity_report,
+        export_snapshot.logical_id(),
+        &text_defaults,
+        &heading_styles,
+        uses_math,
+        &body,
+        &header_parts,
+        &footer_parts,
+        &footnotes,
+    );
+
     Ok(DocxDocument {
         info,
         body,
@@ -511,6 +531,234 @@ fn docx_document_impl(
         fidelity_report,
         export_snapshot,
     })
+}
+
+fn record_dynamic_field_inventory(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    body: &[Block],
+    headers: &[HdrFtrPart],
+    footers: &[HdrFtrPart],
+    footnotes: &[Footnote],
+) {
+    record_block_fields(report, snapshot_id, body);
+    for part in headers.iter().chain(footers) {
+        record_block_fields(report, snapshot_id, &part.blocks);
+    }
+    for footnote in footnotes {
+        record_block_fields(report, snapshot_id, &footnote.blocks);
+    }
+}
+
+fn record_block_fields(report: &mut FidelityReport, snapshot_id: u128, blocks: &[Block]) {
+    for block in blocks {
+        match block {
+            Block::Para(para) => record_para_fields(report, snapshot_id, para),
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        record_block_fields(report, snapshot_id, &cell.blocks);
+                    }
+                }
+            }
+            Block::Toc(toc) => {
+                report.record_dynamic_field(
+                    snapshot_id,
+                    &toc.instr,
+                    field_owner(toc.mode),
+                    FieldVisibility::Visible,
+                );
+                for entry in &toc.entries {
+                    record_para_fields(report, snapshot_id, entry);
+                }
+                for run in &toc.fallback {
+                    record_run_fields(report, snapshot_id, run);
+                }
+            }
+            Block::FlowSpace { .. } | Block::SectionBreak(_) | Block::Tag(_) => {}
+        }
+    }
+}
+
+fn record_para_fields(report: &mut FidelityReport, snapshot_id: u128, para: &Para) {
+    for child in &para.content {
+        match child {
+            ParaChild::Run(run) => record_run_fields(report, snapshot_id, run),
+            ParaChild::Hyperlink { runs, .. } => {
+                for run in runs {
+                    record_run_fields(report, snapshot_id, run);
+                }
+            }
+            ParaChild::OmmlPara(_)
+            | ParaChild::BookmarkStart { .. }
+            | ParaChild::BookmarkEnd { .. }
+            | ParaChild::Tag(_) => {}
+        }
+    }
+}
+
+fn record_run_fields(report: &mut FidelityReport, snapshot_id: u128, run: &Run) {
+    match run {
+        Run::Field(field) => {
+            report.record_dynamic_field(
+                snapshot_id,
+                &field.instr,
+                field_owner(field.mode),
+                match field.display {
+                    FieldDisplay::Visible => FieldVisibility::Visible,
+                    FieldDisplay::Hidden => FieldVisibility::Hidden,
+                },
+            );
+            for result in &field.result {
+                record_run_fields(report, snapshot_id, result);
+            }
+        }
+        Run::Drawing(drawing) => {
+            if let Some(text_box) =
+                drawing.shape.as_ref().and_then(|shape| shape.txbx.as_ref())
+            {
+                record_block_fields(report, snapshot_id, &text_box.blocks);
+            }
+            if let Some(group) = &drawing.group {
+                for child in &group.children {
+                    if let Some(text_box) = &child.shape.txbx {
+                        record_block_fields(report, snapshot_id, &text_box.blocks);
+                    }
+                }
+            }
+        }
+        Run::Text { .. }
+        | Run::Break
+        | Run::PageBreak
+        | Run::ColumnBreak
+        | Run::Tab
+        | Run::FillTab
+        | Run::FootnoteRef { .. }
+        | Run::FootnoteRefMark
+        | Run::OmmlInline(_) => {}
+    }
+}
+
+fn field_owner(mode: FieldMode) -> FieldOwner {
+    match mode {
+        FieldMode::Static => FieldOwner::Typst,
+        FieldMode::Live => FieldOwner::Consumer,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_font_inventory(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    defaults: &TextDefaults,
+    heading_styles: &[HeadingStyle],
+    uses_math: bool,
+    body: &[Block],
+    headers: &[HdrFtrPart],
+    footers: &[HdrFtrPart],
+    footnotes: &[Footnote],
+) {
+    if let Some(font) = &defaults.font {
+        report.record_font(snapshot_id, font);
+    }
+    for style in heading_styles {
+        record_run_props_font(report, snapshot_id, &style.rpr);
+    }
+    if uses_math {
+        report.record_font(snapshot_id, "Cambria Math");
+    }
+    record_block_fonts(report, snapshot_id, body);
+    for part in headers.iter().chain(footers) {
+        record_block_fonts(report, snapshot_id, &part.blocks);
+    }
+    for footnote in footnotes {
+        record_block_fonts(report, snapshot_id, &footnote.blocks);
+    }
+}
+
+fn record_block_fonts(report: &mut FidelityReport, snapshot_id: u128, blocks: &[Block]) {
+    for block in blocks {
+        match block {
+            Block::Para(para) => record_para_fonts(report, snapshot_id, para),
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        record_block_fonts(report, snapshot_id, &cell.blocks);
+                    }
+                }
+            }
+            Block::Toc(toc) => {
+                for entry in &toc.entries {
+                    record_para_fonts(report, snapshot_id, entry);
+                }
+                for run in &toc.fallback {
+                    record_run_fonts(report, snapshot_id, run);
+                }
+            }
+            Block::FlowSpace { .. } | Block::SectionBreak(_) | Block::Tag(_) => {}
+        }
+    }
+}
+
+fn record_para_fonts(report: &mut FidelityReport, snapshot_id: u128, para: &Para) {
+    for child in &para.content {
+        match child {
+            ParaChild::Run(run) => record_run_fonts(report, snapshot_id, run),
+            ParaChild::Hyperlink { runs, .. } => {
+                for run in runs {
+                    record_run_fonts(report, snapshot_id, run);
+                }
+            }
+            ParaChild::OmmlPara(_)
+            | ParaChild::BookmarkStart { .. }
+            | ParaChild::BookmarkEnd { .. }
+            | ParaChild::Tag(_) => {}
+        }
+    }
+}
+
+fn record_run_fonts(report: &mut FidelityReport, snapshot_id: u128, run: &Run) {
+    match run {
+        Run::Text { props, .. } | Run::FootnoteRef { props, .. } => {
+            record_run_props_font(report, snapshot_id, props);
+        }
+        Run::Field(field) => {
+            for result in &field.result {
+                record_run_fonts(report, snapshot_id, result);
+            }
+        }
+        Run::Drawing(drawing) => {
+            if let Some(text_box) =
+                drawing.shape.as_ref().and_then(|shape| shape.txbx.as_ref())
+            {
+                record_block_fonts(report, snapshot_id, &text_box.blocks);
+            }
+            if let Some(group) = &drawing.group {
+                for child in &group.children {
+                    if let Some(text_box) = &child.shape.txbx {
+                        record_block_fonts(report, snapshot_id, &text_box.blocks);
+                    }
+                }
+            }
+        }
+        Run::Break
+        | Run::PageBreak
+        | Run::ColumnBreak
+        | Run::Tab
+        | Run::FillTab
+        | Run::FootnoteRefMark
+        | Run::OmmlInline(_) => {}
+    }
+}
+
+fn record_run_props_font(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    props: &RunProps,
+) {
+    if let Some(font) = &props.font {
+        report.record_font(snapshot_id, font);
+    }
 }
 
 fn section_uses_even_furniture(sect: &SectPr) -> bool {
