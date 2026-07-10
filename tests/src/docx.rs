@@ -994,11 +994,37 @@ fn floating_placed_text_keeps_clearance_and_wrap_policy() {
 }
 
 #[test]
-fn rich_placed_content_flow_fallback_is_reported() {
-    let src = "#place(top + left, table(columns: 1, [Flowing table]))";
+fn placed_simple_table_is_an_editable_anchored_text_box() {
+    let src = "#place(top + left, dx: 8pt, dy: 12pt, \
+               table(columns: 2, [Left cell], [Right cell]))";
     let p = parts(src);
-    assert!(p["word/document.xml"].contains("Flowing table"));
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<wp:anchor"));
+    assert!(doc.contains("<wps:txbx>"));
+    assert!(doc.contains("<wps:bodyPr wrap=\"square\""));
+    assert!(doc.contains("<w:tbl>"), "the table stays native inside the box");
+    assert!(doc.contains("Left cell") && doc.contains("Right cell"));
+    assert!(!doc.contains("<a:blip"), "the table is not flattened to pixels");
+
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedTextBox
+            && decision.representation == Representation::Native
+    }));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedContentFlowFallback
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn rich_placed_content_flow_fallback_is_reported() {
+    // Math inside a table is deliberately not admitted to the placed-table
+    // text-box plan until that consumer combination is validated atomically.
+    let src = "#place(top + left, table(columns: 1, [$x + 1$]))";
+    let p = parts(src);
     assert!(p["word/document.xml"].contains("<w:tbl>"));
+    assert!(p["word/document.xml"].contains("<m:oMath"));
 
     let compiled = compile_docx(src, &[]);
     assert!(compiled.fidelity_report().decisions().iter().any(|decision| {

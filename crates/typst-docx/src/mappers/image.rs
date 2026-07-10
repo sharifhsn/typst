@@ -45,7 +45,7 @@ use typst_ooxml_core::media;
 use crate::ctx::DocxCtx;
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Drawing, Field, FieldDisplay, FieldMode, Jc,
-    Para, ParaChild, ParaProps, Run, RunProps,
+    Para, ParaChild, ParaProps, Run, RunProps, TextBoxWrap,
 };
 use crate::report::{DecisionReason, LossSet, Representation};
 
@@ -57,6 +57,18 @@ const EMU_PER_PT: f64 = 12700.0;
 
 /// The `Caption` paragraph-style id (defined in `styles.xml`).
 const CAPTION_STYLE: &str = "Caption";
+
+/// Whole-region representation selected before a placed body is lowered.
+///
+/// Selection is source-structural; execution can still fall through when a
+/// measurement/layout attempt produces no usable region, but serialization
+/// never makes the policy decision implicitly.
+#[derive(Copy, Clone)]
+enum PlacePlan {
+    NativeShapeGroup,
+    NativeTextBox(TextBoxWrap),
+    LowerOnce,
+}
 
 /// Lowers an [`ImageElem`] into an inline DrawingML picture run.
 ///
@@ -318,6 +330,7 @@ pub fn place(
 ) -> SourceResult<Vec<Block>> {
     let body = &elem.body;
     let placed = elem.clone().pack();
+    let plan = preflight_place(body, styles);
 
     // A placed body whose ENTIRE content is a composition of native shapes —
     // e.g. a decorative background pattern built from many `#polygon`s in a
@@ -327,7 +340,7 @@ pub fn place(
     // under `Target::Paged` resolves each shape's percentage-relative
     // coordinates against the page and hands `build_shapes_drawing` a frame of
     // concrete `Geometry::Curve` shapes to group.
-    if crate::convert::body_shape_only(body, styles)
+    if matches!(plan, PlacePlan::NativeShapeGroup)
         && let Some(Run::Drawing(mut drawing)) =
             crate::mappers::shape::transformed(body, styles, ctx)?
     {
@@ -346,8 +359,9 @@ pub fn place(
     // editable/searchable while preserving the source alignment and offsets;
     // footnotes, tables, figures, math, and nested drawings are deliberately
     // excluded because Word either forbids or destabilizes them in `wps:txbx`.
-    if let Some(Run::Drawing(mut drawing)) =
-        crate::mappers::shape::unframed_text_box(body, styles, ctx)?
+    if let PlacePlan::NativeTextBox(wrap) = plan
+        && let Some(Run::Drawing(mut drawing)) =
+            crate::mappers::shape::unframed_text_box(body, styles, wrap, ctx)?
     {
         set_place_anchor(&mut drawing, elem, styles, ctx);
         ctx.record_content_decision(
@@ -422,6 +436,71 @@ pub fn place(
         }
         _ => Ok(Vec::new()),
     }
+}
+
+fn preflight_place(body: &Content, styles: StyleChain) -> PlacePlan {
+    if crate::convert::body_shape_only(body, styles) {
+        return PlacePlan::NativeShapeGroup;
+    }
+    if crate::convert::body_textbox_safe(body) {
+        return PlacePlan::NativeTextBox(TextBoxWrap::None);
+    }
+    if placed_table_textbox_safe(body) {
+        return PlacePlan::NativeTextBox(TextBoxWrap::Square);
+    }
+    PlacePlan::LowerOnce
+}
+
+/// Word text boxes can contain a real `w:tbl`. Keep this deliberately narrower
+/// than general text-box content: exactly one root table/grid, with no nested
+/// drawings, counters, math, notes, lists, or second table. Those richer cases
+/// retain the explicit flow/raster fallback until their own preflight plans are
+/// consumer-validated.
+fn placed_table_textbox_safe(body: &Content) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::layout::{BoxElem, GridElem};
+    use typst_library::math::EquationElem;
+    use typst_library::model::{EnumElem, FootnoteElem, ListElem, TableElem, TermsElem};
+    use typst_library::visualize::{
+        CircleElem, EllipseElem, ImageElem, PolygonElem, RectElem, SquareElem,
+    };
+
+    if !body.is::<TableElem>() && !body.is::<GridElem>() {
+        return false;
+    }
+    if !crate::convert::body_extractable(body) || crate::convert::body_has_footnote(body)
+    {
+        return false;
+    }
+
+    let mut tables = 0usize;
+    body.traverse(&mut |element: Content| {
+        if element.is::<TableElem>() || element.is::<GridElem>() {
+            tables += 1;
+            return if tables == 1 {
+                ControlFlow::Continue(())
+            } else {
+                ControlFlow::Break(())
+            };
+        }
+
+        let unsafe_child = element.is::<FootnoteElem>()
+            || element.is::<FigureElem>()
+            || element.is::<ImageElem>()
+            || element.is::<EquationElem>()
+            || element.is::<ListElem>()
+            || element.is::<EnumElem>()
+            || element.is::<TermsElem>()
+            || element.is::<BoxElem>()
+            || element.is::<RectElem>()
+            || element.is::<SquareElem>()
+            || element.is::<EllipseElem>()
+            || element.is::<CircleElem>()
+            || element.is::<PolygonElem>();
+        if unsafe_child { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+    })
+    .is_continue()
+        && tables == 1
 }
 
 /// Wraps a drawing in its own paragraph block.

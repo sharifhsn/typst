@@ -171,11 +171,10 @@ pub fn text_box(
 pub fn unframed_text_box(
     body: &Content,
     styles: StyleChain,
+    wrap: TextBoxWrap,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
-    if !crate::convert::body_extractable(body)
-        || crate::convert::body_has_footnote(body)
-        || !crate::convert::body_textbox_safe(body)
+    if !crate::convert::body_extractable(body) || crate::convert::body_has_footnote(body)
     {
         return Ok(None);
     }
@@ -209,7 +208,7 @@ pub fn unframed_text_box(
             geom: ShapeGeom::Rect,
             fill: None,
             stroke: None,
-            txbx: Some(TextBox { ins: [0; 4], blocks, wrap: TextBoxWrap::None }),
+            txbx: Some(TextBox { ins: [0; 4], blocks, wrap }),
         }),
         group: None,
     })))
