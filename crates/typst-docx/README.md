@@ -214,12 +214,15 @@ identities, and diagnostics suppressed by best-effort fallback conversion.
 `DocxDocument::export_snapshot()` exposes owned semantic nodes matched to the
 converged paged oracle, and `fidelity_manifest_xml()` serializes both records.
 Every package persists that versioned manifest at
-`customXml/typstFidelity.xml`. The finalized IR inventory records every dynamic
-field's instruction, update owner, visibility, and occurrence count, plus every
-referenced font and its current non-embedded status. The same font inventory
-drives `fontTable.xml`, including fonts used only by individual runs. Complete
-native-region and consumer-profile enrollment plus an optional standalone CLI
-sidecar remain migration work.
+`customXml/typstFidelity.xml` and duplicates its exact text in the standard
+`TypstFidelityManifestV1` custom document property because LibreOffice Writer
+drops arbitrary custom-XML parts on save but preserves custom properties. The
+finalized IR inventory records every dynamic field's instruction, update owner,
+visibility, and occurrence count, plus every referenced font, whether it was
+available on the export machine, and its current non-embedded status. The same
+font inventory drives `fontTable.xml`, including fonts used only by individual
+runs. Complete native-region and consumer-profile enrollment plus an optional
+standalone CLI sidecar remain migration work.
 
 For the cross-export pipeline, fidelity model, verified failure modes, and
 proposed preflight architecture, see

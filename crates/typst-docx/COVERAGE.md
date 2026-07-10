@@ -72,7 +72,7 @@ enriched `app.xml`/`core.xml`.
 | Category | Examples | Why skipped |
 |---|---|---|
 | **Comment styles** | `BalloonText`, `CommentText`, `CommentReference`, `CommentSubject` (+`Char`) | We emit no comments; the styles would be dead. |
-| **SharePoint / property binding** | `customXml/item*.xml`, `docProps/custom.xml`, `docVars` | Bind to content controls / server properties we don't have. |
+| **SharePoint / property binding** | `w:dataBinding`, SharePoint property parts, `docVars` | Bind to content controls / server properties we don't have. Custom XML is used for bibliography/fidelity data, and one custom property is used as a Writer-stable fidelity carrier. |
 | **`Normal` aliases** | `BodyText*`, `NormalWeb`, `NoSpacing`, `PlainText`, `Default` | Re-skins of `Normal`; we render with direct formatting + `docDefaults`. |
 | **Feature-specific built-ins** | `EnvelopeAddress/Return`, `MacroText`, `HTMLPreformatted`, `MessageHeader`, `IndexHeading`, `TOAHeading`, `DocumentMap`, `Index*` | For Word features (mail-merge, web, index, table-of-authorities) with no Typst source. |
 | **Multi-level list styles** | `ListBullet2`–`5`, `ListNumber2`–`5`, `ListContinue*`, `List2`–`5` | We drive lists from `numbering.xml` directly. |
@@ -1221,8 +1221,10 @@ The real CLI rebuilt the placed-table fixture with the manifest. Microsoft Word
 opened the package without repair and retained the editable anchored textbox,
 2-row/2-column table, and individual cell accessibility. LibreOffice Writer
 rendered the package as one 453.543 x 340.157 pt page. The custom relationship
-and manifest therefore survive both primary consumers without perturbing the
-native authoring surface.
+and manifest therefore open in both primary consumers without perturbing the
+native authoring surface. Later Writer save-round-trip testing showed that
+opening is not preservation: Writer drops arbitrary `customXml` parts. Section
+26 records the redundant carrier added for that case.
 
 ## 20. Whole-region table/grid preflight and representative cell paint
 
@@ -1445,3 +1447,48 @@ four scripts from the Writer PDF. Package inspection showed `w:eastAsia="ja"`,
 Hebrew, and Geeza Pro fallback families. Word opened without repair and its
 accessibility tree exposed the complete multilingual content as native document
 text.
+
+## 26. Missing-font facts and Writer-stable fidelity evidence
+
+The finalized font inventory previously recorded only family, occurrence count,
+and `embedded=false`. That made an installed family and an unresolved portable
+Word reference indistinguishable even though the latter lets Word or Writer
+choose different glyphs, widths, and line breaks from the Typst PDF fallback.
+
+Each `FontFact` now records `available_at_export`. Final inventory checks the
+actual `FontBook` after every style/body/table/TOC/text-box/header/footer/
+footnote run has been lowered. The embedded manifest emits
+`availableAtExport` per family and an occurrence-weighted `missingFonts` count;
+the stable font ID remains snapshot plus family so machine availability does not
+change semantic identity. A missing family remains in `fontTable.xml` and run
+properties as a valid editable Word reference rather than being silently
+rewritten to the export machine's fallback.
+
+The same investigation found that Writer 26.2.4.2 removes
+`customXml/typstFidelity.xml` during an open/save DOCX round trip. Every new DOCX
+therefore also stores the exact canonical manifest text in the standard
+`TypstFidelityManifestV1` custom document property at `docProps/custom.xml`,
+with a package-root custom-properties relationship. Word and tooling can keep
+using the canonical custom-XML part; recovery tools use the property when that
+part is absent. This is redundancy, not a second independently generated
+report, so the two carriers cannot drift at export time.
+
+Structural regressions cover installed-versus-missing font facts, manifest
+counts/attributes, the portable `fontTable` reference, custom-property/root-
+relationship presence, and exact equality between the canonical and redundant
+payloads. The DOCX target passes 164 tests.
+
+A 2026-07-10 missing-font fixture compiled to one 160 x 120 mm Typst PDF page
+and one identically sized Writer page. Both kept searchable text and happened to
+choose substitutes with the same line breaks, which is recorded as an observed
+consumer result rather than a portability guarantee. Current Word opened
+without repair, showed the unavailable requested family in the font UI while
+displaying substituted glyphs, exposed native editable text, and reported
+`Accessibility: Good to go`.
+
+Writer then saved the DOCX back to DOCX. It removed the canonical custom-XML
+part but retained `docProps/custom.xml`; extracting the custom-property value
+produced the same 1,730-byte manifest and SHA-256
+`511dbf865d506b860da306c5c2bf19ab1b099a18daeced015b586c5a3fcb356d` as the
+original canonical part. This proves exact evidence survival for this fixture,
+not a blanket guarantee across future Writer versions.

@@ -19,6 +19,12 @@ pub fn build(document: &DocxDocument) -> String {
         report.dynamic_fields().iter().map(|field| field.occurrences).sum();
     let referenced_font_count: usize =
         report.fonts().iter().map(|font| font.occurrences).sum();
+    let missing_font_count: usize = report
+        .fonts()
+        .iter()
+        .filter(|font| !font.available_at_export)
+        .map(|font| font.occurrences)
+        .sum();
     let mut out = String::from(XML_DECL);
     let _ = write!(
         out,
@@ -27,7 +33,7 @@ pub fn build(document: &DocxDocument) -> String {
     );
     let _ = write!(
         out,
-        "<typst:counts native=\"{}\" nativeWithFallback=\"{}\" approximate=\"{}\" raster=\"{}\" drop=\"{}\" dynamicFields=\"{}\" referencedFonts=\"{}\" measuredTables=\"{}\"/>",
+        "<typst:counts native=\"{}\" nativeWithFallback=\"{}\" approximate=\"{}\" raster=\"{}\" drop=\"{}\" dynamicFields=\"{}\" referencedFonts=\"{}\" missingFonts=\"{}\" measuredTables=\"{}\"/>",
         counts.native,
         counts.native_with_fallback,
         counts.approximate,
@@ -35,6 +41,7 @@ pub fn build(document: &DocxDocument) -> String {
         counts.drop,
         dynamic_field_count,
         referenced_font_count,
+        missing_font_count,
         snapshot.tables().len()
     );
 
@@ -128,9 +135,10 @@ pub fn build(document: &DocxDocument) -> String {
     for font in report.fonts() {
         let _ = write!(
             out,
-            "<typst:font id=\"{:032x}\" family=\"{}\" embedded=\"{}\" occurrences=\"{}\"/>",
+            "<typst:font id=\"{:032x}\" family=\"{}\" availableAtExport=\"{}\" embedded=\"{}\" occurrences=\"{}\"/>",
             font.logical_id,
             escape_attr(&font.family),
+            font.available_at_export,
             font.embedded,
             font.occurrences
         );

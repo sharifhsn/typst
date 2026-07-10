@@ -28,6 +28,7 @@ pub struct DocxOptions {
 const REL_OFFICE_DOCUMENT: &str = ns::rel::OFFICE_DOCUMENT;
 const REL_CORE_PROPS: &str = ns::rel::CORE_PROPS;
 const REL_EXTENDED_PROPS: &str = ns::rel::EXTENDED_PROPS;
+const REL_CUSTOM_PROPERTIES: &str = ns::rel::CUSTOM_PROPERTIES;
 const REL_STYLES: &str = ns::rel::STYLES;
 const REL_NUMBERING: &str = ns::rel::NUMBERING;
 const REL_FOOTNOTES: &str = ns::rel::FOOTNOTES;
@@ -46,6 +47,7 @@ const CT_ENDNOTES: &str = ns::ct::WORD_ENDNOTES;
 const CT_SETTINGS: &str = ns::ct::WORD_SETTINGS;
 const CT_CORE: &str = ns::ct::CORE_PROPS;
 const CT_EXTENDED: &str = ns::ct::EXTENDED_PROPS;
+const CT_CUSTOM_PROPERTIES: &str = ns::ct::CUSTOM_PROPERTIES;
 const CT_HEADER: &str = ns::ct::WORD_HEADER;
 const CT_FOOTER: &str = ns::ct::WORD_FOOTER;
 const CT_THEME: &str = ns::ct::THEME;
@@ -219,13 +221,15 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     }
 
     // -- customXml/typstFidelity.xml ---------------------------------------
-    // Versioned, machine-readable export evidence. This stays inside the
-    // package so CLI output, corpus artifacts, and consumer round trips retain
-    // the exact snapshot/decision record that produced the document.
+    // Versioned, machine-readable export evidence. The canonical customXml
+    // part is ideal for tooling, but Writer drops arbitrary customXml on save;
+    // docProps/custom.xml below redundantly carries the exact payload through
+    // that round trip.
+    let fidelity_manifest = document.fidelity_manifest_xml();
     package.add_xml(
         crate::manifest::PART_NAME,
         "application/xml",
-        document.fidelity_manifest_xml(),
+        fidelity_manifest.clone(),
     );
     doc_rels.add(
         crate::manifest::REL_TYPE,
@@ -243,11 +247,17 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     // -- docProps/core.xml + app.xml --
     package.add_xml("docProps/core.xml", CT_CORE, build_core(&document.info, pretty));
     package.add_xml("docProps/app.xml", CT_EXTENDED, build_app(pretty));
+    package.add_xml(
+        "docProps/custom.xml",
+        CT_CUSTOM_PROPERTIES,
+        build_custom_properties(&fidelity_manifest, pretty),
+    );
 
     // -- package root relationships --
     root_rels.add(REL_OFFICE_DOCUMENT, "word/document.xml", RelMode::Internal);
     root_rels.add(REL_CORE_PROPS, "docProps/core.xml", RelMode::Internal);
     root_rels.add(REL_EXTENDED_PROPS, "docProps/app.xml", RelMode::Internal);
+    root_rels.add(REL_CUSTOM_PROPERTIES, "docProps/custom.xml", RelMode::Internal);
 
     if let Err(err) = crate::schema::validate_package(&package) {
         bail!(Span::detached(), "invalid finalized DOCX XML sequence: {err}");
@@ -1720,6 +1730,29 @@ fn build_item_props(guid: &str, pretty: bool) -> String {
 // ---------------------------------------------------------------------------
 // docProps
 // ---------------------------------------------------------------------------
+
+/// Redundant standards-based carrier for the fidelity payload.
+///
+/// LibreOffice Writer drops arbitrary `customXml` parts on save, but preserves
+/// custom document properties. Keeping the canonical XML part and duplicating
+/// its exact text here lets tools recover the evidence after either Word or
+/// Writer round trips without placing hidden content in the document body.
+fn build_custom_properties(fidelity_manifest: &str, pretty: bool) -> String {
+    let mut w = XmlWriter::new(pretty);
+    w.open("Properties")
+        .attr("xmlns", ns::CUSTOM_PROPERTIES)
+        .attr("xmlns:vt", ns::DOC_PROPS_VTYPES)
+        .start_children();
+    w.open("property")
+        .attr("fmtid", "{D5CDD505-2E9C-101B-9397-08002B2CF9AE}")
+        .attr("pid", "2")
+        .attr("name", "TypstFidelityManifestV1")
+        .start_children();
+    w.elem_text("vt:lpwstr", fidelity_manifest);
+    w.close();
+    w.close();
+    w.finish()
+}
 
 fn build_core(info: &DocumentInfo, pretty: bool) -> String {
     let mut w = XmlWriter::new(pretty);

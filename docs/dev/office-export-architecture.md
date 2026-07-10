@@ -207,6 +207,7 @@ users and corpus gates. Every export should be able to report:
 - text characters and semantic nodes captured by raster fallbacks;
 - fields that can change when Word updates them;
 - fonts referenced but not embedded;
+- whether each referenced family was actually available on the export machine;
 - consumer-specific compatibility branches;
 - suppressed layout or conversion errors.
 
@@ -216,11 +217,14 @@ stderr strings.
 
 DOCX now retains this information on `DocxDocument` and persists a versioned XML
 manifest inside every package at `customXml/typstFidelity.xml`, related from the
-main document part. A public serializer supports external tooling. A finalized
-IR inventory enrolls every live/static field with its recalculation owner and
-visibility, plus every referenced font with occurrence counts and current
-non-embedded status. Complete native-region and consumer-profile enrollment and
-an optional CLI-selected standalone JSON/text sidecar remain open work.
+main document part. Because Writer removes arbitrary custom XML during save, the
+exact XML text is redundantly stored in the standards-based
+`TypstFidelityManifestV1` custom document property. A public serializer supports
+external tooling. A finalized IR inventory enrolls every live/static field with
+its recalculation owner and visibility, plus every referenced font with
+occurrence counts, export-machine availability, and current non-embedded status.
+Complete native-region and consumer-profile enrollment and an optional
+CLI-selected standalone JSON/text sidecar remain open work.
 
 ## Consumer rendering realities
 
@@ -408,6 +412,11 @@ mechanical cleanup that introduced this document.
   physical left/right result into Word's logical start/end after applying
   `w:bidi`; this fixed Writer placing default Hebrew/Arabic paragraphs at the
   left margin while Typst PDF placed them at physical right.
+- Finalized font facts now distinguish an installed family from a portable but
+  unresolved reference. The manifest records `availableAtExport`, `embedded`,
+  and a `missingFonts` count. Its exact payload is duplicated into
+  `docProps/custom.xml`; a Writer 26.2.4.2 open/save removed the canonical
+  `customXml` part but preserved this property byte-for-byte after XML decoding.
 
 ## Current implementation evidence (2026-07-10)
 

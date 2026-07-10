@@ -480,6 +480,25 @@ fn fidelity_manifest_is_persisted_and_related() {
     let rels = &p["word/_rels/document.xml.rels"];
     assert!(rels.contains("../customXml/typstFidelity.xml"));
     assert!(rels.contains("relationships/fidelity"));
+
+    let custom = &p["docProps/custom.xml"];
+    let custom_doc = roxmltree::Document::parse(custom).unwrap();
+    let property = custom_doc
+        .descendants()
+        .find(|node| {
+            node.is_element()
+                && node.tag_name().name() == "property"
+                && node.attribute("name") == Some("TypstFidelityManifestV1")
+        })
+        .expect("fidelity custom property");
+    let payload = property
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "lpwstr")
+        .and_then(|node| node.text());
+    assert_eq!(payload, Some(manifest.as_str()));
+    let root_rels = &p["_rels/.rels"];
+    assert!(root_rels.contains("docProps/custom.xml"));
+    assert!(root_rels.contains("relationships/custom-properties"));
     assert_all_wellformed(&p);
 }
 
@@ -3185,9 +3204,12 @@ fn fidelity_report_enrolls_referenced_fonts() {
     for family in ["libertinus serif", "dejavu sans mono"] {
         assert!(
             fonts.iter().any(|font| {
-                font.family == family && !font.embedded && font.occurrences > 0
+                font.family == family
+                    && font.available_at_export
+                    && !font.embedded
+                    && font.occurrences > 0
             }),
-            "{family} must be inventoried as a referenced, non-embedded font: {fonts:?}"
+            "{family} must be inventoried as an available, non-embedded font: {fonts:?}"
         );
     }
 
@@ -3198,6 +3220,37 @@ fn fidelity_report_enrolls_referenced_fonts() {
     assert!(manifest.contains("embedded=\"false\""));
     assert!(manifest.contains("referencedFonts="));
     assert!(p["word/fontTable.xml"].contains("w:name=\"dejavu sans mono\""));
+}
+
+#[test]
+fn fidelity_report_marks_missing_fonts_as_consumer_dependent() {
+    let family = "definitely missing typst font";
+    let src = "#set text(font: \"Definitely Missing Typst Font\")\nPortable reference.";
+    let compiled = compile_docx(src, &[]);
+    let fact = compiled
+        .fidelity_report()
+        .fonts()
+        .iter()
+        .find(|font| font.family == family)
+        .unwrap_or_else(|| {
+            panic!("missing font fact: {:?}", compiled.fidelity_report().fonts())
+        });
+    assert!(!fact.available_at_export, "missing family must be explicit: {fact:?}");
+    assert!(!fact.embedded, "missing family has no embedded program: {fact:?}");
+
+    let p = text_parts(&compiled);
+    let manifest = &p["customXml/typstFidelity.xml"];
+    assert!(manifest.contains("missingFonts=\"1\""), "{manifest}");
+    assert!(
+        manifest.contains(
+            "family=\"definitely missing typst font\" availableAtExport=\"false\" embedded=\"false\""
+        ),
+        "{manifest}"
+    );
+    assert!(
+        p["word/fontTable.xml"].contains("w:name=\"definitely missing typst font\""),
+        "the portable Word reference remains declared"
+    );
 }
 
 #[test]

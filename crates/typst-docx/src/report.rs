@@ -305,6 +305,10 @@ pub struct DynamicFieldFact {
 pub struct FontFact {
     pub logical_id: u128,
     pub family: EcoString,
+    /// Whether the family was resolvable in Typst's font book while exporting.
+    /// A missing family can still be a valid portable Word reference, but its
+    /// first-open metrics and glyph coverage are consumer-dependent.
+    pub available_at_export: bool,
     /// DOCX currently references fonts but does not embed font programs.
     pub embedded: bool,
     pub occurrences: usize,
@@ -474,7 +478,12 @@ impl FidelityReport {
         });
     }
 
-    pub(crate) fn record_font(&mut self, snapshot_id: u128, family: &str) {
+    pub(crate) fn record_font(
+        &mut self,
+        snapshot_id: u128,
+        family: &str,
+        available_at_export: bool,
+    ) {
         if family.is_empty() {
             return;
         }
@@ -488,6 +497,7 @@ impl FidelityReport {
         self.fonts.push(FontFact {
             logical_id,
             family: family.into(),
+            available_at_export,
             embedded: false,
             occurrences: 1,
         });

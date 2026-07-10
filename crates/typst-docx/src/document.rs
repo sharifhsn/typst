@@ -4,6 +4,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use typst_library::World;
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, NativeElement, Selector, StyleChain};
@@ -527,6 +528,7 @@ fn docx_document_impl(
     record_font_inventory(
         &mut fidelity_report,
         export_snapshot.logical_id(),
+        engine.world.book(),
         &text_defaults,
         &heading_styles,
         uses_math,
@@ -681,6 +683,7 @@ fn field_owner(mode: FieldMode) -> FieldOwner {
 fn record_font_inventory(
     report: &mut FidelityReport,
     snapshot_id: u128,
+    book: &typst_library::text::FontBook,
     defaults: &TextDefaults,
     heading_styles: &[HeadingStyle],
     uses_math: bool,
@@ -690,40 +693,45 @@ fn record_font_inventory(
     footnotes: &[Footnote],
 ) {
     if let Some(font) = &defaults.font {
-        report.record_font(snapshot_id, font);
+        record_font(report, snapshot_id, book, font);
     }
     for style in heading_styles {
-        record_run_props_font(report, snapshot_id, &style.rpr);
+        record_run_props_font(report, snapshot_id, book, &style.rpr);
     }
     if uses_math {
-        report.record_font(snapshot_id, "Cambria Math");
+        record_font(report, snapshot_id, book, "Cambria Math");
     }
-    record_block_fonts(report, snapshot_id, body);
+    record_block_fonts(report, snapshot_id, book, body);
     for part in headers.iter().chain(footers) {
-        record_block_fonts(report, snapshot_id, &part.blocks);
+        record_block_fonts(report, snapshot_id, book, &part.blocks);
     }
     for footnote in footnotes {
-        record_block_fonts(report, snapshot_id, &footnote.blocks);
+        record_block_fonts(report, snapshot_id, book, &footnote.blocks);
     }
 }
 
-fn record_block_fonts(report: &mut FidelityReport, snapshot_id: u128, blocks: &[Block]) {
+fn record_block_fonts(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    book: &typst_library::text::FontBook,
+    blocks: &[Block],
+) {
     for block in blocks {
         match block {
-            Block::Para(para) => record_para_fonts(report, snapshot_id, para),
+            Block::Para(para) => record_para_fonts(report, snapshot_id, book, para),
             Block::Table(table) => {
                 for row in &table.rows {
                     for cell in &row.cells {
-                        record_block_fonts(report, snapshot_id, &cell.blocks);
+                        record_block_fonts(report, snapshot_id, book, &cell.blocks);
                     }
                 }
             }
             Block::Toc(toc) => {
                 for entry in &toc.entries {
-                    record_para_fonts(report, snapshot_id, entry);
+                    record_para_fonts(report, snapshot_id, book, entry);
                 }
                 for run in &toc.fallback {
-                    record_run_fonts(report, snapshot_id, run);
+                    record_run_fonts(report, snapshot_id, book, run);
                 }
             }
             Block::FlowSpace { .. } | Block::SectionBreak(_) | Block::Tag(_) => {}
@@ -731,13 +739,18 @@ fn record_block_fonts(report: &mut FidelityReport, snapshot_id: u128, blocks: &[
     }
 }
 
-fn record_para_fonts(report: &mut FidelityReport, snapshot_id: u128, para: &Para) {
+fn record_para_fonts(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    book: &typst_library::text::FontBook,
+    para: &Para,
+) {
     for child in &para.content {
         match child {
-            ParaChild::Run(run) => record_run_fonts(report, snapshot_id, run),
+            ParaChild::Run(run) => record_run_fonts(report, snapshot_id, book, run),
             ParaChild::Hyperlink { runs, .. } => {
                 for run in runs {
-                    record_run_fonts(report, snapshot_id, run);
+                    record_run_fonts(report, snapshot_id, book, run);
                 }
             }
             ParaChild::OmmlPara(_)
@@ -748,26 +761,31 @@ fn record_para_fonts(report: &mut FidelityReport, snapshot_id: u128, para: &Para
     }
 }
 
-fn record_run_fonts(report: &mut FidelityReport, snapshot_id: u128, run: &Run) {
+fn record_run_fonts(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    book: &typst_library::text::FontBook,
+    run: &Run,
+) {
     match run {
         Run::Text { props, .. } | Run::FootnoteRef { props, .. } => {
-            record_run_props_font(report, snapshot_id, props);
+            record_run_props_font(report, snapshot_id, book, props);
         }
         Run::Field(field) => {
             for result in &field.result {
-                record_run_fonts(report, snapshot_id, result);
+                record_run_fonts(report, snapshot_id, book, result);
             }
         }
         Run::Drawing(drawing) => {
             if let Some(text_box) =
                 drawing.shape.as_ref().and_then(|shape| shape.txbx.as_ref())
             {
-                record_block_fonts(report, snapshot_id, &text_box.blocks);
+                record_block_fonts(report, snapshot_id, book, &text_box.blocks);
             }
             if let Some(group) = &drawing.group {
                 for child in &group.children {
                     if let Some(text_box) = &child.shape.txbx {
-                        record_block_fonts(report, snapshot_id, &text_box.blocks);
+                        record_block_fonts(report, snapshot_id, book, &text_box.blocks);
                     }
                 }
             }
@@ -785,11 +803,21 @@ fn record_run_fonts(report: &mut FidelityReport, snapshot_id: u128, run: &Run) {
 fn record_run_props_font(
     report: &mut FidelityReport,
     snapshot_id: u128,
+    book: &typst_library::text::FontBook,
     props: &RunProps,
 ) {
     if let Some(font) = &props.font {
-        report.record_font(snapshot_id, font);
+        record_font(report, snapshot_id, book, font);
     }
+}
+
+fn record_font(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    book: &typst_library::text::FontBook,
+    family: &str,
+) {
+    report.record_font(snapshot_id, family, book.contains_family(&family.to_lowercase()));
 }
 
 fn section_uses_even_furniture(sect: &SectPr) -> bool {
