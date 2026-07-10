@@ -36,6 +36,13 @@ Shared OPC finalization validates unique and legal part names, content-type
 consistency, relationship owners, and every internal relationship target before
 writing. Parts and overrides are canonicalized for byte-deterministic output,
 and ZIP failures propagate as export diagnostics instead of panicking.
+Immediately before that format-neutral finalizer consumes the package, DOCX
+parses every accumulated XML part and enforces repair-sensitive WordprocessingML
+sequences: paragraph/run properties lead their containers, table properties and
+grids precede rows, cells retain an editable terminal paragraph, section
+properties terminate the body, and `mc:Choice` branches precede their fallback.
+This is a focused consumer-safety gate, not a claim of complete ECMA-376 XSD
+validation.
 
 ## How content is mapped
 

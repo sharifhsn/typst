@@ -21,6 +21,7 @@ mod parts;
 mod props;
 mod report;
 mod rules;
+mod schema;
 mod snapshot;
 mod styles_part;
 mod xml;

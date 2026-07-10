@@ -3206,6 +3206,7 @@ dependencies = [
  "ecow",
  "flate2",
  "hayagriva",
+ "roxmltree 0.21.1",
  "rustc-hash",
  "time",
  "typst-export-common",

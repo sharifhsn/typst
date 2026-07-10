@@ -249,6 +249,10 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     root_rels.add(REL_CORE_PROPS, "docProps/core.xml", RelMode::Internal);
     root_rels.add(REL_EXTENDED_PROPS, "docProps/app.xml", RelMode::Internal);
 
+    if let Err(err) = crate::schema::validate_package(&package) {
+        bail!(Span::detached(), "invalid finalized DOCX XML sequence: {err}");
+    }
+
     match package.finish(&root_rels) {
         Ok(bytes) => Ok(bytes),
         Err(err) => bail!(Span::detached(), "failed to finalize DOCX package: {err}"),

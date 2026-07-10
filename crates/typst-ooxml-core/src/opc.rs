@@ -265,6 +265,20 @@ impl Package {
         self.parts.push((part_name.to_string(), bytes, Compress::Store));
     }
 
+    /// Iterates over XML parts currently accumulated in the package.
+    ///
+    /// This is intentionally a read-only, format-neutral view. Format crates can
+    /// use it for their own schema or consumer-policy gates before [`Self::finish`]
+    /// performs the generic OPC validation and consumes the package.
+    pub fn xml_parts(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.parts.iter().filter_map(|(name, bytes, _)| {
+            if !name.ends_with(".xml") {
+                return None;
+            }
+            std::str::from_utf8(bytes).ok().map(|body| (name.as_str(), body))
+        })
+    }
+
     /// Adds a part-owned relationships part and retains the typed set for
     /// target validation during finalization.
     pub fn add_relationships(

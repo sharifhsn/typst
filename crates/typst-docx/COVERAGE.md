@@ -1366,3 +1366,46 @@ a repair prompt; its accessibility tree exposed one native 2-row/5-column outer
 table (content columns plus two physical gutters), the nested 1-row/2-column
 table, every individual cell, and an `Accessibility: Good to go` result. The
 DOCX target passes 162 tests.
+
+## 24. Repair-sensitive WordprocessingML sequence gate
+
+Well-formed XML and complete OPC relationships are necessary but do not prove
+that Word will accept the child order of a complex type. Word is particularly
+sensitive to property elements emitted after content, table grids emitted after
+rows, a section-properties element that does not terminate the body, and
+malformed markup-compatibility branch order. These mistakes can survive a plain
+XML parser and only appear as a repair prompt in the consumer.
+
+The shared `Package` now exposes a read-only iterator over its accumulated XML
+parts. It remains format-neutral: it does not know Word element names or schema
+policy. Immediately before generic OPC finalization, `typst-docx::schema`
+parses those parts and enforces the repair-sensitive sequences currently emitted
+by this exporter:
+
+- at most one leading `w:pPr`, `w:rPr`, `w:tblPr`, `w:trPr`, or `w:tcPr` in
+  its owning container;
+- at most one `w:tblGrid`, before every `w:tr`;
+- a final paragraph in every table cell, preserving Word's editable cell
+  terminator;
+- at most one final `w:sectPr` in `w:body`;
+- one or more `mc:Choice` branches before at most one `mc:Fallback`.
+
+A violation becomes a detached export diagnostic naming the package part,
+container, and failed sequence before ZIP bytes are written. Six focused unit
+gates cover a valid representative tree and late paragraph properties, late
+table grids, reversed or choice-less compatibility branches, and missing cell
+terminators. The runtime gate executes across all 162 DOCX structural tests.
+Strict clippy passes for `typst-ooxml-core` and `typst-docx`.
+
+The measured-table CLI fixture was rebuilt through this gate. ZIP integrity was
+clean, and LibreOffice Writer 26.2.4.2 opened it headlessly and produced one
+453.543 x 340.157 pt (160 x 120 mm) PDF page. This is consumer-open evidence for
+the representative package, while the earlier interactive Word table evidence
+continues to cover editability and accessibility; neither is presented as full
+schema validation.
+
+This intentionally does not claim full ECMA-376 validation. The remaining gate
+is validation of every emitted part against the chosen Office-version schemas,
+plus a maintained allowlist for Microsoft extension namespaces and compatibility
+markup; consumer open/save tests remain independent evidence rather than a
+substitute for that work.

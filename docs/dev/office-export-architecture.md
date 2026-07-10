@@ -324,8 +324,9 @@ mechanical cleanup that introduced this document.
 - math lowering has three implementations with different access to styles and
   resolved IR;
 - shared package finalization now proves part/content-type uniqueness and typed
-  internal relationship targets, but full OOXML schema and consumer-repair
-  invariants still need broader gates;
+  internal relationship targets; DOCX additionally validates the
+  repair-sensitive container sequences it emits, while full Office-version XSD
+  validation still needs a broader gate;
 - current feature matrices and comparison measurements drift behind the code.
 
 ### Resolved on the rearchitecture branch
@@ -390,6 +391,12 @@ mechanical cleanup that introduced this document.
   references, duplicate numbering IDs, and missing abstract/paragraph numbering
   targets before XML serialization. These WordprocessingML rules stay in
   `typst-docx`, while package mechanics remain in `typst-ooxml-core`.
+- A second DOCX-owned gate runs over every accumulated XML part immediately
+  before OPC finalization. It rejects late or duplicate paragraph/run/table/row/
+  cell properties, table grids after rows, cells without a terminal paragraph,
+  non-terminal body section properties, and invalid `mc:AlternateContent`
+  branch order. Shared OPC exposes only a read-only XML-part view and remains
+  free of Word policy.
 - Heading inheritance now respects the full `HeadingN -> Normal -> docDefaults`
   cascade. A direct heading deviation that happens to equal Normal is retained
   whenever HeadingN defines that property, preventing Word from silently
@@ -516,7 +523,9 @@ No single gate is sufficient.
 - every internal relationship target exists;
 - every referenced relationship ID exists on the owning part;
 - unique bookmark, drawing, shape, slide, and relationship IDs;
-- OOXML schema validation against the intended Office version;
+- repair-sensitive DOCX child-sequence validation (implemented for the emitted
+  paragraph, run, table, cell, body-section, and compatibility-branch subset);
+- complete OOXML schema validation against the intended Office version;
 - byte determinism under `SOURCE_DATE_EPOCH`.
 
 ### Semantic/editability gates
@@ -571,12 +580,13 @@ backgrounds, footnotes, citations, and mixed page sizes.
    same whole-region boundary to field groups and consumer profiles, and solve
    transformed or fully merged table geometry where no single-cell measurement
    is available.
-5. **OPC invariants — second slice implemented.** Shared finalization validates
+5. **OPC invariants — third slice implemented.** Shared finalization validates
    unique/legal parts, content-type consistency, typed relationship owners and
    internal targets, XML well-formedness, per-source-part relationship ID
    references, deterministic ordering, and propagates ZIP failures. DOCX now
-   adds final-IR drawing, bookmark, footnote, and numbering ID/reference gates.
-   Continue with schema/child-order validation and PPTX-specific ID coverage.
+   adds final-IR drawing, bookmark, footnote, and numbering ID/reference gates,
+   plus a final-package repair-sensitive child-sequence gate. Continue with
+   complete Office-version XSD validation and PPTX-specific ID coverage.
 6. **Cross-consumer gates.** Make Microsoft Office plus LibreOffice render and
    interaction results part of release evidence.
 
