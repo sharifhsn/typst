@@ -151,6 +151,14 @@ pub enum PackageError {
         source_part: String,
         target: String,
     },
+    InvalidXml {
+        part_name: String,
+        message: String,
+    },
+    MissingRelationshipReference {
+        source_part: String,
+        relationship_id: String,
+    },
     Zip(zip::result::ZipError),
 }
 
@@ -180,6 +188,15 @@ impl Display for PackageError {
                 f,
                 "relationship from `{source_part}` has invalid internal target `{target}`"
             ),
+            Self::InvalidXml { part_name, message } => {
+                write!(f, "invalid XML in package part `{part_name}`: {message}")
+            }
+            Self::MissingRelationshipReference { source_part, relationship_id } => {
+                write!(
+                    f,
+                    "package part `{source_part}` references missing relationship `{relationship_id}`"
+                )
+            }
             Self::Zip(err) => write!(f, "ZIP write failed: {err}"),
         }
     }
@@ -384,6 +401,57 @@ impl Package {
             }
             validate_relationships(Some(source_part), rels, &parts)?;
         }
+        self.validate_relationship_references()?;
+        Ok(())
+    }
+
+    /// Proves that relationship IDs referenced by XML belong to that exact
+    /// source part. Target validation alone cannot catch a stale or cross-part
+    /// `r:id`, `r:embed`, or `r:link` in the serialized markup.
+    fn validate_relationship_references(&self) -> Result<(), PackageError> {
+        let relationship_sets = self
+            .relationship_sets
+            .iter()
+            .map(|(source, rels)| (source.as_str(), rels))
+            .collect::<BTreeMap<_, _>>();
+
+        for (part_name, bytes, _) in &self.parts {
+            if !part_name.ends_with(".xml") {
+                continue;
+            }
+            let body =
+                std::str::from_utf8(bytes).map_err(|err| PackageError::InvalidXml {
+                    part_name: part_name.clone(),
+                    message: err.to_string(),
+                })?;
+            let document = roxmltree::Document::parse(body).map_err(|err| {
+                PackageError::InvalidXml {
+                    part_name: part_name.clone(),
+                    message: err.to_string(),
+                }
+            })?;
+            for attribute in document
+                .descendants()
+                .filter(|node| node.is_element())
+                .flat_map(|node| node.attributes())
+                .filter(|attribute| {
+                    attribute.namespace() == Some(ns::R)
+                        && matches!(attribute.name(), "id" | "embed" | "link")
+                })
+            {
+                let relationship_id = attribute.value();
+                let exists =
+                    relationship_sets.get(part_name.as_str()).is_some_and(|rels| {
+                        rels.entries.iter().any(|entry| entry.id == relationship_id)
+                    });
+                if !exists {
+                    return Err(PackageError::MissingRelationshipReference {
+                        source_part: part_name.clone(),
+                        relationship_id: relationship_id.into(),
+                    });
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -530,12 +598,12 @@ mod tests {
     #[test]
     fn package_bytes_are_independent_of_part_insertion_order() {
         let mut a = package();
-        a.add_xml("word/z.xml", "application/z+xml", "z".into());
-        a.add_xml("word/a.xml", "application/a+xml", "a".into());
+        a.add_xml("word/z.xml", "application/z+xml", "<z/>".into());
+        a.add_xml("word/a.xml", "application/a+xml", "<a/>".into());
 
         let mut b = package();
-        b.add_xml("word/a.xml", "application/a+xml", "a".into());
-        b.add_xml("word/z.xml", "application/z+xml", "z".into());
+        b.add_xml("word/a.xml", "application/a+xml", "<a/>".into());
+        b.add_xml("word/z.xml", "application/z+xml", "<z/>".into());
 
         assert_eq!(a.finish(&Rels::new()).unwrap(), b.finish(&Rels::new()).unwrap());
     }
@@ -556,8 +624,8 @@ mod tests {
     #[test]
     fn owned_relationship_targets_resolve_relative_to_the_source_part() {
         let mut package = package();
-        package.add_xml("word/document.xml", "application/xml", String::new());
-        package.add_xml("word/media/image1.png", "image/png", String::new());
+        package.add_xml("word/document.xml", "application/xml", "<document/>".into());
+        package.add_xml("word/media/image1.png", "image/png", "<image/>".into());
         let mut rels = Rels::new();
         rels.add("image", "media/image1.png", RelMode::Internal);
         package.add_relationships("word/document.xml", &rels).unwrap();
@@ -574,5 +642,48 @@ mod tests {
         let external = rels.add("kind", "same", RelMode::External);
         assert_ne!(internal, external);
         assert_eq!(rels.to_xml().matches("<Relationship ").count(), 2);
+    }
+
+    #[test]
+    fn missing_referenced_relationship_ids_are_rejected() {
+        let mut package = package();
+        package.add_xml(
+            "word/document.xml",
+            "application/xml",
+            format!("<document xmlns:r=\"{}\" r:id=\"rId9\"/>", ns::R),
+        );
+        assert!(matches!(
+            package.finish(&Rels::new()),
+            Err(PackageError::MissingRelationshipReference {
+                source_part,
+                relationship_id,
+            }) if source_part == "word/document.xml" && relationship_id == "rId9"
+        ));
+    }
+
+    #[test]
+    fn referenced_relationship_ids_are_scoped_to_the_owning_part() {
+        let mut package = package();
+        package.add_xml(
+            "word/document.xml",
+            "application/xml",
+            format!("<document xmlns:r=\"{}\" r:id=\"rId1\"/>", ns::R),
+        );
+        package.add_xml("word/target.xml", "application/xml", "<target/>".into());
+        let mut rels = Rels::new();
+        assert_eq!(rels.add("kind", "target.xml", RelMode::Internal), "rId1");
+        package.add_relationships("word/document.xml", &rels).unwrap();
+        assert!(package.finish(&Rels::new()).is_ok());
+    }
+
+    #[test]
+    fn malformed_xml_parts_are_rejected() {
+        let mut package = package();
+        package.add_xml("word/document.xml", "application/xml", "<document>".into());
+        assert!(matches!(
+            package.finish(&Rels::new()),
+            Err(PackageError::InvalidXml { part_name, .. })
+                if part_name == "word/document.xml"
+        ));
     }
 }

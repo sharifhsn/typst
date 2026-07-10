@@ -3455,6 +3455,7 @@ name = "typst-ooxml-core"
 version = "0.15.0"
 dependencies = [
  "ecow",
+ "roxmltree 0.21.1",
  "rustc-hash",
  "typst-export-common",
  "typst-layout",

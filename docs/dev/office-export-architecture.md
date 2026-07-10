@@ -215,9 +215,11 @@ stderr strings.
 
 DOCX now retains this information on `DocxDocument` and persists a versioned XML
 manifest inside every package at `customXml/typstFidelity.xml`, related from the
-main document part. A public serializer supports external tooling. Enrolling
-every native region and dynamic field, adding consumer/font facts, and an
-optional CLI-selected standalone JSON/text sidecar remain open work.
+main document part. A public serializer supports external tooling. A finalized
+IR inventory enrolls every live/static field with its recalculation owner and
+visibility, plus every referenced font with occurrence counts and current
+non-embedded status. Complete native-region and consumer-profile enrollment and
+an optional CLI-selected standalone JSON/text sidecar remain open work.
 
 ## Consumer rendering realities
 
@@ -373,11 +375,25 @@ mechanical cleanup that introduced this document.
   and missing/invalid internal targets. Relationship mode participates in rId
   deduplication, parts/overrides are canonicalized, ZIP failures propagate as
   typed errors, and DOCX/PPTX no longer panic during package finalization.
+- Shared OPC finalization parses every XML part and proves that each `r:id`,
+  `r:embed`, and `r:link` resolves in the relationship set owned by that exact
+  source part. Malformed XML and stale or cross-part relationship IDs fail with
+  typed package diagnostics instead of reaching Word's repair path.
+- The finalized DOCX IR is inventoried for fields and fonts after all body,
+  table, TOC, drawing/text-box, header/footer, and footnote lowering. Field facts
+  record instruction kind, Typst-versus-consumer update ownership, visibility,
+  and occurrences. Font facts feed both the embedded manifest and
+  `fontTable.xml`; font programs are explicitly reported as not embedded.
+- A DOCX-specific final-IR gate now rejects zero/duplicate drawing IDs,
+  duplicate or unpaired bookmark IDs and names, invalid or dangling footnote
+  references, duplicate numbering IDs, and missing abstract/paragraph numbering
+  targets before XML serialization. These WordprocessingML rules stay in
+  `typst-docx`, while package mechanics remain in `typst-ooxml-core`.
 
 ## Current implementation evidence (2026-07-10)
 
-- The focused Graphify corpus was refreshed from the live worktree: 3,048 code
-  nodes, 8,433 extracted edges, and 121 communities. `FidelityReport` is linked
+- The focused Graphify corpus was refreshed from the live worktree: 3,092 code
+  nodes, 8,565 extracted edges, and 129 communities. `FidelityReport` is linked
   to `DocxCtx`, `LoweredDocx`, `DocxDocument`, and the public report accessor;
   equation preflight reaches the explicit raster-fallback mapper. The refreshed
   graph also connects `DirectLinkKind` through `LinkElem` to the DOCX paragraph
@@ -396,19 +412,23 @@ mechanical cleanup that introduced this document.
   `PackageError`, and detached export diagnostics. The snapshot query connects
   `PagedIntrospector` and `matched_positions` through `ExportSnapshot` and
   `DocxDocument` to the public APIs, embedded manifest builder, typed package
-  relationship, and final OPC validation. The table query connects
+  relationship, and final OPC validation. The field/font path connects the
+  finalized recursive inventories to `FidelityReport`, the embedded manifest,
+  and font-table emission. The table query connects
   `TableElem`/`GridElem` through `preflight_table`, `TablePlan`, and
   `execute_table_plan` to native cell lowering, whole-region fallback,
   representative gradient color, structured decisions, and the manifest.
 - `cargo clippy -p typst-docx --all-targets -- -D warnings` passes.
-- The complete structural DOCX test target passes 158 tests. New gates cover
+- The complete structural DOCX test target passes 160 tests. New gates cover
   raster/compatibility/approximation classification, a retained suppressed
   layout-callback error, nested unsupported math choosing one whole-region
   fallback, explicit placed-content planning, native anchored tables, and
   complete DOCX byte determinism, stable semantic IDs/paged positions, and the
-  embedded manifest relationship/content. Seven shared OPC unit gates cover duplicate
-  and invalid parts, content-type conflicts, relative target resolution,
-  missing targets, relationship-mode identity, and insertion-order independence.
+  embedded manifest relationship/content. Ten shared OPC unit gates cover
+  duplicate and invalid parts, content-type conflicts, relative target
+  resolution, missing targets, relationship-mode identity, insertion-order
+  independence, malformed XML, missing referenced relationship IDs, and
+  source-part scoping. The shared DML unit gate also passes.
 - The atomic-math fixture was compiled through the real CLI to PDF and DOCX,
   then the DOCX was rendered through LibreOffice Writer 26.2.4.2. Both outputs
   remained one 160 mm × 90 mm page; the boxed fraction and surrounding equation
@@ -510,9 +530,10 @@ backgrounds, footnotes, citations, and mixed page sizes.
    `typst-export-common`; isolate DOCX fallback, PPTX table capture, and Pandoc
    normalization in focused modules. No intended output change.
 2. **Loss accounting — in progress.** Typed report and central lossy paths are
-   implemented; field ownership and non-equivalent numbering decisions are now
-   enrolled. Migrate remaining mapper-specific `Option`/empty fallbacks,
-   native/dynamic-field facts, and optional standalone CLI manifest output. The
+   implemented; field ownership, non-equivalent numbering decisions, finalized
+   dynamic-field facts, and referenced-font facts are enrolled. Migrate
+   remaining mapper-specific `Option`/empty fallbacks, native-region and
+   consumer-profile facts, and optional standalone CLI manifest output. The
    versioned manifest is already embedded in every DOCX.
 3. **Stable semantic sidecar — first slice implemented.** `ExportSnapshot`
    carries stable source-backed IDs, semantic occurrences, converged page sizes,
@@ -526,10 +547,12 @@ backgrounds, footnotes, citations, and mixed page sizes.
    reported editable approximations, and missing-grid atomic fallback. Extend
    the same whole-region boundary to field groups and consumer profiles, and
    replace approximate table tracks with measured snapshot geometry.
-5. **OPC invariants — first slice implemented.** Shared finalization validates
+5. **OPC invariants — second slice implemented.** Shared finalization validates
    unique/legal parts, content-type consistency, typed relationship owners and
-   internal targets, deterministic ordering, and propagates ZIP failures.
-   Continue with schema/order validation and per-part referenced-ID checks.
+   internal targets, XML well-formedness, per-source-part relationship ID
+   references, deterministic ordering, and propagates ZIP failures. DOCX now
+   adds final-IR drawing, bookmark, footnote, and numbering ID/reference gates.
+   Continue with schema/child-order validation and PPTX-specific ID coverage.
 6. **Cross-consumer gates.** Make Microsoft Office plus LibreOffice render and
    interaction results part of release evidence.
 

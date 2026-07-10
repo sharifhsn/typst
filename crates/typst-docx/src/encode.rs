@@ -61,6 +61,9 @@ fn push_font(fonts: &mut Vec<String>, font: &str) {
 /// Serializes a DOCX document into the OPC zip bytes.
 #[typst_macros::time(name = "docx encode")]
 pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<u8>> {
+    if let Err(err) = crate::invariants::validate(document) {
+        bail!(Span::detached(), "invalid finalized DOCX IR: {err}");
+    }
     let pretty = options.pretty;
     let mut package = Package::new(DOCX_PACKAGE_OPTIONS);
     let mut root_rels = Rels::new();

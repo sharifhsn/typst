@@ -1266,3 +1266,43 @@ the full gradient; Word and Writer show the representative purple tone, while
 the manifest records `Approximate/TableGeometryApproximation`, 96 affected text
 characters, and one semantic node. The structural gate separately proves a
 fixed-track solid table enrolls as `Native/NativeTable`.
+
+## 21. Finalized field/font inventory and referenced-relationship validation
+
+Field behavior and font dependence previously existed only in the serialized
+markup. That made it impossible for corpus tooling to distinguish a stable
+Typst result from a consumer-recalculated field, or to identify an inline-only
+font that was absent from `fontTable.xml`.
+
+After all body, table, TOC, drawing/text-box, header/footer, and footnote
+lowering, one recursive IR inventory now records:
+
+- every typed field, grouped by stable snapshot ID, normalized instruction,
+  `Typst`/`Consumer` update owner, visible/hidden result, and occurrences;
+- every referenced default, style, math, and concrete-run font, with stable ID,
+  occurrences, and explicit `embedded=false` status.
+
+Both collections are persisted in `customXml/typstFidelity.xml`. The font
+collection also drives `word/fontTable.xml`, so a family used only by a local
+run no longer disappears from the package's declared fonts. Focused structural
+gates cover `TOC`, `PAGEREF`, `SEQ`, and `PAGE` ownership and a document whose
+inline monospace font differs from its root serif font.
+
+Shared OPC finalization now closes the next consumer-repair failure class. It
+parses every `.xml` part and validates every relationship-namespace `id`,
+`embed`, and `link` attribute against the `Rels` set owned by that exact source
+part. Malformed XML, a missing relationship ID, or an ID accidentally borrowed
+from another part returns a typed `PackageError`. Three new shared gates cover
+those cases. All 160 DOCX structural tests, all 41 PPTX structural tests, and
+all 11 shared core unit tests pass.
+
+WordprocessingML identifiers have additional format-specific scope rules, so a
+finalized-IR validator runs before DOCX serialization. It recursively covers
+body content, tables, TOCs, field results, text boxes/groups, headers, footers,
+and footnotes, rejecting zero/duplicate drawing IDs, duplicate or unpaired
+bookmark IDs and names, dangling footnote references, duplicate numbering IDs,
+and missing abstract or paragraph numbering targets. These checks deliberately
+remain in `typst-docx`; only format-neutral package mechanics live in the shared
+OPC crate. Two crate unit gates cover duplicate drawings and unpaired bookmarks,
+and the full structural suite proves every current exporter path satisfies the
+validator.

@@ -13,6 +13,7 @@ mod dom;
 mod encode;
 mod fallback;
 mod introspect;
+mod invariants;
 mod manifest;
 mod mappers;
 mod package;
