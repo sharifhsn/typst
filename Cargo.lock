@@ -3139,6 +3139,7 @@ dependencies = [
  "typst-dev-assets",
  "typst-docx",
  "typst-eval",
+ "typst-export-common",
  "typst-html",
  "typst-kit",
  "typst-layout",
@@ -3246,6 +3247,7 @@ dependencies = [
  "typst-layout",
  "typst-library",
  "typst-render",
+ "typst-utils",
 ]
 
 [[package]]
@@ -3640,6 +3642,7 @@ dependencies = [
  "typst-dev-assets",
  "typst-docx",
  "typst-eval",
+ "typst-export-common",
  "typst-html",
  "typst-kit",
  "typst-layout",

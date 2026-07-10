@@ -1328,3 +1328,41 @@ inspection showed the corrected span retained explicit Libertinus Serif,
 Writer 26.2.4.2 opened and rendered the DOCX as the same single 150 mm x 80 mm
 page; the heading, red override, and red body remained visually aligned with the
 PDF, and all text stayed searchable.
+
+## 23. Converged paged geometry for native DOCX tables
+
+Flexible table tracks were previously re-solved inside DOCX from the current
+flowing-width budget. That fixed hard-coded page widths but still duplicated a
+layout algorithm without Typst's content measurements. It also made nested
+tables too wide by ignoring the parent cell's physical insets and estimated
+page-column gutters independently from paged layout.
+
+Layout already emits hidden `GridCellRegion` tags containing each final cell's
+logical coordinates, spans, width, and height. A new format-neutral
+`typst-export-common::paged::PagedGeometry` walker captures those tags from the
+converged `PagedDocument`, including nested frame transforms, and groups them by
+the same source-backed logical ID used by the DOCX snapshot. The CLI passes this
+owned sidecar into the independent DOCX realization. `ExportSnapshot` persists
+the physical cell facts and the embedded fidelity manifest serializes them.
+
+Table preflight now derives `w:tblGrid` content tracks and physical gutter gaps
+from those measurements. Axis-aligned auto/fractional/relative tables with a
+complete single-cell sample per column can enroll as `Native/NativeTable`;
+measured row heights become non-clipping `atLeast` minima. Unsupported paints,
+border nuance, repeated footers, transforms, fully merged columns without a
+solvable sample, and callers that do not supply paged geometry remain explicit
+approximations.
+
+The structural regression uses a 1:2 fractional table and proves the snapshot,
+Word grid, native decision, and manifest all share the converged ratio. Existing
+nested-table and page-column gates now compare emitted widths directly with the
+paged oracle: this exposed and fixed the old parent-inset and hand-estimated
+gutter assumptions. A real auto/1fr/2fr table with a 7 pt gutter and nested 1:2
+table was compiled to PDF and DOCX. The manifest enrolled two measured native
+tables; LibreOffice Writer 26.2.4.2 rendered the same single 160 mm x 120 mm
+page, outer/nested cell boundaries closely matched the PDF, and all cell text
+remained searchable and editable. Microsoft Word opened the same package without
+a repair prompt; its accessibility tree exposed one native 2-row/5-column outer
+table (content columns plus two physical gutters), the nested 1-row/2-column
+table, every individual cell, and an `Accessibility: Good to go` result. The
+DOCX target passes 162 tests.

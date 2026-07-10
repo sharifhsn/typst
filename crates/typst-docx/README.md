@@ -89,7 +89,7 @@ stays consistent.
 
 | Feature | | Notes |
 |---|:--:|---|
-| Tables | ✅ | `w:tbl` — borders, alignment, cell shading, merged cells, row heights; fixed tracks are native, while auto/fractional/relative tracks stay editable against the active scoped width and are explicitly reported as approximate |
+| Tables | ✅ | `w:tbl` — borders, alignment, cell shading, merged cells, row heights; the CLI carries converged paged cell geometry into `w:tblGrid`, so axis-aligned auto/fractional/relative tracks are native when fully measured; unavailable geometry stays editable and explicitly approximate |
 | Layout grids (`#grid`) | ✅ | also `w:tbl` (content stays editable); column and row gutters become physical spacer tracks |
 | `stroke: none` cells | ✅ | explicit `w:val="nil"` |
 | Gradient/translucent cell fills and non-solid border nuance | ⚠️ | native editable cells with a representative composited solid tone / solid border; the visual difference is recorded before lowering |

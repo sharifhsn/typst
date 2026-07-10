@@ -36,6 +36,7 @@ typst-bundle = { workspace = true }
 typst-dev-assets = { workspace = true }
 typst-docx = { workspace = true }
 typst-eval = { workspace = true }
+typst-export-common = { workspace = true }
 typst-html = { workspace = true }
 typst-kit = { workspace = true, features = ["datetime"] }
 typst-layout = { workspace = true }

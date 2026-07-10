@@ -92,6 +92,8 @@ pub struct DocxCtx<'a, 'e> {
     pub(crate) uses_math: bool,
     /// Structured representation choices and suppressed diagnostics.
     pub(crate) fidelity_report: FidelityReport,
+    /// Final physical regions recovered from the converged paged frames.
+    pub(crate) paged_geometry: Arc<typst_export_common::paged::PagedGeometry>,
 
     pub(crate) bookmarks: BookmarkTable,
 
@@ -211,6 +213,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             max_heading_level: 0,
             uses_math: false,
             fidelity_report: FidelityReport::default(),
+            paged_geometry: Arc::new(typst_export_common::paged::PagedGeometry::default()),
             bookmarks: BookmarkTable::default(),
             deferred_tags: Vec::new(),
             real_alias_locations: FxHashSet::default(),
@@ -232,6 +235,13 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             suppress_text_box: false,
             overlay_cache: FxHashMap::default(),
         }
+    }
+
+    pub(crate) fn set_paged_geometry(
+        &mut self,
+        geometry: Arc<typst_export_common::paged::PagedGeometry>,
+    ) {
+        self.paged_geometry = geometry;
     }
 
     // -- Borrowing helpers --------------------------------------------------

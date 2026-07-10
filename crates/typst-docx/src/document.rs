@@ -63,7 +63,7 @@ pub fn docx_document(
     content: &Content,
     styles: StyleChain,
 ) -> SourceResult<DocxDocument> {
-    docx_document_impl(engine, content, styles, None, None)
+    docx_document_impl(engine, content, styles, None, None, None)
 }
 
 /// Produces a DOCX document backed by the fixed-point paged introspector.
@@ -92,6 +92,29 @@ pub fn docx_document_with_paged_introspector(
         styles,
         Some(paged_introspector),
         Some(paged_page_sizes),
+        None,
+    )
+}
+
+/// Produces a DOCX document backed by both paged introspection and an owned
+/// frame-geometry sidecar. The CLI uses this entry point so table/grid preflight
+/// can consume final physical cell sizes that are intentionally absent from the
+/// queryable introspector.
+pub fn docx_document_with_paged_geometry(
+    engine: &mut Engine,
+    content: &Content,
+    styles: StyleChain,
+    paged_introspector: Arc<typst_layout::PagedIntrospector>,
+    paged_page_sizes: Arc<Vec<typst_library::layout::Size>>,
+    paged_geometry: Arc<typst_export_common::paged::PagedGeometry>,
+) -> SourceResult<DocxDocument> {
+    docx_document_impl(
+        engine,
+        content,
+        styles,
+        Some(paged_introspector),
+        Some(paged_page_sizes),
+        Some(paged_geometry),
     )
 }
 
@@ -102,6 +125,7 @@ fn docx_document_impl(
     styles: StyleChain,
     paged_introspector: Option<Arc<typst_layout::PagedIntrospector>>,
     paged_page_sizes: Option<Arc<Vec<typst_library::layout::Size>>>,
+    paged_geometry: Option<Arc<typst_export_common::paged::PagedGeometry>>,
 ) -> SourceResult<DocxDocument> {
     // Mark the external styles as document-level "outside".
     let styles = styles.to_map().outside();
@@ -132,8 +156,12 @@ fn docx_document_impl(
     // body walk; header/footer *content* is lowered later on the same `ctx`.
     let real_ref = paged_introspector.as_deref();
     let page_sizes_ref = paged_page_sizes.as_deref().map(Vec::as_slice);
-    let export_snapshot =
-        crate::snapshot::ExportSnapshot::build(&pairs, real_ref, page_sizes_ref);
+    let export_snapshot = crate::snapshot::ExportSnapshot::build(
+        &pairs,
+        real_ref,
+        page_sizes_ref,
+        paged_geometry.as_deref(),
+    );
     let sections = resolve_sections(&pairs, styles, real_ref, page_sizes_ref);
     // The width fed to rasterized content comes from the first section.
     let first_geom = sections
@@ -207,6 +235,9 @@ fn docx_document_impl(
                 route: typst_library::engine::Route::extend(engine.route.track()),
             };
             let mut ctx = DocxCtx::new(&mut sub, &mut locator);
+            if let Some(geometry) = &paged_geometry {
+                ctx.set_paged_geometry(Arc::clone(geometry));
+            }
             set_ctx_geometry(&mut ctx, &first_geom);
             // Record raw/code source ranges up front: inline raw is unwrapped to
             // styled `TextElem`s before the walker sees a `RawElem`, so runs are

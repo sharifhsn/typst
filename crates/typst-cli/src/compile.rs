@@ -396,17 +396,23 @@ fn compile_and_export(
                             .map(|page| page.frame.size())
                             .collect::<Vec<_>>(),
                     );
+                    let paged_geometry = Arc::new(
+                        typst_export_common::paged::PagedGeometry::from_document(
+                            &paged_document,
+                        ),
+                    );
                     let Warned { output, warnings: docx_warnings } =
                         typst::compile_with::<DocxDocument, _>(
                             world,
                             Some(seed.as_ref()),
                             move |engine, content, styles| {
-                                typst_docx::docx_document_with_paged_introspector(
+                                typst_docx::docx_document_with_paged_geometry(
                                     engine,
                                     content,
                                     styles,
                                     Arc::clone(&primary),
                                     Arc::clone(&page_sizes),
+                                    Arc::clone(&paged_geometry),
                                 )
                             },
                         );

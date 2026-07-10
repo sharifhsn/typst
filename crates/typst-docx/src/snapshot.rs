@@ -1,5 +1,6 @@
 //! Stable, owned semantic/paged sidecar captured before DOCX lowering.
 
+use typst_export_common::paged::{PagedGeometry, PagedTableGeometry};
 use typst_layout::PagedIntrospector;
 use typst_library::foundations::Content;
 use typst_library::introspection::Introspector;
@@ -39,6 +40,7 @@ pub struct ExportSnapshot {
     logical_id: u128,
     nodes: Vec<SnapshotNode>,
     pages: Vec<SnapshotPage>,
+    tables: Vec<PagedTableGeometry>,
 }
 
 impl ExportSnapshot {
@@ -54,10 +56,16 @@ impl ExportSnapshot {
         &self.pages
     }
 
+    /// Final physical table/grid cell regions recovered from paged frames.
+    pub fn tables(&self) -> &[PagedTableGeometry] {
+        &self.tables
+    }
+
     pub(crate) fn build(
         pairs: &[Pair<'_>],
         paged: Option<&PagedIntrospector>,
         page_sizes: Option<&[Size]>,
+        paged_geometry: Option<&PagedGeometry>,
     ) -> Self {
         let pages = page_sizes
             .unwrap_or_default()
@@ -94,8 +102,39 @@ impl ExportSnapshot {
             .iter()
             .map(|page| (page.width_pt.to_bits(), page.height_pt.to_bits()))
             .collect::<Vec<_>>();
-        let logical_id = typst_utils::hash128(&(identity_nodes, identity_pages));
-        Self { logical_id, nodes, pages }
+        let tables = paged_geometry
+            .map(|geometry| geometry.tables().to_vec())
+            .unwrap_or_default();
+        let identity_tables = tables
+            .iter()
+            .map(|table| {
+                (
+                    table.logical_id,
+                    table.page,
+                    table
+                        .cells
+                        .iter()
+                        .map(|cell| {
+                            (
+                                cell.page,
+                                cell.x,
+                                cell.y,
+                                cell.colspan,
+                                cell.rowspan,
+                                cell.left_pt.to_bits(),
+                                cell.top_pt.to_bits(),
+                                cell.width_pt.to_bits(),
+                                cell.height_pt.to_bits(),
+                                cell.axis_aligned,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let logical_id =
+            typst_utils::hash128(&(identity_nodes, identity_pages, identity_tables));
+        Self { logical_id, nodes, pages, tables }
     }
 }
 

@@ -32,10 +32,15 @@ use crate::dom::{
 use crate::report::{DecisionReason, LossSet, Representation};
 
 enum TablePlan<'a> {
-    Native(&'a CellGrid),
-    Approximate(&'a CellGrid),
+    Native { grid: &'a CellGrid, measured: Option<MeasuredTableGeometry> },
+    Approximate { grid: &'a CellGrid, measured: Option<MeasuredTableGeometry> },
     Empty,
     Raster,
+}
+
+struct MeasuredTableGeometry {
+    columns_dxa: Vec<i32>,
+    row_heights: Vec<Option<RowHeight>>,
 }
 
 pub fn table(
@@ -44,7 +49,12 @@ pub fn table(
     ctx: &mut DocxCtx,
 ) -> SourceResult<Vec<Block>> {
     let source = elem.clone().pack();
-    execute_table_plan(&source, preflight_table(elem.grid.as_deref()), styles, ctx)
+    execute_table_plan(
+        &source,
+        preflight_table(&source, elem.grid.as_deref(), ctx),
+        styles,
+        ctx,
+    )
 }
 
 /// A layout grid (`#grid`) resolves to the same [`CellGrid`] as a table, so it
@@ -58,18 +68,28 @@ pub fn grid(
     ctx: &mut DocxCtx,
 ) -> SourceResult<Vec<Block>> {
     let source = elem.clone().pack();
-    execute_table_plan(&source, preflight_table(elem.grid.as_deref()), styles, ctx)
+    execute_table_plan(
+        &source,
+        preflight_table(&source, elem.grid.as_deref(), ctx),
+        styles,
+        ctx,
+    )
 }
 
-fn preflight_table(grid: Option<&CellGrid>) -> TablePlan<'_> {
+fn preflight_table<'a>(
+    source: &Content,
+    grid: Option<&'a CellGrid>,
+    ctx: &DocxCtx,
+) -> TablePlan<'a> {
     let Some(grid) = grid else { return TablePlan::Raster };
     if grid.non_gutter_column_count() == 0 || grid.entries.is_empty() {
         return TablePlan::Empty;
     }
-    if table_geometry_is_approximate(grid) {
-        TablePlan::Approximate(grid)
+    let measured = measured_table_geometry(source, grid, ctx);
+    if table_geometry_is_approximate(grid, measured.as_ref()) {
+        TablePlan::Approximate { grid, measured }
     } else {
-        TablePlan::Native(grid)
+        TablePlan::Native { grid, measured }
     }
 }
 
@@ -80,7 +100,7 @@ fn execute_table_plan(
     ctx: &mut DocxCtx,
 ) -> SourceResult<Vec<Block>> {
     match plan {
-        TablePlan::Native(grid) => {
+        TablePlan::Native { grid, measured } => {
             ctx.record_content_decision(
                 source,
                 Representation::Native,
@@ -88,9 +108,9 @@ fn execute_table_plan(
                 LossSet::default(),
                 content_text_chars(source),
             );
-            cellgrid(grid, styles, ctx)
+            cellgrid(grid, styles, ctx, measured.as_ref())
         }
-        TablePlan::Approximate(grid) => {
+        TablePlan::Approximate { grid, measured } => {
             ctx.record_content_decision(
                 source,
                 Representation::Approximate,
@@ -98,7 +118,7 @@ fn execute_table_plan(
                 LossSet::VISUAL_ONLY,
                 content_text_chars(source),
             );
-            cellgrid(grid, styles, ctx)
+            cellgrid(grid, styles, ctx, measured.as_ref())
         }
         TablePlan::Empty => Ok(Vec::new()),
         TablePlan::Raster => {
@@ -126,16 +146,23 @@ fn execute_table_plan(
     }
 }
 
-fn table_geometry_is_approximate(grid: &CellGrid) -> bool {
-    let column_sizing = grid.cols.iter().any(|sizing| match sizing {
-        Sizing::Auto | Sizing::Fr(_) => true,
-        Sizing::Rel(rel) => rel.rel.get() != 0.0 || !rel.abs.em.is_zero(),
-    });
-    let row_sizing = grid.rows.iter().any(|sizing| match sizing {
-        Sizing::Fr(_) => true,
-        Sizing::Rel(rel) => rel.rel.get() != 0.0 || !rel.abs.em.is_zero(),
-        Sizing::Auto => false,
-    });
+fn table_geometry_is_approximate(
+    grid: &CellGrid,
+    measured: Option<&MeasuredTableGeometry>,
+) -> bool {
+    let column_sizing = measured.is_none()
+        && grid.cols.iter().any(|sizing| match sizing {
+            Sizing::Auto | Sizing::Fr(_) => true,
+            Sizing::Rel(rel) => rel.rel.get() != 0.0 || !rel.abs.em.is_zero(),
+        });
+    let rows_are_measured =
+        measured.is_some_and(|geometry| geometry.row_heights.iter().all(Option::is_some));
+    let row_sizing = !rows_are_measured
+        && grid.rows.iter().any(|sizing| match sizing {
+            Sizing::Fr(_) => true,
+            Sizing::Rel(rel) => rel.rel.get() != 0.0 || !rel.abs.em.is_zero(),
+            Sizing::Auto => false,
+        });
     let cell_visuals = grid.entries.iter().any(|entry| {
         let Some(cell) = entry.as_cell() else { return false };
         cell.fill.as_ref().is_some_and(paint_is_approximate)
@@ -191,6 +218,7 @@ fn cellgrid(
     grid: &CellGrid,
     styles: StyleChain,
     ctx: &mut DocxCtx,
+    measured: Option<&MeasuredTableGeometry>,
 ) -> SourceResult<Vec<Block>> {
     let ncols = grid.non_gutter_column_count();
     if ncols == 0 || grid.entries.is_empty() {
@@ -203,8 +231,10 @@ fn cellgrid(
     // zero-sized tracks on the other axis. Do not leak those normalization-only
     // tracks into Word: a row-only gutter must not create phantom columns.
     let has_column_gutter = has_nonzero_column_gutter(grid);
-    let col_dxa =
-        resolve_column_widths(grid, ctx.available_width_dxa(), has_column_gutter);
+    let col_dxa = measured.map_or_else(
+        || resolve_column_widths(grid, ctx.available_width_dxa(), has_column_gutter),
+        |geometry| geometry.columns_dxa.clone(),
+    );
     let width_dxa: i32 = col_dxa.iter().copied().sum();
 
     // -- Header rows (mark `table.header` rows for `w:tblHeader`) -----------
@@ -317,7 +347,9 @@ fn cellgrid(
         rows.push(Row {
             header: is_header_row(y),
             cant_split: row_cant_split(grid, y),
-            height: row_height(grid, y),
+            height: measured
+                .and_then(|geometry| geometry.row_heights.get(y).cloned().flatten())
+                .or_else(|| row_height(grid, y)),
             cells,
         });
 
@@ -571,6 +603,112 @@ fn color_to_rgb(color: &Color) -> [u8; 3] {
         ((value + 127) / 255) as u8
     };
     [composite(r), composite(g), composite(b)]
+}
+
+/// Resolves Word's table grid from the final paged cell regions rather than
+/// redistributing flexible tracks against an estimated flowing width.
+fn measured_table_geometry(
+    source: &Content,
+    grid: &CellGrid,
+    ctx: &DocxCtx,
+) -> Option<MeasuredTableGeometry> {
+    let logical_id = typst_export_common::paged::logical_id(source);
+    let table = ctx.paged_geometry.first_table(logical_id)?;
+    if table.cells.is_empty() || table.cells.iter().any(|cell| !cell.axis_aligned) {
+        return None;
+    }
+
+    let ncols = grid.non_gutter_column_count();
+    let nrows = grid.entries.len().checked_div(ncols)?;
+    let mut column_samples = vec![Vec::<f64>::new(); ncols];
+    let mut row_samples = vec![Vec::<(usize, f64)>::new(); nrows];
+    for cell in &table.cells {
+        if cell.colspan == 1 && cell.x < ncols {
+            column_samples[cell.x].push(cell.width_pt);
+        }
+        if cell.rowspan == 1 && cell.y < nrows {
+            row_samples[cell.y].push((cell.page, cell.height_pt));
+        }
+    }
+    let columns = column_samples
+        .into_iter()
+        .map(median_positive)
+        .collect::<Option<Vec<_>>>()?;
+
+    let has_column_gutter = has_nonzero_column_gutter(grid);
+    let gutters = if has_column_gutter {
+        let mut samples = vec![Vec::<f64>::new(); ncols.saturating_sub(1)];
+        for left in &table.cells {
+            if left.colspan != 1 || left.x + 1 >= ncols {
+                continue;
+            }
+            if let Some(right) = table.cells.iter().find(|right| {
+                right.page == left.page
+                    && right.y == left.y
+                    && right.x == left.x + 1
+                    && right.colspan == 1
+            }) {
+                let gap = right.left_pt - (left.left_pt + left.width_pt);
+                if gap > 0.0 {
+                    samples[left.x].push(gap);
+                }
+            }
+        }
+        samples.into_iter().map(median_positive).collect::<Option<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+
+    let mut columns_dxa = Vec::with_capacity(columns.len() + gutters.len());
+    for (index, width) in columns.into_iter().enumerate() {
+        columns_dxa.push(pt_to_positive_dxa(width)?);
+        if let Some(gutter) = gutters.get(index) {
+            columns_dxa.push(pt_to_positive_dxa(*gutter)?);
+        }
+    }
+
+    let row_heights = row_samples
+        .into_iter()
+        .map(|samples| {
+            let pages = samples
+                .iter()
+                .map(|(page, _)| *page)
+                .collect::<std::collections::BTreeSet<_>>();
+            if pages.len() != 1 {
+                return None;
+            }
+            median_positive(samples.into_iter().map(|(_, height)| height).collect())
+                .and_then(|height| {
+                    pt_to_positive_dxa(height).map(|val| RowHeight {
+                        // `atLeast` preserves editability and avoids clipping if
+                        // Word substitutes a font with taller metrics.
+                        val,
+                        exact: false,
+                    })
+                })
+        })
+        .collect();
+
+    Some(MeasuredTableGeometry { columns_dxa, row_heights })
+}
+
+fn median_positive(mut values: Vec<f64>) -> Option<f64> {
+    values.retain(|value| value.is_finite() && *value > 0.0);
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    Some(if values.len() % 2 == 0 {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    })
+}
+
+fn pt_to_positive_dxa(points: f64) -> Option<i32> {
+    let dxa = (points * 20.0).round();
+    (dxa.is_finite() && dxa >= 1.0 && dxa <= i32::MAX as f64).then_some(dxa as i32)
 }
 
 /// Per-track widths in dxa for `w:tblGrid`, including Typst gutter tracks.

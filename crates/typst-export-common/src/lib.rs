@@ -4,4 +4,5 @@
 //! fall back to pixels. This crate owns the target-independent mechanics used
 //! after that decision.
 
+pub mod paged;
 pub mod raster;

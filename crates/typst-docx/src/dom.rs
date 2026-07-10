@@ -679,6 +679,7 @@ pub struct Row {
     pub cells: Vec<Cell>,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct RowHeight {
     pub val: i32,
     pub exact: bool,

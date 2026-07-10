@@ -27,14 +27,15 @@ pub fn build(document: &DocxDocument) -> String {
     );
     let _ = write!(
         out,
-        "<typst:counts native=\"{}\" nativeWithFallback=\"{}\" approximate=\"{}\" raster=\"{}\" drop=\"{}\" dynamicFields=\"{}\" referencedFonts=\"{}\"/>",
+        "<typst:counts native=\"{}\" nativeWithFallback=\"{}\" approximate=\"{}\" raster=\"{}\" drop=\"{}\" dynamicFields=\"{}\" referencedFonts=\"{}\" measuredTables=\"{}\"/>",
         counts.native,
         counts.native_with_fallback,
         counts.approximate,
         counts.raster,
         counts.drop,
         dynamic_field_count,
-        referenced_font_count
+        referenced_font_count,
+        snapshot.tables().len()
     );
 
     out.push_str("<typst:pages>");
@@ -47,7 +48,32 @@ pub fn build(document: &DocxDocument) -> String {
             page.height_pt
         );
     }
-    out.push_str("</typst:pages><typst:nodes>");
+    out.push_str("</typst:pages><typst:tables>");
+    for table in snapshot.tables() {
+        let _ = write!(
+            out,
+            "<typst:table sourceId=\"{:032x}\" page=\"{}\">",
+            table.logical_id, table.page
+        );
+        for cell in &table.cells {
+            let _ = write!(
+                out,
+                "<typst:cell page=\"{}\" x=\"{}\" y=\"{}\" colspan=\"{}\" rowspan=\"{}\" leftPt=\"{}\" topPt=\"{}\" widthPt=\"{}\" heightPt=\"{}\" axisAligned=\"{}\"/>",
+                cell.page,
+                cell.x,
+                cell.y,
+                cell.colspan,
+                cell.rowspan,
+                cell.left_pt,
+                cell.top_pt,
+                cell.width_pt,
+                cell.height_pt,
+                cell.axis_aligned
+            );
+        }
+        out.push_str("</typst:table>");
+    }
+    out.push_str("</typst:tables><typst:nodes>");
     for node in snapshot.nodes() {
         let _ = write!(
             out,

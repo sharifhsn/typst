@@ -115,6 +115,10 @@ fn package_bytes_with_files(
     files: &[(&str, &[u8])],
 ) -> HashMap<String, Vec<u8>> {
     let doc = compile_docx(src, files);
+    package_bytes(&doc)
+}
+
+fn package_bytes(doc: &DocxDocument) -> HashMap<String, Vec<u8>> {
     let bytes = docx(&doc, &DocxOptions { pretty: false }).expect("docx export failed");
 
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
@@ -127,6 +131,15 @@ fn package_bytes_with_files(
         map.insert(name, bytes);
     }
     map
+}
+
+fn text_parts(doc: &DocxDocument) -> HashMap<String, String> {
+    package_bytes(doc)
+        .into_iter()
+        .filter_map(|(name, bytes)| {
+            String::from_utf8(bytes).ok().map(|text| (name, text))
+        })
+        .collect()
 }
 
 fn compile_docx(src: &str, files: &[(&str, &[u8])]) -> DocxDocument {
@@ -142,16 +155,19 @@ fn compile_docx_with_world(world: &TestWorld) -> DocxDocument {
     let seed = Arc::clone(&primary);
     let page_sizes =
         Arc::new(paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>());
+    let paged_geometry =
+        Arc::new(typst_export_common::paged::PagedGeometry::from_document(&paged));
     typst::compile_with::<DocxDocument, _>(
         world,
         Some(seed.as_ref()),
         move |engine, content, styles| {
-            typst_docx::docx_document_with_paged_introspector(
+            typst_docx::docx_document_with_paged_geometry(
                 engine,
                 content,
                 styles,
                 Arc::clone(&primary),
                 Arc::clone(&page_sizes),
+                Arc::clone(&paged_geometry),
             )
         },
     )
@@ -183,16 +199,19 @@ fn compile_paged_and_docx(src: &str) -> (PagedDocument, DocxDocument) {
     let seed = Arc::clone(&primary);
     let page_sizes =
         Arc::new(paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>());
+    let paged_geometry =
+        Arc::new(typst_export_common::paged::PagedGeometry::from_document(&paged));
     let doc = typst::compile_with::<DocxDocument, _>(
         &world,
         Some(seed.as_ref()),
         move |engine, content, styles| {
-            typst_docx::docx_document_with_paged_introspector(
+            typst_docx::docx_document_with_paged_geometry(
                 engine,
                 content,
                 styles,
                 Arc::clone(&primary),
                 Arc::clone(&page_sizes),
+                Arc::clone(&paged_geometry),
             )
         },
     )
@@ -495,6 +514,42 @@ fn table_preflight_reports_native_and_approximate_geometry() {
 }
 
 #[test]
+fn flexible_table_uses_converged_paged_cell_geometry() {
+    let src = "#set page(width: 140mm, height: 90mm, margin: 10mm)\n#table(columns: (1fr, 2fr), [One], [Two])";
+    let compiled = compile_docx(src, &[]);
+    let table = compiled
+        .export_snapshot()
+        .tables()
+        .first()
+        .expect("paged frame scanner must enroll the table");
+    let left = table
+        .cells
+        .iter()
+        .find(|cell| cell.x == 0 && cell.y == 0)
+        .expect("left measured cell");
+    let right = table
+        .cells
+        .iter()
+        .find(|cell| cell.x == 1 && cell.y == 0)
+        .expect("right measured cell");
+    assert!((right.width_pt / left.width_pt - 2.0).abs() < 0.01);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::NativeTable
+            && decision.representation == Representation::Native
+    }));
+
+    let p = parts(src);
+    let widths = grid_widths(&element_fragments(&p["word/document.xml"], "tbl")[0]);
+    assert_eq!(widths.len(), 2);
+    assert!((widths[1] as f64 / widths[0] as f64 - 2.0).abs() < 0.01);
+    let manifest = &p["customXml/typstFidelity.xml"];
+    assert!(manifest.contains("<typst:tables>"));
+    assert!(manifest.contains("measuredTables=\"1\""));
+    assert!(manifest.contains("widthPt="));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn heading_maps_to_heading_style() {
     let p = parts("= Introduction\n\nBody text.");
     let doc = &p["word/document.xml"];
@@ -732,20 +787,35 @@ fn colspan_includes_internal_gutter_tracks() {
 
 #[test]
 fn nested_table_uses_its_parent_cell_width() {
-    let p = parts(
-        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+    let src = "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
          #table(\n\
            columns: (1fr, 1fr),\n\
            [#table(columns: (1fr, 1fr), [A], [B])],\n\
            [Outer],\n\
-         )",
-    );
+         )";
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
     let tables = element_fragments(&p["word/document.xml"], "tbl");
     assert_eq!(tables.len(), 2, "outer and nested tables");
     let outer: i32 = grid_widths(tables[0]).iter().sum();
     let inner: i32 = grid_widths(tables[1]).iter().sum();
-    assert!((outer - 5669).abs() <= 2, "outer={outer}");
-    assert!((inner * 2 - outer).abs() <= 2, "inner={inner}, outer={outer}");
+    let measured = compiled.export_snapshot().tables();
+    assert_eq!(measured.len(), 2, "outer and nested paged table regions");
+    let outer_measured = measured[0]
+        .cells
+        .iter()
+        .filter(|cell| cell.y == 0)
+        .map(|cell| cell.width_pt)
+        .sum::<f64>();
+    let inner_measured = measured[1]
+        .cells
+        .iter()
+        .filter(|cell| cell.y == 0)
+        .map(|cell| cell.width_pt)
+        .sum::<f64>();
+    assert!((outer as f64 - outer_measured * 20.0).abs() <= 2.0);
+    assert!((inner as f64 - inner_measured * 20.0).abs() <= 2.0);
+    assert!(inner < outer / 2, "parent cell insets narrow the nested table");
     assert_all_wellformed(&p);
 }
 
@@ -2214,18 +2284,22 @@ fn page_level_columns_stay_a_single_section() {
 
 #[test]
 fn table_inside_page_columns_uses_the_column_width() {
-    // 100mm text area, two columns, default 4%-of-page (~272 twip) gap:
-    // (5669 - 272) / 2 = ~2698 twips per column.
-    let p = parts(
-        "#set page(\n\
+    let src = "#set page(\n\
            width: 120mm, height: 100mm, margin: 10mm,\n\
            columns: 2,\n\
          )\n\
-         #table(columns: (1fr, 1fr), [A], [B])",
-    );
+         #table(columns: (1fr, 1fr), [A], [B])";
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
     let tables = element_fragments(&p["word/document.xml"], "tbl");
     let width: i32 = grid_widths(tables[0]).iter().sum();
-    assert!((width - 2698).abs() <= 2, "column table width={width}");
+    let measured = compiled.export_snapshot().tables()[0]
+        .cells
+        .iter()
+        .filter(|cell| cell.y == 0)
+        .map(|cell| cell.width_pt)
+        .sum::<f64>();
+    assert!((width as f64 - measured * 20.0).abs() <= 2.0, "width={width}");
     assert_all_wellformed(&p);
 }
 

@@ -169,8 +169,9 @@ The first DOCX slice now captures an owned `ExportSnapshot` before lowering.
 Logical IDs are span/element based rather than target-specific-location based;
 top-level lowering regions and nested located semantic nodes aggregate their
 semantic occurrences and every matching converged paged position. The snapshot
-also owns every converged page size and a deterministic document ID. Counter,
-link, bibliography, and fallback-specific resolved payload enrollment remains
+also owns every converged page size, physical table/grid cell regions recovered
+from hidden paged-frame tags, and a deterministic document ID. Counter, link,
+bibliography, and fallback-specific resolved payload enrollment remains
 incomplete.
 
 DOCX uses semantics as primary and paged geometry as an oracle. PPTX would
@@ -342,10 +343,12 @@ mechanical cleanup that introduced this document.
   locations, repeated semantic occurrences aggregate, and matching paged
   positions/page sizes survive into the final document and manifest.
 - Tables and grids now cross an explicit `TablePlan` before cell lowering.
-  Fixed-track/solid regions enroll as native; flexible/relative track sizing,
-  unsupported cell paints, border nuance, and repeating footers enroll as one
-  attributable visual approximation. A missing resolved grid selects atomic
-  raster fallback and can only drop after that fallback also produces nothing.
+  Fixed tracks and axis-aligned auto/fractional/relative tracks with complete
+  converged cell measurements enroll as native. Unsupported cell paints, border
+  nuance, repeating footers, transformed regions, or unavailable measurements
+  enroll as one attributable visual approximation. A missing resolved grid
+  selects atomic raster fallback and can only drop after that fallback also
+  produces nothing.
 - DOCX field ownership is explicit. Reference intent now survives the library's
   `RefElem -> DirectLinkElem -> LinkMarker/style` realization path; the old
   mapper-only policy was bypassed in final output. Normal references remain
@@ -395,8 +398,8 @@ mechanical cleanup that introduced this document.
 
 ## Current implementation evidence (2026-07-10)
 
-- The focused Graphify corpus was refreshed from the live worktree: 3,095 code
-  nodes, 8,575 extracted edges, and 125 communities. `FidelityReport` is linked
+- The focused Graphify corpus was refreshed from the live worktree: 3,214 code
+  nodes, 8,887 extracted edges, and 134 communities. `FidelityReport` is linked
   to `DocxCtx`, `LoweredDocx`, `DocxDocument`, and the public report accessor;
   equation preflight reaches the explicit raster-fallback mapper. The refreshed
   graph also connects `DirectLinkKind` through `LinkElem` to the DOCX paragraph
@@ -417,12 +420,13 @@ mechanical cleanup that introduced this document.
   `DocxDocument` to the public APIs, embedded manifest builder, typed package
   relationship, and final OPC validation. The field/font path connects the
   finalized recursive inventories to `FidelityReport`, the embedded manifest,
-  and font-table emission. The table query connects
-  `TableElem`/`GridElem` through `preflight_table`, `TablePlan`, and
-  `execute_table_plan` to native cell lowering, whole-region fallback,
-  representative gradient color, structured decisions, and the manifest.
+  and font-table emission. The measured-table query connects layout's
+  `GridCellRegion` through the format-neutral `PagedGeometry` scanner, CLI
+  handoff, `ExportSnapshot`, `DocxCtx`, `preflight_table`, and `TablePlan` to
+  native `w:tblGrid` lowering, structured decisions, the embedded manifest, and
+  the structural oracle-comparison gates.
 - `cargo clippy -p typst-docx --all-targets -- -D warnings` passes.
-- The complete structural DOCX test target passes 161 tests. New gates cover
+- The complete structural DOCX test target passes 162 tests. New gates cover
   raster/compatibility/approximation classification, a retained suppressed
   layout-callback error, nested unsupported math choosing one whole-region
   fallback, explicit placed-content planning, native anchored tables, and
@@ -493,6 +497,13 @@ mechanical cleanup that introduced this document.
   representative purple solid (`854E9D`) rather than a missing fill, and the
   manifest reports `Approximate/TableGeometryApproximation`, 96 affected text
   characters, and one semantic node.
+- A measured-table fixture compared an auto/1fr/2fr table, 7 pt gutters, and a
+  nested 1:2 table across PDF, DOCX, Word, and Writer. The manifest enrolled two
+  measured native tables. Writer preserved the outer and nested boundaries on
+  the same 160 mm x 120 mm page; Word opened without repair and exposed the
+  outer 2-row/5-track table, nested 1-row/2-column table, every cell, and an
+  `Accessibility: Good to go` result. Narrow-cell text can still reflow under
+  consumer font metrics, which is expected in Word's editable flow model.
 
 ## Validation model
 
@@ -544,18 +555,22 @@ backgrounds, footnotes, citations, and mixed page sizes.
    remaining mapper-specific `Option`/empty fallbacks, native-region and
    consumer-profile facts, and optional standalone CLI manifest output. The
    versioned manifest is already embedded in every DOCX.
-3. **Stable semantic sidecar — first slice implemented.** `ExportSnapshot`
-   carries stable source-backed IDs, semantic occurrences, converged page sizes,
-   and matched paged positions. Enroll resolved counters, links, bibliography
-   payloads, fallback regions, and reuse the sidecar across PPTX/Pandoc.
+3. **Stable semantic sidecar — table geometry slice implemented.**
+   `ExportSnapshot` carries stable source-backed IDs, semantic occurrences,
+   converged page sizes, matched paged positions, and final table/grid cell
+   regions extracted through format-neutral paged-frame scanning. Enroll
+   resolved counters, links, bibliography payloads, and fallback regions, and
+   reuse more of the sidecar across PPTX/Pandoc.
 4. **Capability planning — equations, placed content, furniture, and table slices
    implemented.** Equations plan atomically. Placed content preflights native
    shape groups, plain text boxes, simple native tables, and a lower-once
    fallback. Furniture preflights exact static/first/parity variants versus a
    warned sampled approximation. Tables/grids preflight native fixed geometry,
-   reported editable approximations, and missing-grid atomic fallback. Extend
-   the same whole-region boundary to field groups and consumer profiles, and
-   replace approximate table tracks with measured snapshot geometry.
+   reported editable approximations, missing-grid atomic fallback, and measured
+   paged geometry for axis-aligned flexible tracks and row minima. Extend the
+   same whole-region boundary to field groups and consumer profiles, and solve
+   transformed or fully merged table geometry where no single-cell measurement
+   is available.
 5. **OPC invariants — second slice implemented.** Shared finalization validates
    unique/legal parts, content-type consistency, typed relationship owners and
    internal targets, XML well-formedness, per-source-part relationship ID
