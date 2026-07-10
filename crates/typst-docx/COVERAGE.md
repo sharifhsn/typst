@@ -1004,6 +1004,12 @@ The replacement is explicit and survives realization:
 - `FieldMode::{Static, Live}` records value ownership. Static complex fields
   encode `w:fldLock`; live fields stay consumer-updateable. `FieldDisplay`
   separately records visible versus hidden behavior.
+- `FieldCacheStatus::{Resolved, ConsumerRequired, Unavailable}` records cached
+  result provenance independently of ownership. Final-IR validation rejects
+  impossible combinations. Figure-number evaluation failures now retain their
+  exact `FieldPlanning` diagnostics, record a `FieldCacheUnavailable`
+  approximation, and remain visible in the public/embedded field inventory
+  instead of being erased by `Err(_) => Vec::new()`.
 - Figure `SEQ` is visible/live only for a single Typst numbering component that
   exactly matches Word's Arabic/alphabetic/roman format switches. Prefixes,
   suffixes, multiple components, padding, and functions remain exact Typst text
@@ -1028,7 +1034,11 @@ caption/reference text on one 170 mm x 120 mm page. A manual select-all/F9
 update followed by a real Word save kept the Typst-owned hyperlink and hidden
 counter intact while updating live field caches; Writer rendered that Word-saved
 round trip with the same visible text. Structural gates now cover all ownership
-branches; the DOCX target passes 158 tests and clippy with warnings denied.
+branches; the DOCX target passes 164 tests and the crate passes 12 unit gates.
+The cache-failure kernel also survived a LibreOffice 26.2.4.2 save/reopen: live
+`SEQ`/`PAGEREF` instructions remained, `cache="Unavailable"` survived in the
+Writer-stable custom property, and the one-page visible/searchable text was
+unchanged across the Writer round trip.
 
 ## 14. Scoped width ownership and physical grid gutters
 

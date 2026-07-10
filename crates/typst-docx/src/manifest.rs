@@ -127,12 +127,13 @@ pub fn build(document: &DocxDocument) -> String {
     for field in report.dynamic_fields() {
         let _ = write!(
             out,
-            "<typst:field id=\"{:032x}\" kind=\"{}\" instruction=\"{}\" owner=\"{:?}\" visibility=\"{:?}\" occurrences=\"{}\"/>",
+            "<typst:field id=\"{:032x}\" kind=\"{}\" instruction=\"{}\" owner=\"{:?}\" visibility=\"{:?}\" cache=\"{:?}\" occurrences=\"{}\"/>",
             field.logical_id,
             escape_attr(&field.kind),
             escape_attr(&field.instruction),
             field.owner,
             field.visibility,
+            field.cache_status,
             field.occurrences
         );
     }

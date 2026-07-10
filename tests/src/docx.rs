@@ -3249,6 +3249,7 @@ fn fidelity_report_enrolls_dynamic_field_ownership() {
     assert!(manifest.contains("kind=\"TOC\""));
     assert!(manifest.contains("kind=\"PAGEREF\""));
     assert!(manifest.contains("owner=\"Consumer\""));
+    assert!(manifest.contains("cache=\"Resolved\""));
     assert!(manifest.contains("dynamicFields="));
 }
 
@@ -4049,6 +4050,32 @@ fn failing_figure_numbering_closure_does_not_abort_the_export() {
     // cached number is best-effort — the SEQ field is the live truth in Word.
     let src = "#set figure(numbering: _ => if target() == \"docx\" { (1,).at(9) } else { \"1\" })\n\
                #figure(rect(), caption: [Survives])";
+    let compiled = compile_docx(src, &[]);
+    assert!(
+        compiled
+            .fidelity_report()
+            .suppressed_diagnostics()
+            .iter()
+            .any(|entry| {
+                entry.stage == ExportStage::FieldPlanning
+                    && entry.kind == SuppressedKind::Error
+            }),
+        "the failed cache evaluation must remain attributable"
+    );
+    assert!(
+        compiled.fidelity_report().decisions().iter().any(|decision| {
+            decision.reason == DecisionReason::FieldCacheUnavailable
+                && decision.representation == Representation::Approximate
+        }),
+        "the consumer-computed fallback must be an explicit representation decision"
+    );
+    assert!(
+        compiled.fidelity_report().dynamic_fields().iter().any(|field| {
+            field.kind == "SEQ"
+                && field.cache_status == typst_docx::FieldCacheStatus::Unavailable
+        }),
+        "the finalized field inventory must distinguish a failed cache"
+    );
     let p = parts(src);
     let doc = &p["word/document.xml"];
     assert!(doc.contains("Survives"), "the caption text is kept");

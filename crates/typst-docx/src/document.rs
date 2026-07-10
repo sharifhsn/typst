@@ -15,17 +15,19 @@ use typst_library::routines::{Arenas, RealizationKind};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, BookmarkTable, DocxDocument, Field, FieldDisplay, FieldMode, Footnote,
-    HdrFtrPart, HdrFtrRef, HeadingStyle, HeadingStyleSample, LineNumbering, MediaPart,
-    NumberingTable, Para, ParaChild, ParaProps, PgNumType, Run, RunProps, SectPr,
-    SectType, Spacing, TextDefaults, TocFigure, TocHeading,
+    Block, BookmarkTable, DocxDocument, Field, FieldCacheStatus as DomFieldCacheStatus,
+    FieldDisplay, FieldMode, Footnote, HdrFtrPart, HdrFtrRef, HeadingStyle,
+    HeadingStyleSample, LineNumbering, MediaPart, NumberingTable, Para, ParaChild,
+    ParaProps, PgNumType, Run, RunProps, SectPr, SectType, Spacing, TextDefaults,
+    TocFigure, TocHeading,
 };
 use crate::introspect::DocxIntrospector;
 use crate::package::Rels;
 use crate::props;
 use crate::report::{
-    DecisionReason, ExportSource, ExportStage, FidelityReport, FieldOwner,
-    FieldVisibility, LossSet, Representation, SuppressedKind,
+    DecisionReason, ExportSource, ExportStage, FidelityReport,
+    FieldCacheStatus as ReportFieldCacheStatus, FieldOwner, FieldVisibility, LossSet,
+    Representation, SuppressedKind,
 };
 
 /// The complete product of the lowering walk before document-wide postpasses.
@@ -608,6 +610,7 @@ fn record_block_fields(report: &mut FidelityReport, snapshot_id: u128, blocks: &
                     &toc.instr,
                     field_owner(toc.mode),
                     FieldVisibility::Visible,
+                    ReportFieldCacheStatus::Resolved,
                 );
                 for entry in &toc.entries {
                     record_para_fields(report, snapshot_id, entry);
@@ -648,6 +651,15 @@ fn record_run_fields(report: &mut FidelityReport, snapshot_id: u128, run: &Run) 
                 match field.display {
                     FieldDisplay::Visible => FieldVisibility::Visible,
                     FieldDisplay::Hidden => FieldVisibility::Hidden,
+                },
+                match field.cache_status {
+                    DomFieldCacheStatus::Resolved => ReportFieldCacheStatus::Resolved,
+                    DomFieldCacheStatus::ConsumerRequired => {
+                        ReportFieldCacheStatus::ConsumerRequired
+                    }
+                    DomFieldCacheStatus::Unavailable => {
+                        ReportFieldCacheStatus::Unavailable
+                    }
                 },
             );
             for result in &field.result {
@@ -2893,6 +2905,7 @@ fn page_number_para(
             result: vec![Run::Text { props: RunProps::default(), text: "1".into() }],
             mode: FieldMode::Live,
             display: FieldDisplay::Visible,
+            cache_status: DomFieldCacheStatus::Resolved,
         }))
     };
     let literal = |text: ecow::EcoString| {

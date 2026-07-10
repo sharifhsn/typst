@@ -52,6 +52,9 @@ pub enum DecisionReason {
     /// A figure number keeps Typst's computed value because its numbering
     /// pattern or function has no equivalent Word `SEQ` format.
     TypstOwnedFigureNumber,
+    /// Typst could not compute a trustworthy cached field result, so the
+    /// consumer must provide a best-effort value from the native field code.
+    FieldCacheUnavailable,
     /// Section content failed to lower, so only its geometry was retained.
     SectionGeometryFallback,
     /// Fractional stack spacing depends on leftover region geometry. DOCX keeps
@@ -243,6 +246,7 @@ pub enum ExportStage {
     LayoutCallback,
     FallbackLayout,
     SectionLowering,
+    FieldPlanning,
 }
 
 /// Kind of suppressed diagnostic.
@@ -289,6 +293,14 @@ pub enum FieldVisibility {
     Hidden,
 }
 
+/// Availability of a trustworthy cached result in the finalized field group.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum FieldCacheStatus {
+    Resolved,
+    ConsumerRequired,
+    Unavailable,
+}
+
 /// One stable field group in the finalized DOCX IR.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct DynamicFieldFact {
@@ -297,6 +309,7 @@ pub struct DynamicFieldFact {
     pub instruction: EcoString,
     pub owner: FieldOwner,
     pub visibility: FieldVisibility,
+    pub cache_status: FieldCacheStatus,
     pub occurrences: usize,
 }
 
@@ -477,6 +490,7 @@ impl FidelityReport {
         instruction: &str,
         owner: FieldOwner,
         visibility: FieldVisibility,
+        cache_status: FieldCacheStatus,
     ) {
         let instruction = instruction.trim();
         let kind: EcoString = instruction
@@ -485,8 +499,13 @@ impl FidelityReport {
             .unwrap_or("UNKNOWN")
             .to_ascii_uppercase()
             .into();
-        let logical_id =
-            typst_utils::hash128(&(snapshot_id, instruction, owner, visibility));
+        let logical_id = typst_utils::hash128(&(
+            snapshot_id,
+            instruction,
+            owner,
+            visibility,
+            cache_status,
+        ));
         if let Some(existing) = self
             .dynamic_fields
             .iter_mut()
@@ -501,6 +520,7 @@ impl FidelityReport {
             instruction: instruction.into(),
             owner,
             visibility,
+            cache_status,
             occurrences: 1,
         });
     }

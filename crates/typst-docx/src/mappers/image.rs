@@ -44,8 +44,8 @@ use typst_ooxml_core::media;
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Anchor, AnchorPos, AnchorWrap, Block, Drawing, Field, FieldDisplay, FieldMode, Jc,
-    Para, ParaChild, ParaProps, Run, RunProps, TextBoxWrap,
+    Anchor, AnchorPos, AnchorWrap, Block, Drawing, Field, FieldCacheStatus, FieldDisplay,
+    FieldMode, Jc, Para, ParaChild, ParaProps, Run, RunProps, TextBoxWrap,
 };
 use crate::report::{DecisionReason, LossSet, Representation};
 
@@ -670,6 +670,7 @@ fn caption_runs(
 
     // The realized number, used as the SEQ field's cached result so the caption
     // is readable before Word updates fields.
+    let mut cache_unavailable = false;
     let number_runs =
         match (cap.counter.clone(), cap.numbering.clone(), cap.figure_location) {
             (Some(Some(counter)), Some(Some(numbering)), Some(Some(location))) => {
@@ -692,12 +693,37 @@ fn caption_runs(
                     Ok(number) => {
                         ctx.inline_runs(&number, styles, RunProps::default())?
                     }
-                    Err(_) => Vec::new(),
+                    Err(errors) => {
+                        cache_unavailable = true;
+                        let content = elem.clone().pack();
+                        for diagnostic in errors {
+                            ctx.suppress_content_diagnostic(
+                                &content,
+                                crate::report::ExportStage::FieldPlanning,
+                                diagnostic,
+                            );
+                        }
+                        ctx.record_content_decision(
+                            &content,
+                            Representation::Approximate,
+                            DecisionReason::FieldCacheUnavailable,
+                            LossSet::DYNAMIC_BEHAVIOR,
+                            0,
+                        );
+                        Vec::new()
+                    }
                 }
             }
             _ => Vec::new(),
         };
 
+    let number_cache_status = if cache_unavailable {
+        FieldCacheStatus::Unavailable
+    } else if number_runs.is_empty() {
+        FieldCacheStatus::ConsumerRequired
+    } else {
+        FieldCacheStatus::Resolved
+    };
     let seq = seq_name(elem, styles);
     if let Some(format) = word_seq_format(numbering, ctx, cap.span()) {
         // Word can exactly reproduce this single-component numeral system, so
@@ -707,6 +733,7 @@ fn caption_runs(
             result: number_runs,
             mode: FieldMode::Live,
             display: FieldDisplay::Visible,
+            cache_status: number_cache_status,
         }));
     } else if number_runs.is_empty() {
         // If Typst itself could not evaluate a user numbering function, retain
@@ -716,6 +743,7 @@ fn caption_runs(
             result: Vec::new(),
             mode: FieldMode::Live,
             display: FieldDisplay::Visible,
+            cache_status: number_cache_status,
         }));
     } else {
         // Prefixes/suffixes, multi-component patterns, and functions have no
@@ -728,6 +756,7 @@ fn caption_runs(
             result: Vec::new(),
             mode: FieldMode::Live,
             display: FieldDisplay::Hidden,
+            cache_status: FieldCacheStatus::ConsumerRequired,
         }));
         let content = elem.clone().pack();
         ctx.record_content_decision(

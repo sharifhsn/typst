@@ -23,7 +23,9 @@ use typst_library::introspection::Location;
 use typst_library::model::{Destination, LinkElem, RefElem, RefForm};
 
 use crate::ctx::DocxCtx;
-use crate::dom::{Field, FieldDisplay, FieldMode, ParaChild, Run, RunProps};
+use crate::dom::{
+    Field, FieldCacheStatus, FieldDisplay, FieldMode, ParaChild, Run, RunProps,
+};
 use crate::report::{DecisionReason, LossSet, Representation};
 
 /// The `Hyperlink` character style name (defined in `styles.xml`).
@@ -168,5 +170,6 @@ pub fn reference(
         result: result_runs,
         mode,
         display: FieldDisplay::Visible,
+        cache_status: FieldCacheStatus::Resolved,
     })])
 }

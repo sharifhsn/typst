@@ -135,6 +135,12 @@ and TOC dialogs on open. Baked results make first-open output complete, while
 Word's normal **Update Table / Update Field** commands remain available after
 the user edits the document.
 
+Field ownership and cached-result availability are independent. Every complex
+field carries `FieldCacheStatus::{Resolved, ConsumerRequired, Unavailable}` in
+the finalized IR. An unavailable cache cannot be locked as Typst-owned; its
+suppressed diagnostic and approximate representation decision remain visible in
+the fidelity report instead of collapsing into an unexplained empty result.
+
 ### Figures, images & graphics
 
 | Feature | | Notes |
@@ -219,7 +225,7 @@ Every package persists that versioned manifest at
 `TypstFidelityManifestV1` custom document property because LibreOffice Writer
 drops arbitrary custom-XML parts on save but preserves custom properties. The
 finalized IR inventory records every dynamic field's instruction, update owner,
-visibility, and occurrence count, plus every referenced font, whether it was
+visibility, cache status, and occurrence count, plus every referenced font, whether it was
 available on the export machine, and its current non-embedded status. The same
 font inventory drives `fontTable.xml`, including fonts used only by individual
 runs. Drawing facts independently classify described, native-text,

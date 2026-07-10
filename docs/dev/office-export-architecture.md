@@ -251,6 +251,18 @@ counter. Static complex fields use `w:fldLock`; hidden fields use both their
 field switch and `w:vanish` on every structural/result run because LibreOffice
 does not reliably implement Word's `SEQ \h` behavior.
 
+Cached-result provenance is a separate finalized-IR decision:
+`FieldCacheStatus::{Resolved, ConsumerRequired, Unavailable}` distinguishes a
+trustworthy Typst cache from an intentionally consumer-computed field and from
+a failed cache evaluation. This removes the former ambiguous empty `Vec<Run>`
+state. Final-IR validation rejects contradictory plans (for example, a locked
+Typst-owned field with an unavailable cache, a resolved field without a result,
+or visible cached runs on a hidden field). A failed figure-numbering cache is
+retained as a `FieldPlanning` diagnostic and `FieldCacheUnavailable`
+approximation, then serialized as an explicitly consumer-owned fallback instead
+of being silently swallowed. The same status is public in `DynamicFieldFact`
+and persisted as the manifest field's `cache` attribute.
+
 The exporter does not emit document-wide `w:updateFields` or mark TOCs dirty.
 Microsoft documents `updateFields` as recalculating all fields, while `fldLock`
 prevents recalculation of a specific field. In current Word for macOS, either
@@ -453,7 +465,7 @@ mechanical cleanup that introduced this document.
   native `w:tblGrid` lowering, structured decisions, the embedded manifest, and
   the structural oracle-comparison gates.
 - `cargo clippy -p typst-docx --all-targets -- -D warnings` passes.
-- The complete structural DOCX test target passes 162 tests. New gates cover
+- The complete structural DOCX test target passes 164 tests. New gates cover
   raster/compatibility/approximation classification, a retained suppressed
   layout-callback error, nested unsupported math choosing one whole-region
   fallback, explicit placed-content planning, native anchored tables, and
@@ -463,6 +475,12 @@ mechanical cleanup that introduced this document.
   resolution, missing targets, relationship-mode identity, insertion-order
   independence, malformed XML, missing referenced relationship IDs, and
   source-part scoping. The shared DML unit gate also passes.
+- The field-cache failure fixture was compiled through the real CLI to PDF and
+  DOCX, rendered through Writer, saved back to DOCX, and rendered again. Writer
+  preserved the live `SEQ` and `PAGEREF` instructions and the standard custom
+  property retained `cache="Unavailable"`; the one-page round trip kept all
+  visible/searchable caption, reference, and footer text. Twelve DOCX crate
+  unit gates include finalized field-plan contradictions.
 - The atomic-math fixture was compiled through the real CLI to PDF and DOCX,
   then the DOCX was rendered through LibreOffice Writer 26.2.4.2. Both outputs
   remained one 160 mm × 90 mm page; the boxed fraction and surrounding equation

@@ -10,7 +10,9 @@ use std::fmt::{self, Display, Formatter};
 
 use ecow::EcoString;
 
-use crate::dom::{Block, DocxDocument, Para, ParaChild, Run};
+use crate::dom::{
+    Block, DocxDocument, FieldCacheStatus, FieldDisplay, FieldMode, Para, ParaChild, Run,
+};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum DocumentInvariantError {
@@ -28,6 +30,10 @@ pub(crate) enum DocumentInvariantError {
     DuplicateNumberingId(u32),
     MissingAbstractNumberingId(u32),
     MissingNumberingId(u32),
+    ResolvedFieldHasNoCache(EcoString),
+    UnavailableFieldHasCache(EcoString),
+    UnavailableFieldIsStatic(EcoString),
+    HiddenFieldHasVisibleCache(EcoString),
 }
 
 impl Display for DocumentInvariantError {
@@ -65,6 +71,18 @@ impl Display for DocumentInvariantError {
             }
             Self::MissingNumberingId(id) => {
                 write!(f, "paragraph references missing numbering ID `{id}`")
+            }
+            Self::ResolvedFieldHasNoCache(instr) => {
+                write!(f, "resolved field `{instr}` has no cached result")
+            }
+            Self::UnavailableFieldHasCache(instr) => {
+                write!(f, "unavailable field `{instr}` unexpectedly has a cached result")
+            }
+            Self::UnavailableFieldIsStatic(instr) => {
+                write!(f, "unavailable field `{instr}` cannot be Typst-owned and locked")
+            }
+            Self::HiddenFieldHasVisibleCache(instr) => {
+                write!(f, "hidden field `{instr}` carries visible cached runs")
             }
         }
     }
@@ -215,6 +233,29 @@ impl State {
                 }
             }
             Run::Field(field) => {
+                if field.display == FieldDisplay::Hidden && !field.result.is_empty() {
+                    return Err(DocumentInvariantError::HiddenFieldHasVisibleCache(
+                        field.instr.clone(),
+                    ));
+                }
+                match field.cache_status {
+                    FieldCacheStatus::Resolved if field.result.is_empty() => {
+                        return Err(DocumentInvariantError::ResolvedFieldHasNoCache(
+                            field.instr.clone(),
+                        ));
+                    }
+                    FieldCacheStatus::Unavailable if !field.result.is_empty() => {
+                        return Err(DocumentInvariantError::UnavailableFieldHasCache(
+                            field.instr.clone(),
+                        ));
+                    }
+                    FieldCacheStatus::Unavailable if field.mode == FieldMode::Static => {
+                        return Err(DocumentInvariantError::UnavailableFieldIsStatic(
+                            field.instr.clone(),
+                        ));
+                    }
+                    _ => {}
+                }
                 for result in &field.result {
                     self.visit_run(result)?;
                 }
@@ -259,7 +300,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dom::Drawing;
+    use crate::dom::{Drawing, Field};
 
     #[test]
     fn duplicate_drawing_ids_are_rejected() {
@@ -297,6 +338,38 @@ mod tests {
         assert_eq!(
             state.visit_run(&run),
             Err(DocumentInvariantError::DecorativeDrawingHasAccessibleContent(9))
+        );
+    }
+
+    #[test]
+    fn resolved_field_requires_a_cached_result() {
+        let mut state = State::default();
+        let run = Run::Field(Field {
+            instr: " PAGE ".into(),
+            result: Vec::new(),
+            mode: FieldMode::Live,
+            display: FieldDisplay::Visible,
+            cache_status: FieldCacheStatus::Resolved,
+        });
+        assert_eq!(
+            state.visit_run(&run),
+            Err(DocumentInvariantError::ResolvedFieldHasNoCache(" PAGE ".into()))
+        );
+    }
+
+    #[test]
+    fn unavailable_field_cannot_be_typst_owned() {
+        let mut state = State::default();
+        let run = Run::Field(Field {
+            instr: " REF _Ref1 ".into(),
+            result: Vec::new(),
+            mode: FieldMode::Static,
+            display: FieldDisplay::Visible,
+            cache_status: FieldCacheStatus::Unavailable,
+        });
+        assert_eq!(
+            state.visit_run(&run),
+            Err(DocumentInvariantError::UnavailableFieldIsStatic(" REF _Ref1 ".into()))
         );
     }
 }

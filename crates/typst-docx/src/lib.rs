@@ -37,8 +37,9 @@ pub use self::introspect::DocxIntrospector;
 pub use self::mappers::math::equation_omml_fragment;
 pub use self::report::{
     DecisionReason, DrawingAccessibilityFact, DynamicFieldFact, ExportDecision,
-    ExportSource, ExportStage, FidelityReport, FieldOwner, FieldVisibility, FontFact,
-    LossSet, Representation, RepresentationCounts, SuppressedDiagnostic, SuppressedKind,
+    ExportSource, ExportStage, FidelityReport, FieldCacheStatus, FieldOwner,
+    FieldVisibility, FontFact, LossSet, Representation, RepresentationCounts,
+    SuppressedDiagnostic, SuppressedKind,
 };
 pub use self::rules::register;
 pub use self::snapshot::{ExportSnapshot, SnapshotNode, SnapshotPage, SnapshotPosition};

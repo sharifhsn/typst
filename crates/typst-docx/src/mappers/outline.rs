@@ -29,8 +29,8 @@ use typst_syntax::Span;
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, Field, FieldDisplay, FieldMode, Para, ParaChild, ParaProps, Run, RunProps,
-    TabAlign, TabLeader, TabStop, Toc, TocFigure, TocHeading,
+    Block, Field, FieldCacheStatus, FieldDisplay, FieldMode, Para, ParaChild, ParaProps,
+    Run, RunProps, TabAlign, TabLeader, TabStop, Toc, TocFigure, TocHeading,
 };
 
 /// The default outline depth used for the `\o "1-N"` switch when the outline
@@ -193,6 +193,7 @@ fn entry_para(
             result: vec![Run::Text { props: RunProps::default(), text: page_text }],
             mode: FieldMode::Live,
             display: FieldDisplay::Visible,
+            cache_status: FieldCacheStatus::Resolved,
         })));
     }
     Para {

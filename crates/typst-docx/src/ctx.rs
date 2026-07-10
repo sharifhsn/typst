@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ecow::{EcoString, eco_format};
 use rustc_hash::{FxHashMap, FxHashSet};
-use typst_library::diag::{SourceResult, warning};
+use typst_library::diag::{SourceDiagnostic, SourceResult, warning};
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Packed, StyleChain};
 use typst_library::introspection::{Locator, SplitLocator, Tag, TagElem};
@@ -29,9 +29,9 @@ use typst_ooxml_core::ns;
 use typst_syntax::{FileId, Span};
 
 use crate::dom::{
-    Block, BookmarkTable, Field, FieldDisplay, FieldMode, Footnote, HeadingStyleSample,
-    ListSpec, NumberingTable, ParaProps, Run, RunProps, TocFigure, TocHeading, Underline,
-    VertAlign,
+    Block, BookmarkTable, Field, FieldCacheStatus, FieldDisplay, FieldMode, Footnote,
+    HeadingStyleSample, ListSpec, NumberingTable, ParaProps, Run, RunProps, TocFigure,
+    TocHeading, Underline, VertAlign,
 };
 use crate::fallback::CachedOverlay;
 use crate::mappers;
@@ -347,6 +347,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 result: Vec::new(),
                 mode: crate::dom::FieldMode::Live,
                 display: crate::dom::FieldDisplay::Hidden,
+                cache_status: crate::dom::FieldCacheStatus::ConsumerRequired,
             }));
         }
     }
@@ -414,6 +415,22 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             reason,
             losses,
             affected_text_chars,
+        );
+    }
+
+    /// Retains a field-planning failure absorbed by a deliberate best-effort
+    /// plan instead of losing the diagnostic or aborting the whole document.
+    pub(crate) fn suppress_content_diagnostic(
+        &mut self,
+        content: &Content,
+        stage: ExportStage,
+        diagnostic: SourceDiagnostic,
+    ) {
+        self.fidelity_report.suppress_content(
+            content,
+            stage,
+            SuppressedKind::Error,
+            diagnostic,
         );
     }
 
@@ -1069,6 +1086,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                             result: runs,
                             mode: FieldMode::Live,
                             display: FieldDisplay::Visible,
+                            cache_status: FieldCacheStatus::Resolved,
                         })));
                     }
                     DirectLinkKind::Reference | DirectLinkKind::Other => {
@@ -1142,6 +1160,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                                         result: runs,
                                         mode: FieldMode::Live,
                                         display: FieldDisplay::Visible,
+                                        cache_status: FieldCacheStatus::Resolved,
                                     })));
                                     page_field = Some((direct_span, loc, index));
                                 }
@@ -1412,6 +1431,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                         result: runs,
                         mode: FieldMode::Live,
                         display: FieldDisplay::Visible,
+                        cache_status: FieldCacheStatus::Resolved,
                     }));
                 }
                 DirectLinkKind::Reference => {
@@ -1421,6 +1441,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                         result: runs,
                         mode: FieldMode::Static,
                         display: FieldDisplay::Visible,
+                        cache_status: FieldCacheStatus::Resolved,
                     }));
                 }
                 DirectLinkKind::Other => out.extend(runs),

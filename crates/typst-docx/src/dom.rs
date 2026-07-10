@@ -518,6 +518,27 @@ pub enum FieldDisplay {
     Hidden,
 }
 
+/// Provenance of the cached result carried by a complex field.
+///
+/// This is deliberately separate from [`FieldMode`]: ownership says who may
+/// update the field after export, while this says whether the package already
+/// contains a trustworthy value. Consumers treat a missing cache very
+/// differently from an intentionally consumer-computed field, so lowering must
+/// decide this before serialization rather than letting an empty `Vec` encode
+/// both states.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum FieldCacheStatus {
+    /// Typst produced a usable cached result.
+    Resolved,
+    /// The field is intentionally left for Word/Writer to compute (for example
+    /// PAGE/NUMPAGES), or is hidden and has no visible result by design.
+    ConsumerRequired,
+    /// Typst attempted to compute a cache but failed. The field remains a
+    /// best-effort consumer-owned fallback and the diagnostic is retained in
+    /// the fidelity report.
+    Unavailable,
+}
+
 impl FieldMode {
     pub(crate) fn locked(self) -> bool {
         self == Self::Static
@@ -530,6 +551,7 @@ pub struct Field {
     pub result: Vec<Run>,
     pub mode: FieldMode,
     pub display: FieldDisplay,
+    pub cache_status: FieldCacheStatus,
 }
 
 /// An image. Inline (`anchor: None`) or floating (`anchor: Some`).
