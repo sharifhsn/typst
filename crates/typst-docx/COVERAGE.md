@@ -1040,7 +1040,7 @@ caption/reference text on one 170 mm x 120 mm page. A manual select-all/F9
 update followed by a real Word save kept the Typst-owned hyperlink and hidden
 counter intact while updating live field caches; Writer rendered that Word-saved
 round trip with the same visible text. Structural gates now cover all ownership
-branches; the DOCX target passes 172 tests and the crate passes 13 unit gates.
+branches; the DOCX target passes 173 tests and the crate passes 13 unit gates.
 The cache-failure kernel also survived a LibreOffice 26.2.4.2 save/reopen: live
 `SEQ`/`PAGEREF` instructions remained, `cache="Unavailable"` survived in the
 Writer-stable custom property, and the one-page visible/searchable text was
@@ -1499,7 +1499,7 @@ report, so the two carriers cannot drift at export time.
 Structural regressions cover installed-versus-missing font facts, manifest
 counts/attributes, the portable `fontTable` reference, custom-property/root-
 relationship presence, and exact equality between the canonical and redundant
-payloads. The DOCX target passes 172 tests.
+payloads. The DOCX target passes 173 tests.
 
 A 2026-07-10 missing-font fixture compiled to one 160 x 120 mm Typst PDF page
 and one identically sized Writer page. Both kept searchable text and happened to
@@ -1543,7 +1543,7 @@ The manifest adds drawing/unlabeled counts and a `<typst:drawings>` collection.
 Existing structural tests now cover described and unlabeled SVG pictures,
 native text boxes, decorative vector shapes, decorative backgrounds, and a
 described foreground; one new invariant unit gate covers contradictory intent.
-The DOCX target now passes 172 structural tests and 13 crate unit tests.
+The DOCX target now passes 173 structural tests and 13 crate unit tests.
 
 A 2026-07-10 mixed fixture produced five drawings: one described SVG, one
 unlabeled SVG, one native text box, one decorative orange shape, and one
@@ -1687,3 +1687,25 @@ link texts; DOCX uses the same `_Typst…` value for `w:bookmarkStart/@w:name` a
 `w:hyperlink/@w:anchor`, its relationship targets `https://example.com` in
 external mode, and the manifest publishes one node edge and one URL edge.
 Repeated compilation produces identical link facts and bookmark names.
+
+## 34. Paged-authoritative page counters and TOC caches
+
+TOC page caches previously called `Counter::display_at` after DOCX lowering.
+That replayed custom numbering functions under `Target::Docx`, even when the
+PDF had already evaluated them successfully under `Target::Paged`. A function
+could therefore produce the correct PDF value but fail during DOCX export,
+forcing a `BestEffort` placeholder and a consumer refresh.
+
+Each snapshot node now owns resolved page-counter displays for its matching
+paged occurrences. Evaluation runs through a temporary engine whose
+introspector is the converged `PagedIntrospector` and whose target style is
+explicitly `Paged`; page patterns, updates, and resets are therefore captured
+from the visual reference universe. Counter facts participate in the snapshot
+hash and appear beneath their semantic node in the fidelity manifest.
+
+TOC cache planning first consults those facts. The real two-page fixture uses a
+numbering closure that deliberately errors under `Target::Docx`, roman `i` on
+the first page, then switches to Arabic and resets to `1`. PDF and the DOCX TOC
+both show `i`/`1`; the manifest records the same values, and the two `PAGEREF`
+fields are `Resolved` rather than `BestEffort`. Non-page semantic counters and
+pre-enrolled fallback regions remain snapshot migration work.

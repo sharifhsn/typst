@@ -4,8 +4,10 @@ use comemo::Track;
 use ecow::EcoString;
 use typst_export_common::paged::{PagedGeometry, PagedTableGeometry};
 use typst_layout::PagedIntrospector;
+use typst_library::engine::Engine;
+use typst_library::foundations::StyleChain;
 use typst_library::foundations::{Content, Selector};
-use typst_library::introspection::Introspector;
+use typst_library::introspection::{Counter, CounterKey, Introspector};
 use typst_library::layout::Size;
 use typst_library::routines::Pair;
 use typst_library::{
@@ -36,6 +38,14 @@ pub struct SnapshotNode {
     pub source: ExportSource,
     pub semantic_occurrences: usize,
     pub paged_positions: Vec<SnapshotPosition>,
+    pub page_counters: Vec<SnapshotPageCounter>,
+}
+
+/// Resolved page-counter value at one semantic node occurrence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotPageCounter {
+    pub page: usize,
+    pub display: EcoString,
 }
 
 /// One bibliography entry selected by the converged paged document.
@@ -119,6 +129,8 @@ impl ExportSnapshot {
     }
 
     pub(crate) fn build(
+        engine: &mut Engine,
+        styles: StyleChain,
         pairs: &[Pair<'_>],
         paged: Option<&PagedIntrospector>,
         page_sizes: Option<&[Size]>,
@@ -141,11 +153,11 @@ impl ExportSnapshot {
             // nodes join the sidecar when Typst assigned them a semantic
             // location (headings, figures, links, counters, notes, etc.).
             if content.location().is_none() {
-                push_node(&mut nodes, content, paged);
+                push_node(&mut nodes, content, paged, engine, styles);
             }
             let _ = content.traverse(&mut |element: Content| {
                 if element.location().is_some() {
-                    push_node(&mut nodes, &element, paged);
+                    push_node(&mut nodes, &element, paged, engine, styles);
                 }
                 ControlFlow::<()>::Continue(())
             });
@@ -154,7 +166,16 @@ impl ExportSnapshot {
         let links = collect_links(pairs, paged);
         let identity_nodes = nodes
             .iter()
-            .map(|node| (node.source.logical_id, node.semantic_occurrences))
+            .map(|node| {
+                (
+                    node.source.logical_id,
+                    node.semantic_occurrences,
+                    node.page_counters
+                        .iter()
+                        .map(|counter| (counter.page, counter.display.as_str()))
+                        .collect::<Vec<_>>(),
+                )
+            })
             .collect::<Vec<_>>();
         let identity_pages = pages
             .iter()
@@ -234,6 +255,17 @@ impl ExportSnapshot {
             bibliography_biblatex,
             bibliography_entries,
         }
+    }
+
+    pub(crate) fn page_counter_for_location(
+        &self,
+        location: typst_library::introspection::Location,
+    ) -> Option<&str> {
+        self.nodes
+            .iter()
+            .find(|node| node.source.location == Some(location))
+            .and_then(|node| node.page_counters.first())
+            .map(|counter| counter.display.as_str())
     }
 }
 
@@ -318,9 +350,12 @@ fn push_node(
     nodes: &mut Vec<SnapshotNode>,
     content: &Content,
     paged: Option<&PagedIntrospector>,
+    engine: &mut Engine,
+    styles: StyleChain,
 ) {
     let source = ExportSource::from_content(content);
     let paged_positions = matched_positions(content, paged);
+    let page_counters = matched_page_counters(content, paged, engine, styles);
     if let Some(existing) = nodes
         .iter_mut()
         .find(|node| node.source.logical_id == source.logical_id)
@@ -328,9 +363,71 @@ fn push_node(
         existing.semantic_occurrences += 1;
         existing.paged_positions.extend(paged_positions);
         normalize_positions(&mut existing.paged_positions);
+        existing.page_counters.extend(page_counters);
+        normalize_page_counters(&mut existing.page_counters);
     } else {
-        nodes.push(SnapshotNode { source, semantic_occurrences: 1, paged_positions });
+        nodes.push(SnapshotNode {
+            source,
+            semantic_occurrences: 1,
+            paged_positions,
+            page_counters,
+        });
     }
+}
+
+fn matched_page_counters(
+    content: &Content,
+    paged: Option<&PagedIntrospector>,
+    engine: &mut Engine,
+    styles: StyleChain,
+) -> Vec<SnapshotPageCounter> {
+    use typst_library::foundations::{Target, TargetElem};
+
+    let Some(paged) = paged else { return Vec::new() };
+    let locations = paged
+        .query(&content.elem().select())
+        .iter()
+        .filter(|candidate| candidate.span() == content.span())
+        .filter_map(|candidate| candidate.location())
+        .collect::<Vec<_>>();
+    let mut counters = Vec::new();
+    for location in locations {
+        let Some(page) = paged.page(location) else { continue };
+        let Some(numbering) = paged.page_numbering(location) else { continue };
+        let mut sink = typst_library::engine::Sink::new();
+        let mut sub = Engine {
+            world: engine.world,
+            library: engine.library,
+            introspector: typst_utils::Protected::new(
+                (paged as &dyn Introspector).track(),
+            ),
+            traced: engine.traced,
+            sink: sink.track_mut(),
+            route: typst_library::engine::Route::extend(engine.route.track()),
+        };
+        let target = TargetElem::target.set(Target::Paged).wrap();
+        let paged_styles = styles.chain(&target);
+        let Ok(display) = Counter::new(CounterKey::Page).display_at(
+            &mut sub,
+            location,
+            paged_styles,
+            numbering,
+            content.span(),
+        ) else {
+            continue;
+        };
+        counters.push(SnapshotPageCounter {
+            page: page.get(),
+            display: display.plain_text(),
+        });
+    }
+    normalize_page_counters(&mut counters);
+    counters
+}
+
+fn normalize_page_counters(counters: &mut Vec<SnapshotPageCounter>) {
+    counters.sort_by(|a, b| a.page.cmp(&b.page).then_with(|| a.display.cmp(&b.display)));
+    counters.dedup();
 }
 
 fn matched_positions(

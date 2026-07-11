@@ -116,14 +116,19 @@ pub fn outline(
 /// `fallback` (introspector-queried, plain text). A list of figures/tables fills
 /// from `figures` of its caption category. Called once the whole body, across
 /// all sections, has been converted.
+pub(crate) struct TocPlanning<'a, 'e> {
+    pub engine: &'a mut Engine<'e>,
+    pub styles: StyleChain<'a>,
+    pub fidelity_report: &'a mut FidelityReport,
+    pub snapshot: &'a crate::snapshot::ExportSnapshot,
+}
+
 pub(crate) fn fill_tocs(
     blocks: &mut [Block],
     recorded: &[TocHeading],
     fallback: &[TocHeading],
     figures: &[TocFigure],
-    engine: &mut Engine,
-    styles: StyleChain,
-    fidelity_report: &mut FidelityReport,
+    planning: &mut TocPlanning<'_, '_>,
 ) {
     let headings = if recorded.is_empty() { fallback } else { recorded };
     for block in blocks.iter_mut() {
@@ -138,8 +143,13 @@ pub(crate) fn fill_tocs(
             toc.entries = selected
                 .iter()
                 .map(|h| {
-                    let (page_text, cache_status) =
-                        cached_page_text(engine, styles, h.location, fidelity_report);
+                    let (page_text, cache_status) = cached_page_text(
+                        planning.engine,
+                        planning.styles,
+                        h.location,
+                        planning.fidelity_report,
+                        planning.snapshot,
+                    );
                     entry_para(
                         h.level,
                         &h.anchor,
@@ -161,8 +171,13 @@ pub(crate) fn fill_tocs(
             toc.entries = selected
                 .iter()
                 .map(|f| {
-                    let (page_text, cache_status) =
-                        cached_page_text(engine, styles, f.location, fidelity_report);
+                    let (page_text, cache_status) = cached_page_text(
+                        planning.engine,
+                        planning.styles,
+                        f.location,
+                        planning.fidelity_report,
+                        planning.snapshot,
+                    );
                     entry_para(
                         1,
                         &f.anchor,
@@ -231,6 +246,7 @@ fn cached_page_text(
     styles: StyleChain,
     location: Option<Location>,
     fidelity_report: &mut FidelityReport,
+    snapshot: &crate::snapshot::ExportSnapshot,
 ) -> (EcoString, FieldCacheStatus) {
     let source =
         || ExportSource::new("TOC page-number cache", Span::detached(), location);
@@ -245,6 +261,9 @@ fn cached_page_text(
         (EcoString::from("1"), FieldCacheStatus::BestEffort)
     };
     let Some(location) = location else { return unavailable(fidelity_report) };
+    if let Some(display) = snapshot.page_counter_for_location(location) {
+        return (display.into(), FieldCacheStatus::Resolved);
+    }
     let span = Span::detached();
     let Some(numbering) = engine.introspect(PageNumberingIntrospection(location, span))
     else {

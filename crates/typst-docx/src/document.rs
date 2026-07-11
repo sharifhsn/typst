@@ -160,6 +160,8 @@ fn docx_document_impl(
     let real_ref = paged_introspector.as_deref();
     let page_sizes_ref = paged_page_sizes.as_deref().map(Vec::as_slice);
     let export_snapshot = crate::snapshot::ExportSnapshot::build(
+        engine,
+        styles,
         &pairs,
         real_ref,
         page_sizes_ref,
@@ -433,14 +435,18 @@ fn docx_document_impl(
     // Now that every heading/figure's real bookmark is known, populate the
     // table(s) of contents and list(s) of figures in document order, across all
     // sections.
+    let mut toc_planning = crate::mappers::outline::TocPlanning {
+        engine,
+        styles,
+        fidelity_report: &mut fidelity_report,
+        snapshot: &export_snapshot,
+    };
     crate::mappers::outline::fill_tocs(
         &mut body,
         &toc_headings,
         &toc_fallback,
         &toc_figures,
-        engine,
-        styles,
-        &mut fidelity_report,
+        &mut toc_planning,
     );
 
     // Synthetic page model: a flowing document has no real pages, but templates

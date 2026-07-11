@@ -132,6 +132,14 @@ pub fn build(document: &DocxDocument) -> String {
                 position.page, position.x_pt, position.y_pt
             );
         }
+        for counter in &node.page_counters {
+            let _ = write!(
+                out,
+                "<typst:counter key=\"page\" page=\"{}\" display=\"{}\"/>",
+                counter.page,
+                escape_attr(&counter.display)
+            );
+        }
         out.push_str("</typst:node>");
     }
     out.push_str("</typst:nodes><typst:decisions>");

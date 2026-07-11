@@ -229,7 +229,9 @@ converged paged oracle plus the exact bibliography entry set and lossless
 BibLaTeX payload from that reference document. Both the external bibliography
 sidecar and Word Source Manager data derive from this one snapshot. Resolved
 semantic link edges also carry stable source/target identities; matched internal
-bookmarks use target-node IDs instead of conversion-order names.
+bookmarks use target-node IDs instead of conversion-order names. Resolved page
+counter displays at semantic nodes come from the paged target and supply TOC
+field caches without replaying numbering functions under `Target::Docx`.
 `fidelity_manifest_xml()` serializes the snapshot and fidelity records.
 Every package persists that versioned manifest at
 `customXml/typstFidelity.xml` and duplicates its exact text in the standard

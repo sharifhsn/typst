@@ -4052,6 +4052,28 @@ fn page_refs_follow_real_numbering_across_sections() {
 }
 
 #[test]
+fn snapshot_page_counters_preserve_patterns_and_resets() {
+    let src = "#set page(numbering: \"i\")\n= Front <front>\n#pagebreak()\n\
+               #set page(numbering: \"1\")\n#counter(page).update(1)\n= Main <main>";
+    let compiled = compile_docx(src, &[]);
+    let displays = compiled
+        .export_snapshot()
+        .nodes()
+        .iter()
+        .flat_map(|node| node.page_counters.iter())
+        .map(|counter| counter.display.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(displays.contains("i"), "front-matter counter is captured: {displays:?}");
+    assert!(
+        displays.contains("1"),
+        "reset main-matter counter is captured: {displays:?}"
+    );
+    let manifest = compiled.fidelity_manifest_xml();
+    assert!(manifest.contains("key=\"page\" page=\"1\" display=\"i\""));
+    assert!(manifest.contains("key=\"page\" page=\"2\" display=\"1\""));
+}
+
+#[test]
 fn leading_page_setup_does_not_advance_the_synthetic_page() {
     // A top-of-document `set page(..)` produces page-run machinery before the
     // first real body content. That setup must not count as a physical page,
@@ -4187,28 +4209,30 @@ fn failing_figure_numbering_closure_does_not_abort_the_export() {
 }
 
 #[test]
-fn failing_toc_page_cache_is_explicit_and_consumer_owned() {
-    // The baked TOC used to swallow this counter-display error and silently
-    // claim that page 1 was a resolved cache. Keep the visible best-effort
-    // value, but make both the diagnostic and Word-owned refresh state public.
+fn toc_page_cache_uses_the_paged_snapshot_not_the_docx_target() {
+    // This numbering function deliberately fails under Target::Docx. The PDF
+    // already resolved the authoritative page value under Target::Paged, so
+    // the TOC cache must consume that snapshot fact instead of replaying the
+    // closure in the incompatible target universe.
     let src = "#set page(numbering: (..nums) => if target() == \"docx\" { nums.pos().at(9) } else { \"1\" })\n\
                #outline()\n\n= Entry";
     let compiled = compile_docx(src, &[]);
     let report = compiled.fidelity_report();
     assert!(
-        report.suppressed_diagnostics().iter().any(|entry| {
-            entry.stage == ExportStage::FieldPlanning
-                && entry.kind == SuppressedKind::Error
-        }),
-        "the failed TOC cache evaluation must remain attributable"
+        !report
+            .suppressed_diagnostics()
+            .iter()
+            .any(|entry| { entry.stage == ExportStage::FieldPlanning })
     );
-    assert!(report.decisions().iter().any(|decision| {
-        decision.reason == DecisionReason::FieldCacheUnavailable
-            && decision.representation == Representation::Approximate
-    }));
+    assert!(
+        !report
+            .decisions()
+            .iter()
+            .any(|decision| { decision.reason == DecisionReason::FieldCacheUnavailable })
+    );
     assert!(report.dynamic_fields().iter().any(|field| {
         field.kind == "PAGEREF"
-            && field.cache_status == typst_docx::FieldCacheStatus::BestEffort
+            && field.cache_status == typst_docx::FieldCacheStatus::Resolved
     }));
 
     let p = parts(src);
@@ -4216,8 +4240,9 @@ fn failing_toc_page_cache_is_explicit_and_consumer_owned() {
     assert!(doc.contains("Entry"), "the TOC entry stays visible");
     assert!(doc.contains(" PAGEREF "), "Word can refresh the live page field");
     assert!(
-        p["customXml/typstFidelity.xml"].contains("cache=\"BestEffort\""),
-        "the embedded manifest must preserve placeholder provenance"
+        p["customXml/typstFidelity.xml"]
+            .contains("<typst:counter key=\"page\" page=\"1\" display=\"1\"/>"),
+        "the embedded snapshot must preserve the paged counter value"
     );
     assert_all_wellformed(&p);
 }
