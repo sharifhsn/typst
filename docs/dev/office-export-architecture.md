@@ -326,7 +326,8 @@ mechanical cleanup that introduced this document.
   content and content loss. Central fallback layout, layout-callback, section,
   delayed conversion, field-cache, and standalone-caption planning failures are
   now retained in `FidelityReport`; a block layout callback whose native and
-  paged recovery both fail is now an explicit `LayoutCallbackUnavailable` drop.
+  paged recovery both fail is now an explicit `LayoutCallbackUnavailable` drop,
+  and introspection-only placed bodies can no longer masquerade as visible flow.
 - PPTX table tags do not carry the resolver's final fill, stroke, inset,
   alignment, gutter, or cell-math contract.
 - PPTX live text is regrouped heuristically and does not carry a complete font,
@@ -473,7 +474,7 @@ mechanical cleanup that introduced this document.
   native `w:tblGrid` lowering, structured decisions, the embedded manifest, and
   the structural oracle-comparison gates.
 - `cargo clippy -p typst-docx --all-targets -- -D warnings` passes.
-- The complete structural DOCX test target passes 168 tests. New gates cover
+- The complete structural DOCX test target passes 169 tests. New gates cover
   raster/compatibility/approximation classification, a retained suppressed
   layout-callback error, nested unsupported math choosing one whole-region
   fallback, explicit placed-content planning, native anchored tables, and
@@ -525,6 +526,13 @@ mechanical cleanup that introduced this document.
   likewise no longer mislabeled as resolved: its visible `1` placeholder is
   inventoried as `BestEffort` and remains consumer-refreshable through
   `PAGEREF`.
+- The analogous placed-region fixture proved that a surviving introspection tag
+  had been mistaken for successful visible flow. The planner now preserves that
+  tag, continues to whole-region recovery, and records
+  `Drop/PositionedContentUnavailable` when no drawing can be anchored. The PDF
+  visibly contains `VISIBLE PLACED BODY`; the intentionally degraded DOCX keeps
+  following text and embeds both nested and enclosing drop facts instead of an
+  inaccurate flow approximation.
 - A two-section width fixture (100 mm and 160 mm text areas) was compared with
   the Typst PDF and opened in both Word and LibreOffice. Flexible 1:2 tracks,
   12 pt column gutters, 8 pt row gutters, and a nested table stayed horizontally

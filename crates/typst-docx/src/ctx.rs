@@ -418,6 +418,24 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         );
     }
 
+    /// Records the terminal state for a logical region after every planned
+    /// representation and whole-region fallback has failed.
+    pub(crate) fn record_content_drop(
+        &mut self,
+        content: &Content,
+        reason: DecisionReason,
+        message: &'static str,
+    ) {
+        self.record_content_decision(
+            content,
+            Representation::Drop,
+            reason,
+            LossSet::DROP,
+            content.plain_text().chars().count(),
+        );
+        self.warn_message(message, content.span());
+    }
+
     fn record_native_page_reference(&mut self, content: &Content) {
         self.record_content_decision(
             content,

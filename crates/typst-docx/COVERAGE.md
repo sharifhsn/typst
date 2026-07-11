@@ -1040,7 +1040,7 @@ caption/reference text on one 170 mm x 120 mm page. A manual select-all/F9
 update followed by a real Word save kept the Typst-owned hyperlink and hidden
 counter intact while updating live field caches; Writer rendered that Word-saved
 round trip with the same visible text. Structural gates now cover all ownership
-branches; the DOCX target passes 168 tests and the crate passes 13 unit gates.
+branches; the DOCX target passes 169 tests and the crate passes 13 unit gates.
 The cache-failure kernel also survived a LibreOffice 26.2.4.2 save/reopen: live
 `SEQ`/`PAGEREF` instructions remained, `cache="Unavailable"` survived in the
 Writer-stable custom property, and the one-page visible/searchable text was
@@ -1499,7 +1499,7 @@ report, so the two carriers cannot drift at export time.
 Structural regressions cover installed-versus-missing font facts, manifest
 counts/attributes, the portable `fontTable` reference, custom-property/root-
 relationship presence, and exact equality between the canonical and redundant
-payloads. The DOCX target passes 168 tests.
+payloads. The DOCX target passes 169 tests.
 
 A 2026-07-10 missing-font fixture compiled to one 160 x 120 mm Typst PDF page
 and one identically sized Writer page. Both kept searchable text and happened to
@@ -1543,7 +1543,7 @@ The manifest adds drawing/unlabeled counts and a `<typst:drawings>` collection.
 Existing structural tests now cover described and unlabeled SVG pictures,
 native text boxes, decorative vector shapes, decorative backgrounds, and a
 described foreground; one new invariant unit gate covers contradictory intent.
-The DOCX target now passes 168 structural tests and 13 crate unit tests.
+The DOCX target now passes 169 structural tests and 13 crate unit tests.
 
 A 2026-07-10 mixed fixture produced five drawings: one described SVG, one
 unlabeled SVG, one native text box, one decorative orange shape, and one
@@ -1605,3 +1605,24 @@ display to an apparently resolved page `1`. Its diagnostic is retained at
 the distinct `BestEffort` cache provenance: a visible placeholder exists, but
 Word or Writer owns refreshing it. Final-IR invariants require best-effort
 fields to remain live and to carry a placeholder.
+
+## 30. Introspection-only placed bodies are not visible representations
+
+Placed-content lowering previously tested only whether `ctx.blocks(body)` was
+non-empty. A failed nested layout can leave an ordered `Block::Tag` even though
+it emitted no paragraph, table, drawing, or other visible block. The outer
+`#place` therefore reported `PositionedContentFlowFallback` and returned without
+trying its atomic fallback: introspection survived, but the visible region did
+not, and no placed-region drop was recorded.
+
+The place planner now distinguishes introspection scaffolding from rendered
+blocks. Tags remain in document order, but a tag-only body proceeds to the
+whole-region raster attempt. If that also produces no anchorable drawing, the
+planner records `Drop/PositionedContentUnavailable` and emits a source warning
+through the shared terminal-region helper.
+
+The real 120 x 80 mm fixture renders `VISIBLE PLACED BODY` in the PDF's 60 mm
+content region. Its deliberately failing DOCX callback leaves only `After` in
+the Word body; the package now truthfully reports both the nested
+`LayoutCallbackUnavailable` and enclosing `PositionedContentUnavailable`
+regions, with `drop="2"`, rather than claiming an approximate flowed result.

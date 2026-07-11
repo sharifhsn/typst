@@ -87,6 +87,9 @@ pub enum DecisionReason {
     /// Non-native placed content was rasterized as one anchored region so its
     /// position and appearance survived atomically.
     PositionedContentRasterFallback,
+    /// Placed content produced neither editable flow nor an anchorable
+    /// whole-region fallback.
+    PositionedContentUnavailable,
     /// Contextual page furniture varied beyond Word's first/even/default
     /// header model, so one sampled value is repeated rather than pretending
     /// that a page-specific value is parity-stable.

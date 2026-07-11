@@ -4234,6 +4234,37 @@ fn failed_layout_callback_and_fallback_record_an_explicit_drop() {
 }
 
 #[test]
+fn failed_placed_region_records_its_terminal_drop() {
+    let src = "#set page(width: 120mm, height: 80mm, margin: 10mm)\n\
+               #place(top, layout(size => if size.height > 70mm { panic(\"placed region rejected\") } else { [VISIBLE PLACED BODY] }))\n\
+               After";
+    let compiled = compile_docx(src, &[]);
+    let report = compiled.fidelity_report();
+    assert!(
+        report.decisions().iter().any(|decision| {
+            decision.reason == DecisionReason::PositionedContentUnavailable
+                && decision.representation == Representation::Drop
+        }),
+        "decisions: {:?}",
+        report.decisions()
+    );
+    assert!(!report.decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedContentFlowFallback
+    }));
+    assert!(
+        report
+            .suppressed_diagnostics()
+            .iter()
+            .any(|entry| entry.stage == ExportStage::FallbackLayout)
+    );
+
+    let p = parts(src);
+    assert!(p["word/document.xml"].contains("After"));
+    assert!(p["customXml/typstFidelity.xml"].contains("PositionedContentUnavailable"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn numbering_only_change_emits_a_section_break() {
     // Front-matter roman numerals switching to arabic (`set page(numbering:)`)
     // is section-scoped in Word (`w:pgNumType`); same-geometry runs must not

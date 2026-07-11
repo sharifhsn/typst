@@ -457,7 +457,8 @@ pub fn place(
     // valuable) text beats a positioned-but-dead raster. Genuinely visual
     // placed content — a bare shape, a canvas — lowered to a single drawing
     // above and never reaches here.
-    if !blocks.is_empty() {
+    let has_rendered_blocks = blocks.iter().any(|block| !matches!(block, Block::Tag(_)));
+    if has_rendered_blocks {
         ctx.record_content_decision(
             &placed,
             Representation::Approximate,
@@ -484,9 +485,20 @@ pub fn place(
             set_place_anchor(&mut drawing, elem, styles, ctx);
             let mut content = vec![ParaChild::Run(Run::Drawing(drawing))];
             content.extend(runs.map(ParaChild::Run));
-            Ok(vec![Block::Para(Para { props: ParaProps::default(), content })])
+            blocks.push(Block::Para(Para { props: ParaProps::default(), content }));
+            Ok(blocks)
         }
-        _ => Ok(Vec::new()),
+        _ => {
+            ctx.record_content_drop(
+                &placed,
+                DecisionReason::PositionedContentUnavailable,
+                "placed content and whole-region fallback produced no output",
+            );
+            // Introspection-only blocks are not a visible representation, but
+            // they must remain in document order even when the placed visual
+            // itself has no safe fallback.
+            Ok(blocks)
+        }
     }
 }
 
