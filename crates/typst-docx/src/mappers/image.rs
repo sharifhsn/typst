@@ -187,7 +187,7 @@ pub fn figure(
     // Register a bookmark so cross-references to this figure resolve. We bracket
     // the whole figure (caption + body) with the start/end markers, attaching
     // them to the first and last emitted paragraphs.
-    let bookmark = elem.location().map(|loc| ctx.add_bookmark(loc));
+    let bookmark = elem.location().and_then(|loc| ctx.bookmark_for_emission(loc));
 
     // G9: build the caption with a `SEQ` field for the number (so Word
     // auto-renumbers) instead of a baked-in static counter value.
