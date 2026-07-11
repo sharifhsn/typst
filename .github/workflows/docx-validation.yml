@@ -1,0 +1,77 @@
+name: DOCX validation
+
+on:
+  pull_request:
+    paths:
+      - "crates/typst-docx/**"
+      - "crates/typst-cli/**"
+      - "tests/src/docx.rs"
+      - "tools/docx-validate/**"
+      - ".github/workflows/docx-validation.yml"
+  push:
+    branches: [main, docx-export, office-pandoc]
+    paths:
+      - "crates/typst-docx/**"
+      - "crates/typst-cli/**"
+      - "tests/src/docx.rs"
+      - "tools/docx-validate/**"
+      - ".github/workflows/docx-validation.yml"
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      visual:
+        description: "Run the LibreOffice visual lane"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Fixture package, semantic, and editability checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - uses: astral-sh/setup-uv@v7
+      - run: cargo build -p typst-cli --release
+      - run: >-
+          uv run tools/docx-validate/run.py
+          --typst target/release/typst
+          --out target/docx-validation
+          --mode smoke
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: docx-validation-smoke
+          path: target/docx-validation
+          retention-days: 14
+
+  visual:
+    name: Fixture LibreOffice visual checks
+    needs: smoke
+    if: github.event_name == 'schedule' || inputs.visual == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - uses: astral-sh/setup-uv@v7
+      - run: sudo apt-get update && sudo apt-get install -y libreoffice-writer poppler-utils
+      - run: cargo build -p typst-cli --release
+      - run: >-
+          uv run tools/docx-validate/run.py
+          --typst target/release/typst
+          --out target/docx-validation-visual
+          --mode smoke
+          --visual
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: docx-validation-visual
+          path: target/docx-validation-visual
+          retention-days: 14

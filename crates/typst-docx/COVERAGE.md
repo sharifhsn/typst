@@ -2,9 +2,16 @@
 
 A map of what has been **deliberately handled** vs **deliberately skipped** (and
 *why*), so that a new finding can be quickly classified as a genuine gap or as
-already-covered noise. Validated against the 627-document `typst-corpus`
-(`bench/docx_batch.py` for validity, `bench/docx_oracle.py` for content
-correctness). Steady state: **616/627 export, 0 invalid XML.**
+already-covered noise. The current, checked-in package and semantic validator
+lives in [`../../tools/docx-validate/`](../../tools/docx-validate/); its
+workflow, report format, smoke corpus, and explicit non-goals are documented in
+[`../../docs/dev/docx-validation.md`](../../docs/dev/docx-validation.md).
+
+The older 627-document `typst-corpus` campaign used local
+`bench/docx_batch.py` and `bench/docx_oracle.py` scripts that are **not present
+in this repository**. Its final recorded snapshot was **616/627 exports and 0
+invalid XML packages**. Keep that number as dated regression evidence, not as a
+reproducible current release result or a public compatibility percentage.
 
 The four feature tiers (Native / Approximate / Rasterized / Unsupported) and
 the per-feature mapping live in the [README](README.md); this file is the
@@ -14,7 +21,8 @@ the rationale behind each disposition and the catalogue of noise.
 > **Historical ledger.** Corpus counts and dispositions below describe the
 > exporter snapshot in which each audit was run. They are valuable evidence,
 > but not a substitute for the current cross-export issue register and design in
-> [`../../docs/dev/office-export-architecture.md`](../../docs/dev/office-export-architecture.md).
+> [`../../docs/dev/office-export-architecture.md`](../../docs/dev/office-export-architecture.md),
+> or for a fresh run of the checked-in validator above.
 
 ## Current rearchitecture foundation
 
@@ -635,9 +643,12 @@ recovered text as **hidden `w:vanish` runs** in the same paragraph (and sets the
 drawing's `descr` alt-text to the space-joined transcription).
 
 The image is byte-for-byte the same PNG — **zero visual regression** — but the
-region is no longer dead pixels: the text is searchable (Word Find), selectable,
-copy-pasteable, screen-reader accessible (both the hidden runs and the image alt
-text), and indexable. The hidden block is bracketed with hidden spaces so its
+region is no longer dead pixels: the recovered text is available to Word Find,
+copy/paste, and indexing through hidden runs and the image description. This is
+**not yet a screen-reader claim**: consumers differ in whether they announce
+hidden runs, descriptions, or both, so release-level assistive-technology tests
+must check for omissions and duplicate announcements. The hidden block is
+bracketed with hidden spaces so its
 first/last words keep a boundary against adjacent visible runs (without them a
 consumer concatenating run text glues e.g. `urbane`+`Stoicos` — the one
 tokenization seam the corpus check caught).
@@ -658,7 +669,9 @@ across those 298 docs — some more than doubled (`universal-jlu-thesis`
 359->1241). Corpus batch 618 OK / **0 INVALID**, 68/68 docx tests green,
 LibreOffice round-trips cleanly (the `w:vanish` text correctly does not render,
 so the visual is unchanged, while staying in the document model for
-search/accessibility). The residue that "can't become text" now does.
+search and accessibility metadata). Assistive-technology behavior remains
+subject to the screen-reader qualification above. The residue that "can't
+become text" now does.
 
 ### 7.2 Radial gradient (scoped out in §4, see the `6bcb673cf` commit)
 OOXML's radial gradient is expressed as an inset (`a:fillToRect`) into the
@@ -1517,6 +1530,12 @@ original canonical part. This proves exact evidence survival for this fixture,
 not a blanket guarantee across future Writer versions.
 
 ## 27. Explicit drawing accessibility semantics and inventory
+
+> **Scope:** This section records structural metadata and dated observations for
+> specific fixtures. It does not establish WCAG, Section 508, EN 301 549, or
+> screen-reader conformance for arbitrary exports. Package validation cannot
+> substitute for Word's Accessibility Checker, reading-order review, and testing
+> with the assistive technology used by the intended audience.
 
 Drawing accessibility previously depended only on optional image alt text.
 Bodyless vector art, page backgrounds, text boxes, described pictures, and an

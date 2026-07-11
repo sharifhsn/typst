@@ -10,8 +10,44 @@ on:
   workflow_dispatch:
 
 jobs:
+  validate-docx-release:
+    name: Validate native release DOCX export
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+
+      - name: Build native release binary
+        # The CLI updater is hard-coded to typst/typst. Enabling it in this fork
+        # would replace an Office-capable binary with an upstream release.
+        run: cargo build -p typst-cli --release
+
+      - name: Validate DOCX package, semantics, and editability
+        run: >-
+          uv run tools/docx-validate/run.py
+          --typst target/release/typst
+          --out target/docx-validation-release
+          --mode smoke
+
+      - name: Upload DOCX validation evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: docx-validation-release
+          path: target/docx-validation-release
+          retention-days: 30
+
   build-binaries:
     name: Build ${{ matrix.target }} binary
+    needs: validate-docx-release
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -60,11 +96,11 @@ jobs:
           # Suppress getrandom 0.2/0.3 NetBSD metadata conflict warning (doesn't
           # affect us). We can't currently unify the depencencies because
           # unicode_names2 is not compatible with getrandom 0.3.
-          CROSS_NO_WARNINGS=0 cross build -p typst-cli --release --target "${{ matrix.target }}" --features self-update,vendor-openssl
+          CROSS_NO_WARNINGS=0 cross build -p typst-cli --release --target "${{ matrix.target }}" --features vendor-openssl
 
       - name: Run Cargo
         if: ${{ !matrix.cross }}
-        run: cargo build -p typst-cli --release --target "${{ matrix.target }}" --features self-update
+        run: cargo build -p typst-cli --release --target "${{ matrix.target }}"
 
       - name: Create artifact directory
         shell: bash
@@ -94,6 +130,7 @@ jobs:
 
   build-docs:
     name: Build documentation (PDF)
+    needs: validate-docx-release
     runs-on: ubuntu-latest
     permissions:
       contents: write

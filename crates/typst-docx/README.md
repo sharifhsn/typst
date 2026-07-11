@@ -3,7 +3,9 @@
 Native Word (`.docx`) export for Typst. It walks the realized Typst element tree
 under a `Target::Docx` and emits idiomatic Office Open XML — real headings,
 tables, lists, OMML math, footnotes, fields, and styles — rather than a flat
-rendering. Output opens cleanly in Microsoft Word and LibreOffice.
+rendering. Representative fixtures are package-validated and have been opened
+in Microsoft Word and LibreOffice, but unfamiliar documents can still expose
+consumer-specific repair or reflow bugs; this remains preview software.
 
 > **Status: experimental / preview.** Like Typst's HTML export, this is a preview
 > feature. Structural content (text, tables, math, lists, references) maps to
@@ -155,7 +157,7 @@ encoder convention.
 | **PNG / JPEG / GIF** images | ✅ | embedded **verbatim** (no re-encode) |
 | **SVG** images | ✅ | native SVG with a PNG compatibility fallback |
 | **PDF / WebP** images | 🖼️ | rasterized to PNG |
-| Drawing accessibility | ✅ | image `alt` becomes the Word description; text boxes expose native text; bodyless art and page backgrounds are explicitly decorative; unresolved non-decorative images are counted as unlabeled |
+| Drawing accessibility metadata | ⚠️ | image `alt` becomes the Word description; text boxes expose native text; bodyless art and page backgrounds are explicitly decorative; unresolved non-decorative images are counted as unlabeled. This is structural support, not an accessibility certification; verify the final file in Word's Accessibility Checker and with the intended screen reader. |
 | Rect, square, circle, ellipse, polygon (solid **or linear-gradient** fill) | ✅ | **native vector** `wps:wsp` DrawingML — solid → `a:solidFill`, linear gradient → `a:gradFill` |
 | Framed text boxes (`#box`/`#rect[text]`) | ✅ | editable `wps:txbx`, or flowing shaded paragraphs |
 | Horizontal rules (`#line`) | ✅ | paragraph bottom border |
@@ -219,6 +221,25 @@ typst compile --format docx document.typ document.docx
 ```
 
 The target is also selected automatically from a `.docx` output extension.
+
+## Validation and accessibility
+
+The checked-in validator and smoke corpus live in
+[`../../tools/docx-validate/`](../../tools/docx-validate/). Its reproducible
+workflow, dependency requirements, checks, report schema, and known limits are
+documented in
+[`../../docs/dev/docx-validation.md`](../../docs/dev/docx-validation.md).
+Validation covers the generated package and the semantic smoke expectations; it
+does not prove pixel identity with the PDF, Microsoft Word compatibility for
+every document, or accessibility conformance.
+
+The exporter emits native document structure, language and direction metadata,
+alternative-text descriptions, explicit decorative markers, and a fidelity
+inventory of unlabeled drawings. Before distributing a document with an
+accessibility requirement, run Word's Accessibility Checker, repair any missing
+descriptions or reading-order issues, and test with the audience's screen
+reader. Dated consumer observations in [COVERAGE.md](COVERAGE.md) are fixture
+evidence rather than a blanket WCAG, Section 508, or EN 301 549 claim.
 
 `DocxDocument::fidelity_report()` exposes structured representation decisions
 (`NativeWithFallback`, `Approximate`, `Raster`, and `Drop` as they are enrolled),

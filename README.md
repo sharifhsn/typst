@@ -46,9 +46,9 @@ consider signing up to our [collaborative online editor][app] for free.
 > Both are **experimental previews** (like Typst's own HTML export); see
 > **[Word export](#word-export-this-fork)** and
 > **[PowerPoint export](#powerpoint-export-this-fork)** below for how to build
-> them, what maps natively, and the honest limitations. A companion
-> [Pandoc-AST target](https://github.com/sharifhsn/typst/tree/claude/typst-pandoc)
-> (Typst → LaTeX / Markdown / EPUB / …) lives on a sibling branch.
+> them, what maps natively, and the honest limitations. This fork also includes
+> a [Pandoc-AST target](crates/typst-pandoc/README.md) for evaluated Typst →
+> LaTeX / Markdown / EPUB / … workflows.
 >
 > This fork is **not affiliated with or endorsed by the Typst maintainers**, and
 > the export code is not part of upstream Typst.
@@ -124,6 +124,13 @@ Let's dissect what's going on:
 
 ## Installation
 Typst's CLI is available from different sources:
+
+> [!IMPORTANT]
+> The package-manager commands and upstream Typst releases below install the
+> official compiler and **do not include this fork's DOCX, PPTX, or Pandoc
+> exporters**. For Office export, use a binary from the
+> [fork releases][fork-releases] or build this repository at the matching
+> release tag or commit.
 
 - You can get sources and pre-built binaries for the latest release of Typst
   from the [releases page][releases]. Download the archive for your platform and
@@ -201,17 +208,27 @@ various editor extensions.
 ## Word export (this fork)
 This fork adds a native Word exporter (`crates/typst-docx`). It walks Typst's
 realized element tree under a dedicated `Docx` target and emits idiomatic Office
-Open XML that opens cleanly in **Microsoft Word** and **LibreOffice** — using
-Word's built-in styles, so the Navigation pane and Styles gallery work. Some
+Open XML using Word's built-in styles, so the Navigation pane and Styles gallery
+work. Representative fixtures are package-validated and have been exercised in
+**Microsoft Word** and **LibreOffice**, but this preview cannot guarantee every
+document will open without repair or reflow. Some
 cross-references and numbering are emitted as live Word fields; updating fields
 can change results when Word's semantics differ from Typst's.
 
-Because there are no pre-built binaries for the fork yet, build it from source
-(requires a [Rust][rust] toolchain):
+Download a pre-built archive from the [fork releases][fork-releases], extract
+it, and put the `typst` executable on your `PATH`. Release assets are built from
+the tagged source and smoke-tested for DOCX export before upload. Install future
+fork releases from the same page: these assets intentionally omit `typst
+update`, whose current implementation downloads official upstream releases and
+would replace the Office-capable binary.
+
+To build the same source yourself, check out the release tag or commit you want
+to use (requires a [Rust][rust] toolchain):
 
 ```sh
-git clone -b office-pandoc https://github.com/sharifhsn/typst
+git clone https://github.com/sharifhsn/typst
 cd typst
+git checkout <release-tag-or-commit>
 cargo build --release
 # the binary is at target/release/typst
 ```
@@ -236,7 +253,8 @@ DrawingML.
 **What falls back to an embedded image:** graphics with no safe Word equivalent —
 PDF/WebP images, CeTZ/fletcher diagrams, many transforms, and radial/conic
 gradients. SVG images carry a native SVG part plus a PNG compatibility fallback.
-Rasterized regions keep recovered hidden text where possible.
+Rasterized regions carry recovered text or descriptions where the exporter can
+do so without presenting duplicate visible content to document consumers.
 
 **Known limitations:** Word reflows native paragraphs and tables with its own
 fonts and layout engine, so editability and pixel identity sometimes conflict.
@@ -250,6 +268,16 @@ in [`crates/typst-docx/README.md`](crates/typst-docx/README.md) and
 comparison against typ2docx and pandoc is in [`COMPARISON.md`](COMPARISON.md).
 The cross-target design, current architectural risks, and validation model are
 in [`docs/dev/office-export-architecture.md`](docs/dev/office-export-architecture.md).
+
+**Accessibility status:** the exporter emits native headings, lists, tables,
+language/direction metadata, image descriptions, and explicit decorative-art
+markers, and its fidelity manifest reports unlabeled drawings. Those structural
+features are useful to assistive technology, but the exporter is **not yet
+certified or exhaustively tested for accessibility**. Before distributing an
+accessible document, run Microsoft Word's Accessibility Checker, add any
+missing alternative text, verify reading order, and test the document with the
+screen reader used by its audience. A successful package validation or a clean
+open in Word is not an accessibility conformance result.
 
 Output is byte-for-byte reproducible under `SOURCE_DATE_EPOCH`. This is preview
 software: please report anything that opens wrong or looks off.
@@ -407,6 +435,7 @@ We'd like to thank everyone who is supporting Typst's development, be it via
 [scripting]: https://typst.app/docs/reference/scripting/
 [rust]: https://rustup.rs/
 [releases]: https://github.com/typst/typst/releases/
+[fork-releases]: https://github.com/sharifhsn/typst/releases/
 [repology]: https://repology.org/project/typst/versions
 [contact]: https://typst.app/contact
 [architecture]: https://github.com/typst/typst/blob/main/docs/dev/architecture.md

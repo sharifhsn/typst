@@ -10,9 +10,13 @@ credentials).
 
 **Fidelity metric:** render the exported file to PDF via LibreOffice headless,
 rasterize both it and the gold Typst PDF to fixed-size grayscale strips, score mean
-per-pixel agreement in [0, 1] — the same oracle this exporter is validated with
-corpus-wide. **Structure metrics** are counted from the raw OOXML. The scoring and
-audit scripts are in [`crates/typst-pptx/compare/`](crates/typst-pptx/compare/), so every number here is reproducible.
+per-pixel agreement in [0, 1]. **Structure metrics** are counted from the raw
+OOXML. The historical scoring and audit scripts are in
+[`crates/typst-pptx/compare/`](crates/typst-pptx/compare/). The benchmark inputs
+and third-party tool environments are not vendored, so reproducing these dated
+numbers also requires the same corpus revision, fonts, LibreOffice version, and
+converter versions. Current DOCX release validation is documented separately in
+[`docs/dev/docx-validation.md`](docs/dev/docx-validation.md).
 
 > **Dated benchmark snapshot (2026-07-03).** These measurements compare the
 > revisions and installed renderers used on that date. They are regression
@@ -44,7 +48,7 @@ slides = 13 `<p:pic>` images, zero `<a:t>` text elements).
 | gradients / alpha | 13 / 3 | 13 / 3 | — |
 
 **What the gap looks like**
-([`compare/calmly-touying-slide2-3way.png`](crates/typst-pptx/compare/calmly-touying-slide2-3way.png)):
+([`crates/typst-pptx/compare/calmly-touying-slide2-3way.png`](crates/typst-pptx/compare/calmly-touying-slide2-3way.png)):
 on the "Introduction" section divider, this exporter matches the gold PDF's serif
 face and position; typ2pptx renders it bold sans and wraps it mid-word
 ("Introducti / on"). Verified in the XML: the deck's titles are Libertinus Serif
@@ -79,7 +83,7 @@ installs from PyPI in seconds, and runs fast (0.2–0.9 s/deck; this exporter
 A pixel metric can't distinguish live text from a screenshot — a fully rasterized
 deck scores ~perfect. So nativeness is audited separately: live `<a:t>` words
 against the gold PDF's text layer, across 112 real presentation templates
-([`compare/nativeness_audit.py`](crates/typst-pptx/compare/nativeness_audit.py)). Result: **the median
+([`crates/typst-pptx/compare/nativeness_audit.py`](crates/typst-pptx/compare/nativeness_audit.py)). Result: **the median
 deck preserves 100% of its words as editable text (mean 97.5%)**.
 
 The audit is also how the exporter's biggest content-loss bug was found and fixed:
@@ -95,7 +99,7 @@ with its reason and the text characters affected.
 
 ## DOCX: vs typ2docx and pandoc
 
-**Reliability first:** pandoc's Typst reader failed **0/4** real templates — it
+**Reliability first:** pandoc's Typst reader succeeded on **0/4** real templates — it
 parses syntax but doesn't evaluate code, so any template with
 `#import "@preview/..."` dies immediately. typ2docx crashed on 1/4 (classicthesis:
 an internal panic, `extract.rs "project should compile: unable to get the current
@@ -172,7 +176,12 @@ Python/pandoc/Adobe pipeline, ~0.1 s per document.
 
 ## Reproducing
 
-The compare scripts live in [`crates/typst-pptx/compare/`](crates/typst-pptx/compare/): `score_files.py` (fidelity),
-`audit_structure.py` (OOXML structure counts), `nativeness_audit.py` (corpus
-text-recovery + raster-event audit). Each is a `uv run`-able PEP-723 script;
-methodology details are in their docstrings. Measured 2026-07-03.
+The comparison scripts are
+[`score_files.py`](crates/typst-pptx/compare/score_files.py) (fidelity),
+[`audit_structure.py`](crates/typst-pptx/compare/audit_structure.py) (OOXML
+structure counts), and
+[`nativeness_audit.py`](crates/typst-pptx/compare/nativeness_audit.py) (corpus
+text recovery and raster-event audit). Each is a `uv run`-able PEP-723 script;
+methodology details and required arguments are in its docstring. The nativeness
+audit's corpus checkout is currently configured in the script and must be
+adjusted to the local corpus path before use. Measurements are from 2026-07-03.

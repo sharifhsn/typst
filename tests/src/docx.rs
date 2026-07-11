@@ -673,6 +673,24 @@ fn table_maps_to_wtbl() {
 }
 
 #[test]
+fn table_header_rows_are_marked_for_assistive_structure() {
+    let p = parts("#table(columns: 2, table.header([Name], [Value]), [Alpha], [1])");
+    let rows = element_fragments(&p["word/document.xml"], "tr");
+    assert_eq!(rows.len(), 2, "one header row and one body row");
+    assert!(
+        rows[0].contains("<w:tblHeader/>"),
+        "table.header row carries the OOXML repeating-header marker: {}",
+        rows[0]
+    );
+    assert!(
+        !rows[1].contains("<w:tblHeader/>"),
+        "body rows must not be promoted to headers: {}",
+        rows[1]
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn fixed_vertical_space_between_tables_is_an_explicit_flow_block() {
     let p = parts(
         "#table(columns: 1, [Before])\n\
@@ -1038,6 +1056,10 @@ fn svg_image_embeds_native_svg_with_png_fallback() {
         "xmlns:asvg=\"http://schemas.microsoft.com/office/drawing/2016/SVG/main\""
     ));
     assert!(doc.contains("descr=\"Brand mark\""));
+    assert!(
+        !doc.contains("<adec:decorative"),
+        "a drawing with explicit alternative text is not also decorative"
+    );
 
     let described = compile_docx_with_world(&TestWorld::with_files(
         r#"#image("logo.svg", width: 40pt, alt: "Brand mark")"#,
@@ -2894,7 +2916,14 @@ fn decorative_shape_becomes_a_vector_drawing() {
     assert!(doc.contains("prst=\"rect\""), "with rectangle preset geometry");
     assert!(!doc.contains("a:blip"), "and is not an embedded raster image");
     assert!(doc.contains("a:solidFill"), "the solid fill is carried");
-    assert!(doc.contains("<adec:decorative"), "bodyless art is explicitly decorative");
+    assert!(
+        doc.contains("<adec:decorative xmlns:adec=\"http://schemas.microsoft.com/office/drawing/2017/decorative\" val=\"1\"/>"),
+        "bodyless art carries Office's explicit decorative marker"
+    );
+    assert!(
+        !doc.contains("descr=\""),
+        "decorative art must not duplicate an accessible description"
+    );
     let compiled = compile_docx(
         "#rect(width: 2cm, height: 1cm, fill: blue, stroke: 1pt + red)",
         &[],
