@@ -61,8 +61,11 @@ pub fn heading(
         .bookmarked
         .get(styles)
         .unwrap_or_else(|| elem.outlined.get(styles));
-    let bookmark =
-        if bookmarked { elem.location().map(|loc| ctx.add_bookmark(loc)) } else { None };
+    let bookmark = if bookmarked {
+        elem.location().and_then(|loc| ctx.bookmark_for_emission(loc))
+    } else {
+        None
+    };
 
     if let Some((id, ref name)) = bookmark {
         content.push(ParaChild::BookmarkStart { id, name: name.clone() });

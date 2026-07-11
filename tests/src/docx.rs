@@ -2649,6 +2649,20 @@ fn labeled_targets_get_bookmarks_so_refs_resolve() {
 }
 
 #[test]
+fn repeated_located_heading_emits_one_bookmark_pair() {
+    // Query results retain their original location. Showing the same result twice
+    // must not repeat that location's OOXML marker pair.
+    let p = parts(
+        "= Repeated <repeated>\n\n\
+         #context { let it = query(<repeated>).first(); (it, it) }",
+    );
+    let doc = &p["word/document.xml"];
+    assert_eq!(doc.matches("<w:bookmarkStart ").count(), 1);
+    assert_eq!(doc.matches("<w:bookmarkEnd ").count(), 1);
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn snapshot_link_edges_drive_stable_internal_bookmark_names() {
     let src = "= Target <target>\n\n#link(<target>)[internal] and #link(\"https://example.com\")[external]";
     let first = compile_docx(src, &[]);

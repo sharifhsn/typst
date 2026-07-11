@@ -84,6 +84,7 @@ pub struct DocxCtx<'a, 'e> {
     pub(crate) part_rels: Option<Rels>,
     next_bookmark_id: u32,
     snapshot_bookmark_names: FxHashMap<Location, EcoString>,
+    emitted_bookmarks: FxHashSet<Location>,
     next_docpr_id: u32,
     /// Monotonic id for unique header/footer part names across sections.
     next_hdrftr_id: u32,
@@ -209,6 +210,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             part_rels: None,
             next_bookmark_id: 1,
             snapshot_bookmark_names: FxHashMap::default(),
+            emitted_bookmarks: FxHashSet::default(),
             next_docpr_id: 1,
             next_hdrftr_id: 1,
             next_z: 1,
@@ -603,6 +605,11 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             .unwrap_or_else(|| eco_format!("_Ref{id}"));
         self.bookmarks.by_location.insert(loc, (name.clone(), id));
         (id, name)
+    }
+
+    /// Returns a bookmark only the first time its marker pair should be emitted.
+    pub fn bookmark_for_emission(&mut self, loc: Location) -> Option<(u32, EcoString)> {
+        self.emitted_bookmarks.insert(loc).then(|| self.add_bookmark(loc))
     }
 
     /// Allocates (or reuses) an external hyperlink relationship in the active
@@ -1302,9 +1309,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             if let Some(loc) = label_loc
                 && out.len() > child_out_start
             {
-                let (id, name) = self.add_bookmark(loc);
-                out.insert(child_out_start, ParaChild::BookmarkStart { id, name });
-                out.push(ParaChild::BookmarkEnd { id });
+                if let Some((id, name)) = self.bookmark_for_emission(loc) {
+                    out.insert(child_out_start, ParaChild::BookmarkStart { id, name });
+                    out.push(ParaChild::BookmarkEnd { id });
+                }
             }
         }
 

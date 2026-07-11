@@ -131,9 +131,10 @@ pub fn convert_children(
             if child.label().is_some()
                 && let Some(loc) = child.location()
             {
-                let (id, name) = ctx.add_bookmark(loc);
-                pending.insert(par_start, ParaChild::BookmarkStart { id, name });
-                pending.push(ParaChild::BookmarkEnd { id });
+                if let Some((id, name)) = ctx.bookmark_for_emission(loc) {
+                    pending.insert(par_start, ParaChild::BookmarkStart { id, name });
+                    pending.push(ParaChild::BookmarkEnd { id });
+                }
             }
             have_pending = true;
             last_was_par = true;
@@ -626,8 +627,12 @@ fn handle_block(
         && !child.is::<HeadingElem>()
         && !child.is::<FigureElem>()
     {
-        let (id, name) = ctx.add_bookmark(loc);
-        bracket_bookmark(&mut out[block_start..], id, name);
+        let blocks = &mut out[block_start..];
+        if blocks.iter().any(|block| matches!(block, Block::Para(_)))
+            && let Some((id, name)) = ctx.bookmark_for_emission(loc)
+        {
+            bracket_bookmark(blocks, id, name);
+        }
     }
     Ok(())
 }
