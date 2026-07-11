@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "id": "basic",
+      "entry": "fixtures/basic.typ",
+      "expected_text": [
+        "DOCX validator heading",
+        "DOCX validator semantic sentinel",
+        "First editable list item",
+        "Alpha",
+        "heading reference"
+      ],
+      "minimums": {
+        "paragraphs": 5,
+        "heading_styles": 1,
+        "tables": 1,
+        "table_headers": 1,
+        "omml_math": 1,
+        "hyperlinks": 1
+      },
+      "visual": {
+        "minimum_score": 0.45,
+        "max_page_delta": 1
+      }
+    },
+    {
+      "id": "accessibility",
+      "entry": "fixtures/accessibility.typ",
+      "expected_text": [
+        "Accessible export fixture",
+        "image accessibility sentinel"
+      ],
+      "minimums": {
+        "paragraphs": 2,
+        "heading_styles": 1,
+        "drawings": 1,
+        "alt_descriptions": 1
+      },
+      "visual": {
+        "minimum_score": 0.45,
+        "max_page_delta": 1
+      }
+    }
+  ]
+}
