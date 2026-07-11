@@ -127,28 +127,40 @@ pub(crate) fn validate(document: &DocxDocument) -> Result<(), DocumentInvariantE
         }
     }
 
-    state.visit_blocks(&document.body)?;
+    state.visit_story(&document.body)?;
     for part in document.header_parts.iter().chain(&document.footer_parts) {
-        state.visit_blocks(&part.blocks)?;
+        state.visit_story(&part.blocks)?;
     }
+    state.bookmarks = BookmarkState::default();
     for footnote in &document.footnotes {
         state.visit_blocks(&footnote.blocks)?;
     }
-    state.finish()
+    state.finish_bookmarks()
 }
 
 #[derive(Default)]
 struct State {
     drawing_ids: BTreeSet<u32>,
-    bookmark_start_ids: BTreeSet<u32>,
-    bookmark_end_ids: BTreeSet<u32>,
-    bookmark_names: BTreeSet<EcoString>,
+    bookmarks: BookmarkState,
     footnote_ids: BTreeSet<i32>,
     abstract_numbering_ids: BTreeSet<u32>,
     numbering_ids: BTreeSet<u32>,
 }
 
+#[derive(Default)]
+struct BookmarkState {
+    bookmark_start_ids: BTreeSet<u32>,
+    bookmark_end_ids: BTreeSet<u32>,
+    bookmark_names: BTreeSet<EcoString>,
+}
+
 impl State {
+    fn visit_story(&mut self, blocks: &[Block]) -> Result<(), DocumentInvariantError> {
+        self.bookmarks = BookmarkState::default();
+        self.visit_blocks(blocks)?;
+        self.finish_bookmarks()
+    }
+
     fn visit_blocks(&mut self, blocks: &[Block]) -> Result<(), DocumentInvariantError> {
         for block in blocks {
             match block {
@@ -189,17 +201,17 @@ impl State {
                     }
                 }
                 ParaChild::BookmarkStart { id, name } => {
-                    if !self.bookmark_start_ids.insert(*id) {
+                    if !self.bookmarks.bookmark_start_ids.insert(*id) {
                         return Err(DocumentInvariantError::DuplicateBookmarkId(*id));
                     }
-                    if !self.bookmark_names.insert(name.clone()) {
+                    if !self.bookmarks.bookmark_names.insert(name.clone()) {
                         return Err(DocumentInvariantError::DuplicateBookmarkName(
                             name.clone(),
                         ));
                     }
                 }
                 ParaChild::BookmarkEnd { id } => {
-                    if !self.bookmark_end_ids.insert(*id) {
+                    if !self.bookmarks.bookmark_end_ids.insert(*id) {
                         return Err(DocumentInvariantError::DuplicateBookmarkId(*id));
                     }
                 }
@@ -300,14 +312,20 @@ impl State {
         Ok(())
     }
 
-    fn finish(self) -> Result<(), DocumentInvariantError> {
-        if let Some(id) =
-            self.bookmark_end_ids.difference(&self.bookmark_start_ids).next()
+    fn finish_bookmarks(&self) -> Result<(), DocumentInvariantError> {
+        if let Some(id) = self
+            .bookmarks
+            .bookmark_end_ids
+            .difference(&self.bookmarks.bookmark_start_ids)
+            .next()
         {
             return Err(DocumentInvariantError::OrphanBookmarkEnd(*id));
         }
-        if let Some(id) =
-            self.bookmark_start_ids.difference(&self.bookmark_end_ids).next()
+        if let Some(id) = self
+            .bookmarks
+            .bookmark_start_ids
+            .difference(&self.bookmarks.bookmark_end_ids)
+            .next()
         {
             return Err(DocumentInvariantError::MissingBookmarkEnd(*id));
         }
@@ -333,8 +351,56 @@ mod tests {
     #[test]
     fn unpaired_bookmarks_are_rejected() {
         let mut state = State::default();
-        state.bookmark_start_ids.insert(3);
-        assert_eq!(state.finish(), Err(DocumentInvariantError::MissingBookmarkEnd(3)));
+        state.bookmarks.bookmark_start_ids.insert(3);
+        assert_eq!(
+            state.finish_bookmarks(),
+            Err(DocumentInvariantError::MissingBookmarkEnd(3))
+        );
+    }
+
+    fn bookmark_pair(id: u32, name: &str) -> Block {
+        Block::Para(Para {
+            props: Default::default(),
+            content: vec![
+                ParaChild::BookmarkStart { id, name: name.into() },
+                ParaChild::BookmarkEnd { id },
+            ],
+        })
+    }
+
+    #[test]
+    fn bookmark_ids_and_names_may_repeat_across_stories() {
+        let story = [bookmark_pair(7, "same")];
+        let mut state = State::default();
+        assert_eq!(state.visit_story(&story), Ok(()));
+        assert_eq!(state.visit_story(&story), Ok(()));
+    }
+
+    #[test]
+    fn duplicate_bookmarks_within_a_story_are_rejected() {
+        let duplicate_id = [bookmark_pair(7, "first"), bookmark_pair(7, "second")];
+        assert_eq!(
+            State::default().visit_story(&duplicate_id),
+            Err(DocumentInvariantError::DuplicateBookmarkId(7))
+        );
+
+        let duplicate_name = [bookmark_pair(7, "same"), bookmark_pair(8, "same")];
+        assert_eq!(
+            State::default().visit_story(&duplicate_name),
+            Err(DocumentInvariantError::DuplicateBookmarkName("same".into()))
+        );
+    }
+
+    #[test]
+    fn duplicate_bookmarks_across_footnotes_are_rejected() {
+        let footnote_one = [bookmark_pair(7, "same")];
+        let footnote_two = [bookmark_pair(7, "same")];
+        let mut state = State::default();
+        assert_eq!(state.visit_blocks(&footnote_one), Ok(()));
+        assert_eq!(
+            state.visit_blocks(&footnote_two),
+            Err(DocumentInvariantError::DuplicateBookmarkId(7))
+        );
     }
 
     #[test]
