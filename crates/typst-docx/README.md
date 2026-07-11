@@ -227,7 +227,9 @@ identities, and diagnostics suppressed by best-effort fallback conversion.
 `DocxDocument::export_snapshot()` exposes owned semantic nodes matched to the
 converged paged oracle plus the exact bibliography entry set and lossless
 BibLaTeX payload from that reference document. Both the external bibliography
-sidecar and Word Source Manager data derive from this one snapshot.
+sidecar and Word Source Manager data derive from this one snapshot. Resolved
+semantic link edges also carry stable source/target identities; matched internal
+bookmarks use target-node IDs instead of conversion-order names.
 `fidelity_manifest_xml()` serializes the snapshot and fidelity records.
 Every package persists that versioned manifest at
 `customXml/typstFidelity.xml` and duplicates its exact text in the standard

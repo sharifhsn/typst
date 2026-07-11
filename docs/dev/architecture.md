@@ -171,6 +171,8 @@ format.
   paged layout before escalating a text-primary failure to raster or drop. Its
   pre-lowering snapshot owns the paged bibliography entry set and lossless
   payload so Word-native and external-tool package views cannot drift apart.
+  It also resolves semantic link edges and gives matched internal bookmarks
+  stable target-node-derived names.
 - The PPTX exporter starts from laid-out page frames and recovers selected
   semantics through layout tags.
 - The Pandoc exporter starts from realized semantic content and emits a typed

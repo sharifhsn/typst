@@ -69,7 +69,29 @@ pub fn build(document: &DocxDocument) -> String {
             escape_attr(&entry.key)
         );
     }
-    out.push_str("</typst:bibliography><typst:tables>");
+    out.push_str("</typst:bibliography><typst:links>");
+    for link in snapshot.links() {
+        let _ = write!(
+            out,
+            "<typst:link id=\"{:032x}\" sourceId=\"{:032x}\" occurrences=\"{}\"",
+            link.logical_id, link.source_id, link.occurrences
+        );
+        match &link.target {
+            crate::snapshot::SnapshotLinkTarget::Url(url) => {
+                let _ = write!(out, " target=\"url\" url=\"{}\"/>", escape_attr(url));
+            }
+            crate::snapshot::SnapshotLinkTarget::Node(target) => {
+                let _ = write!(out, " target=\"node\" targetId=\"{target:032x}\"/>");
+            }
+            crate::snapshot::SnapshotLinkTarget::Position { page, x_pt, y_pt } => {
+                let _ = write!(
+                    out,
+                    " target=\"position\" page=\"{page}\" xPt=\"{x_pt}\" yPt=\"{y_pt}\"/>"
+                );
+            }
+        }
+    }
+    out.push_str("</typst:links><typst:tables>");
     for table in snapshot.tables() {
         let _ = write!(
             out,

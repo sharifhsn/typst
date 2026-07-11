@@ -1040,7 +1040,7 @@ caption/reference text on one 170 mm x 120 mm page. A manual select-all/F9
 update followed by a real Word save kept the Typst-owned hyperlink and hidden
 counter intact while updating live field caches; Writer rendered that Word-saved
 round trip with the same visible text. Structural gates now cover all ownership
-branches; the DOCX target passes 171 tests and the crate passes 13 unit gates.
+branches; the DOCX target passes 172 tests and the crate passes 13 unit gates.
 The cache-failure kernel also survived a LibreOffice 26.2.4.2 save/reopen: live
 `SEQ`/`PAGEREF` instructions remained, `cache="Unavailable"` survived in the
 Writer-stable custom property, and the one-page visible/searchable text was
@@ -1499,7 +1499,7 @@ report, so the two carriers cannot drift at export time.
 Structural regressions cover installed-versus-missing font facts, manifest
 counts/attributes, the portable `fontTable` reference, custom-property/root-
 relationship presence, and exact equality between the canonical and redundant
-payloads. The DOCX target passes 171 tests.
+payloads. The DOCX target passes 172 tests.
 
 A 2026-07-10 missing-font fixture compiled to one 160 x 120 mm Typst PDF page
 and one identically sized Writer page. Both kept searchable text and happened to
@@ -1543,7 +1543,7 @@ The manifest adds drawing/unlabeled counts and a `<typst:drawings>` collection.
 Existing structural tests now cover described and unlabeled SVG pictures,
 native text boxes, decorative vector shapes, decorative backgrounds, and a
 described foreground; one new invariant unit gate covers contradictory intent.
-The DOCX target now passes 171 structural tests and 13 crate unit tests.
+The DOCX target now passes 172 structural tests and 13 crate unit tests.
 
 A 2026-07-10 mixed fixture produced five drawings: one described SVG, one
 unlabeled SVG, one native text box, one decorative orange shape, and one
@@ -1666,3 +1666,24 @@ manifest contain stable `alpha`/`beta` entry identities, Word Source Manager
 contains exactly the same two tags, and the lossless sidecar contains both
 source records. Repeated compilation produces identical entry IDs. A document
 without a bibliography has empty snapshot facts and emits neither package view.
+
+## 33. Snapshot link edges and stable internal bookmark names
+
+Internal hyperlinks previously called `add_bookmark(Location)` during lowering,
+which assigned `_Ref1`, `_Ref2`, and so on in conversion order. The location and
+name therefore belonged to the DOCX realization rather than the paged semantic
+target, and unrelated earlier allocations could rename every later edge.
+
+`ExportSnapshot` now resolves `LinkElem` destinations against the converged
+paged introspector before lowering. Each edge owns a stable source ID and either
+an external URL, paged position, or target semantic-node ID; edge identities and
+occurrence counts participate in the document snapshot hash and are serialized
+in the fidelity manifest. For DOCX locations matched to snapshot nodes,
+`add_bookmark` uses `_Typst` plus the target node's 128-bit ID. Unmatched
+generated locations retain the sequential compatibility fallback.
+
+The real fixture contains one label link and one external URL. PDF exposes both
+link texts; DOCX uses the same `_Typst…` value for `w:bookmarkStart/@w:name` and
+`w:hyperlink/@w:anchor`, its relationship targets `https://example.com` in
+external mode, and the manifest publishes one node edge and one URL edge.
+Repeated compilation produces identical link facts and bookmark names.

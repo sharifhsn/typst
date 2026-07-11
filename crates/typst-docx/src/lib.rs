@@ -43,6 +43,6 @@ pub use self::report::{
 };
 pub use self::rules::register;
 pub use self::snapshot::{
-    ExportSnapshot, SnapshotBibliographyEntry, SnapshotNode, SnapshotPage,
-    SnapshotPosition,
+    ExportSnapshot, SnapshotBibliographyEntry, SnapshotLink, SnapshotLinkTarget,
+    SnapshotNode, SnapshotPage, SnapshotPosition,
 };

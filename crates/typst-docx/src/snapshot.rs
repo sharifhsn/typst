@@ -4,11 +4,14 @@ use comemo::Track;
 use ecow::EcoString;
 use typst_export_common::paged::{PagedGeometry, PagedTableGeometry};
 use typst_layout::PagedIntrospector;
-use typst_library::foundations::Content;
+use typst_library::foundations::{Content, Selector};
 use typst_library::introspection::Introspector;
 use typst_library::layout::Size;
 use typst_library::routines::Pair;
-use typst_library::{foundations::Label, model::BibliographyElem};
+use typst_library::{
+    foundations::Label,
+    model::{BibliographyElem, Destination, LinkElem},
+};
 
 use crate::report::ExportSource;
 
@@ -44,6 +47,23 @@ pub struct SnapshotBibliographyEntry {
     pub(crate) entry: hayagriva::Entry,
 }
 
+/// Resolved target of one semantic link in the paged reference document.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SnapshotLinkTarget {
+    Url(EcoString),
+    Node(u128),
+    Position { page: usize, x_pt: f64, y_pt: f64 },
+}
+
+/// One stable semantic link edge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotLink {
+    pub logical_id: u128,
+    pub source_id: u128,
+    pub target: SnapshotLinkTarget,
+    pub occurrences: usize,
+}
+
 /// Stable bridge between the DOCX semantic realization and converged paged
 /// geometry. This deliberately owns only identities and resolved facts, never
 /// arena-backed `Content` or `StyleChain` values.
@@ -53,6 +73,7 @@ pub struct ExportSnapshot {
     nodes: Vec<SnapshotNode>,
     pages: Vec<SnapshotPage>,
     tables: Vec<PagedTableGeometry>,
+    links: Vec<SnapshotLink>,
     bibliography_biblatex: Option<String>,
     bibliography_entries: Vec<SnapshotBibliographyEntry>,
 }
@@ -73,6 +94,10 @@ impl ExportSnapshot {
     /// Final physical table/grid cell regions recovered from paged frames.
     pub fn tables(&self) -> &[PagedTableGeometry] {
         &self.tables
+    }
+
+    pub fn links(&self) -> &[SnapshotLink] {
+        &self.links
     }
 
     /// Lossless bibliography source payload resolved by the paged reference
@@ -126,6 +151,7 @@ impl ExportSnapshot {
             });
         }
 
+        let links = collect_links(pairs, paged);
         let identity_nodes = nodes
             .iter()
             .map(|node| (node.source.logical_id, node.semantic_occurrences))
@@ -187,10 +213,15 @@ impl ExportSnapshot {
             .iter()
             .map(|entry| entry.logical_id)
             .collect::<Vec<_>>();
+        let identity_links = links
+            .iter()
+            .map(|link| (link.logical_id, link.occurrences))
+            .collect::<Vec<_>>();
         let logical_id = typst_utils::hash128(&(
             identity_nodes,
             identity_pages,
             identity_tables,
+            identity_links,
             &bibliography_biblatex,
             bibliography_entry_ids,
         ));
@@ -199,9 +230,87 @@ impl ExportSnapshot {
             nodes,
             pages,
             tables,
+            links,
             bibliography_biblatex,
             bibliography_entries,
         }
+    }
+}
+
+fn collect_links(
+    pairs: &[Pair<'_>],
+    paged: Option<&PagedIntrospector>,
+) -> Vec<SnapshotLink> {
+    use std::ops::ControlFlow;
+
+    let Some(paged) = paged else { return Vec::new() };
+    let mut links = Vec::<SnapshotLink>::new();
+    for (content, _) in pairs {
+        let _ = content.traverse(&mut |element: Content| {
+            let Some(link) = element.to_packed::<LinkElem>() else {
+                return ControlFlow::<()>::Continue(());
+            };
+            let Ok(destination) = link.dest.resolve_late(paged) else {
+                return ControlFlow::<()>::Continue(());
+            };
+            let source_id = ExportSource::from_content(&element).logical_id;
+            let Some(target) = snapshot_link_target(destination, paged) else {
+                return ControlFlow::<()>::Continue(());
+            };
+            let logical_id = match &target {
+                SnapshotLinkTarget::Url(url) => {
+                    typst_utils::hash128(&(source_id, "url", url))
+                }
+                SnapshotLinkTarget::Node(target) => {
+                    typst_utils::hash128(&(source_id, "node", target))
+                }
+                SnapshotLinkTarget::Position { page, x_pt, y_pt } => {
+                    typst_utils::hash128(&(
+                        source_id,
+                        "position",
+                        page,
+                        x_pt.to_bits(),
+                        y_pt.to_bits(),
+                    ))
+                }
+            };
+            if let Some(existing) =
+                links.iter_mut().find(|existing| existing.logical_id == logical_id)
+            {
+                existing.occurrences += 1;
+            } else {
+                links.push(SnapshotLink {
+                    logical_id,
+                    source_id,
+                    target,
+                    occurrences: 1,
+                });
+            }
+            ControlFlow::Continue(())
+        });
+    }
+    links.sort_by_key(|link| link.logical_id);
+    links
+}
+
+fn snapshot_link_target(
+    destination: Destination,
+    paged: &PagedIntrospector,
+) -> Option<SnapshotLinkTarget> {
+    match destination {
+        Destination::Url(url) => {
+            Some(SnapshotLinkTarget::Url(url.into_inner().as_str().into()))
+        }
+        Destination::Location(location) => {
+            paged.query(&Selector::Location(location)).first().map(|target| {
+                SnapshotLinkTarget::Node(ExportSource::from_content(target).logical_id)
+            })
+        }
+        Destination::Position(position) => Some(SnapshotLinkTarget::Position {
+            page: position.page.get(),
+            x_pt: position.point.x.to_pt(),
+            y_pt: position.point.y.to_pt(),
+        }),
     }
 }
 

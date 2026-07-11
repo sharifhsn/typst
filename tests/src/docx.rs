@@ -2627,6 +2627,36 @@ fn labeled_targets_get_bookmarks_so_refs_resolve() {
 }
 
 #[test]
+fn snapshot_link_edges_drive_stable_internal_bookmark_names() {
+    let src = "= Target <target>\n\n#link(<target>)[internal] and #link(\"https://example.com\")[external]";
+    let first = compile_docx(src, &[]);
+    let second = compile_docx(src, &[]);
+    assert_eq!(first.export_snapshot().links(), second.export_snapshot().links());
+    let links = first.export_snapshot().links();
+    let target_id = links
+        .iter()
+        .find_map(|link| match link.target {
+            typst_docx::SnapshotLinkTarget::Node(target) => Some(target),
+            _ => None,
+        })
+        .expect("internal link has a stable target node");
+    assert!(links.iter().any(|link| matches!(
+        &link.target,
+        typst_docx::SnapshotLinkTarget::Url(url) if url == "https://example.com"
+    )));
+
+    let p = parts(src);
+    let doc = &p["word/document.xml"];
+    let name = format!("_Typst{target_id:032x}");
+    assert!(doc.contains(&format!("w:name=\"{name}\"")));
+    assert!(doc.contains(&format!("w:anchor=\"{name}\"")));
+    let manifest = &p["customXml/typstFidelity.xml"];
+    assert!(manifest.contains("target=\"node\""));
+    assert!(manifest.contains("target=\"url\" url=\"https://example.com\""));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn aligned_equation_keeps_its_alignment() {
     // `a + b &= c \ x &= y` must vertically align the `=` columns. `m:eqArr`
     // cannot express per-column alignment, so the converter emits a matrix whose

@@ -83,6 +83,7 @@ pub struct DocxCtx<'a, 'e> {
     /// lowered (an `r:id` in `headerN.xml` must resolve against `headerN.xml.rels`).
     pub(crate) part_rels: Option<Rels>,
     next_bookmark_id: u32,
+    snapshot_bookmark_names: FxHashMap<Location, EcoString>,
     next_docpr_id: u32,
     /// Monotonic id for unique header/footer part names across sections.
     next_hdrftr_id: u32,
@@ -207,6 +208,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             footnote_rels: Rels::new(),
             part_rels: None,
             next_bookmark_id: 1,
+            snapshot_bookmark_names: FxHashMap::default(),
             next_docpr_id: 1,
             next_hdrftr_id: 1,
             next_z: 1,
@@ -242,6 +244,21 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         geometry: Arc<typst_export_common::paged::PagedGeometry>,
     ) {
         self.paged_geometry = geometry;
+    }
+
+    pub(crate) fn set_snapshot_bookmarks(
+        &mut self,
+        snapshot: &crate::snapshot::ExportSnapshot,
+    ) {
+        self.snapshot_bookmark_names = snapshot
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                node.source.location.map(|location| {
+                    (location, eco_format!("_Typst{:032x}", node.source.logical_id))
+                })
+            })
+            .collect();
     }
 
     // -- Borrowing helpers --------------------------------------------------
@@ -579,7 +596,11 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         }
         let id = self.next_bookmark_id;
         self.next_bookmark_id += 1;
-        let name: EcoString = eco_format!("_Ref{id}");
+        let name = self
+            .snapshot_bookmark_names
+            .get(&loc)
+            .cloned()
+            .unwrap_or_else(|| eco_format!("_Ref{id}"));
         self.bookmarks.by_location.insert(loc, (name.clone(), id));
         (id, name)
     }

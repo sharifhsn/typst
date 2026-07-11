@@ -172,8 +172,10 @@ semantic occurrences and every matching converged paged position. The snapshot
 also owns every converged page size, physical table/grid cell regions recovered
 from hidden paged-frame tags, the paged reference document's lossless
 bibliography payload and selected entries, and a deterministic document ID.
-Both DOCX bibliography package views derive from that authority. Counter, link,
-and fallback-specific resolved payload enrollment remains incomplete.
+Both DOCX bibliography package views derive from that authority. Resolved
+semantic link edges also carry stable source and target identities, and matched
+DOCX bookmarks use target-node IDs rather than allocation order. Counter and
+fallback-specific resolved payload enrollment remains incomplete.
 
 DOCX uses semantics as primary and paged geometry as an oracle. PPTX would
 use frames as primary and semantic regions as a sidecar. Pandoc would use only
@@ -373,6 +375,10 @@ mechanical cleanup that introduced this document.
   document's lossless BibLaTeX payload and selected Hayagriva entries with
   stable logical IDs; both the private sidecar and Word `b:Sources` part derive
   from those facts instead of performing independent late introspector queries.
+- User-authored semantic links now enroll as snapshot edges to URLs, positions,
+  or stable semantic target nodes. Matched internal bookmarks derive their names
+  from the target-node ID rather than conversion order; unmatched generated
+  locations retain a compatibility fallback.
 - Tables and grids now cross an explicit `TablePlan` before cell lowering.
   Fixed tracks and axis-aligned auto/fractional/relative tracks with complete
   converged cell measurements enroll as native. Unsupported cell paints, border
@@ -481,7 +487,7 @@ mechanical cleanup that introduced this document.
   native `w:tblGrid` lowering, structured decisions, the embedded manifest, and
   the structural oracle-comparison gates.
 - `cargo clippy -p typst-docx --all-targets -- -D warnings` passes.
-- The complete structural DOCX test target passes 171 tests. New gates cover
+- The complete structural DOCX test target passes 172 tests. New gates cover
   raster/compatibility/approximation classification, a retained suppressed
   layout-callback error, nested unsupported math choosing one whole-region
   fallback, explicit placed-content planning, native anchored tables, and
@@ -589,6 +595,11 @@ mechanical cleanup that introduced this document.
   exactly those two tags, and the lossless sidecar contains both canonical
   records. Repeated compilation yields identical entry IDs, while a document
   with no bibliography has no snapshot entries or bibliography parts.
+- A label-link plus external-URL fixture produces stable snapshot edges across
+  repeated exports. The internal edge's target-node ID is also the suffix of
+  both Word's bookmark name and hyperlink anchor; the external edge resolves to
+  a proper `TargetMode="External"` relationship. The embedded manifest records
+  the same node and URL targets.
 - A table-planning fixture compared one PDF gradient/fractional table with the
   native DOCX result. Word opened without repair and exposed an editable
   3-row/2-column table and every cell; Writer rendered one page with matching
@@ -660,7 +671,7 @@ backgrounds, footnotes, citations, and mixed page sizes.
    `ExportSnapshot` carries stable source-backed IDs, semantic occurrences,
    converged page sizes, matched paged positions, and final table/grid cell
    regions extracted through format-neutral paged-frame scanning. Enroll
-   resolved counters, links, and fallback regions, and
+   resolved counters and fallback regions, and
    reuse more of the sidecar across PPTX/Pandoc.
 4. **Capability planning — equations, placed content, furniture, and table slices
    implemented.** Equations plan atomically. Placed content preflights native

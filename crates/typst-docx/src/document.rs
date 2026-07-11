@@ -238,6 +238,7 @@ fn docx_document_impl(
                 route: typst_library::engine::Route::extend(engine.route.track()),
             };
             let mut ctx = DocxCtx::new(&mut sub, &mut locator);
+            ctx.set_snapshot_bookmarks(&export_snapshot);
             if let Some(geometry) = &paged_geometry {
                 ctx.set_paged_geometry(Arc::clone(geometry));
             }
