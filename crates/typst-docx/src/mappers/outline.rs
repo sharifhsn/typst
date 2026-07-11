@@ -18,7 +18,7 @@
 //! Word cannot reconstruct those entries and must not erase them on update.
 
 use ecow::{EcoString, eco_format};
-use typst_library::diag::SourceResult;
+use typst_library::diag::{SourceResult, warning};
 use typst_library::engine::Engine;
 use typst_library::foundations::{Element, Packed, Repr, Selector, StyleChain};
 use typst_library::introspection::{
@@ -31,6 +31,10 @@ use crate::ctx::DocxCtx;
 use crate::dom::{
     Block, Field, FieldCacheStatus, FieldDisplay, FieldMode, Para, ParaChild, ParaProps,
     Run, RunProps, TabAlign, TabLeader, TabStop, Toc, TocFigure, TocHeading,
+};
+use crate::report::{
+    DecisionReason, ExportSource, ExportStage, FidelityReport, LossSet, Representation,
+    SuppressedKind,
 };
 
 /// The default outline depth used for the `\o "1-N"` switch when the outline
@@ -119,6 +123,7 @@ pub(crate) fn fill_tocs(
     figures: &[TocFigure],
     engine: &mut Engine,
     styles: StyleChain,
+    fidelity_report: &mut FidelityReport,
 ) {
     let headings = if recorded.is_empty() { fallback } else { recorded };
     for block in blocks.iter_mut() {
@@ -133,11 +138,14 @@ pub(crate) fn fill_tocs(
             toc.entries = selected
                 .iter()
                 .map(|h| {
+                    let (page_text, cache_status) =
+                        cached_page_text(engine, styles, h.location, fidelity_report);
                     entry_para(
                         h.level,
                         &h.anchor,
                         &h.text,
-                        cached_page_text(engine, styles, h.location),
+                        page_text,
+                        cache_status,
                         toc.tab_pos,
                     )
                 })
@@ -153,11 +161,14 @@ pub(crate) fn fill_tocs(
             toc.entries = selected
                 .iter()
                 .map(|f| {
+                    let (page_text, cache_status) =
+                        cached_page_text(engine, styles, f.location, fidelity_report);
                     entry_para(
                         1,
                         &f.anchor,
                         &f.text,
-                        cached_page_text(engine, styles, f.location),
+                        page_text,
+                        cache_status,
                         toc.tab_pos,
                     )
                 })
@@ -174,6 +185,7 @@ fn entry_para(
     anchor: &Option<EcoString>,
     text: &EcoString,
     page_text: EcoString,
+    cache_status: FieldCacheStatus,
     tab_pos: i32,
 ) -> Para {
     let text_run = Run::Text { props: RunProps::default(), text: text.clone() };
@@ -193,7 +205,7 @@ fn entry_para(
             result: vec![Run::Text { props: RunProps::default(), text: page_text }],
             mode: FieldMode::Live,
             display: FieldDisplay::Visible,
-            cache_status: FieldCacheStatus::Resolved,
+            cache_status,
         })));
     }
     Para {
@@ -218,19 +230,59 @@ fn cached_page_text(
     engine: &mut Engine,
     styles: StyleChain,
     location: Option<Location>,
-) -> EcoString {
-    let Some(location) = location else { return "1".into() };
+    fidelity_report: &mut FidelityReport,
+) -> (EcoString, FieldCacheStatus) {
+    let source =
+        || ExportSource::new("TOC page-number cache", Span::detached(), location);
+    let unavailable = |fidelity_report: &mut FidelityReport| {
+        fidelity_report.record_span(
+            source(),
+            Representation::Approximate,
+            DecisionReason::FieldCacheUnavailable,
+            LossSet::DYNAMIC_BEHAVIOR,
+            1,
+        );
+        (EcoString::from("1"), FieldCacheStatus::BestEffort)
+    };
+    let Some(location) = location else { return unavailable(fidelity_report) };
     let span = Span::detached();
     let Some(numbering) = engine.introspect(PageNumberingIntrospection(location, span))
     else {
-        return "1".into();
+        return unavailable(fidelity_report);
     };
-    Counter::new(CounterKey::Page)
-        .display_at(engine, location, styles, &numbering.trimmed(), span)
-        .map(|content| content.plain_text())
-        .ok()
-        .filter(|text| !text.is_empty())
-        .unwrap_or_else(|| "1".into())
+    match Counter::new(CounterKey::Page).display_at(
+        engine,
+        location,
+        styles,
+        &numbering.trimmed(),
+        span,
+    ) {
+        Ok(content) => {
+            let text = content.plain_text();
+            if text.is_empty() {
+                unavailable(fidelity_report)
+            } else {
+                (text, FieldCacheStatus::Resolved)
+            }
+        }
+        Err(errors) => {
+            for diagnostic in errors {
+                fidelity_report.suppress_span(
+                    "TOC page-number cache",
+                    span,
+                    Some(location),
+                    ExportStage::FieldPlanning,
+                    SuppressedKind::Error,
+                    diagnostic,
+                );
+            }
+            engine.sink.warn(warning!(
+                span,
+                "DOCX could not compute a cached TOC page number; Word must refresh the PAGEREF field"
+            ));
+            unavailable(fidelity_report)
+        }
+    }
 }
 
 /// The TOC depth (`\o "1-N"`): the outline's `depth`, or Word's default of 3,

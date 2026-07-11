@@ -40,6 +40,9 @@ pub enum DecisionReason {
     EquationTextFallback,
     /// A page-relative background or foreground rendered as a PNG.
     PageOverlayRasterFallback,
+    /// A block layout callback and its whole-region paged fallback both failed,
+    /// so no safe representation could be emitted.
+    LayoutCallbackUnavailable,
     /// Native SVG with the PNG branch required by Office compatibility markup.
     SvgWithPngFallback,
     /// The target format cannot express the source feature.
@@ -311,6 +314,7 @@ pub enum FieldVisibility {
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum FieldCacheStatus {
     Resolved,
+    BestEffort,
     ConsumerRequired,
     Unavailable,
 }

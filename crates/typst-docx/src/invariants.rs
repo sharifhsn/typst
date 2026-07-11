@@ -31,6 +31,8 @@ pub(crate) enum DocumentInvariantError {
     MissingAbstractNumberingId(u32),
     MissingNumberingId(u32),
     ResolvedFieldHasNoCache(EcoString),
+    BestEffortFieldHasNoCache(EcoString),
+    BestEffortFieldIsStatic(EcoString),
     UnavailableFieldHasCache(EcoString),
     UnavailableFieldIsStatic(EcoString),
     HiddenFieldHasVisibleCache(EcoString),
@@ -74,6 +76,12 @@ impl Display for DocumentInvariantError {
             }
             Self::ResolvedFieldHasNoCache(instr) => {
                 write!(f, "resolved field `{instr}` has no cached result")
+            }
+            Self::BestEffortFieldHasNoCache(instr) => {
+                write!(f, "best-effort field `{instr}` has no placeholder result")
+            }
+            Self::BestEffortFieldIsStatic(instr) => {
+                write!(f, "best-effort field `{instr}` cannot be Typst-owned and locked")
             }
             Self::UnavailableFieldHasCache(instr) => {
                 write!(f, "unavailable field `{instr}` unexpectedly has a cached result")
@@ -244,6 +252,16 @@ impl State {
                             field.instr.clone(),
                         ));
                     }
+                    FieldCacheStatus::BestEffort if field.result.is_empty() => {
+                        return Err(DocumentInvariantError::BestEffortFieldHasNoCache(
+                            field.instr.clone(),
+                        ));
+                    }
+                    FieldCacheStatus::BestEffort if field.mode == FieldMode::Static => {
+                        return Err(DocumentInvariantError::BestEffortFieldIsStatic(
+                            field.instr.clone(),
+                        ));
+                    }
                     FieldCacheStatus::Unavailable if !field.result.is_empty() => {
                         return Err(DocumentInvariantError::UnavailableFieldHasCache(
                             field.instr.clone(),
@@ -370,6 +388,24 @@ mod tests {
         assert_eq!(
             state.visit_run(&run),
             Err(DocumentInvariantError::UnavailableFieldIsStatic(" REF _Ref1 ".into()))
+        );
+    }
+
+    #[test]
+    fn best_effort_field_requires_a_live_placeholder() {
+        let mut state = State::default();
+        let run = Run::Field(Field {
+            instr: " PAGEREF _Ref1 ".into(),
+            result: Vec::new(),
+            mode: FieldMode::Live,
+            display: FieldDisplay::Visible,
+            cache_status: FieldCacheStatus::BestEffort,
+        });
+        assert_eq!(
+            state.visit_run(&run),
+            Err(DocumentInvariantError::BestEffortFieldHasNoCache(
+                " PAGEREF _Ref1 ".into()
+            ))
         );
     }
 }

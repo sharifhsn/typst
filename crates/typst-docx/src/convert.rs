@@ -13,6 +13,7 @@ use typst_library::routines::Pair;
 use crate::ctx::DocxCtx;
 use crate::dom::{Block, Para, ParaChild, ParaProps, Run, RunProps};
 use crate::mappers;
+use crate::report::{DecisionReason, LossSet, Representation};
 
 /// Lowers the top-level realized children into the document body blocks.
 pub fn run(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Vec<Block>> {
@@ -987,6 +988,19 @@ fn handle_layout(
                 ctx,
             )?) {
                 out.push(para);
+            } else {
+                let source = elem.clone().pack();
+                ctx.record_content_decision(
+                    &source,
+                    Representation::Drop,
+                    DecisionReason::LayoutCallbackUnavailable,
+                    LossSet::DROP,
+                    source.plain_text().chars().count(),
+                );
+                ctx.warn_message(
+                    "layout callback and whole-region fallback produced no output",
+                    elem.span(),
+                );
             }
         }
     }

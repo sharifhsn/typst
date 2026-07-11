@@ -449,6 +449,7 @@ fn docx_document_impl(
         &toc_figures,
         engine,
         styles,
+        &mut fidelity_report,
     );
 
     // Synthetic page model: a flowing document has no real pages, but templates
@@ -654,6 +655,7 @@ fn record_run_fields(report: &mut FidelityReport, snapshot_id: u128, run: &Run) 
                 },
                 match field.cache_status {
                     DomFieldCacheStatus::Resolved => ReportFieldCacheStatus::Resolved,
+                    DomFieldCacheStatus::BestEffort => ReportFieldCacheStatus::BestEffort,
                     DomFieldCacheStatus::ConsumerRequired => {
                         ReportFieldCacheStatus::ConsumerRequired
                     }

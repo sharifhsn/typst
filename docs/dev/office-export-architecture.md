@@ -254,12 +254,14 @@ field switch and `w:vanish` on every structural/result run because LibreOffice
 does not reliably implement Word's `SEQ \h` behavior.
 
 Cached-result provenance is a separate finalized-IR decision:
-`FieldCacheStatus::{Resolved, ConsumerRequired, Unavailable}` distinguishes a
-trustworthy Typst cache from an intentionally consumer-computed field and from
-a failed cache evaluation. This removes the former ambiguous empty `Vec<Run>`
-state. Final-IR validation rejects contradictory plans (for example, a locked
-Typst-owned field with an unavailable cache, a resolved field without a result,
-or visible cached runs on a hidden field). A failed figure-numbering cache is
+`FieldCacheStatus::{Resolved, BestEffort, ConsumerRequired, Unavailable}`
+distinguishes a trustworthy Typst cache, an explicitly approximate visible
+placeholder, an intentionally consumer-computed field, and a failed cache with
+no result. This removes the former ambiguous empty `Vec<Run>` state. Final-IR
+validation rejects contradictory plans (for example, a locked Typst-owned field
+with an unavailable cache, a resolved field without a result, a best-effort
+field without its placeholder, or visible cached runs on a hidden field). A
+failed figure-numbering cache is
 retained as a `FieldPlanning` diagnostic and `FieldCacheUnavailable`
 approximation, then serialized as an explicitly consumer-owned fallback instead
 of being silently swallowed. The same status is public in `DynamicFieldFact`
@@ -323,7 +325,8 @@ mechanical cleanup that introduced this document.
 - Some DOCX mapper-specific `Option`/empty fallbacks still conflate unsupported
   content and content loss. Central fallback layout, layout-callback, section,
   delayed conversion, field-cache, and standalone-caption planning failures are
-  now retained in `FidelityReport`.
+  now retained in `FidelityReport`; a block layout callback whose native and
+  paged recovery both fail is now an explicit `LayoutCallbackUnavailable` drop.
 - PPTX table tags do not carry the resolver's final fill, stroke, inset,
   alignment, gutter, or cell-math contract.
 - PPTX live text is regrouped heuristically and does not carry a complete font,
@@ -470,7 +473,7 @@ mechanical cleanup that introduced this document.
   native `w:tblGrid` lowering, structured decisions, the embedded manifest, and
   the structural oracle-comparison gates.
 - `cargo clippy -p typst-docx --all-targets -- -D warnings` passes.
-- The complete structural DOCX test target passes 166 tests. New gates cover
+- The complete structural DOCX test target passes 168 tests. New gates cover
   raster/compatibility/approximation classification, a retained suppressed
   layout-callback error, nested unsupported math choosing one whole-region
   fallback, explicit placed-content planning, native anchored tables, and
@@ -514,6 +517,14 @@ mechanical cleanup that introduced this document.
   `StandaloneCaptionTextFallback` approximation instead of returning an empty
   block list. Typst PDF and Writer extracted identical caption/body text; the
   known centering-to-flow alignment change remained explicit in the manifest.
+- A height-sensitive block-layout fixture rendered `VISIBLE LAYOUT BODY` in the
+  60 mm PDF content region but rejected both 80 mm DOCX recovery attempts. The
+  exporter kept the following body content, emitted a source warning, retained
+  both callback and fallback diagnostics, and embedded
+  `Drop/LayoutCallbackUnavailable` with `drop="1"`. A failing TOC page cache is
+  likewise no longer mislabeled as resolved: its visible `1` placeholder is
+  inventoried as `BestEffort` and remains consumer-refreshable through
+  `PAGEREF`.
 - A two-section width fixture (100 mm and 160 mm text areas) was compared with
   the Typst PDF and opened in both Word and LibreOffice. Flexible 1:2 tracks,
   12 pt column gutters, 8 pt row gutters, and a nested table stayed horizontally

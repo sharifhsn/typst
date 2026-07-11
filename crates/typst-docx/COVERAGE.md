@@ -1010,7 +1010,7 @@ The replacement is explicit and survives realization:
 - `FieldMode::{Static, Live}` records value ownership. Static complex fields
   encode `w:fldLock`; live fields stay consumer-updateable. `FieldDisplay`
   separately records visible versus hidden behavior.
-- `FieldCacheStatus::{Resolved, ConsumerRequired, Unavailable}` records cached
+- `FieldCacheStatus::{Resolved, BestEffort, ConsumerRequired, Unavailable}` records cached
   result provenance independently of ownership. Final-IR validation rejects
   impossible combinations. Figure-number evaluation failures now retain their
   exact `FieldPlanning` diagnostics, record a `FieldCacheUnavailable`
@@ -1040,7 +1040,7 @@ caption/reference text on one 170 mm x 120 mm page. A manual select-all/F9
 update followed by a real Word save kept the Typst-owned hyperlink and hidden
 counter intact while updating live field caches; Writer rendered that Word-saved
 round trip with the same visible text. Structural gates now cover all ownership
-branches; the DOCX target passes 166 tests and the crate passes 12 unit gates.
+branches; the DOCX target passes 168 tests and the crate passes 13 unit gates.
 The cache-failure kernel also survived a LibreOffice 26.2.4.2 save/reopen: live
 `SEQ`/`PAGEREF` instructions remained, `cache="Unavailable"` survived in the
 Writer-stable custom property, and the one-page visible/searchable text was
@@ -1499,7 +1499,7 @@ report, so the two carriers cannot drift at export time.
 Structural regressions cover installed-versus-missing font facts, manifest
 counts/attributes, the portable `fontTable` reference, custom-property/root-
 relationship presence, and exact equality between the canonical and redundant
-payloads. The DOCX target passes 166 tests.
+payloads. The DOCX target passes 168 tests.
 
 A 2026-07-10 missing-font fixture compiled to one 160 x 120 mm Typst PDF page
 and one identically sized Writer page. Both kept searchable text and happened to
@@ -1543,7 +1543,7 @@ The manifest adds drawing/unlabeled counts and a `<typst:drawings>` collection.
 Existing structural tests now cover described and unlabeled SVG pictures,
 native text boxes, decorative vector shapes, decorative backgrounds, and a
 described foreground; one new invariant unit gate covers contradictory intent.
-The DOCX target now passes 166 structural tests and 12 crate unit tests.
+The DOCX target now passes 168 structural tests and 13 crate unit tests.
 
 A 2026-07-10 mixed fixture produced five drawings: one described SVG, one
 unlabeled SVG, one native text box, one decorative orange shape, and one
@@ -1583,3 +1583,25 @@ recorded `Approximate`, `StandaloneCaptionTextFallback`, and 54 affected text
 characters. Writer rendered the caption visibly as ordinary text; its flowing
 alignment differs from the centered PDF and is therefore reported rather than
 presented as exact fidelity.
+
+## 29. Explicit failure provenance for layout regions and TOC page caches
+
+A block `#layout` could fail standalone callback evaluation, fail its paged
+whole-region fallback, and then return successfully with no block, warning, or
+representation decision. The suppressed errors existed, but the manifest
+incorrectly reported zero drops. `handle_layout` now treats that double failure
+as `Drop/LayoutCallbackUnavailable`, emits a source warning, and retains both
+the `LayoutCallback` and `FallbackLayout` diagnostics.
+
+The real 120 x 80 mm regression fixture is deliberately height-sensitive: the
+60 mm PDF content region renders `VISIBLE LAYOUT BODY`, while both DOCX recovery
+attempts reject the 80 mm region. The final package keeps the following body
+text, reports `drop="1"`, and names the failed region instead of claiming full
+fidelity.
+
+TOC page-number cache evaluation also no longer converts a failed counter
+display to an apparently resolved page `1`. Its diagnostic is retained at
+`FieldPlanning`, the approximation is enrolled, and the live `PAGEREF` carries
+the distinct `BestEffort` cache provenance: a visible placeholder exists, but
+Word or Writer owns refreshing it. Final-IR invariants require best-effort
+fields to remain live and to carry a placeholder.

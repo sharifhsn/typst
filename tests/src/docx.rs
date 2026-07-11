@@ -4118,6 +4118,42 @@ fn failing_figure_numbering_closure_does_not_abort_the_export() {
 }
 
 #[test]
+fn failing_toc_page_cache_is_explicit_and_consumer_owned() {
+    // The baked TOC used to swallow this counter-display error and silently
+    // claim that page 1 was a resolved cache. Keep the visible best-effort
+    // value, but make both the diagnostic and Word-owned refresh state public.
+    let src = "#set page(numbering: (..nums) => if target() == \"docx\" { nums.pos().at(9) } else { \"1\" })\n\
+               #outline()\n\n= Entry";
+    let compiled = compile_docx(src, &[]);
+    let report = compiled.fidelity_report();
+    assert!(
+        report.suppressed_diagnostics().iter().any(|entry| {
+            entry.stage == ExportStage::FieldPlanning
+                && entry.kind == SuppressedKind::Error
+        }),
+        "the failed TOC cache evaluation must remain attributable"
+    );
+    assert!(report.decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::FieldCacheUnavailable
+            && decision.representation == Representation::Approximate
+    }));
+    assert!(report.dynamic_fields().iter().any(|field| {
+        field.kind == "PAGEREF"
+            && field.cache_status == typst_docx::FieldCacheStatus::BestEffort
+    }));
+
+    let p = parts(src);
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("Entry"), "the TOC entry stays visible");
+    assert!(doc.contains(" PAGEREF "), "Word can refresh the live page field");
+    assert!(
+        p["customXml/typstFidelity.xml"].contains("cache=\"BestEffort\""),
+        "the embedded manifest must preserve placeholder provenance"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn failing_standalone_caption_uses_an_attributed_whole_region_fallback() {
     // A custom figure show rule can emit `it.caption` outside the figure. Its
     // DOCX-target numbering closure used to fail realization and silently
@@ -4168,6 +4204,32 @@ fn suppressed_layout_callback_error_is_retained_in_fidelity_report() {
     let p = parts(src);
     let document = &p["word/document.xml"];
     assert!(document.contains("Paged fallback"), "the paged fallback survives");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn failed_layout_callback_and_fallback_record_an_explicit_drop() {
+    // The PDF callback sees the 60 mm content region and succeeds. DOCX's
+    // standalone callback and whole-page fallback both see 80 mm and reject
+    // it; this used to delete the visible region while reporting zero drops.
+    let src = "#set page(width: 120mm, height: 80mm, margin: 10mm)\n\
+               #layout(size => if size.height > 70mm { panic(\"synthetic region rejected\") } else { [VISIBLE LAYOUT BODY] })\n\
+               After";
+    let compiled = compile_docx(src, &[]);
+    let report = compiled.fidelity_report();
+    assert!(report.suppressed_diagnostics().iter().any(|entry| {
+        entry.stage == ExportStage::LayoutCallback && entry.kind == SuppressedKind::Error
+    }));
+    assert!(report.suppressed_diagnostics().iter().any(|entry| {
+        entry.stage == ExportStage::FallbackLayout && entry.kind == SuppressedKind::Error
+    }));
+    assert!(report.decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::LayoutCallbackUnavailable
+            && decision.representation == Representation::Drop
+    }));
+
+    let p = parts(src);
+    assert!(p["word/document.xml"].contains("After"));
     assert_all_wellformed(&p);
 }
 

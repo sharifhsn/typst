@@ -137,8 +137,10 @@ Word's normal **Update Table / Update Field** commands remain available after
 the user edits the document.
 
 Field ownership and cached-result availability are independent. Every complex
-field carries `FieldCacheStatus::{Resolved, ConsumerRequired, Unavailable}` in
-the finalized IR. An unavailable cache cannot be locked as Typst-owned; its
+field carries `FieldCacheStatus::{Resolved, BestEffort, ConsumerRequired,
+Unavailable}` in the finalized IR. `BestEffort` means a visible placeholder is
+present but requires consumer refresh; `Unavailable` means no cache exists. An
+unavailable cache cannot be locked as Typst-owned; its
 suppressed diagnostic and approximate representation decision remain visible in
 the fidelity report instead of collapsing into an unexplained empty result.
 Exact page-reference groups additionally enroll as `NativePageReference`

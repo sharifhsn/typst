@@ -530,6 +530,9 @@ pub enum FieldDisplay {
 pub enum FieldCacheStatus {
     /// Typst produced a usable cached result.
     Resolved,
+    /// Typst emitted a visible placeholder that is not semantically
+    /// trustworthy; the consumer owns refreshing the live field.
+    BestEffort,
     /// The field is intentionally left for Word/Writer to compute (for example
     /// PAGE/NUMPAGES), or is hidden and has no visible result by design.
     ConsumerRequired,
