@@ -163,7 +163,11 @@ format.
 - The HTML exporter starts from semantic content because layout is the browser's
   job.
 - The DOCX exporter starts from realized semantic content, with the converged
-  paged document acting as an introspection and geometry oracle.
+  paged document acting as an introspection and geometry oracle. Semantic link
+  realization also preserves target-relevant ownership boundaries, such as a
+  Typst-owned page-reference supplement beside a consumer-owned page value;
+  DOCX turns the latter into a live `PAGEREF` without letting updates erase the
+  former.
 - The PPTX exporter starts from laid-out page frames and recovers selected
   semantics through layout tags.
 - The Pandoc exporter starts from realized semantic content and emits a typed

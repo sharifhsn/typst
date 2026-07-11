@@ -458,6 +458,10 @@ pub enum DirectLinkKind {
     Reference,
     /// A page reference whose displayed value belongs to the target layout.
     PageReference,
+    /// The Typst-owned supplement preceding a page reference value. This is a
+    /// separate semantic segment so target exporters can keep localized text
+    /// such as "page" stable while allowing the numeric value to update.
+    PageReferenceSupplement,
 }
 
 #[elem(Construct)]

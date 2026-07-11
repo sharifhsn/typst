@@ -244,7 +244,9 @@ The exporter must distinguish:
 
 DOCX now encodes the first two cases as `FieldMode::{Static, Live}` and models
 visibility independently with `FieldDisplay`. Normal semantic references remain
-Typst-computed hyperlinks; page references are live `PAGEREF` fields. A visible
+Typst-computed hyperlinks. Page references are atomic mixed-ownership groups:
+their localized/custom supplement plus nonbreaking space remains Typst-owned
+linked text, while only the numeric value is a live `PAGEREF` field. A visible
 `SEQ` is live only for a provably equivalent single-component numeral system.
 Richer numbering stays exact Typst text and advances an explicitly hidden Word
 counter. Static complex fields use `w:fldLock`; hidden fields use both their
@@ -369,9 +371,11 @@ mechanical cleanup that introduced this document.
 - DOCX field ownership is explicit. Reference intent now survives the library's
   `RefElem -> DirectLinkElem -> LinkMarker/style` realization path; the old
   mapper-only policy was bypassed in final output. Normal references remain
-  static hyperlinks, page references become one live `PAGEREF` per logical
-  reference, and non-equivalent figure numbering stays Typst-owned instead of
-  being coerced to Arabic `SEQ` output.
+  static hyperlinks. Page references split during semantic realization into a
+  `PageReferenceSupplement` segment and a `PageReference` value with shared
+  source identity: the supplement stays static and linked, while the value
+  becomes one live `PAGEREF`. Non-equivalent figure numbering stays Typst-owned
+  instead of being coerced to Arabic `SEQ` output.
 - Native TOCs are baked, unlocked, and manually updateable; Typst-only fallback
   TOCs are locked. No field requests automatic document-open refresh, avoiding
   Word's modal warnings without leaving blank first-open page numbers.
@@ -465,7 +469,7 @@ mechanical cleanup that introduced this document.
   native `w:tblGrid` lowering, structured decisions, the embedded manifest, and
   the structural oracle-comparison gates.
 - `cargo clippy -p typst-docx --all-targets -- -D warnings` passes.
-- The complete structural DOCX test target passes 164 tests. New gates cover
+- The complete structural DOCX test target passes 165 tests. New gates cover
   raster/compatibility/approximation classification, a retained suppressed
   layout-callback error, nested unsupported math choosing one whole-region
   fallback, explicit placed-content planning, native anchored tables, and
@@ -497,6 +501,12 @@ mechanical cleanup that introduced this document.
   select-all/F9 update and Word save preserved the static hyperlink and hidden
   counter while updating TOC/PAGEREF results; the Word-saved package rendered
   with the same text in Writer. Both consumers produced one 170 mm x 120 mm page.
+- An atomic page-reference fixture compared default `page 1` and custom
+  `sheet 1` output across Typst PDF, first-open DOCX, Writer save/reopen, and a
+  real Word select-all/F9/save. Extracted text was identical in every artifact.
+  Word exposed the supplements as separate links and the values as two live
+  `PAGEREF` fields; after F9, both supplements survived and the fields refreshed
+  to `1`. The Word-saved package retained `NativePageReference` manifest facts.
 - A two-section width fixture (100 mm and 160 mm text areas) was compared with
   the Typst PDF and opened in both Word and LibreOffice. Flexible 1:2 tracks,
   12 pt column gutters, 8 pt row gutters, and a nested table stayed horizontally

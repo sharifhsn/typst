@@ -996,11 +996,14 @@ output users actually received.
 
 The replacement is explicit and survives realization:
 
-- `DirectLinkKind::{Reference, PageReference, Other}` and a source span are
-  carried through the library/layout direct-link rule. DOCX keeps normal
-  reference text as Typst-computed clickable hyperlinks and emits one live
-  `PAGEREF` for each logical page reference (multi-run supplements/results are
-  coalesced instead of duplicating the field).
+- `DirectLinkKind::{Reference, PageReferenceSupplement, PageReference, Other}`
+  and a source span are carried through the library/layout direct-link rule.
+  DOCX keeps normal reference text as Typst-computed clickable hyperlinks. A
+  page reference is one semantic group whose localized/custom supplement plus
+  nonbreaking space remains a static linked segment while only the numeric
+  segment becomes one live `PAGEREF`; multi-run numeric results are coalesced
+  instead of duplicating the field. Exact groups enroll as
+  `NativePageReference` fidelity decisions.
 - `FieldMode::{Static, Live}` records value ownership. Static complex fields
   encode `w:fldLock`; live fields stay consumer-updateable. `FieldDisplay`
   separately records visible versus hidden behavior.
@@ -1034,11 +1037,18 @@ caption/reference text on one 170 mm x 120 mm page. A manual select-all/F9
 update followed by a real Word save kept the Typst-owned hyperlink and hidden
 counter intact while updating live field caches; Writer rendered that Word-saved
 round trip with the same visible text. Structural gates now cover all ownership
-branches; the DOCX target passes 164 tests and the crate passes 12 unit gates.
+branches; the DOCX target passes 165 tests and the crate passes 12 unit gates.
 The cache-failure kernel also survived a LibreOffice 26.2.4.2 save/reopen: live
 `SEQ`/`PAGEREF` instructions remained, `cache="Unavailable"` survived in the
 Writer-stable custom property, and the one-page visible/searchable text was
 unchanged across the Writer round trip.
+An atomic page-reference fixture then compared default `page 1` and custom
+`sheet 1` references across Typst PDF, first-open DOCX, a Writer save/reopen,
+and a real Word select-all/F9/save. All three extracted texts were identical;
+Word's accessibility tree exposed separate linked `page `/`sheet ` segments and
+two live `PAGEREF` values before and after the update. Both Word and Writer
+saved packages retained the two instructions and visible supplements, and Word
+preserved the embedded `NativePageReference` evidence.
 
 ## 14. Scoped width ownership and physical grid gutters
 
@@ -1486,7 +1496,7 @@ report, so the two carriers cannot drift at export time.
 Structural regressions cover installed-versus-missing font facts, manifest
 counts/attributes, the portable `fontTable` reference, custom-property/root-
 relationship presence, and exact equality between the canonical and redundant
-payloads. The DOCX target passes 164 tests.
+payloads. The DOCX target passes 165 tests.
 
 A 2026-07-10 missing-font fixture compiled to one 160 x 120 mm Typst PDF page
 and one identically sized Writer page. Both kept searchable text and happened to

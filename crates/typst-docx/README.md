@@ -123,11 +123,12 @@ stays consistent.
 | `@ref` to heading / figure / equation / labelled element | ✅ | Typst-computed text in a clickable hyperlink → bookmark; Word cannot rewrite it as non-equivalent `REF` text |
 | Footnotes | ✅ | `footnotes.xml` |
 | `#link` to a page *coordinate* | ❌ | text kept, link dropped |
-| `@ref` to a **page number** | ✅ | live `PAGEREF` field with Typst's fixed-point result as its cache; DOCX-only/fallback locations use a synthetic explicit-break model |
+| `@ref` to a **page number** | ✅ | one atomic reference group: the localized/custom supplement remains Typst-owned linked text and only the numeric cache is a live `PAGEREF`; DOCX-only/fallback locations use a synthetic explicit-break model |
 
 Word fields are live document objects, not frozen paint. The IR therefore marks
 value ownership explicitly. Normal references are Typst-owned static hyperlinks;
-page references and pagination fields are consumer-owned; a TOC is live only
+the supplement of a page reference is Typst-owned while its numeric value and
+pagination fields are consumer-owned; a TOC is live only
 when Word can reconstruct all of its entries (otherwise it is locked around the
 baked result). The exporter deliberately omits document-wide `updateFields` and
 per-field `dirty` flags because current Word presents disruptive external-field
@@ -140,6 +141,9 @@ field carries `FieldCacheStatus::{Resolved, ConsumerRequired, Unavailable}` in
 the finalized IR. An unavailable cache cannot be locked as Typst-owned; its
 suppressed diagnostic and approximate representation decision remain visible in
 the fidelity report instead of collapsing into an unexplained empty result.
+Exact page-reference groups additionally enroll as `NativePageReference`
+decisions, so the static/live ownership boundary is inspectable rather than an
+encoder convention.
 
 ### Figures, images & graphics
 

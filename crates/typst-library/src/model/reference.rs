@@ -351,20 +351,43 @@ fn realize_reference(
         eco_format!("{supplement} {numbering}",)
     };
 
-    let mut content = numbers;
-    if !supplement.is_empty() {
-        content = supplement + TextElem::packed("\u{a0}") + content;
-    }
-
-    content = content.spanned(span);
-
-    let kind = match reference.form.get(styles) {
-        RefForm::Normal => DirectLinkKind::Reference,
-        RefForm::Page => DirectLinkKind::PageReference,
-    };
-    Ok(DirectLinkElem::new(loc, content, Some(alt), kind)
+    match reference.form.get(styles) {
+        RefForm::Normal => Ok(DirectLinkElem::new(
+            loc,
+            if supplement.is_empty() {
+                numbers
+            } else {
+                supplement + TextElem::packed("\u{a0}") + numbers
+            },
+            Some(alt),
+            DirectLinkKind::Reference,
+        )
         .pack()
-        .spanned(span))
+        .spanned(span)),
+        RefForm::Page => {
+            let value = DirectLinkElem::new(
+                loc,
+                numbers,
+                Some(alt),
+                DirectLinkKind::PageReference,
+            )
+            .pack()
+            .spanned(span);
+            if supplement.is_empty() {
+                Ok(value)
+            } else {
+                let prefix = DirectLinkElem::new(
+                    loc,
+                    supplement + TextElem::packed("\u{a0}"),
+                    None,
+                    DirectLinkKind::PageReferenceSupplement,
+                )
+                .pack()
+                .spanned(span);
+                Ok(prefix + value)
+            }
+        }
+    }
 }
 
 /// Turn a reference into a citation.

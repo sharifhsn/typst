@@ -139,36 +139,37 @@ pub fn reference(
         return Ok(result_runs);
     };
 
+    // Page references realize as two semantic direct-link segments: a static
+    // Typst-owned supplement (for example localized "page" + NBSP) and a live
+    // consumer-owned page value. `inline_runs` has already lowered that plan;
+    // wrapping it in another PAGEREF would create a nested field and let an
+    // update erase the supplement.
+    if form == RefForm::Page {
+        return Ok(result_runs);
+    }
+
     // In-document reference → REF (text) or PAGEREF (page number) complex
     // field targeting the element's bookmark.
     let (_id, name) = ctx.add_bookmark(loc);
-    let (keyword, mode) = match form {
-        // Page locations belong to the consumer's pagination model and are
-        // therefore safe to keep live.
-        RefForm::Page => ("PAGEREF", FieldMode::Live),
-        // Word's REF evaluator returns bookmarked content; it cannot reproduce
-        // Typst's supplement + numbering rules. Keep the native field/link UX,
-        // but lock the exact Typst-computed cached result against global update.
-        RefForm::Normal => {
-            let content = elem.clone().pack();
-            ctx.record_content_decision(
-                &content,
-                Representation::Approximate,
-                DecisionReason::TypstOwnedReferenceText,
-                LossSet::DYNAMIC_BEHAVIOR,
-                0,
-            );
-            ("REF", FieldMode::Static)
-        }
-    };
+    // Word's REF evaluator returns bookmarked content; it cannot reproduce
+    // Typst's supplement + numbering rules. Keep the native field/link UX, but
+    // lock the exact Typst-computed cached result against global update.
+    let content = elem.clone().pack();
+    ctx.record_content_decision(
+        &content,
+        Representation::Approximate,
+        DecisionReason::TypstOwnedReferenceText,
+        LossSet::DYNAMIC_BEHAVIOR,
+        0,
+    );
     // ` REF _Ref7 \h ` — `\h` makes the field result a hyperlink to the
     // bookmark. Leading/trailing spaces match every real-world emitter.
-    let instr: EcoString = ecow::eco_format!(" {keyword} {name} \\h ");
+    let instr: EcoString = ecow::eco_format!(" REF {name} \\h ");
 
     Ok(vec![Run::Field(Field {
         instr,
         result: result_runs,
-        mode,
+        mode: FieldMode::Static,
         display: FieldDisplay::Visible,
         cache_status: FieldCacheStatus::Resolved,
     })])

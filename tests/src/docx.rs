@@ -3212,11 +3212,10 @@ fn typst_owned_reference_text_stays_static_beside_a_live_toc() {
 
 #[test]
 fn page_reference_remains_live_and_unlocked() {
-    let p = parts(
-        "#set page(numbering: \"1\")\n\
+    let src = "#set page(numbering: \"1\")\n\
          #figure(rect(width: 20pt, height: 20pt), caption: [A box]) <f>\n\n\
-         See page #ref(<f>, form: \"page\").",
-    );
+         See #ref(<f>, form: \"page\").";
+    let p = parts(src);
     let begin = field_begin_tag(&p["word/document.xml"], " PAGEREF ");
     assert!(!begin.contains("w:fldLock"), "PAGEREF belongs to Word: {begin}");
     assert_eq!(
@@ -3224,6 +3223,41 @@ fn page_reference_remains_live_and_unlocked() {
         1,
         "one semantic page reference must emit one complex field"
     );
+    assert!(
+        visible_text(&p["word/document.xml"]).contains("See page\u{a0}1."),
+        "the localized Typst supplement must remain visible outside PAGEREF"
+    );
+    let para = p["word/document.xml"]
+        .split("<w:p>")
+        .find(|para| para.contains(" PAGEREF "))
+        .expect("page-reference paragraph");
+    assert!(
+        para.find("page").unwrap() < para.find(" PAGEREF ").unwrap(),
+        "the supplement must precede, not live inside, the updateable field"
+    );
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::NativePageReference
+            && decision.representation == Representation::Native
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn custom_page_reference_supplement_stays_outside_the_live_field() {
+    let p = parts(
+        "#set page(numbering: \"i\")\n\
+         = Target <t>\n\n\
+         See #ref(<t>, form: \"page\", supplement: [sheet]).",
+    );
+    let doc = &p["word/document.xml"];
+    assert_eq!(doc.matches(" PAGEREF ").count(), 1);
+    assert!(visible_text(doc).contains("See sheet\u{a0}i."));
+    let para = doc
+        .split("<w:p>")
+        .find(|para| para.contains(" PAGEREF "))
+        .expect("custom page-reference paragraph");
+    assert!(para.find("sheet").unwrap() < para.find(" PAGEREF ").unwrap());
     assert_all_wellformed(&p);
 }
 

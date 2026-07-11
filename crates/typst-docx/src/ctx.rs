@@ -418,6 +418,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         );
     }
 
+    fn record_native_page_reference(&mut self, content: &Content) {
+        self.record_content_decision(
+            content,
+            Representation::Native,
+            DecisionReason::NativePageReference,
+            LossSet::default(),
+            0,
+        );
+    }
+
     /// Retains a field-planning failure absorbed by a deliberate best-effort
     /// plan instead of losing the diagnostic or aborting the whole document.
     pub(crate) fn suppress_content_diagnostic(
@@ -1081,6 +1091,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 let runs = self.inline_runs(&elem.body, child_styles, props.clone())?;
                 match elem.kind {
                     DirectLinkKind::PageReference => {
+                        self.record_native_page_reference(&elem.clone().pack());
                         out.push(ParaChild::Run(Run::Field(Field {
                             instr: eco_format!(" PAGEREF {name} \\h "),
                             result: runs,
@@ -1089,7 +1100,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                             cache_status: FieldCacheStatus::Resolved,
                         })));
                     }
-                    DirectLinkKind::Reference | DirectLinkKind::Other => {
+                    DirectLinkKind::Reference
+                    | DirectLinkKind::PageReferenceSupplement
+                    | DirectLinkKind::Other => {
                         if elem.kind == DirectLinkKind::Reference {
                             let content = elem.clone().pack();
                             self.record_content_decision(
@@ -1146,6 +1159,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                             .unwrap_or(DirectLinkKind::Other)
                         {
                             DirectLinkKind::PageReference => {
+                                self.record_native_page_reference(child);
                                 if let Some((span, previous_loc, index)) = page_field
                                     && span == direct_span
                                     && previous_loc == loc
@@ -1179,7 +1193,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                                     runs,
                                 });
                             }
-                            DirectLinkKind::Other => {
+                            DirectLinkKind::PageReferenceSupplement
+                            | DirectLinkKind::Other => {
                                 out.push(ParaChild::Hyperlink {
                                     rel: None,
                                     anchor: Some(name),
@@ -1425,6 +1440,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             let runs = self.inline_runs(&elem.body, styles, props.clone())?;
             match elem.kind {
                 DirectLinkKind::PageReference => {
+                    self.record_native_page_reference(&elem.clone().pack());
                     let (_id, name) = self.add_bookmark(elem.loc);
                     out.push(Run::Field(Field {
                         instr: eco_format!(" PAGEREF {name} \\h "),
@@ -1444,7 +1460,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                         cache_status: FieldCacheStatus::Resolved,
                     }));
                 }
-                DirectLinkKind::Other => out.extend(runs),
+                DirectLinkKind::PageReferenceSupplement | DirectLinkKind::Other => {
+                    out.extend(runs)
+                }
             }
         } else if let Some(elem) = child.to_packed::<LinkMarker>() {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);

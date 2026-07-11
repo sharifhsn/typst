@@ -55,6 +55,9 @@ pub enum DecisionReason {
     /// Typst could not compute a trustworthy cached field result, so the
     /// consumer must provide a best-effort value from the native field code.
     FieldCacheUnavailable,
+    /// A page reference was planned as one atomic semantic group: its localized
+    /// supplement is Typst-owned text and its numeric value is a live PAGEREF.
+    NativePageReference,
     /// Section content failed to lower, so only its geometry was retained.
     SectionGeometryFallback,
     /// Fractional stack spacing depends on leftover region geometry. DOCX keeps
