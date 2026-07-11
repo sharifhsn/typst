@@ -3,7 +3,6 @@ use std::num::NonZeroUsize;
 use crate::diag::{SourceResult, bail};
 use crate::engine::Engine;
 use crate::foundations::{Args, Construct, Content, elem};
-use crate::introspection::{Locatable, Unqueriable};
 use crate::layout::{Abs, Length, Ratio, Rel};
 
 /// Separates a region into multiple equally sized columns.

@@ -13,7 +13,6 @@ use crate::foundations::{
     Args, Array, CastInfo, Construct, Content, Context, Fold, FromValue, Func, IntoValue,
     Packed, Reflect, Resolve, Smart, StyleChain, Synthesize, Value, cast, elem, scope,
 };
-use crate::introspection::{Locatable, Tagged, Unqueriable};
 use crate::layout::resolve::{CellGrid, grid_to_cellgrid};
 use crate::layout::{
     Abs, Alignment, Length, OuterHAlignment, OuterVAlignment, Rel, Sides, Sizing,
