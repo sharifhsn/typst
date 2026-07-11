@@ -165,14 +165,15 @@ semantics from frames. The shared compiler product should instead contain:
 - resolved semantic regions for tables, columns, equations, page furniture,
   and placed content.
 
-The first DOCX slice now captures an owned `ExportSnapshot` before lowering.
+The DOCX exporter now captures an owned `ExportSnapshot` before lowering.
 Logical IDs are span/element based rather than target-specific-location based;
 top-level lowering regions and nested located semantic nodes aggregate their
 semantic occurrences and every matching converged paged position. The snapshot
 also owns every converged page size, physical table/grid cell regions recovered
-from hidden paged-frame tags, and a deterministic document ID. Counter, link,
-bibliography, and fallback-specific resolved payload enrollment remains
-incomplete.
+from hidden paged-frame tags, the paged reference document's lossless
+bibliography payload and selected entries, and a deterministic document ID.
+Both DOCX bibliography package views derive from that authority. Counter, link,
+and fallback-specific resolved payload enrollment remains incomplete.
 
 DOCX uses semantics as primary and paged geometry as an oracle. PPTX would
 use frames as primary and semantic regions as a sidecar. Pandoc would use only
@@ -368,6 +369,10 @@ mechanical cleanup that introduced this document.
   owned pre-lowering sidecar. Source-backed IDs exclude target-specific
   locations, repeated semantic occurrences aggregate, and matching paged
   positions/page sizes survive into the final document and manifest.
+- Bibliography now has one pre-lowering authority. The snapshot owns the paged
+  document's lossless BibLaTeX payload and selected Hayagriva entries with
+  stable logical IDs; both the private sidecar and Word `b:Sources` part derive
+  from those facts instead of performing independent late introspector queries.
 - Tables and grids now cross an explicit `TablePlan` before cell lowering.
   Fixed tracks and axis-aligned auto/fractional/relative tracks with complete
   converged cell measurements enroll as native. Unsupported cell paints, border
@@ -476,7 +481,7 @@ mechanical cleanup that introduced this document.
   native `w:tblGrid` lowering, structured decisions, the embedded manifest, and
   the structural oracle-comparison gates.
 - `cargo clippy -p typst-docx --all-targets -- -D warnings` passes.
-- The complete structural DOCX test target passes 170 tests. New gates cover
+- The complete structural DOCX test target passes 171 tests. New gates cover
   raster/compatibility/approximation classification, a retained suppressed
   layout-callback error, nested unsupported math choosing one whole-region
   fallback, explicit placed-content planning, native anchored tables, and
@@ -578,6 +583,12 @@ mechanical cleanup that introduced this document.
   cells. LibreOffice Writer rendered one 453.543 x 340.157 pt page. Package
   inspection found the deterministic snapshot ID, page geometry, and native
   `PositionedTextBox` decision in `customXml/typstFidelity.xml`.
+- A two-entry bibliography fixture now proves both package views come from the
+  same snapshot. PDF keeps citation order `beta` then `alpha`; the manifest
+  publishes stable entry IDs for both keys, Word's `b:Sources` part contains
+  exactly those two tags, and the lossless sidecar contains both canonical
+  records. Repeated compilation yields identical entry IDs, while a document
+  with no bibliography has no snapshot entries or bibliography parts.
 - A table-planning fixture compared one PDF gradient/fractional table with the
   native DOCX result. Word opened without repair and exposed an editable
   3-row/2-column table and every cell; Writer rendered one page with matching
@@ -649,7 +660,7 @@ backgrounds, footnotes, citations, and mixed page sizes.
    `ExportSnapshot` carries stable source-backed IDs, semantic occurrences,
    converged page sizes, matched paged positions, and final table/grid cell
    regions extracted through format-neutral paged-frame scanning. Enroll
-   resolved counters, links, bibliography payloads, and fallback regions, and
+   resolved counters, links, and fallback regions, and
    reuse more of the sidecar across PPTX/Pandoc.
 4. **Capability planning — equations, placed content, furniture, and table slices
    implemented.** Equations plan atomically. Placed content preflights native

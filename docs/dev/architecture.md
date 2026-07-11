@@ -168,7 +168,9 @@ format.
   Typst-owned page-reference supplement beside a consumer-owned page value;
   DOCX turns the latter into a live `PAGEREF` without letting updates erase the
   former. Mapper-owned region plans can also recover visible editable text from
-  paged layout before escalating a text-primary failure to raster or drop.
+  paged layout before escalating a text-primary failure to raster or drop. Its
+  pre-lowering snapshot owns the paged bibliography entry set and lossless
+  payload so Word-native and external-tool package views cannot drift apart.
 - The PPTX exporter starts from laid-out page frames and recovers selected
   semantics through layout tags.
 - The Pandoc exporter starts from realized semantic content and emits a typed

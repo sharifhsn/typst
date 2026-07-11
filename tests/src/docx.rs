@@ -3815,7 +3815,46 @@ fn bibliography_gets_a_biblatex_sidecar_part() {
 }
 
 #[test]
+fn export_snapshot_owns_both_bibliography_package_views() {
+    let src =
+        "First @beta and then @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")";
+    let files = &[("refs.bib", REFS_BIB)];
+    let first = compile_docx(src, files);
+    let second = compile_docx(src, files);
+    let first_entries = first.export_snapshot().bibliography_entries();
+    let second_entries = second.export_snapshot().bibliography_entries();
+    assert_eq!(
+        first_entries
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"]
+    );
+    assert_eq!(
+        first_entries.iter().map(|entry| entry.logical_id).collect::<Vec<_>>(),
+        second_entries
+            .iter()
+            .map(|entry| entry.logical_id)
+            .collect::<Vec<_>>()
+    );
+    assert!(first.export_snapshot().bibliography_biblatex().is_some());
+
+    let p = parts_with_files(src, files);
+    assert_eq!(p["customXml/item1.xml"].matches("<b:Source>").count(), 2);
+    assert!(p["word/typstBibliography.xml"].contains("Alpha Source"));
+    let manifest = &p["customXml/typstFidelity.xml"];
+    for entry in first_entries {
+        assert!(manifest.contains(&format!("id=\"{:032x}\"", entry.logical_id)));
+        assert!(manifest.contains(&format!("key=\"{}\"", entry.key)));
+    }
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn no_bibliography_means_no_sidecar_part() {
+    let compiled = compile_docx("Just some plain text, no citations at all.", &[]);
+    assert!(compiled.export_snapshot().bibliography_entries().is_empty());
+    assert!(compiled.export_snapshot().bibliography_biblatex().is_none());
     let p = parts("Just some plain text, no citations at all.");
     assert!(
         !p.contains_key("word/typstBibliography.xml"),

@@ -60,7 +60,16 @@ pub fn build(document: &DocxDocument) -> String {
             page.height_pt
         );
     }
-    out.push_str("</typst:pages><typst:tables>");
+    out.push_str("</typst:pages><typst:bibliography>");
+    for entry in snapshot.bibliography_entries() {
+        let _ = write!(
+            out,
+            "<typst:entry id=\"{:032x}\" key=\"{}\"/>",
+            entry.logical_id,
+            escape_attr(&entry.key)
+        );
+    }
+    out.push_str("</typst:bibliography><typst:tables>");
     for table in snapshot.tables() {
         let _ = write!(
             out,

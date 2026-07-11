@@ -1040,7 +1040,7 @@ caption/reference text on one 170 mm x 120 mm page. A manual select-all/F9
 update followed by a real Word save kept the Typst-owned hyperlink and hidden
 counter intact while updating live field caches; Writer rendered that Word-saved
 round trip with the same visible text. Structural gates now cover all ownership
-branches; the DOCX target passes 170 tests and the crate passes 13 unit gates.
+branches; the DOCX target passes 171 tests and the crate passes 13 unit gates.
 The cache-failure kernel also survived a LibreOffice 26.2.4.2 save/reopen: live
 `SEQ`/`PAGEREF` instructions remained, `cache="Unavailable"` survived in the
 Writer-stable custom property, and the one-page visible/searchable text was
@@ -1499,7 +1499,7 @@ report, so the two carriers cannot drift at export time.
 Structural regressions cover installed-versus-missing font facts, manifest
 counts/attributes, the portable `fontTable` reference, custom-property/root-
 relationship presence, and exact equality between the canonical and redundant
-payloads. The DOCX target passes 170 tests.
+payloads. The DOCX target passes 171 tests.
 
 A 2026-07-10 missing-font fixture compiled to one 160 x 120 mm Typst PDF page
 and one identically sized Writer page. Both kept searchable text and happened to
@@ -1543,7 +1543,7 @@ The manifest adds drawing/unlabeled counts and a `<typst:drawings>` collection.
 Existing structural tests now cover described and unlabeled SVG pictures,
 native text boxes, decorative vector shapes, decorative backgrounds, and a
 described foreground; one new invariant unit gate covers contradictory intent.
-The DOCX target now passes 170 structural tests and 13 crate unit tests.
+The DOCX target now passes 171 structural tests and 13 crate unit tests.
 
 A 2026-07-10 mixed fixture produced five drawings: one described SVG, one
 unlabeled SVG, one native text box, one decorative orange shape, and one
@@ -1645,3 +1645,24 @@ box. Typst PDF contains `VISIBLE INLINE BODY`; the deliberately degraded DOCX
 retains `Before` and `After`, emits the source warning, retains the
 `FallbackLayout/Error`, and embeds `drop="1"` with
 `InlinePositionedContentUnavailable`.
+
+## 32. Snapshot-owned bibliography authority
+
+Bibliography packaging previously queried the DOCX introspector twice after
+snapshot construction: once for the lossless BibLaTeX sidecar and once for the
+selected Hayagriva entries mapped into Word's `b:Sources` schema. Those parallel
+late queries could disagree with the paged visual reference or with each other.
+
+`ExportSnapshot` now captures the paged document's owned BibLaTeX payload and
+ordered selected entries before DOCX lowering. Every entry has a stable logical
+ID derived from its key and canonical snapshot payload; those IDs participate
+in the document snapshot hash. Both `word/typstBibliography.xml` and
+`customXml/item1.xml` now derive exclusively from the snapshot, and the fidelity
+manifest publishes each entry ID/key pair.
+
+The real fixture cites `beta` before `alpha` while the source file lists
+`alpha` first. PDF retains visible `[1]`/`[2]` citation order, the snapshot and
+manifest contain stable `alpha`/`beta` entry identities, Word Source Manager
+contains exactly the same two tags, and the lossless sidecar contains both
+source records. Repeated compilation produces identical entry IDs. A document
+without a bibliography has empty snapshot facts and emits neither package view.

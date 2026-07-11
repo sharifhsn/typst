@@ -225,7 +225,10 @@ The target is also selected automatically from a `.docx` output extension.
 independent loss dimensions, affected searchable-text counts, stable source
 identities, and diagnostics suppressed by best-effort fallback conversion.
 `DocxDocument::export_snapshot()` exposes owned semantic nodes matched to the
-converged paged oracle, and `fidelity_manifest_xml()` serializes both records.
+converged paged oracle plus the exact bibliography entry set and lossless
+BibLaTeX payload from that reference document. Both the external bibliography
+sidecar and Word Source Manager data derive from this one snapshot.
+`fidelity_manifest_xml()` serializes the snapshot and fidelity records.
 Every package persists that versioned manifest at
 `customXml/typstFidelity.xml` and duplicates its exact text in the standard
 `TypstFidelityManifestV1` custom document property because LibreOffice Writer

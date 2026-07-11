@@ -1,11 +1,14 @@
 //! Stable, owned semantic/paged sidecar captured before DOCX lowering.
 
+use comemo::Track;
+use ecow::EcoString;
 use typst_export_common::paged::{PagedGeometry, PagedTableGeometry};
 use typst_layout::PagedIntrospector;
 use typst_library::foundations::Content;
 use typst_library::introspection::Introspector;
 use typst_library::layout::Size;
 use typst_library::routines::Pair;
+use typst_library::{foundations::Label, model::BibliographyElem};
 
 use crate::report::ExportSource;
 
@@ -32,6 +35,15 @@ pub struct SnapshotNode {
     pub paged_positions: Vec<SnapshotPosition>,
 }
 
+/// One bibliography entry selected by the converged paged document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotBibliographyEntry {
+    pub logical_id: u128,
+    pub key: EcoString,
+    pub(crate) label: Label,
+    pub(crate) entry: hayagriva::Entry,
+}
+
 /// Stable bridge between the DOCX semantic realization and converged paged
 /// geometry. This deliberately owns only identities and resolved facts, never
 /// arena-backed `Content` or `StyleChain` values.
@@ -41,6 +53,8 @@ pub struct ExportSnapshot {
     nodes: Vec<SnapshotNode>,
     pages: Vec<SnapshotPage>,
     tables: Vec<PagedTableGeometry>,
+    bibliography_biblatex: Option<String>,
+    bibliography_entries: Vec<SnapshotBibliographyEntry>,
 }
 
 impl ExportSnapshot {
@@ -59,6 +73,24 @@ impl ExportSnapshot {
     /// Final physical table/grid cell regions recovered from paged frames.
     pub fn tables(&self) -> &[PagedTableGeometry] {
         &self.tables
+    }
+
+    /// Lossless bibliography source payload resolved by the paged reference
+    /// document before target-specific lowering begins.
+    pub fn bibliography_biblatex(&self) -> Option<&str> {
+        self.bibliography_biblatex.as_deref()
+    }
+
+    /// Citation keys represented by the paged document's visible bibliography.
+    pub fn bibliography_entries(&self) -> &[SnapshotBibliographyEntry] {
+        &self.bibliography_entries
+    }
+
+    pub(crate) fn bibliography_source_entries(&self) -> Vec<(Label, hayagriva::Entry)> {
+        self.bibliography_entries
+            .iter()
+            .map(|entry| (entry.label, entry.entry.clone()))
+            .collect()
     }
 
     pub(crate) fn build(
@@ -132,9 +164,44 @@ impl ExportSnapshot {
                 )
             })
             .collect::<Vec<_>>();
-        let logical_id =
-            typst_utils::hash128(&(identity_nodes, identity_pages, identity_tables));
-        Self { logical_id, nodes, pages, tables }
+        let (bibliography_biblatex, bibliography_entries) = paged.map_or_else(
+            || (None, Vec::new()),
+            |paged| {
+                let biblatex =
+                    BibliographyElem::biblatex((paged as &dyn Introspector).track());
+                let mut entries =
+                    BibliographyElem::entries((paged as &dyn Introspector).track());
+                entries.sort_by_key(|(label, _)| label.resolve().as_str().to_owned());
+                let entries = entries
+                    .into_iter()
+                    .map(|(label, entry)| {
+                        let key = EcoString::from(label.resolve().as_str());
+                        let logical_id = typst_utils::hash128(&(key.as_str(), &entry));
+                        SnapshotBibliographyEntry { logical_id, key, label, entry }
+                    })
+                    .collect();
+                (biblatex, entries)
+            },
+        );
+        let bibliography_entry_ids = bibliography_entries
+            .iter()
+            .map(|entry| entry.logical_id)
+            .collect::<Vec<_>>();
+        let logical_id = typst_utils::hash128(&(
+            identity_nodes,
+            identity_pages,
+            identity_tables,
+            &bibliography_biblatex,
+            bibliography_entry_ids,
+        ));
+        Self {
+            logical_id,
+            nodes,
+            pages,
+            tables,
+            bibliography_biblatex,
+            bibliography_entries,
+        }
     }
 }
 

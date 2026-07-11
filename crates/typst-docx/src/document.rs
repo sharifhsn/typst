@@ -386,23 +386,13 @@ fn docx_document_impl(
     // Same call and reasoning as the Pandoc exporter's `.bib` sidecar: a pure
     // query of the (already-stabilized) shared introspector, so it cannot
     // perturb convergence. `None` when the document has no bibliography.
-    let bibliography = {
-        let introspector = engine.introspector.access(
-            "querying bibliography elements to synthesize a .bib sidecar is a pure query",
-        );
-        typst_library::model::BibliographyElem::biblatex(*introspector)
-    };
+    let bibliography = export_snapshot.bibliography_biblatex().map(str::to_owned);
 
-    // The same bibliography, mapped onto Word's native `b:Source` schema (see
-    // `crate::bibliography`) so References → Manage Sources shows real,
-    // correctly-typed sources. Same pure-query justification as above.
-    let word_sources = {
-        let introspector = engine.introspector.access(
-            "querying bibliography elements to populate the native Word sources part is a pure query",
-        );
-        let entries = typst_library::model::BibliographyElem::entries(*introspector);
-        crate::bibliography::map_entries(&entries)
-    };
+    // Map the same snapshot-owned entries onto Word's native `b:Source` schema
+    // so References → Manage Sources and the lossless sidecar cannot select
+    // different semantic source sets.
+    let word_sources =
+        crate::bibliography::map_entries(&export_snapshot.bibliography_source_entries());
 
     // Fallback heading list, for documents whose headings are show-ruled or
     // rasterized and so never reach the heading mapper (nothing recorded): query

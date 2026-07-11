@@ -42,4 +42,7 @@ pub use self::report::{
     SuppressedDiagnostic, SuppressedKind,
 };
 pub use self::rules::register;
-pub use self::snapshot::{ExportSnapshot, SnapshotNode, SnapshotPage, SnapshotPosition};
+pub use self::snapshot::{
+    ExportSnapshot, SnapshotBibliographyEntry, SnapshotNode, SnapshotPage,
+    SnapshotPosition,
+};
