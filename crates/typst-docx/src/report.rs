@@ -58,6 +58,16 @@ pub enum DecisionReason {
     /// A page reference was planned as one atomic semantic group: its localized
     /// supplement is Typst-owned text and its numeric value is a live PAGEREF.
     NativePageReference,
+    /// A standalone figure caption could not be realized natively, so visible
+    /// editable text recovered from paged layout preserves the whole caption.
+    StandaloneCaptionTextFallback,
+    /// Both native realization and visible-text recovery failed, so a
+    /// standalone figure caption was preserved as one rendered region plus
+    /// searchable fallback text.
+    StandaloneCaptionRasterFallback,
+    /// Neither native standalone-caption realization nor its whole-region
+    /// fallback produced output.
+    StandaloneCaptionUnavailable,
     /// Section content failed to lower, so only its geometry was retained.
     SectionGeometryFallback,
     /// Fractional stack spacing depends on leftover region geometry. DOCX keeps
@@ -250,6 +260,7 @@ pub enum ExportStage {
     FallbackLayout,
     SectionLowering,
     FieldPlanning,
+    CapabilityPlanning,
 }
 
 /// Kind of suppressed diagnostic.

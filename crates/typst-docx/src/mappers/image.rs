@@ -291,14 +291,64 @@ pub fn caption(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Vec<Block>> {
-    // Best-effort: realizing a standalone caption runs the user's numbering
-    // closure, which can fail against the empty first-iteration introspector
-    // (see `caption_runs`) — skip the caption rather than abort the export.
-    let Ok(realized) = elem.realize(ctx.engine(), styles) else {
-        return Ok(Vec::new());
+    enum CaptionPlan {
+        Native(Content),
+        Fallback,
+    }
+
+    let source = elem.clone().pack();
+    let plan = match elem.realize(ctx.engine(), styles) {
+        Ok(realized) => CaptionPlan::Native(realized),
+        Err(errors) => {
+            for diagnostic in errors {
+                ctx.suppress_content_diagnostic(
+                    &source,
+                    crate::report::ExportStage::CapabilityPlanning,
+                    diagnostic,
+                );
+            }
+            CaptionPlan::Fallback
+        }
     };
-    let runs = ctx.inline_runs(&realized, styles, RunProps::default())?;
+    let runs = match plan {
+        CaptionPlan::Native(realized) => {
+            ctx.inline_runs(&realized, styles, RunProps::default())?
+        }
+        CaptionPlan::Fallback => {
+            if let Some(text) = ctx.layout_fallback_text(&source, styles, elem.span())? {
+                ctx.record_content_decision(
+                    &source,
+                    Representation::Approximate,
+                    DecisionReason::StandaloneCaptionTextFallback,
+                    LossSet::VISUAL_ONLY,
+                    text.chars().count(),
+                );
+                vec![Run::Text { props: RunProps::default(), text: text.into() }]
+            } else {
+                laid_out_fallback_with_reason(
+                    &source,
+                    styles,
+                    ctx,
+                    DecisionReason::StandaloneCaptionRasterFallback,
+                )?
+            }
+        }
+    };
     if runs.is_empty() {
+        let affected_text_chars = elem.body.plain_text().chars().count();
+        if affected_text_chars > 0 {
+            ctx.record_content_decision(
+                &source,
+                Representation::Drop,
+                DecisionReason::StandaloneCaptionUnavailable,
+                LossSet::DROP,
+                affected_text_chars,
+            );
+            ctx.warn_message(
+                "standalone caption realization and whole-region fallback produced no output",
+                elem.span(),
+            );
+        }
         return Ok(Vec::new());
     }
     let props = ParaProps {

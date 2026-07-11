@@ -167,7 +167,8 @@ format.
   realization also preserves target-relevant ownership boundaries, such as a
   Typst-owned page-reference supplement beside a consumer-owned page value;
   DOCX turns the latter into a live `PAGEREF` without letting updates erase the
-  former.
+  former. Mapper-owned region plans can also recover visible editable text from
+  paged layout before escalating a text-primary failure to raster or drop.
 - The PPTX exporter starts from laid-out page frames and recovers selected
   semantics through layout tags.
 - The Pandoc exporter starts from realized semantic content and emits a typed

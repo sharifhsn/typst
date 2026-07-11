@@ -4118,6 +4118,41 @@ fn failing_figure_numbering_closure_does_not_abort_the_export() {
 }
 
 #[test]
+fn failing_standalone_caption_uses_an_attributed_whole_region_fallback() {
+    // A custom figure show rule can emit `it.caption` outside the figure. Its
+    // DOCX-target numbering closure used to fail realization and silently
+    // return an empty block list, deleting the complete caption.
+    let src = "#set figure(numbering: _ => if target() == \"docx\" { (1,).at(9) } else { \"1\" })\n\
+               #show figure: it => [#it.body #it.caption]\n\
+               #figure(rect(width: 20pt, height: 10pt), caption: [Caption survives])";
+    let compiled = compile_docx(src, &[]);
+    assert!(
+        compiled
+            .fidelity_report()
+            .suppressed_diagnostics()
+            .iter()
+            .any(|entry| {
+                entry.stage == ExportStage::CapabilityPlanning
+                    && entry.kind == SuppressedKind::Error
+            }),
+        "the failed native caption plan must retain its diagnostic"
+    );
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::StandaloneCaptionTextFallback
+            && decision.representation == Representation::Approximate
+            && decision.affected_text_chars > 0
+    }));
+
+    let p = parts(src);
+    let doc = &p["word/document.xml"];
+    assert!(
+        visible_text(doc).contains("Caption survives"),
+        "the recovered caption must remain visible and searchable"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn suppressed_layout_callback_error_is_retained_in_fidelity_report() {
     let src = "#layout(size => if target() == \"docx\" { (1,).at(9) } else { [Paged fallback] })";
     let compiled = compile_docx(src, &[]);

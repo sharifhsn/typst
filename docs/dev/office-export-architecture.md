@@ -322,7 +322,8 @@ mechanical cleanup that introduced this document.
   resolved per-page representation remains open design work.
 - Some DOCX mapper-specific `Option`/empty fallbacks still conflate unsupported
   content and content loss. Central fallback layout, layout-callback, section,
-  and delayed conversion failures are now retained in `FidelityReport`.
+  delayed conversion, field-cache, and standalone-caption planning failures are
+  now retained in `FidelityReport`.
 - PPTX table tags do not carry the resolver's final fill, stroke, inset,
   alignment, gutter, or cell-math contract.
 - PPTX live text is regrouped heuristically and does not carry a complete font,
@@ -469,7 +470,7 @@ mechanical cleanup that introduced this document.
   native `w:tblGrid` lowering, structured decisions, the embedded manifest, and
   the structural oracle-comparison gates.
 - `cargo clippy -p typst-docx --all-targets -- -D warnings` passes.
-- The complete structural DOCX test target passes 165 tests. New gates cover
+- The complete structural DOCX test target passes 166 tests. New gates cover
   raster/compatibility/approximation classification, a retained suppressed
   layout-callback error, nested unsupported math choosing one whole-region
   fallback, explicit placed-content planning, native anchored tables, and
@@ -507,6 +508,12 @@ mechanical cleanup that introduced this document.
   Word exposed the supplements as separate links and the values as two live
   `PAGEREF` fields; after F9, both supplements survived and the fields refreshed
   to `1`. The Word-saved package retained `NativePageReference` manifest facts.
+- A standalone-caption fixture deliberately failed its DOCX-only numbering
+  closure. The planner retained the error, recovered the whole caption as
+  visible editable text from paged layout, and enrolled an attributed
+  `StandaloneCaptionTextFallback` approximation instead of returning an empty
+  block list. Typst PDF and Writer extracted identical caption/body text; the
+  known centering-to-flow alignment change remained explicit in the manifest.
 - A two-section width fixture (100 mm and 160 mm text areas) was compared with
   the Typst PDF and opened in both Word and LibreOffice. Flexible 1:2 tracks,
   12 pt column gutters, 8 pt row gutters, and a nested table stayed horizontally

@@ -149,7 +149,7 @@ encoder convention.
 
 | Feature | | Notes |
 |---|:--:|---|
-| Figures (caption + cross-reference) | ✅ | equivalent single-component `1`/`a`/`A`/`i`/`I` numbering stays a live `SEQ`; richer Typst patterns/functions stay exact text plus a hidden Word counter |
+| Figures (caption + cross-reference) | ✅ | equivalent single-component `1`/`a`/`A`/`i`/`I` numbering stays a live `SEQ`; richer Typst patterns/functions stay exact text plus a hidden Word counter; a separately emitted caption whose DOCX realization fails recovers visible editable text from paged layout before considering raster/drop |
 | **PNG / JPEG / GIF** images | ✅ | embedded **verbatim** (no re-encode) |
 | **SVG** images | ✅ | native SVG with a PNG compatibility fallback |
 | **PDF / WebP** images | 🖼️ | rasterized to PNG |

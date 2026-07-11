@@ -559,7 +559,10 @@ extraction the whole title block came out as a single `[]`.
    flow with no dispatch arm — it rasterized. Now `mappers::image::caption`
    realizes it (`FigureCaption::realize` → "Figure 3: …", number baked as
    static text since a caption divorced from its figure has no live counter
-   context) into a `Caption`-styled paragraph.
+   context) into a `Caption`-styled paragraph. If that target-specific
+   realization fails, the current planner retains the diagnostic and recovers
+   the complete visible text from paged layout; it no longer returns an empty
+   block list.
 
 **Validated:** corpus-wide `RASTERIZE: caption` 132->0, `sequence` 734->586,
 `styled` 402->374. But the rasterize-count drop *understates* the win: the
@@ -1037,7 +1040,7 @@ caption/reference text on one 170 mm x 120 mm page. A manual select-all/F9
 update followed by a real Word save kept the Typst-owned hyperlink and hidden
 counter intact while updating live field caches; Writer rendered that Word-saved
 round trip with the same visible text. Structural gates now cover all ownership
-branches; the DOCX target passes 165 tests and the crate passes 12 unit gates.
+branches; the DOCX target passes 166 tests and the crate passes 12 unit gates.
 The cache-failure kernel also survived a LibreOffice 26.2.4.2 save/reopen: live
 `SEQ`/`PAGEREF` instructions remained, `cache="Unavailable"` survived in the
 Writer-stable custom property, and the one-page visible/searchable text was
@@ -1496,7 +1499,7 @@ report, so the two carriers cannot drift at export time.
 Structural regressions cover installed-versus-missing font facts, manifest
 counts/attributes, the portable `fontTable` reference, custom-property/root-
 relationship presence, and exact equality between the canonical and redundant
-payloads. The DOCX target passes 165 tests.
+payloads. The DOCX target passes 166 tests.
 
 A 2026-07-10 missing-font fixture compiled to one 160 x 120 mm Typst PDF page
 and one identically sized Writer page. Both kept searchable text and happened to
@@ -1540,7 +1543,7 @@ The manifest adds drawing/unlabeled counts and a `<typst:drawings>` collection.
 Existing structural tests now cover described and unlabeled SVG pictures,
 native text boxes, decorative vector shapes, decorative backgrounds, and a
 described foreground; one new invariant unit gate covers contradictory intent.
-The DOCX target remains at 164 structural tests and now has 10 crate unit tests.
+The DOCX target now passes 166 structural tests and 12 crate unit tests.
 
 A 2026-07-10 mixed fixture produced five drawings: one described SVG, one
 unlabeled SVG, one native text box, one decorative orange shape, and one
@@ -1556,3 +1559,27 @@ picture as `Picture 2`. Word's Accessibility Assistant reported exactly one
 `Missing alt text` issue, matching `unlabeledDrawings="1"`; all other media,
 contrast, table, structure, and access categories reported zero issues. This is
 the intended correlation between package evidence and the consumer UX.
+
+## 28. Whole-region planning for failing standalone captions
+
+A standalone `FigureCaption` emitted by a custom `show figure` rule previously
+used `let Ok(realized) = ... else { return Ok(Vec::new()) }`. A numbering or
+supplement closure that failed only under `target() == "docx"` therefore deleted
+the entire caption without a warning, fallback, or fidelity fact.
+
+Caption lowering now chooses an explicit plan. Native realization remains an
+editable `Caption` paragraph. On failure, every diagnostic is retained at the
+`CapabilityPlanning` stage and the complete caption is re-laid out under the
+paged target. Recovered text becomes one visible editable paragraph with a
+`StandaloneCaptionTextFallback` approximation. Only when no text is recoverable
+does the planner try one whole-caption raster; failure of that second fallback
+records `StandaloneCaptionUnavailable` as a `Drop` with affected text and a
+warning. Introspection tags from the paged recovery remain enrolled.
+
+A real 160 x 100 mm fixture deliberately failed its DOCX numbering closure.
+Typst PDF and Writer both extracted exactly `Figure 1: This caption remains
+visible and searchable.` followed by editable body text. The DOCX manifest
+recorded `Approximate`, `StandaloneCaptionTextFallback`, and 54 affected text
+characters. Writer rendered the caption visibly as ordinary text; its flowing
+alignment differs from the centered PDF and is therefore reported rather than
+presented as exact fidelity.

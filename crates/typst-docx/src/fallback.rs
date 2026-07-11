@@ -34,6 +34,44 @@ pub(crate) struct CachedOverlay {
 }
 
 impl<'a, 'e> DocxCtx<'a, 'e> {
+    /// Recovers visible text from a whole region laid out under the paged
+    /// target, while preserving any introspection tags produced by that layout.
+    /// This is preferable to rasterization for text-primary fallbacks such as a
+    /// caption whose target-specific semantic realization failed.
+    pub(crate) fn layout_fallback_text(
+        &mut self,
+        content: &Content,
+        styles: StyleChain,
+        span: Span,
+    ) -> SourceResult<Option<String>> {
+        let inf_frame = self.layout_export_frame(content, styles, span, Abs::inf())?;
+        let mut tags = Vec::new();
+        let frame = match inf_frame {
+            Some(frame) if usable_size(frame.size()) => frame,
+            rejected => {
+                if let Some(frame) = &rejected {
+                    collect_frame_tags(frame, &mut tags);
+                }
+                match self.layout_export_frame(
+                    content,
+                    styles,
+                    span,
+                    self.raster_height,
+                )? {
+                    Some(frame) if usable_size(frame.size()) => frame,
+                    _ => {
+                        self.deferred_tags.extend(tags);
+                        return Ok(None);
+                    }
+                }
+            }
+        };
+        collect_frame_tags(&frame, &mut tags);
+        self.deferred_tags.extend(tags);
+        let text = frame_to_text(&frame);
+        Ok((!text.is_empty()).then_some(text))
+    }
+
     /// Lays `content` out to a single frame under the paged target, against the
     /// page content width and through a sub-engine with a throwaway sink.
     pub(crate) fn layout_export_frame(
