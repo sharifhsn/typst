@@ -44,7 +44,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
         span: Span,
     ) -> SourceResult<Option<String>> {
-        let inf_frame = self.layout_export_frame(content, styles, span, Abs::inf())?;
+        let (inf_frame, _) =
+            self.layout_export_frame(content, styles, span, Abs::inf())?;
         let mut tags = Vec::new();
         let frame = match inf_frame {
             Some(frame) if usable_size(frame.size()) => frame,
@@ -58,7 +59,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                     span,
                     self.raster_height,
                 )? {
-                    Some(frame) if usable_size(frame.size()) => frame,
+                    (Some(frame), _) if usable_size(frame.size()) => frame,
                     _ => {
                         self.deferred_tags.extend(tags);
                         return Ok(None);
@@ -73,14 +74,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     }
 
     /// Lays `content` out to a single frame under the paged target, against the
-    /// page content width and through a sub-engine with a throwaway sink.
+    /// page content width and through a sub-engine with a throwaway sink. The
+    /// boolean is true only when absence means an error or panic rather than a
+    /// successful but empty frame.
     pub(crate) fn layout_export_frame(
         &mut self,
         content: &Content,
         styles: StyleChain,
         span: Span,
         height: Abs,
-    ) -> SourceResult<Option<Frame>> {
+    ) -> SourceResult<(Option<Frame>, bool)> {
         self.layout_export_frame_in(content, styles, span, height, false)
     }
 
@@ -93,7 +96,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         span: Span,
         height: Abs,
         expand: bool,
-    ) -> SourceResult<Option<Frame>> {
+    ) -> SourceResult<(Option<Frame>, bool)> {
         use comemo::Track;
         use typst_library::foundations::{Target, TargetElem};
         use typst_library::layout::{Axes, Region, Size};
@@ -154,8 +157,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             );
         }
 
-        let frame = match caught {
-            Ok(Ok(frame)) => Some(frame),
+        let (frame, failed) = match caught {
+            Ok(Ok(frame)) => (Some(frame), false),
             Ok(Err(errors)) => {
                 for diagnostic in errors {
                     self.fidelity_report.suppress_content(
@@ -165,7 +168,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                         diagnostic,
                     );
                 }
-                None
+                (None, true)
             }
             Err(_) => {
                 self.fidelity_report.suppress_content(
@@ -178,10 +181,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                     ),
                 );
                 self.warn_without_decision("content that could not be laid out", span);
-                None
+                (None, true)
             }
         };
-        Ok(frame)
+        Ok((frame, failed))
     }
 
     /// Rasterizes arbitrary content and embeds it as a PNG media part.
@@ -191,7 +194,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
         span: Span,
     ) -> SourceResult<Rasterized> {
-        let (tags, rasterized) = self.rasterize_with_tags(content, styles, span)?;
+        let (tags, rasterized, _) = self.rasterize_with_tags(content, styles, span)?;
         self.deferred_tags.extend(tags);
         Ok(rasterized)
     }
@@ -222,9 +225,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             )));
         }
 
-        let Some(frame) =
-            self.layout_export_frame_in(content, styles, span, height, true)?
-        else {
+        let (frame, _) =
+            self.layout_export_frame_in(content, styles, span, height, true)?;
+        let Some(frame) = frame else {
             return Ok(None);
         };
         let mut tags = Vec::new();
@@ -258,13 +261,15 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     }
 
     /// Same as [`Self::rasterize`], but returns the frame tags to the caller
-    /// instead of appending them to `deferred_tags`.
+    /// instead of appending them to `deferred_tags`. The final boolean
+    /// distinguishes failed layout from intentionally empty output when no
+    /// raster was produced.
     pub(crate) fn rasterize_with_tags(
         &mut self,
         content: &Content,
         styles: StyleChain,
         span: Span,
-    ) -> SourceResult<(Vec<Tag>, Rasterized)> {
+    ) -> SourceResult<(Vec<Tag>, Rasterized, bool)> {
         self.rasterize_impl(content, styles, span, true)
     }
 
@@ -274,13 +279,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
         span: Span,
         crop: bool,
-    ) -> SourceResult<(Vec<Tag>, Rasterized)> {
+    ) -> SourceResult<(Vec<Tag>, Rasterized, bool)> {
         if std::env::var_os("DOCX_DEBUG_RASTER").is_some() {
             eprintln!("RASTERIZE: {}", content.elem().name());
         }
 
         // Prefer an infinite-height frame so tall figures are captured whole.
-        let inf_frame = self.layout_export_frame(content, styles, span, Abs::inf())?;
+        let (inf_frame, inf_failed) =
+            self.layout_export_frame(content, styles, span, Abs::inf())?;
 
         // Harvest tags before checking size. An introspecting element can have a
         // temporarily degenerate frame during convergence, and dropping its tags
@@ -300,8 +306,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 span,
                 self.raster_height,
             )? {
-                Some(frame) if usable_size(frame.size()) => frame,
-                _ => return Ok((tags, None)),
+                (Some(frame), _) if usable_size(frame.size()) => frame,
+                (_, retry_failed) => return Ok((tags, None, inf_failed || retry_failed)),
             },
         };
         let frame_text = frame_to_text(&frame);
@@ -310,11 +316,12 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             frame,
             raster::RasterOptions { pixel_per_pt: 2.0, crop_to_ink: crop },
         ) else {
-            return Ok((tags, None));
+            return Ok((tags, None, false));
         };
         Ok((
             tags,
             Some((self.add_image(&rendered.png, "png"), rendered.size, frame_text)),
+            false,
         ))
     }
 
@@ -331,8 +338,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
         span: Span,
     ) -> SourceResult<Option<typst_library::layout::Size>> {
-        let Some(frame) = self.layout_export_frame(content, styles, span, Abs::inf())?
-        else {
+        let (frame, _) = self.layout_export_frame(content, styles, span, Abs::inf())?;
+        let Some(frame) = frame else {
             return Ok(None);
         };
         let size = frame.size();

@@ -1256,13 +1256,20 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 // `drafting` package stores page properties from inside a
                 // `box(place(layout(..)))`), and a later `state.get()` only
                 // sees the update if it precedes the read in tag order.
-                let (tags, runs) = mappers::image::laid_out_fallback_with_tags(
+                let (tags, runs, failed) = mappers::image::laid_out_fallback_with_tags(
                     child,
                     child_styles,
                     self,
                 )?;
                 out.extend(tags.into_iter().map(ParaChild::Tag));
                 out.extend(runs.into_iter().map(ParaChild::Run));
+                if failed {
+                    self.record_content_drop(
+                        child,
+                        DecisionReason::InlinePositionedContentUnavailable,
+                        "inline placed content and whole-region fallback produced no output",
+                    );
+                }
             } else {
                 let mut runs = Vec::new();
                 self.handle_inline(child, child_styles, &props, &mut runs)?;

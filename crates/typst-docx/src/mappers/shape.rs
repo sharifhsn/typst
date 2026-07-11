@@ -661,9 +661,8 @@ pub fn move_(
     // back empty.
     let size = Size::new(ctx.available_width, ctx.raster_height);
     let height = ctx.raster_height;
-    let Some(mut frame) =
-        ctx.layout_export_frame(&elem.body, styles, elem.span(), height)?
-    else {
+    let (frame, _) = ctx.layout_export_frame(&elem.body, styles, elem.span(), height)?;
+    let Some(mut frame) = frame else {
         return Ok(None);
     };
     // Mirrors `typst_layout::layout_move` exactly (dx/dy resolved against the
@@ -692,8 +691,8 @@ pub fn transformed(
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
     let height = ctx.raster_height;
-    let Some(frame) = ctx.layout_export_frame(child, styles, child.span(), height)?
-    else {
+    let (frame, _) = ctx.layout_export_frame(child, styles, child.span(), height)?;
+    let Some(frame) = frame else {
         return Ok(None);
     };
     let run = build_shapes_drawing(ctx, &frame)?;

@@ -4265,6 +4265,40 @@ fn failed_placed_region_records_its_terminal_drop() {
 }
 
 #[test]
+fn failed_inline_placed_fallback_distinguishes_failure_from_empty_scaffolding() {
+    let src = "#set page(width: 120mm, height: 80mm, margin: 10mm)\n\
+               Before #box(place(top, layout(size => if size.height > 70mm { panic(\"inline placed region rejected\") } else { [VISIBLE INLINE BODY] }))) After";
+    let compiled = compile_docx(src, &[]);
+    let report = compiled.fidelity_report();
+    assert!(report.decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::InlinePositionedContentUnavailable
+            && decision.representation == Representation::Drop
+    }));
+    assert!(report.suppressed_diagnostics().iter().any(|entry| {
+        entry.stage == ExportStage::FallbackLayout && entry.kind == SuppressedKind::Error
+    }));
+
+    let p = parts(src);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("Before"));
+    assert!(document.contains("After"));
+    assert!(
+        p["customXml/typstFidelity.xml"].contains("InlinePositionedContentUnavailable")
+    );
+    assert_all_wellformed(&p);
+
+    let scaffolding = compile_docx(
+        "#let s = state(\"inline-scaffold\", none)\n\
+         Before #box(place(layout(size => s.update(size.width)))) After\n\
+         #context s.get()",
+        &[],
+    );
+    assert!(!scaffolding.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::InlinePositionedContentUnavailable
+    }));
+}
+
+#[test]
 fn numbering_only_change_emits_a_section_break() {
     // Front-matter roman numerals switching to arabic (`set page(numbering:)`)
     // is section-scoped in Word (`w:pgNumType`); same-geometry runs must not

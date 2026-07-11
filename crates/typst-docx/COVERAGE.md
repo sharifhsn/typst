@@ -1040,7 +1040,7 @@ caption/reference text on one 170 mm x 120 mm page. A manual select-all/F9
 update followed by a real Word save kept the Typst-owned hyperlink and hidden
 counter intact while updating live field caches; Writer rendered that Word-saved
 round trip with the same visible text. Structural gates now cover all ownership
-branches; the DOCX target passes 169 tests and the crate passes 13 unit gates.
+branches; the DOCX target passes 170 tests and the crate passes 13 unit gates.
 The cache-failure kernel also survived a LibreOffice 26.2.4.2 save/reopen: live
 `SEQ`/`PAGEREF` instructions remained, `cache="Unavailable"` survived in the
 Writer-stable custom property, and the one-page visible/searchable text was
@@ -1499,7 +1499,7 @@ report, so the two carriers cannot drift at export time.
 Structural regressions cover installed-versus-missing font facts, manifest
 counts/attributes, the portable `fontTable` reference, custom-property/root-
 relationship presence, and exact equality between the canonical and redundant
-payloads. The DOCX target passes 169 tests.
+payloads. The DOCX target passes 170 tests.
 
 A 2026-07-10 missing-font fixture compiled to one 160 x 120 mm Typst PDF page
 and one identically sized Writer page. Both kept searchable text and happened to
@@ -1543,7 +1543,7 @@ The manifest adds drawing/unlabeled counts and a `<typst:drawings>` collection.
 Existing structural tests now cover described and unlabeled SVG pictures,
 native text boxes, decorative vector shapes, decorative backgrounds, and a
 described foreground; one new invariant unit gate covers contradictory intent.
-The DOCX target now passes 169 structural tests and 13 crate unit tests.
+The DOCX target now passes 170 structural tests and 13 crate unit tests.
 
 A 2026-07-10 mixed fixture produced five drawings: one described SVG, one
 unlabeled SVG, one native text box, one decorative orange shape, and one
@@ -1626,3 +1626,22 @@ content region. Its deliberately failing DOCX callback leaves only `After` in
 the Word body; the package now truthfully reports both the nested
 `LayoutCallbackUnavailable` and enclosing `PositionedContentUnavailable`
 regions, with `drop="2"`, rather than claiming an approximate flowed result.
+
+## 31. Failed inline placement is distinct from empty semantic scaffolding
+
+The paragraph-child path for inline `#place` and `#box(place(..))` correctly
+kept harvested state/counter tags in document order, but an empty raster result
+still conflated two different outcomes: intentional tag-only scaffolding and a
+failed layout attempt that lost visible content.
+
+Fallback layout now returns explicit failure provenance alongside its optional
+frame/raster. Inline lowering preserves the tags in both cases, but records
+`Drop/InlinePositionedContentUnavailable` only when the layout attempt actually
+errored or panicked. A state-only `box(place(layout(..state.update..)))` remains
+an intentional semantic operation and does not acquire a false drop.
+
+The real 120 x 80 mm fixture places a height-sensitive body inside an inline
+box. Typst PDF contains `VISIBLE INLINE BODY`; the deliberately degraded DOCX
+retains `Before` and `After`, emits the source warning, retains the
+`FallbackLayout/Error`, and embeds `drop="1"` with
+`InlinePositionedContentUnavailable`.

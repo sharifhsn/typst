@@ -90,6 +90,9 @@ pub enum DecisionReason {
     /// Placed content produced neither editable flow nor an anchorable
     /// whole-region fallback.
     PositionedContentUnavailable,
+    /// Inline placed content failed whole-region layout and emitted only
+    /// semantic scaffolding, with no visible run representation.
+    InlinePositionedContentUnavailable,
     /// Contextual page furniture varied beyond Word's first/even/default
     /// header model, so one sampled value is repeated rather than pretending
     /// that a page-specific value is parity-stable.

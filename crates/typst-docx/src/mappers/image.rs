@@ -1045,10 +1045,11 @@ pub fn laid_out_fallback_with_tags(
     content: &Content,
     styles: StyleChain,
     ctx: &mut DocxCtx,
-) -> SourceResult<(Vec<typst_library::introspection::Tag>, Vec<Run>)> {
-    let (tags, rasterized) = ctx.rasterize_with_tags(content, styles, content.span())?;
+) -> SourceResult<(Vec<typst_library::introspection::Tag>, Vec<Run>, bool)> {
+    let (tags, rasterized, failed) =
+        ctx.rasterize_with_tags(content, styles, content.span())?;
     let Some((rel, size, text)) = rasterized else {
-        return Ok((tags, Vec::new()));
+        return Ok((tags, Vec::new(), failed));
     };
     ctx.record_content_decision(
         content,
@@ -1057,7 +1058,7 @@ pub fn laid_out_fallback_with_tags(
         LossSet::RASTER,
         text.chars().count(),
     );
-    Ok((tags, fallback_runs(ctx, rel, size, &text)))
+    Ok((tags, fallback_runs(ctx, rel, size, &text), false))
 }
 
 /// Builds the drawing + hidden-text run sequence for a rasterized frame. The
