@@ -50,6 +50,19 @@ fn zip_xml(xml: &str) -> Vec<u8> {
     output.into_inner()
 }
 
+fn zip_xml_with_comments(document: &str, comments: &str) -> Vec<u8> {
+    let mut output = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut output);
+        zip.start_file(DOCUMENT_XML, SimpleFileOptions::default()).unwrap();
+        zip.write_all(document.as_bytes()).unwrap();
+        zip.start_file(COMMENTS_XML, SimpleFileOptions::default()).unwrap();
+        zip.write_all(comments.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+    output.into_inner()
+}
+
 fn current(text: &str) -> HashMap<String, String> {
     HashMap::from([("main.typ".into(), text.into())])
 }
@@ -85,6 +98,7 @@ fn table_cell_edits_remain_content_in_code_mode() {
     state.regions[0].baseline_end += 1;
     let edits = WordEdits {
         regions: HashMap::from([("one".into(), "new #[literal]".into())]),
+        comments: vec![],
     };
     let report = dry_run(&state, &edits, &current("before [old] after")).unwrap();
     assert_eq!(report.files[0].contents, r#"before [#("new #[literal]")] after"#);
@@ -107,10 +121,25 @@ fn direct_edit_merges_and_escapes_utf8_markup() {
 }
 
 #[test]
+fn comments_inside_review_regions_are_preserved_in_the_report() {
+    let state = state("old", "old");
+    let document = r#"<?xml version="1.0"?><w:document xmlns:w="urn:w"><w:body><w:sdt><w:sdtPr><w:tag w:val="typst:v1:export:one"/></w:sdtPr><w:sdtContent><w:p><w:commentRangeStart w:id="5"/><w:r><w:t>new</w:t></w:r><w:commentRangeEnd w:id="5"/><w:r><w:commentReference w:id="5"/></w:r></w:p></w:sdtContent></w:sdt></w:body></w:document>"#;
+    let comments = r#"<?xml version="1.0"?><w:comments xmlns:w="urn:w"><w:comment w:id="5" w:author="Advisor" w:initials="AD" w:date="2026-07-11T12:00:00Z"><w:p><w:r><w:t>Please clarify this claim.</w:t></w:r></w:p></w:comment></w:comments>"#;
+    let edits = parse_docx(&zip_xml_with_comments(document, comments), &state).unwrap();
+    assert_eq!(edits.comments.len(), 1);
+    assert_eq!(edits.comments[0].region_id, "one");
+    assert_eq!(edits.comments[0].author.as_deref(), Some("Advisor"));
+    assert_eq!(edits.comments[0].text, "Please clarify this claim.");
+    let report = dry_run(&state, &edits, &current("before old after")).unwrap();
+    assert_eq!(report.comments, edits.comments);
+}
+
+#[test]
 fn unrelated_local_edit_remaps_exact_source_island() {
     let state = state("old", "old");
     let edits = WordEdits {
         regions: HashMap::from([("one".into(), "new".into())]),
+        comments: vec![],
     };
     let report =
         dry_run(&state, &edits, &current("new prelude before old after")).unwrap();
@@ -122,6 +151,7 @@ fn overlapping_local_edit_conflicts() {
     let state = state("old", "old");
     let edits = WordEdits {
         regions: HashMap::from([("one".into(), "new".into())]),
+        comments: vec![],
     };
     let report =
         dry_run(&state, &edits, &current("before locally-changed after")).unwrap();
@@ -137,6 +167,7 @@ fn repeated_relocated_islands_conflict() {
     let state = state("old", "old");
     let edits = WordEdits {
         regions: HashMap::from([("one".into(), "new".into())]),
+        comments: vec![],
     };
     let report = dry_run(&state, &edits, &current("shift old and old")).unwrap();
     assert_eq!(
@@ -233,6 +264,7 @@ fn apply_is_explicit_atomic_and_detects_stale_sources() {
     let state = state("old", "old");
     let edits = WordEdits {
         regions: HashMap::from([("one".into(), "new".into())]),
+        comments: vec![],
     };
     let report = dry_run(&state, &edits, &current("before old after")).unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -258,6 +290,7 @@ fn multi_file_plan_applies_transactionally_and_preflights_every_source() {
             word: "b".into(),
             status: RegionStatus::Ready,
         }],
+        comments: vec![],
         files: vec![
             PlannedFile {
                 path: "a.typ".into(),
@@ -300,6 +333,7 @@ fn symbolic_link_source_is_rejected() {
     let state = state("old", "old");
     let edits = WordEdits {
         regions: HashMap::from([("one".into(), "new".into())]),
+        comments: vec![],
     };
     let report = dry_run(&state, &edits, &current("before old after")).unwrap();
     assert!(matches!(apply_atomic(temp.path(), &report), Err(Error::InvalidState(_))));

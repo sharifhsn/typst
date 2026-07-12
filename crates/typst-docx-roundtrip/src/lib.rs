@@ -15,6 +15,7 @@ use similar::{DiffTag, TextDiff};
 use zip::ZipArchive;
 
 const DOCUMENT_XML: &str = "word/document.xml";
+const COMMENTS_XML: &str = "word/comments.xml";
 const TAG_PREFIX: &str = "typst:v1:";
 const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_XML_BYTES: u64 = 16 * 1024 * 1024;
@@ -134,6 +135,18 @@ pub fn sha256(bytes: &[u8]) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WordEdits {
     pub regions: HashMap<String, String>,
+    pub comments: Vec<WordComment>,
+}
+
+/// A Word comment anchored inside one source-backed review region.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct WordComment {
+    pub id: String,
+    pub region_id: String,
+    pub author: Option<String>,
+    pub initials: Option<String>,
+    pub date: Option<String>,
+    pub text: String,
 }
 
 /// Parse and strictly validate the tagged content controls in a DOCX.
@@ -179,6 +192,7 @@ pub fn parse_docx(docx: &[u8], state: &RoundtripState) -> Result<WordEdits, Erro
         state.regions.iter().map(|r| (r.id.as_str(), r)).collect();
     let wanted_prefix = format!("{TAG_PREFIX}{}:", state.export_id);
     let mut regions = HashMap::new();
+    let mut comment_regions: HashMap<String, String> = HashMap::new();
 
     for sdt in document.descendants().filter(|node| is_element(*node, "sdt")) {
         let Some(tag) = sdt
@@ -225,6 +239,20 @@ pub fn parse_docx(docx: &[u8], state: &RoundtripState) -> Result<WordEdits, Erro
         if text.contains(['\r', '\n']) {
             return Err(Error::StructuralEdit(id.to_owned()));
         }
+        for marker in content.descendants().filter(|node| {
+            matches!(
+                node.tag_name().name(),
+                "commentRangeStart" | "commentRangeEnd" | "commentReference"
+            )
+        }) {
+            let Some(comment_id) = attribute(marker, "id") else { continue };
+            if let Some(existing) =
+                comment_regions.insert(comment_id.to_owned(), id.to_owned())
+                && existing != id
+            {
+                return Err(Error::StructuralEdit(id.to_owned()));
+            }
+        }
         regions.insert(id.to_owned(), text);
     }
     for region in &state.regions {
@@ -232,7 +260,52 @@ pub fn parse_docx(docx: &[u8], state: &RoundtripState) -> Result<WordEdits, Erro
             return Err(Error::MissingControl(region.id.clone()));
         }
     }
-    Ok(WordEdits { regions })
+    let comments = parse_comments(&mut archive, &comment_regions)?;
+    Ok(WordEdits { regions, comments })
+}
+
+fn parse_comments(
+    archive: &mut ZipArchive<Cursor<&[u8]>>,
+    wanted: &HashMap<String, String>,
+) -> Result<Vec<WordComment>, Error> {
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut entry = archive
+        .by_name(COMMENTS_XML)
+        .map_err(|_| Error::UnsafeDocx("word/comments.xml is missing"))?;
+    if entry.size() > MAX_XML_BYTES {
+        return Err(Error::UnsafeDocx("word/comments.xml is too large"));
+    }
+    let mut xml = String::new();
+    entry.read_to_string(&mut xml).map_err(Error::Io)?;
+    let lowered = xml.to_ascii_lowercase();
+    if lowered.contains("<!doctype") || lowered.contains("<!entity") {
+        return Err(Error::UnsafeDocx("DOCTYPE and ENTITY declarations are forbidden"));
+    }
+    let document = Document::parse(&xml).map_err(Error::Xml)?;
+    let mut comments = Vec::new();
+    for comment in document.descendants().filter(|node| is_element(*node, "comment")) {
+        let Some(id) = attribute(comment, "id") else { continue };
+        let Some(region_id) = wanted.get(id) else { continue };
+        comments.push(WordComment {
+            id: id.to_owned(),
+            region_id: region_id.clone(),
+            author: attribute(comment, "author").map(str::to_owned),
+            initials: attribute(comment, "initials").map(str::to_owned),
+            date: attribute(comment, "date").map(str::to_owned),
+            text: comment
+                .descendants()
+                .filter(|node| is_element(*node, "t"))
+                .filter_map(|node| node.text())
+                .collect(),
+        });
+    }
+    if comments.len() != wanted.len() {
+        return Err(Error::UnsafeDocx("a referenced Word comment is missing"));
+    }
+    comments.sort_by(|a, b| a.region_id.cmp(&b.region_id).then(a.id.cmp(&b.id)));
+    Ok(comments)
 }
 
 fn visible_text(paragraph: Node<'_, '_>) -> String {
@@ -276,6 +349,9 @@ fn allowed_review_element(node: Node<'_, '_>) -> bool {
             | "proofErr"
             | "permStart"
             | "permEnd"
+            | "commentRangeStart"
+            | "commentRangeEnd"
+            | "commentReference"
     )
 }
 
@@ -293,6 +369,7 @@ fn attribute<'a>(node: Node<'a, 'a>, name: &str) -> Option<&'a str> {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct MergeReport {
     pub regions: Vec<RegionReport>,
+    pub comments: Vec<WordComment>,
     #[serde(skip)]
     files: Vec<PlannedFile>,
 }
@@ -433,7 +510,11 @@ pub fn dry_run(
             });
         }
     }
-    Ok(MergeReport { regions: reports, files })
+    Ok(MergeReport {
+        regions: reports,
+        comments: edits.comments.clone(),
+        files,
+    })
 }
 
 enum Location {
