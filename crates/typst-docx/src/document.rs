@@ -18,8 +18,8 @@ use crate::dom::{
     Block, BookmarkTable, DocxDocument, Field, FieldCacheStatus as DomFieldCacheStatus,
     FieldDisplay, FieldMode, Footnote, HdrFtrPart, HdrFtrRef, HeadingStyle,
     HeadingStyleSample, LineNumbering, MediaPart, NumberingTable, Para, ParaChild,
-    ParaProps, PgNumType, ReviewCandidate, ReviewCandidateKind, Run, RunProps, SectPr,
-    SectType, Spacing, TextDefaults, TocFigure, TocHeading,
+    ParaProps, PgNumType, ReviewCandidate, ReviewCandidateKind, ReviewOrigin, Run,
+    RunProps, SectPr, SectType, Spacing, TextDefaults, TocFigure, TocHeading,
 };
 use crate::introspect::DocxIntrospector;
 use crate::package::Rels;
@@ -598,18 +598,25 @@ fn collect_review_candidates(
     for part in headers.iter().chain(footers) {
         collect_review_paragraphs(&part.blocks, &mut paragraphs);
     }
-    paragraphs
+    let mut seeds = Vec::new();
+    for para in paragraphs {
+        let run_count = review_text_runs(para).count();
+        if run_count == 1
+            && let Some(origin) = para.props.review_origin
+            && let Some(text) = plain_review_text(para)
+        {
+            seeds.push((origin, text));
+            continue;
+        }
+        for (origin, text) in review_text_runs(para) {
+            seeds.push((origin, text.clone()));
+        }
+    }
+    seeds
         .iter()
-        .filter_map(|para| {
-            let origin = para.props.review_origin?;
+        .filter_map(|(origin, baseline)| {
             if origin.span.is_detached()
-                || paragraphs
-                    .iter()
-                    .filter(|other| {
-                        other.props.review_origin.map(|item| item.span)
-                            == Some(origin.span)
-                    })
-                    .count()
+                || seeds.iter().filter(|(other, _)| other.span == origin.span).count()
                     != 1
             {
                 return None;
@@ -630,7 +637,7 @@ fn collect_review_candidates(
                 join_id: origin.join_id,
                 span: origin.span,
                 kind: origin.kind,
-                baseline: plain_review_text(para)?,
+                baseline: baseline.clone(),
             })
         })
         .collect()
@@ -639,7 +646,7 @@ fn collect_review_candidates(
 fn collect_review_paragraphs<'a>(blocks: &'a [Block], out: &mut Vec<&'a Para>) {
     for block in blocks {
         match block {
-            Block::Para(para) if para.props.review_origin.is_some() => out.push(para),
+            Block::Para(para) => out.push(para),
             Block::Table(table) => {
                 for row in &table.rows {
                     for cell in &row.cells {
@@ -650,6 +657,25 @@ fn collect_review_paragraphs<'a>(blocks: &'a [Block], out: &mut Vec<&'a Para>) {
             _ => {}
         }
     }
+}
+
+fn review_text_runs(
+    para: &Para,
+) -> impl Iterator<Item = (ReviewOrigin, &ecow::EcoString)> {
+    para.content.iter().flat_map(|child| match child {
+        ParaChild::Run(Run::Text { props, text }) => props
+            .review_origin
+            .map(|origin| vec![(origin, text)])
+            .unwrap_or_default(),
+        ParaChild::Hyperlink { runs, .. } => runs
+            .iter()
+            .filter_map(|run| {
+                let Run::Text { props, text } = run else { return None };
+                props.review_origin.map(|origin| (origin, text))
+            })
+            .collect(),
+        _ => Vec::new(),
+    })
 }
 
 fn plain_review_text(para: &Para) -> Option<ecow::EcoString> {

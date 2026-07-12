@@ -118,7 +118,7 @@ impl RoundtripState {
             }
             if !matches!(
                 region.kind.0.as_str(),
-                "heading" | "paragraph" | "list_item" | "table_cell"
+                "heading" | "paragraph" | "list_item" | "table_cell" | "inline_text"
             ) {
                 return Err(Error::InvalidState("unsupported review region kind"));
             }
@@ -266,8 +266,11 @@ fn parse_review_part(
             .ok_or_else(|| Error::StructuralEdit(id.to_owned()))?;
         let paragraphs: Vec<_> =
             content.descendants().filter(|node| is_element(*node, "p")).collect();
+        let inline = region.kind.0 == "inline_text";
         let expected_paragraphs = region.word_baseline.split('\n').count();
-        if paragraphs.len() != expected_paragraphs {
+        if (inline && !paragraphs.is_empty())
+            || (!inline && paragraphs.len() != expected_paragraphs)
+        {
             return Err(Error::StructuralEdit(id.to_owned()));
         }
         if content
@@ -277,11 +280,15 @@ fn parse_review_part(
         {
             return Err(Error::StructuralEdit(id.to_owned()));
         }
-        let text = paragraphs
-            .into_iter()
-            .map(visible_text)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = if inline {
+            visible_text(content)
+        } else {
+            paragraphs
+                .into_iter()
+                .map(visible_text)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         if text.contains(['\r', '\n']) {
             return Err(Error::StructuralEdit(id.to_owned()));
         }

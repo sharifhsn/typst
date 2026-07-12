@@ -81,6 +81,13 @@ highlight, small-caps, superscript, or subscript wrappers. The importer replaces
 only the innermost literal source island, so those existing Typst styles survive
 every Word text-edit cycle.
 
+Literal inline fragments are also enrolled independently when a paragraph mixes
+them with other literal or generated content. This covers link labels and figure
+caption bodies without placing the surrounding URL, figure counter, supplement,
+or separator under Word's control. Each fragment is a run-level content control;
+the surrounding paragraph remains native editable Word content but is not
+flattened back into Typst.
+
 Each edit replaces only the exact authored source island. Imported heading,
 paragraph, and list text uses an identifier-free literal markup expression;
 table cells use the same expression inside a content block so the result remains

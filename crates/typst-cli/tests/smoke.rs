@@ -33,7 +33,7 @@ fn test_docx_review_two_cycles() {
     project.write("chapter.typ", "Imported paragraph.");
     let main = project.write(
         "main.typ",
-        "#set page(header: [Original header], footer: [Original footer])\n\n= _Original heading_\n\n#highlight[Original paragraph.]\n\n- *Original item*\n\n#table(columns: 1, [#underline[Original cell]])\n\n#table(columns: 1, [\nFirst cell paragraph.\n\nSecond cell paragraph.\n])\n\nSentence with a note.#footnote[Original footnote.]\n\n#include \"chapter.typ\"",
+        "#set page(header: [Original header], footer: [Original footer])\n\n= _Original heading_\n\n#highlight[Original paragraph.]\n\nMixed prefix #strong[Original inline] and suffix.\n\n#link(\"https://example.com\")[Original link]\n\n#figure(rect(width: 1cm, height: 1cm), caption: [Original caption])\n\n- *Original item*\n\n#table(columns: 1, [#underline[Original cell]])\n\n#table(columns: 1, [\nFirst cell paragraph.\n\nSecond cell paragraph.\n])\n\nSentence with a note.#footnote[Original footnote.]\n\n#include \"chapter.typ\"",
     );
 
     exec()
@@ -69,6 +69,9 @@ fn test_docx_review_two_cycles() {
             ("Original footnote.", "First footnote edit."),
             ("Original header", "First header edit"),
             ("Original footer", "First footer edit"),
+            ("Original inline", "First inline edit"),
+            ("Original link", "First link edit"),
+            ("Original caption", "First caption edit"),
             ("Imported paragraph.", "First imported edit."),
         ],
     );
@@ -105,6 +108,11 @@ fn test_docx_review_two_cycles() {
         .must_contain("header: [#(\"First header edit\")]")
         .must_contain("footer: [#(\"First footer edit\")]");
     project
+        .read("main.typ")
+        .must_contain("#strong[#(\"First inline edit\")]")
+        .must_contain("[#(\"First link edit\")]")
+        .must_contain("caption: [#(\"First caption edit\")]");
+    project
         .read("chapter.typ")
         .must_contain("#(\"First imported edit.\")");
 
@@ -118,7 +126,8 @@ fn test_docx_review_two_cycles() {
     project
         .read("second.docx.typst-review.json")
         .must_contain("list_item")
-        .must_contain("table_cell");
+        .must_contain("table_cell")
+        .must_contain("\"word_baseline\": \"First inline edit\"");
     let second_edited = project.resolve("second-edited.docx");
     edit_docx_texts(
         &second,
@@ -133,6 +142,9 @@ fn test_docx_review_two_cycles() {
             ("First footnote edit.", "Second footnote edit."),
             ("First header edit", "Second header edit"),
             ("First footer edit", "Second footer edit"),
+            ("First inline edit", "Second inline edit"),
+            ("First link edit", "Second link edit"),
+            ("First caption edit", "Second caption edit"),
             ("First imported edit.", "Second imported edit."),
         ],
     );
@@ -157,6 +169,11 @@ fn test_docx_review_two_cycles() {
         .must_contain("#footnote[#(\"Second footnote edit.\")]")
         .must_contain("header: [#(\"Second header edit\")]")
         .must_contain("footer: [#(\"Second footer edit\")]");
+    project
+        .read("main.typ")
+        .must_contain("#strong[#(\"Second inline edit\")]")
+        .must_contain("[#(\"Second link edit\")]")
+        .must_contain("caption: [#(\"Second caption edit\")]");
     project
         .read("chapter.typ")
         .must_contain("#(\"Second imported edit.\")");

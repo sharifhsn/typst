@@ -414,7 +414,7 @@ fn write_block(
                 w.close();
                 w.close();
             } else {
-                write_para(w, para);
+                write_para_with_review(w, para, review_tags);
             }
             true
         }
@@ -479,10 +479,18 @@ fn open_para(w: &mut XmlWriter) {
 }
 
 fn write_para(w: &mut XmlWriter, para: &Para) {
+    write_para_with_review(w, para, None);
+}
+
+fn write_para_with_review(
+    w: &mut XmlWriter,
+    para: &Para,
+    review_tags: Option<&BTreeMap<ReviewJoinId, ReviewTag>>,
+) {
     open_para(w);
     para.props.write_ppr(w);
     for child in &para.content {
-        write_para_child(w, child);
+        write_para_child(w, child, review_tags);
     }
     w.close();
 }
@@ -1083,9 +1091,13 @@ fn write_wsp(
     w.close(); // wps:wsp
 }
 
-fn write_para_child(w: &mut XmlWriter, child: &ParaChild) {
+fn write_para_child(
+    w: &mut XmlWriter,
+    child: &ParaChild,
+    review_tags: Option<&BTreeMap<ReviewJoinId, ReviewTag>>,
+) {
     match child {
-        ParaChild::Run(run) => write_run(w, run),
+        ParaChild::Run(run) => write_run_with_review(w, run, review_tags),
         ParaChild::OmmlPara(xml_str) => w.raw(xml_str),
         ParaChild::Hyperlink { rel, anchor, runs } => {
             w.open(xml::W_HYPERLINK);
@@ -1097,7 +1109,7 @@ fn write_para_child(w: &mut XmlWriter, child: &ParaChild) {
             }
             w.attr("w:history", "1").start_children();
             for run in runs {
-                write_run(w, run);
+                write_run_with_review(w, run, review_tags);
             }
             w.close();
         }
@@ -1111,6 +1123,34 @@ fn write_para_child(w: &mut XmlWriter, child: &ParaChild) {
             w.open(xml::W_BOOKMARK_END).attr("w:id", &id.to_string()).empty();
         }
         ParaChild::Tag(_) => {}
+    }
+}
+
+fn write_run_with_review(
+    w: &mut XmlWriter,
+    run: &Run,
+    review_tags: Option<&BTreeMap<ReviewJoinId, ReviewTag>>,
+) {
+    let selected = match run {
+        Run::Text { props, .. } => props.review_origin.and_then(|origin| {
+            review_tags?.get(&origin.join_id).map(|tag| (origin, tag))
+        }),
+        _ => None,
+    };
+    if let Some((origin, tag)) = selected {
+        w.open("w:sdt").start_children();
+        w.open("w:sdtPr").start_children();
+        let id = u32::try_from(origin.join_id.0).unwrap_or(u32::MAX).max(1);
+        w.open("w:id").attr(xml::W_VAL, &id.to_string()).empty();
+        let value = format!("typst:v1:{}:{}", tag.export, tag.region);
+        w.open("w:tag").attr(xml::W_VAL, &value).empty();
+        w.close();
+        w.open("w:sdtContent").start_children();
+        write_run(w, run);
+        w.close();
+        w.close();
+    } else {
+        write_run(w, run);
     }
 }
 
@@ -1295,7 +1335,7 @@ fn write_toc_body(w: &mut XmlWriter, toc: &Toc) {
             write_begin(w);
         }
         for child in &para.content {
-            write_para_child(w, child);
+            write_para_child(w, child, None);
         }
         if i == last {
             write_field_end(w, FieldDisplay::Visible);
