@@ -33,7 +33,7 @@ fn test_docx_review_two_cycles() {
     project.write("chapter.typ", "Imported paragraph.");
     let main = project.write(
         "main.typ",
-        "= _Original heading_\n\n#highlight[Original paragraph.]\n\n- *Original item*\n\n#table(columns: 1, [#underline[Original cell]])\n\n#table(columns: 1, [\nFirst cell paragraph.\n\nSecond cell paragraph.\n])\n\n#include \"chapter.typ\"",
+        "#set page(header: [Original header], footer: [Original footer])\n\n= _Original heading_\n\n#highlight[Original paragraph.]\n\n- *Original item*\n\n#table(columns: 1, [#underline[Original cell]])\n\n#table(columns: 1, [\nFirst cell paragraph.\n\nSecond cell paragraph.\n])\n\nSentence with a note.#footnote[Original footnote.]\n\n#include \"chapter.typ\"",
     );
 
     exec()
@@ -53,7 +53,8 @@ fn test_docx_review_two_cycles() {
         .must_succeed();
     project
         .read("first.docx.typst-review.json")
-        .must_contain("\"paragraph\"");
+        .must_contain("\"paragraph\"")
+        .must_contain("\"word_baseline\": \"Original footnote.\"");
     let first_edited = project.resolve("first-edited.docx");
     edit_docx_texts(
         &first,
@@ -65,6 +66,9 @@ fn test_docx_review_two_cycles() {
             ("Original cell", "First cell edit"),
             ("First cell paragraph.", "First multi-cell edit."),
             ("Second cell paragraph.", "Second multi-cell edit."),
+            ("Original footnote.", "First footnote edit."),
+            ("Original header", "First header edit"),
+            ("Original footer", "First footer edit"),
             ("Imported paragraph.", "First imported edit."),
         ],
     );
@@ -96,7 +100,10 @@ fn test_docx_review_two_cycles() {
         .must_contain("- *#(\"First item edit\")*")
         .must_contain("[#underline[#(\"First cell edit\")]]")
         .must_contain("#(\"First multi-cell edit.\")")
-        .must_contain("#(\"Second multi-cell edit.\")");
+        .must_contain("#(\"Second multi-cell edit.\")")
+        .must_contain("#footnote[#(\"First footnote edit.\")]")
+        .must_contain("header: [#(\"First header edit\")]")
+        .must_contain("footer: [#(\"First footer edit\")]");
     project
         .read("chapter.typ")
         .must_contain("#(\"First imported edit.\")");
@@ -123,6 +130,9 @@ fn test_docx_review_two_cycles() {
             ("First cell edit", "Second cell edit"),
             ("First multi-cell edit.", "Third multi-cell edit."),
             ("Second multi-cell edit.", "Fourth multi-cell edit."),
+            ("First footnote edit.", "Second footnote edit."),
+            ("First header edit", "Second header edit"),
+            ("First footer edit", "Second footer edit"),
             ("First imported edit.", "Second imported edit."),
         ],
     );
@@ -143,7 +153,10 @@ fn test_docx_review_two_cycles() {
         .must_contain("- *#(\"Second item edit\")*")
         .must_contain("[#underline[#(\"Second cell edit\")]]")
         .must_contain("#(\"Third multi-cell edit.\")")
-        .must_contain("#(\"Fourth multi-cell edit.\")");
+        .must_contain("#(\"Fourth multi-cell edit.\")")
+        .must_contain("#footnote[#(\"Second footnote edit.\")]")
+        .must_contain("header: [#(\"Second header edit\")]")
+        .must_contain("footer: [#(\"Second footer edit\")]");
     project
         .read("chapter.typ")
         .must_contain("#(\"Second imported edit.\")");
@@ -159,7 +172,11 @@ fn edit_docx_texts(input: &Path, output: &Path, replacements: &[(&str, &str)]) {
         let mut entry = archive.by_index(index).unwrap();
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).unwrap();
-        if entry.name() == "word/document.xml" {
+        if entry.name() == "word/document.xml"
+            || entry.name() == "word/footnotes.xml"
+            || (entry.name().starts_with("word/header") && entry.name().ends_with(".xml"))
+            || (entry.name().starts_with("word/footer") && entry.name().ends_with(".xml"))
+        {
             let mut xml = String::from_utf8(bytes).unwrap();
             for (old, new) in replacements {
                 xml = xml.replace(old, new);

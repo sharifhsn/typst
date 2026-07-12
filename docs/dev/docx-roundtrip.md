@@ -72,6 +72,9 @@ The current slice enrolls plain, uniquely realized, source-backed:
 - bullet and numbered list-item text, preserving the list marker and numbering;
 - each source-backed paragraph in single- or multi-paragraph table cells,
   preserving the table structure and cell formatting.
+- unique source-backed header, footer, and footnote text in their native Word
+  story parts. Editing one header/footer part updates its repeated page display,
+  matching the corresponding single Typst source definition.
 
 Literal text may be nested in Typst strong, emphasis, underline, strike,
 highlight, small-caps, superscript, or subscript wrappers. The importer replaces

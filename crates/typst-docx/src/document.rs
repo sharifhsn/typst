@@ -449,7 +449,13 @@ fn docx_document_impl(
         &mut toc_planning,
     );
 
-    let review_candidates = collect_review_candidates(&body, &export_snapshot);
+    let review_candidates = collect_review_candidates(
+        &body,
+        &footnotes,
+        &header_parts,
+        &footer_parts,
+        &export_snapshot,
+    );
 
     // Synthetic page model: a flowing document has no real pages, but templates
     // legitimately read paged introspection (`@target(form: "page")`,
@@ -579,10 +585,19 @@ fn docx_document_impl(
 
 fn collect_review_candidates(
     body: &[Block],
+    footnotes: &[Footnote],
+    headers: &[HdrFtrPart],
+    footers: &[HdrFtrPart],
     snapshot: &crate::snapshot::ExportSnapshot,
 ) -> Vec<ReviewCandidate> {
     let mut paragraphs = Vec::new();
     collect_review_paragraphs(body, &mut paragraphs);
+    for footnote in footnotes {
+        collect_review_paragraphs(&footnote.blocks, &mut paragraphs);
+    }
+    for part in headers.iter().chain(footers) {
+        collect_review_paragraphs(&part.blocks, &mut paragraphs);
+    }
     paragraphs
         .iter()
         .filter_map(|para| {
@@ -642,6 +657,7 @@ fn plain_review_text(para: &Para) -> Option<ecow::EcoString> {
     for child in &para.content {
         match child {
             ParaChild::Run(Run::Text { text: part, .. }) => text.push_str(part),
+            ParaChild::Run(Run::FootnoteRefMark | Run::Tab) => {}
             ParaChild::BookmarkStart { .. }
             | ParaChild::BookmarkEnd { .. }
             | ParaChild::Tag(_) => {}

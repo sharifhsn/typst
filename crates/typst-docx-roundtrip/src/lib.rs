@@ -160,6 +160,7 @@ pub fn parse_docx(docx: &[u8], state: &RoundtripState) -> Result<WordEdits, Erro
         return Err(Error::UnsafeDocx("archive has too many entries"));
     }
     let mut expanded = 0_u64;
+    let mut story_parts = Vec::new();
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(Error::Zip)?;
         expanded = expanded
@@ -168,32 +169,77 @@ pub fn parse_docx(docx: &[u8], state: &RoundtripState) -> Result<WordEdits, Erro
         if expanded > MAX_EXPANDED_BYTES {
             return Err(Error::UnsafeDocx("expanded archive is too large"));
         }
+        let name = entry.name();
+        if name == DOCUMENT_XML
+            || name == "word/footnotes.xml"
+            || (name.starts_with("word/header") && name.ends_with(".xml"))
+            || (name.starts_with("word/footer") && name.ends_with(".xml"))
+        {
+            story_parts.push(name.to_owned());
+        }
     }
-    let entry = archive
-        .by_name(DOCUMENT_XML)
-        .map_err(|_| Error::UnsafeDocx("word/document.xml is missing"))?;
-    if entry.size() > MAX_XML_BYTES {
-        return Err(Error::UnsafeDocx("word/document.xml is too large"));
+    if !story_parts.iter().any(|name| name == DOCUMENT_XML) {
+        return Err(Error::UnsafeDocx("word/document.xml is missing"));
     }
-    let mut xml = String::new();
-    entry
-        .take(MAX_XML_BYTES + 1)
-        .read_to_string(&mut xml)
-        .map_err(Error::Io)?;
-    if xml.len() as u64 > MAX_XML_BYTES {
-        return Err(Error::UnsafeDocx("word/document.xml is too large"));
-    }
-    let lowered = xml.to_ascii_lowercase();
-    if lowered.contains("<!doctype") || lowered.contains("<!entity") {
-        return Err(Error::UnsafeDocx("DOCTYPE and ENTITY declarations are forbidden"));
-    }
-    let document = Document::parse(&xml).map_err(Error::Xml)?;
     let expected: HashMap<_, _> =
         state.regions.iter().map(|r| (r.id.as_str(), r)).collect();
     let wanted_prefix = format!("{TAG_PREFIX}{}:", state.export_id);
     let mut regions = HashMap::new();
     let mut comment_regions: HashMap<String, String> = HashMap::new();
 
+    for part in story_parts {
+        let xml = read_xml_part(&mut archive, &part)?;
+        parse_review_part(
+            &xml,
+            &expected,
+            &wanted_prefix,
+            &mut regions,
+            &mut comment_regions,
+        )?;
+    }
+    for region in &state.regions {
+        if !regions.contains_key(&region.id) {
+            return Err(Error::MissingControl(region.id.clone()));
+        }
+    }
+    let comments = parse_comments(&mut archive, &comment_regions)?;
+    Ok(WordEdits { regions, comments })
+}
+
+fn read_xml_part(
+    archive: &mut ZipArchive<Cursor<&[u8]>>,
+    name: &str,
+) -> Result<String, Error> {
+    let mut entry = archive
+        .by_name(name)
+        .map_err(|_| Error::UnsafeDocx("a Word story part is missing"))?;
+    if entry.size() > MAX_XML_BYTES {
+        return Err(Error::UnsafeDocx("a Word story XML part is too large"));
+    }
+    let mut xml = String::new();
+    entry
+        .by_ref()
+        .take(MAX_XML_BYTES + 1)
+        .read_to_string(&mut xml)
+        .map_err(Error::Io)?;
+    if xml.len() as u64 > MAX_XML_BYTES {
+        return Err(Error::UnsafeDocx("a Word story XML part is too large"));
+    }
+    let lowered = xml.to_ascii_lowercase();
+    if lowered.contains("<!doctype") || lowered.contains("<!entity") {
+        return Err(Error::UnsafeDocx("DOCTYPE and ENTITY declarations are forbidden"));
+    }
+    Ok(xml)
+}
+
+fn parse_review_part(
+    xml: &str,
+    expected: &HashMap<&str, &Region>,
+    wanted_prefix: &str,
+    regions: &mut HashMap<String, String>,
+    comment_regions: &mut HashMap<String, String>,
+) -> Result<(), Error> {
+    let document = Document::parse(xml).map_err(Error::Xml)?;
     for sdt in document.descendants().filter(|node| is_element(*node, "sdt")) {
         let Some(tag) = sdt
             .descendants()
@@ -255,13 +301,7 @@ pub fn parse_docx(docx: &[u8], state: &RoundtripState) -> Result<WordEdits, Erro
         }
         regions.insert(id.to_owned(), text);
     }
-    for region in &state.regions {
-        if !regions.contains_key(&region.id) {
-            return Err(Error::MissingControl(region.id.clone()));
-        }
-    }
-    let comments = parse_comments(&mut archive, &comment_regions)?;
-    Ok(WordEdits { regions, comments })
+    Ok(())
 }
 
 fn parse_comments(
@@ -352,6 +392,8 @@ fn allowed_review_element(node: Node<'_, '_>) -> bool {
             | "commentRangeStart"
             | "commentRangeEnd"
             | "commentReference"
+            | "footnoteRef"
+            | "tab"
     )
 }
 
