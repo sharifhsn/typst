@@ -7,7 +7,7 @@
 //! of bug that makes Word/LibreOffice refuse to open a file), plus targeted
 //! checks on the structural mappings.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::sync::Arc;
 
@@ -19,8 +19,8 @@ use typst::text::{Font, FontBook};
 use typst::utils::{LazyHash, PicoStr};
 use typst::{Library, LibraryExt, World};
 use typst_docx::{
-    DecisionReason, DocxDocument, DocxOptions, ExportStage, Representation,
-    SuppressedKind, docx,
+    DecisionReason, DocxDocument, DocxOptions, ExportStage, Representation, ReviewTag,
+    SuppressedKind, docx, docx_with_review_tags,
 };
 use typst_layout::PagedDocument;
 
@@ -121,6 +121,10 @@ fn package_bytes_with_files(
 fn package_bytes(doc: &DocxDocument) -> HashMap<String, Vec<u8>> {
     let bytes = docx(&doc, &DocxOptions { pretty: false }).expect("docx export failed");
 
+    unzip(bytes)
+}
+
+fn unzip(bytes: Vec<u8>) -> HashMap<String, Vec<u8>> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     let mut map = HashMap::new();
     for i in 0..zip.len() {
@@ -429,6 +433,53 @@ fn docx_export_is_byte_deterministic() {
     let first = docx(&document, &options).expect("first DOCX export failed");
     let second = docx(&document, &options).expect("second DOCX export failed");
     assert_eq!(first, second, "the complete OPC zip must be byte deterministic");
+}
+
+#[test]
+fn review_candidates_are_opt_in_and_preserve_exact_heading_text() {
+    let document = compile_docx("= Alpha heading\n\nBody.\n\n= Beta heading", &[]);
+    let candidates = document.review_candidates();
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].baseline.as_str(), "Alpha heading");
+    assert_eq!(candidates[1].baseline.as_str(), "Beta heading");
+
+    let ordinary = text_parts(&document);
+    let ordinary_xml = &ordinary["word/document.xml"];
+    assert!(!ordinary_xml.contains("<w:sdt>"));
+    assert!(!ordinary_xml.contains("typst:v1:"));
+
+    let mut tags = BTreeMap::new();
+    tags.insert(
+        candidates[0].join_id,
+        ReviewTag { export: "export-a".into(), region: "alpha".into() },
+    );
+    tags.insert(
+        candidates[1].join_id,
+        ReviewTag { export: "export-a".into(), region: "beta".into() },
+    );
+    let options = DocxOptions { pretty: false };
+    let first = docx_with_review_tags(&document, &options, &tags).unwrap();
+    let second = docx_with_review_tags(&document, &options, &tags).unwrap();
+    assert_eq!(first, second, "tagged export must remain deterministic");
+
+    let parts = unzip(first);
+    let xml = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
+    assert_eq!(xml.matches("<w:sdt>").count(), 2);
+    assert!(xml.contains("w:tag w:val=\"typst:v1:export-a:alpha\""));
+    assert!(xml.contains("w:tag w:val=\"typst:v1:export-a:beta\""));
+    assert!(xml.contains("w:id w:val=\"1\""));
+    assert!(xml.contains("w:id w:val=\"2\""));
+    assert!(!xml.contains("w:dataBinding"));
+    assert!(!xml.contains("w:lock"));
+
+    let invalid = BTreeMap::from([(
+        candidates[0].join_id,
+        ReviewTag {
+            export: "x".repeat(60).into(),
+            region: "too-long".into(),
+        },
+    )]);
+    assert!(docx_with_review_tags(&document, &options, &invalid).is_err());
 }
 
 #[test]

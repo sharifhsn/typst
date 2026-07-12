@@ -21,6 +21,7 @@ doc = false
 typst = { workspace = true }
 typst-bundle = { workspace = true }
 typst-docx = { workspace = true }
+typst-docx-roundtrip = { path = "../typst-docx-roundtrip" }
 typst-export-common = { workspace = true }
 typst-pandoc = { workspace = true }
 typst-eval = { workspace = true }
@@ -78,6 +79,7 @@ features = [
 typst-dev-assets = { workspace = true }
 memchr = { workspace = true }
 tempfile = { workspace = true }
+zip = { workspace = true }
 
 [build-dependencies]
 chrono = { workspace = true }

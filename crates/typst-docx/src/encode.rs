@@ -1,5 +1,7 @@
 //! Serializes the typed DOCX IR into an OPC zip package.
 
+use std::collections::BTreeMap;
+
 use ecow::EcoString;
 use typst_library::diag::{SourceResult, bail};
 use typst_library::foundations::Smart;
@@ -10,8 +12,8 @@ use typst_syntax::Span;
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, DocxDocument,
     Drawing, Field, FieldDisplay, FieldMode, Footnote, GroupSpec, HdrFtrPart, Para,
-    ParaChild, ParaProps, Row, Run, SectPr, SectType, ShapeFill, ShapeGeom, ShapeSpec,
-    Spacing, Tbl, Toc, VAlign, VMerge,
+    ParaChild, ParaProps, ReviewJoinId, Row, Run, SectPr, SectType, ShapeFill, ShapeGeom,
+    ShapeSpec, Spacing, Tbl, Toc, VAlign, VMerge,
 };
 use crate::package::{DOCX_PACKAGE_OPTIONS, Package, RelMode, Rels};
 use crate::styles_part;
@@ -22,6 +24,23 @@ use crate::xml::{self, XmlWriter};
 pub struct DocxOptions {
     /// Whether to pretty-print the XML parts.
     pub pretty: bool,
+}
+
+/// Stable components encoded into `w:tag="typst:v1:<export>:<region>"`.
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ReviewTag {
+    pub export: EcoString,
+    pub region: EcoString,
+}
+
+/// Serializes a DOCX with selected review candidates wrapped in unlocked block
+/// content controls. Ordinary [`docx`] export remains byte-for-byte unchanged.
+pub fn docx_with_review_tags(
+    document: &DocxDocument,
+    options: &DocxOptions,
+    tags: &BTreeMap<ReviewJoinId, ReviewTag>,
+) -> SourceResult<Vec<u8>> {
+    docx_impl(document, options, tags)
 }
 
 // Relationship-type URIs.
@@ -63,6 +82,25 @@ fn push_font(fonts: &mut Vec<String>, font: &str) {
 /// Serializes a DOCX document into the OPC zip bytes.
 #[typst_macros::time(name = "docx encode")]
 pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<u8>> {
+    docx_impl(document, options, &BTreeMap::new())
+}
+
+fn docx_impl(
+    document: &DocxDocument,
+    options: &DocxOptions,
+    review_tags: &BTreeMap<ReviewJoinId, ReviewTag>,
+) -> SourceResult<Vec<u8>> {
+    for tag in review_tags.values() {
+        let value = format!("typst:v1:{}:{}", tag.export, tag.region);
+        if tag.export.is_empty()
+            || tag.region.is_empty()
+            || tag.export.contains(':')
+            || tag.region.contains(':')
+            || value.len() > 64
+        {
+            bail!(Span::detached(), "invalid DOCX review content-control tag");
+        }
+    }
     if let Err(err) = crate::invariants::validate(document) {
         bail!(Span::detached(), "invalid finalized DOCX IR: {err}");
     }
@@ -238,7 +276,7 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     );
 
     // -- word/document.xml --
-    let document_xml = build_document(document, pretty);
+    let document_xml = build_document(document, review_tags, pretty);
     package.add_xml("word/document.xml", CT_DOCUMENT, document_xml);
 
     // -- word/_rels/document.xml.rels --
@@ -315,7 +353,11 @@ fn decl_ooxml_namespaces(w: &mut XmlWriter) {
         .attr("xmlns:v", ns::V);
 }
 
-fn build_document(document: &DocxDocument, pretty: bool) -> String {
+fn build_document(
+    document: &DocxDocument,
+    review_tags: &BTreeMap<ReviewJoinId, ReviewTag>,
+    pretty: bool,
+) -> String {
     let mut w = XmlWriter::new(pretty);
     w.open(xml::W_DOCUMENT);
     decl_ooxml_namespaces(&mut w);
@@ -330,8 +372,32 @@ fn build_document(document: &DocxDocument, pretty: bool) -> String {
     w.open(xml::W_BODY).start_children();
 
     let mut ends_with_para = false;
-    for block in &document.body {
-        ends_with_para = write_block(&mut w, block);
+    for (body_index, block) in document.body.iter().enumerate() {
+        let selected = document
+            .review_candidates
+            .iter()
+            .find(|candidate| candidate.body_index == body_index)
+            .and_then(|candidate| review_tags.get(&candidate.join_id));
+        if let Some(tag) = selected {
+            let id = document
+                .review_candidates
+                .iter()
+                .filter(|candidate| candidate.body_index <= body_index)
+                .filter(|candidate| review_tags.contains_key(&candidate.join_id))
+                .count() as u32;
+            w.open("w:sdt").start_children();
+            w.open("w:sdtPr").start_children();
+            w.open("w:id").attr(xml::W_VAL, &id.max(1).to_string()).empty();
+            let value = format!("typst:v1:{}:{}", tag.export, tag.region);
+            w.open("w:tag").attr(xml::W_VAL, &value).empty();
+            w.close();
+            w.open("w:sdtContent").start_children();
+            ends_with_para = write_block(&mut w, block);
+            w.close();
+            w.close();
+        } else {
+            ends_with_para = write_block(&mut w, block);
+        }
     }
 
     // The body must end in a paragraph before the sectPr.

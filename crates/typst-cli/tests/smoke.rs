@@ -1,10 +1,13 @@
 use std::collections::HashSet;
 use std::fmt::{self, Debug, Display, Formatter};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
 use typst::foundations::Bytes;
+use zip::write::SimpleFileOptions;
+use zip::{ZipArchive, ZipWriter};
 
 #[test]
 fn test_help() {
@@ -22,6 +25,93 @@ fn test_compile_pdf() {
     let hello = project.write("hello.typ", format!("#set document(title: \"{title}\")"));
     exec().arg("compile").arg(&hello).must_succeed();
     project.read("hello.pdf").must_start_with("%PDF").must_contain(title);
+}
+
+#[test]
+fn test_docx_review_two_cycles() {
+    let project = tempfs();
+    let main = project.write("main.typ", "= Original heading\n\nBody.");
+
+    exec()
+        .arg("compile")
+        .arg(&main)
+        .arg(project.resolve("collision.docx"))
+        .arg(format!("--docx-review-state={}", main.display()))
+        .must_fail();
+    project.read("main.typ").must_contain("= Original heading");
+
+    let first = project.resolve("first.docx");
+    exec()
+        .arg("compile")
+        .arg(&main)
+        .arg(&first)
+        .arg("--docx-review-state")
+        .must_succeed();
+    let first_edited = project.resolve("first-edited.docx");
+    edit_docx_text(&first, &first_edited, "Original heading", "First edit");
+    exec()
+        .arg("review")
+        .arg(&first_edited)
+        .arg("--state")
+        .arg(project.resolve("first.docx.typst-review.json"))
+        .arg("--root")
+        .arg(project.path())
+        .arg("--report")
+        .arg(&main)
+        .arg("--apply")
+        .must_fail();
+    project.read("main.typ").must_contain("= Original heading");
+    exec()
+        .arg("review")
+        .arg(&first_edited)
+        .arg("--state")
+        .arg(project.resolve("first.docx.typst-review.json"))
+        .arg("--root")
+        .arg(project.path())
+        .arg("--apply")
+        .must_succeed();
+    project.read("main.typ").must_contain("= #(\"First edit\")");
+
+    let second = project.resolve("second.docx");
+    exec()
+        .arg("compile")
+        .arg(&main)
+        .arg(&second)
+        .arg("--docx-review-state")
+        .must_succeed();
+    let second_edited = project.resolve("second-edited.docx");
+    edit_docx_text(&second, &second_edited, "First edit", "Second edit");
+    let review = exec()
+        .arg("review")
+        .arg(&second_edited)
+        .arg("--state")
+        .arg(project.resolve("second.docx.typst-review.json"))
+        .arg("--root")
+        .arg(project.path())
+        .arg("--apply")
+        .must_succeed();
+    review.stdout.must_contain("\"status\": \"ready\"");
+    project.read("main.typ").must_contain("= #(\"Second edit\")");
+    exec().arg("compile").arg(&main).must_succeed();
+}
+
+fn edit_docx_text(input: &Path, output: &Path, old: &str, new: &str) {
+    let source = std::fs::File::open(input).unwrap();
+    let mut archive = ZipArchive::new(source).unwrap();
+    let target = std::fs::File::create(output).unwrap();
+    let mut writer = ZipWriter::new(target);
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).unwrap();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
+        if entry.name() == "word/document.xml" {
+            let xml = String::from_utf8(bytes).unwrap().replace(old, new);
+            bytes = xml.into_bytes();
+        }
+        writer.start_file(entry.name(), SimpleFileOptions::default()).unwrap();
+        writer.write_all(&bytes).unwrap();
+    }
+    writer.finish().unwrap();
 }
 
 #[test]
