@@ -22,6 +22,19 @@ use crate::xml::{self, XmlWriter};
 pub struct DocxOptions {
     /// Whether to pretty-print the XML parts.
     pub pretty: bool,
+    /// Whether to embed the fidelity manifest in the package
+    /// (`customXml/typstFidelity.xml`, mirrored into a custom document
+    /// property so it survives a LibreOffice Writer save).
+    ///
+    /// Off by default: the manifest describes the EXPORT (including which
+    /// referenced fonts were available on the exporting machine and every
+    /// approximation/drop decision), roughly doubles that description by
+    /// mirroring it into `docProps/custom.xml`, and shows up in Word's own
+    /// document-properties UI — none of which belongs in a document handed to
+    /// a recipient unless the author asked for it. The report itself is
+    /// always computed and available on [`DocxDocument`] for tooling either
+    /// way.
+    pub embed_fidelity_manifest: bool,
 }
 
 // Relationship-type URIs.
@@ -220,22 +233,32 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
         doc_rels.add(ns::rel::CUSTOM_XML, "../customXml/item1.xml", RelMode::Internal);
     }
 
-    // -- customXml/typstFidelity.xml ---------------------------------------
+    // -- customXml/typstFidelity.xml (opt-in) --------------------------------
     // Versioned, machine-readable export evidence. The canonical customXml
     // part is ideal for tooling, but Writer drops arbitrary customXml on save;
     // docProps/custom.xml below redundantly carries the exact payload through
-    // that round trip.
-    let fidelity_manifest = document.fidelity_manifest_xml();
-    package.add_xml(
-        crate::manifest::PART_NAME,
-        "application/xml",
-        fidelity_manifest.clone(),
-    );
-    doc_rels.add(
-        crate::manifest::REL_TYPE,
-        "../customXml/typstFidelity.xml",
-        RelMode::Internal,
-    );
+    // that round trip. See `DocxOptions::embed_fidelity_manifest` for why this
+    // is off by default; the report always stays queryable on `DocxDocument`.
+    if options.embed_fidelity_manifest {
+        let fidelity_manifest = document.fidelity_manifest_xml();
+        package.add_xml(
+            crate::manifest::PART_NAME,
+            "application/xml",
+            fidelity_manifest.clone(),
+        );
+        doc_rels.add(
+            crate::manifest::REL_TYPE,
+            "../customXml/typstFidelity.xml",
+            RelMode::Internal,
+        );
+        // `docProps/custom.xml` exists solely to mirror the manifest, so the
+        // whole part (and its root relationship below) is skipped with it.
+        package.add_xml(
+            "docProps/custom.xml",
+            CT_CUSTOM_PROPERTIES,
+            build_custom_properties(&fidelity_manifest, pretty),
+        );
+    }
 
     // -- word/document.xml --
     let document_xml = build_document(document, pretty);
@@ -247,17 +270,14 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     // -- docProps/core.xml + app.xml --
     package.add_xml("docProps/core.xml", CT_CORE, build_core(&document.info, pretty));
     package.add_xml("docProps/app.xml", CT_EXTENDED, build_app(pretty));
-    package.add_xml(
-        "docProps/custom.xml",
-        CT_CUSTOM_PROPERTIES,
-        build_custom_properties(&fidelity_manifest, pretty),
-    );
 
     // -- package root relationships --
     root_rels.add(REL_OFFICE_DOCUMENT, "word/document.xml", RelMode::Internal);
     root_rels.add(REL_CORE_PROPS, "docProps/core.xml", RelMode::Internal);
     root_rels.add(REL_EXTENDED_PROPS, "docProps/app.xml", RelMode::Internal);
-    root_rels.add(REL_CUSTOM_PROPERTIES, "docProps/custom.xml", RelMode::Internal);
+    if options.embed_fidelity_manifest {
+        root_rels.add(REL_CUSTOM_PROPERTIES, "docProps/custom.xml", RelMode::Internal);
+    }
 
     if let Err(err) = crate::schema::validate_package(&package) {
         bail!(Span::detached(), "invalid finalized DOCX XML sequence: {err}");

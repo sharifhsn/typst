@@ -512,7 +512,10 @@ fn mixed_page_size_warning(
 
 /// Export to DOCX.
 fn export_docx(document: &DocxDocument, config: &CompileConfig) -> SourceResult<()> {
-    let options = DocxOptions { pretty: config.pretty };
+    // The embedded fidelity manifest stays off until a CLI flag exposes it;
+    // the report remains queryable on the in-memory document either way.
+    let options =
+        DocxOptions { pretty: config.pretty, embed_fidelity_manifest: false };
     let bytes = typst_docx::docx(document, &options)?;
     config
         .output

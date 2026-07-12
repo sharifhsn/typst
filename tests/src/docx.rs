@@ -103,6 +103,18 @@ fn parts(src: &str) -> HashMap<String, String> {
     parts_with_files(src, &[])
 }
 
+/// Like [`parts`], but with the (default-off) embedded fidelity manifest
+/// enabled — for the tests that assert the manifest parts themselves.
+fn parts_with_manifest(src: &str) -> HashMap<String, String> {
+    let doc = compile_docx(src, &[]);
+    let options = DocxOptions { embed_fidelity_manifest: true, ..Default::default() };
+    let bytes = docx(&doc, &options).expect("docx export failed");
+    zip_parts(bytes)
+        .into_iter()
+        .filter_map(|(name, bytes)| String::from_utf8(bytes).ok().map(|s| (name, s)))
+        .collect()
+}
+
 fn parts_with_files(src: &str, files: &[(&str, &[u8])]) -> HashMap<String, String> {
     package_bytes_with_files(src, files)
         .into_iter()
@@ -119,8 +131,11 @@ fn package_bytes_with_files(
 }
 
 fn package_bytes(doc: &DocxDocument) -> HashMap<String, Vec<u8>> {
-    let bytes = docx(&doc, &DocxOptions { pretty: false }).expect("docx export failed");
+    let bytes = docx(doc, &DocxOptions::default()).expect("docx export failed");
+    zip_parts(bytes)
+}
 
+fn zip_parts(bytes: Vec<u8>) -> HashMap<String, Vec<u8>> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     let mut map = HashMap::new();
     for i in 0..zip.len() {
@@ -135,6 +150,19 @@ fn package_bytes(doc: &DocxDocument) -> HashMap<String, Vec<u8>> {
 
 fn text_parts(doc: &DocxDocument) -> HashMap<String, String> {
     package_bytes(doc)
+        .into_iter()
+        .filter_map(|(name, bytes)| {
+            String::from_utf8(bytes).ok().map(|text| (name, text))
+        })
+        .collect()
+}
+
+/// Like [`text_parts`], but with the (default-off) embedded fidelity manifest
+/// enabled — for the tests that assert the manifest parts themselves.
+fn text_parts_with_manifest(doc: &DocxDocument) -> HashMap<String, String> {
+    let options = DocxOptions { embed_fidelity_manifest: true, ..Default::default() };
+    let bytes = docx(doc, &options).expect("docx export failed");
+    zip_parts(bytes)
         .into_iter()
         .filter_map(|(name, bytes)| {
             String::from_utf8(bytes).ok().map(|text| (name, text))
@@ -425,7 +453,7 @@ fn docx_export_is_byte_deterministic() {
         "= Stable package\n\n#link(\"https://example.com\")[external link]",
         &[],
     );
-    let options = DocxOptions { pretty: false };
+    let options = DocxOptions::default();
     let first = docx(&document, &options).expect("first DOCX export failed");
     let second = docx(&document, &options).expect("second DOCX export failed");
     assert_eq!(first, second, "the complete OPC zip must be byte deterministic");
@@ -467,7 +495,7 @@ fn export_snapshot_stabilizes_semantic_ids_and_paged_positions() {
 
 #[test]
 fn fidelity_manifest_is_persisted_and_related() {
-    let p = parts("#place(top + left, table(columns: 1, [$x + 1$]))");
+    let p = parts_with_manifest("#place(top + left, table(columns: 1, [$x + 1$]))");
     let manifest = &p["customXml/typstFidelity.xml"];
     assert!(manifest.contains("version=\"1\""));
     assert!(manifest.contains("<typst:pages>"));
@@ -557,7 +585,7 @@ fn flexible_table_uses_converged_paged_cell_geometry() {
             && decision.representation == Representation::Native
     }));
 
-    let p = parts(src);
+    let p = parts_with_manifest(src);
     let widths = grid_widths(&element_fragments(&p["word/document.xml"], "tbl")[0]);
     assert_eq!(widths.len(), 2);
     assert!((widths[1] as f64 / widths[0] as f64 - 2.0).abs() < 0.01);
@@ -2645,7 +2673,7 @@ fn snapshot_link_edges_drive_stable_internal_bookmark_names() {
         typst_docx::SnapshotLinkTarget::Url(url) if url == "https://example.com"
     )));
 
-    let p = parts(src);
+    let p = parts_with_manifest(src);
     let doc = &p["word/document.xml"];
     let name = format!("_Typst{target_id:032x}");
     assert!(doc.contains(&format!("w:name=\"{name}\"")));
@@ -3307,7 +3335,7 @@ fn fidelity_report_enrolls_dynamic_field_ownership() {
     }
     assert!(fields.iter().all(|field| field.occurrences > 0));
 
-    let p = parts(src);
+    let p = parts_with_manifest(src);
     let manifest = &p["customXml/typstFidelity.xml"];
     assert!(manifest.contains("<typst:dynamicFields>"));
     assert!(manifest.contains("kind=\"TOC\""));
@@ -3335,7 +3363,7 @@ fn fidelity_report_enrolls_referenced_fonts() {
         );
     }
 
-    let p = parts(src);
+    let p = parts_with_manifest(src);
     let manifest = &p["customXml/typstFidelity.xml"];
     assert!(manifest.contains("<typst:fonts>"));
     assert!(manifest.contains("family=\"dejavu sans mono\""));
@@ -3360,7 +3388,7 @@ fn fidelity_report_marks_missing_fonts_as_consumer_dependent() {
     assert!(!fact.available_at_export, "missing family must be explicit: {fact:?}");
     assert!(!fact.embedded, "missing family has no embedded program: {fact:?}");
 
-    let p = text_parts(&compiled);
+    let p = text_parts_with_manifest(&compiled);
     let manifest = &p["customXml/typstFidelity.xml"];
     assert!(manifest.contains("missingFonts=\"1\""), "{manifest}");
     assert!(
@@ -3585,7 +3613,7 @@ fn auto_page_height_uses_the_true_paged_size_not_a4() {
     assert!(real_h_twips > 16838 * 2, "test doc must need much more than A4 height");
 
     let bytes =
-        docx(&docx_doc, &DocxOptions { pretty: false }).expect("docx export failed");
+        docx(&docx_doc, &DocxOptions::default()).expect("docx export failed");
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     let mut xml = String::new();
     zip.by_name("word/document.xml")
@@ -3869,7 +3897,7 @@ fn export_snapshot_owns_both_bibliography_package_views() {
     );
     assert!(first.export_snapshot().bibliography_biblatex().is_some());
 
-    let p = parts_with_files(src, files);
+    let p = text_parts_with_manifest(&first);
     assert_eq!(p["customXml/item1.xml"].matches("<b:Source>").count(), 2);
     assert!(p["word/typstBibliography.xml"].contains("Alpha Source"));
     let manifest = &p["customXml/typstFidelity.xml"];
@@ -4235,7 +4263,7 @@ fn toc_page_cache_uses_the_paged_snapshot_not_the_docx_target() {
             && field.cache_status == typst_docx::FieldCacheStatus::Resolved
     }));
 
-    let p = parts(src);
+    let p = parts_with_manifest(src);
     let doc = &p["word/document.xml"];
     assert!(doc.contains("Entry"), "the TOC entry stays visible");
     assert!(doc.contains(" PAGEREF "), "Word can refresh the live page field");
@@ -4352,7 +4380,7 @@ fn failed_placed_region_records_its_terminal_drop() {
             .any(|entry| entry.stage == ExportStage::FallbackLayout)
     );
 
-    let p = parts(src);
+    let p = parts_with_manifest(src);
     assert!(p["word/document.xml"].contains("After"));
     assert!(p["customXml/typstFidelity.xml"].contains("PositionedContentUnavailable"));
     assert_all_wellformed(&p);
@@ -4372,7 +4400,7 @@ fn failed_inline_placed_fallback_distinguishes_failure_from_empty_scaffolding() 
         entry.stage == ExportStage::FallbackLayout && entry.kind == SuppressedKind::Error
     }));
 
-    let p = parts(src);
+    let p = parts_with_manifest(src);
     let document = &p["word/document.xml"];
     assert!(document.contains("Before"));
     assert!(document.contains("After"));
