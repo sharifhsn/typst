@@ -19,7 +19,8 @@ use typst::syntax::{Span, SpanKind};
 use typst_bundle::{Bundle, BundleOptions, VirtualFs};
 use typst_docx::{DocxDocument, DocxOptions, ReviewTag};
 use typst_docx_roundtrip::{
-    BaselineFile, Region, RegionKind, RoundtripState, encode_typst_text, sha256,
+    BaselineFile, Region, RegionKind, RoundtripState, capture_format_baselines,
+    encode_typst_text, sha256,
 };
 use typst_html::{HtmlDocument, HtmlOptions};
 use typst_kit::diagnostics::DiagnosticWorld;
@@ -573,8 +574,11 @@ fn export_docx(
             bail!(Span::detached(), "DOCX review output path aliases the Typst source");
         }
     }
-    let (state, tags) = build_review_state(document, world)?;
+    let (mut state, tags) = build_review_state(document, world)?;
     let bytes = typst_docx::docx_with_review_tags(document, &options, &tags)?;
+    capture_format_baselines(&bytes, &mut state)
+        .map_err(|err| eco_format!("failed to capture DOCX review formatting ({err})"))
+        .at(Span::detached())?;
     let state_bytes = state
         .to_json()
         .map_err(|err| eco_format!("failed to serialize DOCX review state ({err})"))
@@ -810,6 +814,7 @@ fn build_review_state(
             source: region.source,
             word_baseline: region.word,
             kind: RegionKind(region.kind),
+            word_format_baseline: Vec::new(),
         });
     }
     let files = files

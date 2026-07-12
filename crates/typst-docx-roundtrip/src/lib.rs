@@ -54,6 +54,33 @@ pub struct Region {
     /// Visible text in Word at export time. Newlines separate paragraphs.
     pub word_baseline: String,
     pub kind: RegionKind,
+    /// Normalized Word character formatting captured from the generated DOCX.
+    #[serde(default)]
+    pub word_format_baseline: Vec<FormatSpan>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WordTextStyle {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: Option<String>,
+    pub strike: bool,
+    pub small_caps: bool,
+    pub caps: bool,
+    pub highlight: Option<String>,
+    pub shading: Option<String>,
+    pub vertical_align: Option<String>,
+    pub font: Option<String>,
+    pub size_half_points: Option<String>,
+    pub color: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FormatSpan {
+    pub text: String,
+    pub style: WordTextStyle,
 }
 
 /// A versioned review-region discriminator validated against the kinds whose
@@ -136,6 +163,7 @@ pub fn sha256(bytes: &[u8]) -> String {
 pub struct WordEdits {
     pub regions: HashMap<String, String>,
     pub comments: Vec<WordComment>,
+    pub formats: HashMap<String, Vec<FormatSpan>>,
 }
 
 /// A Word comment anchored inside one source-backed review region.
@@ -185,6 +213,7 @@ pub fn parse_docx(docx: &[u8], state: &RoundtripState) -> Result<WordEdits, Erro
         state.regions.iter().map(|r| (r.id.as_str(), r)).collect();
     let wanted_prefix = format!("{TAG_PREFIX}{}:", state.export_id);
     let mut regions = HashMap::new();
+    let mut formats = HashMap::new();
     let mut comment_regions: HashMap<String, String> = HashMap::new();
 
     for part in story_parts {
@@ -194,6 +223,7 @@ pub fn parse_docx(docx: &[u8], state: &RoundtripState) -> Result<WordEdits, Erro
             &expected,
             &wanted_prefix,
             &mut regions,
+            &mut formats,
             &mut comment_regions,
         )?;
     }
@@ -203,7 +233,7 @@ pub fn parse_docx(docx: &[u8], state: &RoundtripState) -> Result<WordEdits, Erro
         }
     }
     let comments = parse_comments(&mut archive, &comment_regions)?;
-    Ok(WordEdits { regions, comments })
+    Ok(WordEdits { regions, comments, formats })
 }
 
 fn read_xml_part(
@@ -237,6 +267,7 @@ fn parse_review_part(
     expected: &HashMap<&str, &Region>,
     wanted_prefix: &str,
     regions: &mut HashMap<String, String>,
+    formats: &mut HashMap<String, Vec<FormatSpan>>,
     comment_regions: &mut HashMap<String, String>,
 ) -> Result<(), Error> {
     let document = Document::parse(xml).map_err(Error::Xml)?;
@@ -292,6 +323,7 @@ fn parse_review_part(
         if text.contains(['\r', '\n']) {
             return Err(Error::StructuralEdit(id.to_owned()));
         }
+        formats.insert(id.to_owned(), visible_format_spans(content));
         for marker in content.descendants().filter(|node| {
             matches!(
                 node.tag_name().name(),
@@ -307,6 +339,84 @@ fn parse_review_part(
             }
         }
         regions.insert(id.to_owned(), text);
+    }
+    Ok(())
+}
+
+fn visible_format_spans(content: Node<'_, '_>) -> Vec<FormatSpan> {
+    let mut spans: Vec<FormatSpan> = Vec::new();
+    for run in content.descendants().filter(|node| is_element(*node, "r")) {
+        if run.ancestors().any(|ancestor| {
+            is_element(ancestor, "del") || is_element(ancestor, "moveFrom")
+        }) {
+            continue;
+        }
+        let text = visible_text(run);
+        if text.is_empty() {
+            continue;
+        }
+        let rpr = run.children().find(|node| is_element(*node, "rPr"));
+        let child = |name| {
+            rpr.and_then(|props| props.children().find(|node| is_element(*node, name)))
+        };
+        let style_name = child("rStyle").and_then(|node| attribute(node, "val"));
+        let enabled = |name| {
+            child(name).is_some_and(|node| {
+                !matches!(attribute(node, "val"), Some("0" | "false" | "off" | "none"))
+            })
+        };
+        let style = WordTextStyle {
+            bold: enabled("b") || style_name == Some("Strong"),
+            italic: enabled("i") || style_name == Some("Emphasis"),
+            underline: child("u")
+                .and_then(|node| attribute(node, "val"))
+                .filter(|value| *value != "none")
+                .map(str::to_owned),
+            strike: enabled("strike") || enabled("dstrike"),
+            small_caps: enabled("smallCaps"),
+            caps: enabled("caps"),
+            highlight: child("highlight")
+                .and_then(|node| attribute(node, "val"))
+                .map(str::to_owned),
+            shading: child("shd")
+                .and_then(|node| attribute(node, "fill"))
+                .map(str::to_owned),
+            vertical_align: child("vertAlign")
+                .and_then(|node| attribute(node, "val"))
+                .map(str::to_owned),
+            font: child("rFonts")
+                .and_then(|node| {
+                    attribute(node, "ascii").or_else(|| attribute(node, "hAnsi"))
+                })
+                .map(str::to_owned),
+            size_half_points: child("sz")
+                .and_then(|node| attribute(node, "val"))
+                .map(str::to_owned),
+            color: child("color")
+                .and_then(|node| attribute(node, "val"))
+                .map(str::to_owned),
+        };
+        if let Some(previous) = spans.last_mut()
+            && previous.style == style
+        {
+            previous.text.push_str(&text);
+        } else {
+            spans.push(FormatSpan { text, style });
+        }
+    }
+    spans
+}
+
+/// Capture the generated DOCX's normalized formatting as the comparison
+/// baseline retained with the student's review state.
+pub fn capture_format_baselines(
+    docx: &[u8],
+    state: &mut RoundtripState,
+) -> Result<(), Error> {
+    let parsed = parse_docx(docx, state)?;
+    for region in &mut state.regions {
+        region.word_format_baseline =
+            parsed.formats.get(&region.id).cloned().unwrap_or_default();
     }
     Ok(())
 }
@@ -442,6 +552,8 @@ pub struct RegionReport {
     pub baseline: String,
     pub current: Option<String>,
     pub word: String,
+    pub baseline_format: Vec<FormatSpan>,
+    pub word_format: Vec<FormatSpan>,
     pub status: RegionStatus,
 }
 
@@ -459,6 +571,7 @@ pub enum ConflictKind {
     LocalOverlap,
     AmbiguousLocation,
     OverlappingRegions,
+    FormattingChange,
 }
 
 type Replacement = (Range<usize>, String, usize);
@@ -495,11 +608,16 @@ pub fn dry_run(
             .expect("validated region file");
         let location = locate_region(file, baseline, region);
         let mut status = RegionStatus::Unchanged;
+        let word_format = edits.formats.get(&region.id).cloned().unwrap_or_default();
+        let formatting_changed = !region.word_format_baseline.is_empty()
+            && !formatting_equivalent(&word_format, &region.word_format_baseline);
         let mut current_region = match &location {
             Location::Unique(range) => file.get(range.clone()).map(str::to_owned),
             Location::Missing | Location::Ambiguous => None,
         };
-        if word != &region.word_baseline {
+        if formatting_changed {
+            status = RegionStatus::Conflict(ConflictKind::FormattingChange);
+        } else if word != &region.word_baseline {
             match location {
                 Location::Unique(range) => {
                     current_region = file.get(range.clone()).map(str::to_owned);
@@ -526,6 +644,8 @@ pub fn dry_run(
             baseline: region.source.clone(),
             current: current_region,
             word: word.clone(),
+            baseline_format: region.word_format_baseline.clone(),
+            word_format,
             status,
         });
     }
@@ -564,6 +684,11 @@ pub fn dry_run(
         comments: edits.comments.clone(),
         files,
     })
+}
+
+fn formatting_equivalent(left: &[FormatSpan], right: &[FormatSpan]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| left.style == right.style)
 }
 
 enum Location {

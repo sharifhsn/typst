@@ -25,6 +25,7 @@ fn state(source: &str, word: &str) -> RoundtripState {
             source: source.into(),
             word_baseline: word.into(),
             kind: RegionKind("heading".into()),
+            word_format_baseline: vec![],
         }],
     }
 }
@@ -99,6 +100,7 @@ fn table_cell_edits_remain_content_in_code_mode() {
     let edits = WordEdits {
         regions: HashMap::from([("one".into(), "new #[literal]".into())]),
         comments: vec![],
+        formats: HashMap::new(),
     };
     let report = dry_run(&state, &edits, &current("before [old] after")).unwrap();
     assert_eq!(report.files[0].contents, r#"before [#("new #[literal]")] after"#);
@@ -125,10 +127,11 @@ fn inline_review_controls_accept_runs_but_reject_paragraph_structure() {
     let mut state = state("old", "old");
     state.regions[0].kind = RegionKind("inline_text".into());
     let inline = zip_xml(
-        r#"<?xml version="1.0"?><w:document xmlns:w="urn:w"><w:body><w:p><w:sdt><w:sdtPr><w:tag w:val="typst:v1:export:one"/></w:sdtPr><w:sdtContent><w:r><w:t>new</w:t></w:r></w:sdtContent></w:sdt></w:p></w:body></w:document>"#,
+        r#"<?xml version="1.0"?><w:document xmlns:w="urn:w"><w:body><w:p><w:sdt><w:sdtPr><w:tag w:val="typst:v1:export:one"/></w:sdtPr><w:sdtContent><w:r><w:rPr><w:b/></w:rPr><w:t>new</w:t></w:r></w:sdtContent></w:sdt></w:p></w:body></w:document>"#,
     );
     let edits = parse_docx(&inline, &state).unwrap();
     assert_eq!(edits.regions["one"], "new");
+    assert!(edits.formats["one"][0].style.bold);
     assert!(matches!(
         parse_docx(
             &docx(&[("typst:v1:export:one", "<w:r><w:t>new</w:t></w:r>")]),
@@ -136,6 +139,32 @@ fn inline_review_controls_accept_runs_but_reject_paragraph_structure() {
         ),
         Err(Error::StructuralEdit(_))
     ));
+}
+
+#[test]
+fn formatting_changes_are_explicit_conflicts_instead_of_silent_loss() {
+    let mut state = state("old", "old");
+    state.regions[0].word_format_baseline = vec![FormatSpan {
+        text: "old".into(),
+        style: WordTextStyle::default(),
+    }];
+    let edits = WordEdits {
+        regions: HashMap::from([("one".into(), "old".into())]),
+        comments: vec![],
+        formats: HashMap::from([(
+            "one".into(),
+            vec![FormatSpan {
+                text: "old".into(),
+                style: WordTextStyle { bold: true, ..WordTextStyle::default() },
+            }],
+        )]),
+    };
+    let report = dry_run(&state, &edits, &current("before old after")).unwrap();
+    assert_eq!(
+        report.regions[0].status,
+        RegionStatus::Conflict(ConflictKind::FormattingChange)
+    );
+    assert!(!report.can_apply());
 }
 
 #[test]
@@ -158,6 +187,7 @@ fn unrelated_local_edit_remaps_exact_source_island() {
     let edits = WordEdits {
         regions: HashMap::from([("one".into(), "new".into())]),
         comments: vec![],
+        formats: HashMap::new(),
     };
     let report =
         dry_run(&state, &edits, &current("new prelude before old after")).unwrap();
@@ -170,6 +200,7 @@ fn overlapping_local_edit_conflicts() {
     let edits = WordEdits {
         regions: HashMap::from([("one".into(), "new".into())]),
         comments: vec![],
+        formats: HashMap::new(),
     };
     let report =
         dry_run(&state, &edits, &current("before locally-changed after")).unwrap();
@@ -186,6 +217,7 @@ fn repeated_relocated_islands_conflict() {
     let edits = WordEdits {
         regions: HashMap::from([("one".into(), "new".into())]),
         comments: vec![],
+        formats: HashMap::new(),
     };
     let report = dry_run(&state, &edits, &current("shift old and old")).unwrap();
     assert_eq!(
@@ -283,6 +315,7 @@ fn apply_is_explicit_atomic_and_detects_stale_sources() {
     let edits = WordEdits {
         regions: HashMap::from([("one".into(), "new".into())]),
         comments: vec![],
+        formats: HashMap::new(),
     };
     let report = dry_run(&state, &edits, &current("before old after")).unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -306,6 +339,8 @@ fn multi_file_plan_applies_transactionally_and_preflights_every_source() {
             baseline: "a".into(),
             current: Some("a".into()),
             word: "b".into(),
+            baseline_format: vec![],
+            word_format: vec![],
             status: RegionStatus::Ready,
         }],
         comments: vec![],
@@ -352,6 +387,7 @@ fn symbolic_link_source_is_rejected() {
     let edits = WordEdits {
         regions: HashMap::from([("one".into(), "new".into())]),
         comments: vec![],
+        formats: HashMap::new(),
     };
     let report = dry_run(&state, &edits, &current("before old after")).unwrap();
     assert!(matches!(apply_atomic(temp.path(), &report), Err(Error::InvalidState(_))));

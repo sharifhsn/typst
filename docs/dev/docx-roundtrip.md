@@ -43,6 +43,15 @@ under `comments`, with their Word id, region id, author, initials, date, and
 plain comment text. They are preserved as review annotations and are never
 injected into executable Typst source.
 
+The retained state also records normalized character-format spans from the
+generated DOCX (bold, italic, underline, strike, capitalization, highlight,
+shading, vertical alignment, font, size, and color). If Word changes those
+properties, the report returns a `formatting_change` conflict with both baseline
+and returned formatting instead of silently discarding the advisor's change.
+Automatic formatting-to-Typst rewriting remains intentionally disabled until a
+change can add and remove source wrappers without flattening user-authored style
+expressions.
+
 Apply only a conflict-free plan:
 
 ```sh
@@ -103,8 +112,9 @@ It intentionally rejects or leaves unenrolled:
 - paragraph insertion/deletion and manual line breaks inside a region;
 - missing, duplicated, copied, or foreign content controls;
 - ambiguous source relocation or overlapping student edits;
-- formatting-only round trips and arbitrary Word objects. Comments outside an
-  enrolled source-backed region remain outside the importer boundary.
+- automatic application of formatting changes and arbitrary Word objects.
+  Formatting changes are detected as conflicts; comments outside an enrolled
+  source-backed region remain outside the importer boundary.
 
 These exclusions prevent a visually plausible Word edit from silently
 flattening Typst code, macros, counters, or templates. Future slices can add
