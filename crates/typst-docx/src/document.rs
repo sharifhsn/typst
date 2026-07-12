@@ -3,6 +3,7 @@
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use typst_library::World;
 use typst_library::diag::SourceResult;
@@ -18,8 +19,8 @@ use crate::dom::{
     Block, BookmarkTable, DocxDocument, Field, FieldCacheStatus as DomFieldCacheStatus,
     FieldDisplay, FieldMode, Footnote, HdrFtrPart, HdrFtrRef, HeadingStyle,
     HeadingStyleSample, LineNumbering, MediaPart, NumberingTable, Para, ParaChild,
-    ParaProps, PgNumType, Run, RunProps, SectPr, SectType, Spacing, TextDefaults,
-    TocFigure, TocHeading,
+    ParaProps, PgNumType, ReviewCandidate, ReviewCandidateKind, ReviewJoinId, Run,
+    RunProps, SectPr, SectType, Spacing, TextDefaults, TocFigure, TocHeading,
 };
 use crate::introspect::DocxIntrospector;
 use crate::package::Rels;
@@ -449,6 +450,9 @@ fn docx_document_impl(
         &mut toc_planning,
     );
 
+    let review_candidates =
+        collect_review_candidates(&body, &toc_headings, &export_snapshot);
+
     // Synthetic page model: a flowing document has no real pages, but templates
     // legitimately read paged introspection (`@target(form: "page")`,
     // `loc.page-numbering()`, `counter(page)`) — returning `None` fails the
@@ -581,7 +585,70 @@ fn docx_document_impl(
         word_sources,
         fidelity_report,
         export_snapshot,
+        review_candidates,
     })
+}
+
+static NEXT_REVIEW_JOIN_ID: AtomicU64 = AtomicU64::new(1);
+
+fn collect_review_candidates(
+    body: &[Block],
+    headings: &[TocHeading],
+    snapshot: &crate::snapshot::ExportSnapshot,
+) -> Vec<ReviewCandidate> {
+    let mut candidates = Vec::new();
+    for heading in headings {
+        let (Some(location), Some(anchor)) = (heading.location, heading.anchor.as_ref())
+        else {
+            continue;
+        };
+        let mut nodes = snapshot.nodes().iter().filter(|node| {
+            node.source.location == Some(location)
+                && node.source.element.as_str() == "heading"
+                && node.semantic_occurrences == 1
+                && node.paged_positions.len() == 1
+                && !node.source.span.is_detached()
+        });
+        let Some(node) = nodes.next() else { continue };
+        if nodes.next().is_some() {
+            continue;
+        }
+        let Some((body_index, baseline)) =
+            body.iter().enumerate().find_map(|(index, block)| {
+                let Block::Para(para) = block else { return None };
+                let has_anchor = para.content.iter().any(|child| {
+                    matches!(child, ParaChild::BookmarkStart { name, .. } if name == anchor)
+                });
+                has_anchor
+                    .then(|| plain_review_text(para))
+                    .flatten()
+                    .map(|text| (index, text))
+            })
+        else {
+            continue;
+        };
+        let join = NEXT_REVIEW_JOIN_ID.fetch_add(1, Ordering::Relaxed).max(1);
+        candidates.push(ReviewCandidate {
+            join_id: ReviewJoinId(join),
+            span: node.source.span,
+            kind: ReviewCandidateKind::Heading,
+            baseline,
+            body_index,
+        });
+    }
+    candidates
+}
+
+fn plain_review_text(para: &Para) -> Option<ecow::EcoString> {
+    let mut text = ecow::EcoString::new();
+    for child in &para.content {
+        match child {
+            ParaChild::Run(Run::Text { text: part, .. }) => text.push_str(part),
+            ParaChild::BookmarkStart { .. } | ParaChild::BookmarkEnd { .. } => {}
+            _ => return None,
+        }
+    }
+    (!text.is_empty()).then_some(text)
 }
 
 fn record_dynamic_field_inventory(

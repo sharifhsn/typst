@@ -12,11 +12,35 @@ pub use typst_ooxml_core::dml::{
     FillSpec as ShapeFill, PathSegment, StrokeSpec as ShapeStroke,
 };
 pub use typst_ooxml_core::media::MediaPart;
+use typst_syntax::Span;
 
 use crate::introspect::DocxIntrospector;
 use crate::package::Rels;
 use crate::report::FidelityReport;
 use crate::snapshot::ExportSnapshot;
+
+/// Process-local identity used to join an export review candidate to an
+/// opt-in stable tag at serialization time.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ReviewJoinId(pub u64);
+
+/// The kind of source-backed block offered for review tagging.
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum ReviewCandidateKind {
+    Heading,
+}
+
+/// One conservative source-backed block that can be wrapped in a Word content
+/// control without changing its visible content.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ReviewCandidate {
+    pub join_id: ReviewJoinId,
+    pub span: Span,
+    pub kind: ReviewCandidateKind,
+    pub baseline: EcoString,
+    pub(crate) body_index: usize,
+}
 
 /// Output document: realized native tree lowered to the OOXML IR + metadata +
 /// introspector.
@@ -77,6 +101,7 @@ pub struct DocxDocument {
     /// Owned semantic/paged identity and geometry sidecar captured before
     /// target-specific lowering.
     pub(crate) export_snapshot: ExportSnapshot,
+    pub(crate) review_candidates: Vec<ReviewCandidate>,
 }
 
 impl DocxDocument {
@@ -107,6 +132,12 @@ impl DocxDocument {
     /// Stable semantic nodes and their converged paged geometry.
     pub fn export_snapshot(&self) -> &ExportSnapshot {
         &self.export_snapshot
+    }
+
+    /// Conservative, uniquely source-backed blocks eligible for opt-in Word
+    /// review content controls.
+    pub fn review_candidates(&self) -> &[ReviewCandidate] {
+        &self.review_candidates
     }
 
     /// Versioned machine-readable snapshot and fidelity report embedded in the

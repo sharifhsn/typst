@@ -83,6 +83,9 @@ pub enum Command {
     #[command(visible_alias = "c")]
     Compile(CompileCommand),
 
+    /// Reviews edits from a tagged DOCX and optionally applies them to Typst sources.
+    Review(ReviewCommand),
+
     /// Watches an input file and recompiles on changes.
     #[command(visible_alias = "w")]
     Watch(WatchCommand),
@@ -117,6 +120,30 @@ pub struct CompileCommand {
     /// Arguments for compilation.
     #[clap(flatten)]
     pub args: CompileArgs,
+}
+
+/// Reviews edits made in a DOCX exported with `--docx-review-state`.
+#[derive(Debug, Clone, Parser)]
+pub struct ReviewCommand {
+    /// Edited DOCX file received from the reviewer.
+    #[clap(value_hint = ValueHint::FilePath)]
+    pub docx: PathBuf,
+
+    /// Review-state JSON emitted alongside the original DOCX.
+    #[clap(long, value_hint = ValueHint::FilePath)]
+    pub state: PathBuf,
+
+    /// Project root containing the Typst source files.
+    #[clap(long, default_value = ".", value_hint = ValueHint::DirPath)]
+    pub root: PathBuf,
+
+    /// Write the JSON merge report to this file instead of stdout.
+    #[clap(long, value_hint = ValueHint::FilePath)]
+    pub report: Option<PathBuf>,
+
+    /// Apply the merge when every edited region is conflict-free.
+    #[clap(long)]
+    pub apply: bool,
 }
 
 /// Watches an input file and recompiles on changes.
@@ -314,6 +341,16 @@ pub struct CompileArgs {
     /// The format of the output file, inferred from the extension by default.
     #[arg(long = "format", short = 'f')]
     pub format: Option<OutputFormat>,
+
+    /// Emit a tagged DOCX and review state for merging Word edits back into Typst.
+    /// With no path, writes `<output>.typst-review.json`.
+    #[arg(
+        long = "docx-review-state",
+        value_name = "PATH",
+        num_args = 0..=1,
+        require_equals = true
+    )]
+    pub docx_review_state: Option<Option<PathBuf>>,
 
     /// World arguments.
     #[clap(flatten)]

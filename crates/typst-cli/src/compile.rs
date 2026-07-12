@@ -1,11 +1,13 @@
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use ecow::{EcoVec, eco_format, eco_vec};
 use parking_lot::RwLock;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use typst::World;
 use typst::diag::{
     At, HintedStrResult, HintedString, SourceDiagnostic, SourceResult, StrResult, Warned,
     bail,
@@ -13,9 +15,12 @@ use typst::diag::{
 use typst::foundations::{Datetime, Smart};
 use typst::layout::{Abs, PageRanges};
 use typst::model::Document;
-use typst::syntax::Span;
+use typst::syntax::{Span, SpanKind};
 use typst_bundle::{Bundle, BundleOptions, VirtualFs};
-use typst_docx::{DocxDocument, DocxOptions};
+use typst_docx::{DocxDocument, DocxOptions, ReviewTag};
+use typst_docx_roundtrip::{
+    BaselineFile, Region, RegionKind, RoundtripState, encode_typst_text, sha256,
+};
 use typst_html::{HtmlDocument, HtmlOptions};
 use typst_kit::diagnostics::DiagnosticWorld;
 use typst_kit::timer::Timer;
@@ -64,6 +69,8 @@ pub struct CompileConfig {
     pub output: Output,
     /// The format of the output file.
     pub output_format: OutputFormat,
+    /// Optional state path for an opt-in tagged DOCX review package.
+    pub docx_review_state: Option<PathBuf>,
     /// Whether to make the serialized document pretty.
     pub pretty: bool,
     /// Which pages to export.
@@ -165,6 +172,23 @@ impl CompileConfig {
             );
         }
 
+        let docx_review_state = if let Some(requested) = &args.docx_review_state {
+            if output_format != OutputFormat::Docx {
+                bail!("--docx-review-state is only valid for DOCX export");
+            }
+            let Output::Path(output_path) = &output else {
+                bail!("--docx-review-state requires a path output, not stdout");
+            };
+            if matches!(input, Input::Stdin) {
+                bail!("--docx-review-state requires a path input, not stdin");
+            }
+            Some(requested.clone().unwrap_or_else(|| {
+                PathBuf::from(format!("{}.typst-review.json", output_path.display()))
+            }))
+        } else {
+            None
+        };
+
         let tagged = !args.no_pdf_tags && pages.is_none();
         if output_format == OutputFormat::Pdf && pages.is_some() && !args.no_pdf_tags {
             warnings.push(
@@ -247,6 +271,7 @@ impl CompileConfig {
             input,
             output,
             output_format,
+            docx_review_state,
             pretty: args.pretty,
             pages,
             pdf_standards,
@@ -425,7 +450,7 @@ fn compile_and_export(
                             ) {
                                 warnings.push(warning);
                             }
-                            export_docx(&document, config)
+                            export_docx(&document, world, config)
                                 .map(|()| vec![config.output.clone()])
                         }
                         Err(errors) => Err(errors),
@@ -511,17 +536,315 @@ fn mixed_page_size_warning(
 }
 
 /// Export to DOCX.
-fn export_docx(document: &DocxDocument, config: &CompileConfig) -> SourceResult<()> {
+fn export_docx(
+    document: &DocxDocument,
+    world: &SystemWorld,
+    config: &CompileConfig,
+) -> SourceResult<()> {
     // The embedded fidelity manifest stays off until a CLI flag exposes it;
     // the report remains queryable on the in-memory document either way.
     let options =
         DocxOptions { pretty: config.pretty, embed_fidelity_manifest: false };
-    let bytes = typst_docx::docx(document, &options)?;
-    config
-        .output
-        .write(&bytes)
-        .map_err(|err| eco_format!("failed to write DOCX file ({err})"))
+    let Some(state_path) = &config.docx_review_state else {
+        let bytes = typst_docx::docx(document, &options)?;
+        return config
+            .output
+            .write(&bytes)
+            .map_err(|err| eco_format!("failed to write DOCX file ({err})"))
+            .at(Span::detached());
+    };
+    let Output::Path(output_path) = &config.output else { unreachable!() };
+    if output_path == state_path {
+        bail!(Span::detached(), "DOCX output and review state must use different paths");
+    }
+    let source_path = world
+        .root()
+        .join(world.main().vpath().get_without_slash())
+        .canonicalize()
+        .map_err(|err| eco_format!("failed to resolve main source ({err})"))
+        .at(Span::detached())?;
+    for auxiliary in [output_path.as_path(), state_path.as_path()] {
+        if paths_alias(&source_path, auxiliary)
+            .map_err(|err| {
+                eco_format!("failed to validate DOCX review output paths ({err})")
+            })
+            .at(Span::detached())?
+        {
+            bail!(Span::detached(), "DOCX review output path aliases the Typst source");
+        }
+    }
+    let (state, tags) = build_review_state(document, world)?;
+    let bytes = typst_docx::docx_with_review_tags(document, &options, &tags)?;
+    let state_bytes = state
+        .to_json()
+        .map_err(|err| eco_format!("failed to serialize DOCX review state ({err})"))
+        .at(Span::detached())?;
+    write_review_pair(output_path, &bytes, state_path, &state_bytes)
+        .map_err(|err| eco_format!("failed to write DOCX review package ({err})"))
         .at(Span::detached())
+}
+
+fn build_review_state(
+    document: &DocxDocument,
+    world: &SystemWorld,
+) -> SourceResult<(RoundtripState, BTreeMap<typst_docx::ReviewJoinId, ReviewTag>)> {
+    let main_id = world.main();
+    let main = main_id.vpath().get_without_slash().to_owned();
+    let main_source = world
+        .source(main_id)
+        .map_err(|err| eco_format!("failed to load main source ({err})"))
+        .at(Span::detached())?;
+    let mut files = BTreeMap::new();
+    files.insert(main.clone(), main_source.text().to_owned());
+
+    struct Enrolled {
+        join_id: typst_docx::ReviewJoinId,
+        file: String,
+        start: usize,
+        end: usize,
+        source: String,
+        word: String,
+        kind: String,
+    }
+    let mut enrolled = Vec::new();
+    for candidate in document.review_candidates() {
+        let Some(id) = candidate.span.id() else { continue };
+        if id != main_id {
+            continue;
+        }
+        if !matches!(id.root(), typst::syntax::VirtualRoot::Project) {
+            continue;
+        }
+        let source = world
+            .source(id)
+            .map_err(|err| eco_format!("failed to load review source ({err})"))
+            .at(candidate.span)?;
+        let Some(span_range) = (match candidate.span.get() {
+            SpanKind::Number { num, .. } => source.range(num, None),
+            SpanKind::Range { range, .. } => Some(range),
+            SpanKind::Detached => None,
+        }) else {
+            continue;
+        };
+        let Some(span_text) = source.text().get(span_range.clone()) else { continue };
+        let Some(authored_range) =
+            plain_heading_source_range(span_text, candidate.baseline.as_str())
+        else {
+            continue;
+        };
+        let start = span_range.start + authored_range.start;
+        let end = span_range.start + authored_range.end;
+        let file = id.vpath().get_without_slash().to_owned();
+        files.entry(file.clone()).or_insert_with(|| source.text().to_owned());
+        enrolled.push(Enrolled {
+            join_id: candidate.join_id,
+            file,
+            start,
+            end,
+            source: span_text[authored_range].to_owned(),
+            word: candidate.baseline.to_string(),
+            kind: format!("{:?}", candidate.kind).to_ascii_lowercase(),
+        });
+    }
+
+    if enrolled.is_empty() {
+        bail!(
+            Span::detached(),
+            "this document has no source regions eligible for DOCX review";
+            hint: "the current review MVP supports uniquely realized plain headings";
+        );
+    }
+
+    let region_identity = enrolled
+        .iter()
+        .map(|region| {
+            format!("{}:{}:{}:{}", region.file, region.start, region.end, region.source)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let file_identity = files
+        .iter()
+        .map(|(path, text)| format!("{path}\0{text}"))
+        .collect::<Vec<_>>()
+        .join("\0");
+    // Word's `w:tag` value is limited to 64 characters. The full SHA-256
+    // baselines remain in the student-retained state; compact opaque IDs keep
+    // `typst:v1:<export>:<region>` comfortably within that OOXML limit.
+    let export_id = compact_review_id(&sha256(
+        format!("{main}\0{file_identity}\0{region_identity}").as_bytes(),
+    ));
+    let mut tags = BTreeMap::new();
+    let mut regions = Vec::new();
+    for region in enrolled {
+        let id = compact_review_id(&sha256(
+            format!("{}:{}:{}:{}", region.file, region.start, region.end, region.source)
+                .as_bytes(),
+        ));
+        tags.insert(
+            region.join_id,
+            ReviewTag {
+                export: export_id.clone().into(),
+                region: id.clone().into(),
+            },
+        );
+        regions.push(Region {
+            id,
+            file: region.file,
+            baseline_start: region.start,
+            baseline_end: region.end,
+            source: region.source,
+            word_baseline: region.word,
+            kind: RegionKind(region.kind),
+        });
+    }
+    let files = files
+        .into_iter()
+        .map(|(path, text)| BaselineFile { path, sha256: sha256(text.as_bytes()), text })
+        .collect();
+    Ok((RoundtripState { export_id, main, files, regions }, tags))
+}
+
+fn compact_review_id(digest: &str) -> String {
+    digest[..16].to_owned()
+}
+
+/// Return the authored-text offset only for a literal markup heading whose
+/// complete source body exactly equals Word's visible baseline. This excludes
+/// function calls, content expressions, escapes, styling markup, labels, and
+/// smart-quote transformations rather than guessing at a matching substring.
+fn plain_heading_source_range(
+    source: &str,
+    baseline: &str,
+) -> Option<std::ops::Range<usize>> {
+    let marker_len = source.bytes().take_while(|byte| *byte == b'=').count();
+    if marker_len == 0 || source.as_bytes().get(marker_len) != Some(&b' ') {
+        return None;
+    }
+    let offset = marker_len + 1;
+    let body = source.get(offset..)?;
+    (body == baseline || body == encode_typst_text(baseline))
+        .then_some(offset..source.len())
+}
+
+#[cfg(test)]
+mod review_source_tests {
+    use super::plain_heading_source_range;
+
+    #[test]
+    fn enrolls_only_exact_literal_heading_text() {
+        assert_eq!(plain_heading_source_range("= Alpha", "Alpha"), Some(2..7));
+        assert_eq!(plain_heading_source_range("=== Alpha", "Alpha"), Some(4..9));
+        assert_eq!(plain_heading_source_range("= #(\"Alpha\")", "Alpha"), Some(2..12));
+        assert_eq!(plain_heading_source_range("= #text(\"Alpha\")", "Alpha"), None);
+        assert_eq!(
+            plain_heading_source_range("= #text(upper: true)[Alpha]", "Alpha"),
+            None
+        );
+        assert_eq!(plain_heading_source_range("= #[Alpha]", "Alpha"), None);
+        assert_eq!(plain_heading_source_range("= \\#", "#"), None);
+        assert_eq!(plain_heading_source_range("= *Alpha*", "Alpha"), None);
+        assert_eq!(plain_heading_source_range("= Alpha <label>", "Alpha"), None);
+    }
+}
+
+fn write_review_pair(
+    docx_path: &Path,
+    docx: &[u8],
+    state_path: &Path,
+    state: &[u8],
+) -> std::io::Result<()> {
+    let suffix = format!("typst-review-{}", std::process::id());
+    let docx_temp = docx_path.with_extension(format!("docx.{suffix}"));
+    let state_temp = state_path.with_extension(format!("json.{suffix}"));
+    let docx_backup = docx_path.with_extension(format!("docx.{suffix}.backup"));
+    let state_backup = state_path.with_extension(format!("json.{suffix}.backup"));
+    std::fs::write(&docx_temp, docx)?;
+    if let Err(error) = std::fs::write(&state_temp, state) {
+        let _ = std::fs::remove_file(&docx_temp);
+        return Err(error);
+    }
+
+    let had_docx = docx_path.exists();
+    let had_state = state_path.exists();
+    if had_docx {
+        std::fs::rename(docx_path, &docx_backup)?;
+    }
+    if had_state && let Err(error) = std::fs::rename(state_path, &state_backup) {
+        if had_docx {
+            let _ = std::fs::rename(&docx_backup, docx_path);
+        }
+        let _ = std::fs::remove_file(&docx_temp);
+        let _ = std::fs::remove_file(&state_temp);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&docx_temp, docx_path) {
+        restore_review_pair(
+            docx_path,
+            state_path,
+            &docx_backup,
+            &state_backup,
+            had_docx,
+            had_state,
+        );
+        let _ = std::fs::remove_file(&docx_temp);
+        let _ = std::fs::remove_file(&state_temp);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&state_temp, state_path) {
+        let _ = std::fs::remove_file(docx_path);
+        restore_review_pair(
+            docx_path,
+            state_path,
+            &docx_backup,
+            &state_backup,
+            had_docx,
+            had_state,
+        );
+        let _ = std::fs::remove_file(&state_temp);
+        return Err(error);
+    }
+    let _ = std::fs::remove_file(docx_backup);
+    let _ = std::fs::remove_file(state_backup);
+    Ok(())
+}
+
+fn restore_review_pair(
+    docx_path: &Path,
+    state_path: &Path,
+    docx_backup: &Path,
+    state_backup: &Path,
+    had_docx: bool,
+    had_state: bool,
+) {
+    if had_docx {
+        let _ = std::fs::rename(docx_backup, docx_path);
+    }
+    if had_state {
+        let _ = std::fs::rename(state_backup, state_path);
+    }
+}
+
+fn paths_alias(existing: &Path, destination: &Path) -> std::io::Result<bool> {
+    let existing = existing.canonicalize()?;
+    let destination = if destination.exists() {
+        destination.canonicalize()?
+    } else {
+        let absolute = if destination.is_absolute() {
+            destination.to_owned()
+        } else {
+            std::env::current_dir()?.join(destination)
+        };
+        let parent = absolute.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "output has no parent")
+        })?;
+        parent.canonicalize()?.join(absolute.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "output has no file name",
+            )
+        })?)
+    };
+    Ok(existing == destination)
 }
 
 /// Export to a Pandoc JSON AST.
