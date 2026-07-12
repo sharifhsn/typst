@@ -52,6 +52,12 @@ Automatic formatting-to-Typst rewriting remains intentionally disabled until a
 change can add and remove source wrappers without flattening user-authored style
 expressions.
 
+Each Word story also has a structural baseline: ordered review-control ids and
+paragraph/table/row/cell counts. Inserted or deleted paragraphs, moved review
+controls, and table-shape changes return a `structural_change` conflict with the
+baseline and returned story shapes. They are never mistaken for an unchanged
+review merely because the original tagged text still exists.
+
 Apply only a conflict-free plan:
 
 ```sh

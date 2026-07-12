@@ -31,6 +31,19 @@ pub struct RoundtripState {
     pub main: String,
     pub files: Vec<BaselineFile>,
     pub regions: Vec<Region>,
+    #[serde(default)]
+    pub stories: Vec<StoryShape>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StoryShape {
+    pub part: String,
+    pub review_order: Vec<String>,
+    pub paragraphs: usize,
+    pub tables: usize,
+    pub rows: usize,
+    pub cells: usize,
 }
 
 /// A full UTF-8 source baseline, including its SHA-256 digest.
@@ -164,6 +177,7 @@ pub struct WordEdits {
     pub regions: HashMap<String, String>,
     pub comments: Vec<WordComment>,
     pub formats: HashMap<String, Vec<FormatSpan>>,
+    pub stories: Vec<StoryShape>,
 }
 
 /// A Word comment anchored inside one source-backed review region.
@@ -215,16 +229,19 @@ pub fn parse_docx(docx: &[u8], state: &RoundtripState) -> Result<WordEdits, Erro
     let mut regions = HashMap::new();
     let mut formats = HashMap::new();
     let mut comment_regions: HashMap<String, String> = HashMap::new();
+    let mut stories = Vec::new();
 
     for part in story_parts {
         let xml = read_xml_part(&mut archive, &part)?;
         parse_review_part(
             &xml,
+            &part,
             &expected,
             &wanted_prefix,
             &mut regions,
             &mut formats,
             &mut comment_regions,
+            &mut stories,
         )?;
     }
     for region in &state.regions {
@@ -233,7 +250,8 @@ pub fn parse_docx(docx: &[u8], state: &RoundtripState) -> Result<WordEdits, Erro
         }
     }
     let comments = parse_comments(&mut archive, &comment_regions)?;
-    Ok(WordEdits { regions, comments, formats })
+    stories.sort_by(|a, b| a.part.cmp(&b.part));
+    Ok(WordEdits { regions, comments, formats, stories })
 }
 
 fn read_xml_part(
@@ -264,13 +282,16 @@ fn read_xml_part(
 
 fn parse_review_part(
     xml: &str,
+    part: &str,
     expected: &HashMap<&str, &Region>,
     wanted_prefix: &str,
     regions: &mut HashMap<String, String>,
     formats: &mut HashMap<String, Vec<FormatSpan>>,
     comment_regions: &mut HashMap<String, String>,
+    stories: &mut Vec<StoryShape>,
 ) -> Result<(), Error> {
     let document = Document::parse(xml).map_err(Error::Xml)?;
+    let mut review_order = Vec::new();
     for sdt in document.descendants().filter(|node| is_element(*node, "sdt")) {
         let Some(tag) = sdt
             .descendants()
@@ -285,6 +306,7 @@ fn parse_review_part(
         let Some(id) = tag.strip_prefix(&wanted_prefix) else {
             return Err(Error::ForeignControl(tag.to_owned()));
         };
+        review_order.push(id.to_owned());
         let region = expected
             .get(id)
             .ok_or_else(|| Error::ForeignControl(tag.to_owned()))?;
@@ -340,6 +362,14 @@ fn parse_review_part(
         }
         regions.insert(id.to_owned(), text);
     }
+    stories.push(StoryShape {
+        part: part.to_owned(),
+        review_order,
+        paragraphs: document.descendants().filter(|node| is_element(*node, "p")).count(),
+        tables: document.descendants().filter(|node| is_element(*node, "tbl")).count(),
+        rows: document.descendants().filter(|node| is_element(*node, "tr")).count(),
+        cells: document.descendants().filter(|node| is_element(*node, "tc")).count(),
+    });
     Ok(())
 }
 
@@ -418,6 +448,7 @@ pub fn capture_format_baselines(
         region.word_format_baseline =
             parsed.formats.get(&region.id).cloned().unwrap_or_default();
     }
+    state.stories = parsed.stories;
     Ok(())
 }
 
@@ -529,6 +560,8 @@ fn attribute<'a>(node: Node<'a, 'a>, name: &str) -> Option<&'a str> {
 pub struct MergeReport {
     pub regions: Vec<RegionReport>,
     pub comments: Vec<WordComment>,
+    pub baseline_stories: Vec<StoryShape>,
+    pub word_stories: Vec<StoryShape>,
     #[serde(skip)]
     files: Vec<PlannedFile>,
 }
@@ -572,6 +605,7 @@ pub enum ConflictKind {
     AmbiguousLocation,
     OverlappingRegions,
     FormattingChange,
+    StructuralChange,
 }
 
 type Replacement = (Range<usize>, String, usize);
@@ -592,6 +626,16 @@ pub fn dry_run(
     state.validate()?;
     let mut reports = Vec::with_capacity(state.regions.len());
     let mut replacements: BTreeMap<&str, Vec<Replacement>> = BTreeMap::new();
+    let mut structurally_changed = HashSet::new();
+    for baseline in &state.stories {
+        let returned = edits.stories.iter().find(|story| story.part == baseline.part);
+        if returned != Some(baseline) {
+            structurally_changed.extend(baseline.review_order.iter().cloned());
+            if let Some(returned) = returned {
+                structurally_changed.extend(returned.review_order.iter().cloned());
+            }
+        }
+    }
 
     for (index, region) in state.regions.iter().enumerate() {
         let word = edits
@@ -615,7 +659,9 @@ pub fn dry_run(
             Location::Unique(range) => file.get(range.clone()).map(str::to_owned),
             Location::Missing | Location::Ambiguous => None,
         };
-        if formatting_changed {
+        if structurally_changed.contains(&region.id) {
+            status = RegionStatus::Conflict(ConflictKind::StructuralChange);
+        } else if formatting_changed {
             status = RegionStatus::Conflict(ConflictKind::FormattingChange);
         } else if word != &region.word_baseline {
             match location {
@@ -682,6 +728,8 @@ pub fn dry_run(
     Ok(MergeReport {
         regions: reports,
         comments: edits.comments.clone(),
+        baseline_stories: state.stories.clone(),
+        word_stories: edits.stories.clone(),
         files,
     })
 }
