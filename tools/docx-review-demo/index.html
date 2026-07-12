@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#13130f" />
+    <title>Typst ↔ Word Review Studio</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="Typst Review Studio home">
+        <span class="brand-mark" aria-hidden="true">T</span>
+        <span>
+          <strong>Review Studio</strong>
+          <small>Typst ↔ Word</small>
+        </span>
+      </a>
+      <nav class="view-tabs" aria-label="Demo views">
+        <button class="tab is-active" data-view="studio">Live review</button>
+        <button class="tab" data-view="coverage">Coverage</button>
+        <button class="tab" data-view="flow">How it works</button>
+      </nav>
+      <div class="top-actions">
+        <span class="connection"><i></i> Local demo</span>
+        <button class="icon-button" id="theme-toggle" aria-label="Toggle theme">◐</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="view is-active" id="studio-view">
+        <div class="hero-row">
+          <div>
+            <p class="eyebrow">Advisor review, without leaving Typst behind</p>
+            <h1>Write in Typst.<br /><em>Review in Word.</em></h1>
+          </div>
+          <div class="hero-copy">
+            <p>Edit the document like an advisor, add a comment, then inspect and apply the source-safe round trip.</p>
+            <div class="hero-stats">
+              <span><strong id="region-count">6</strong> mapped regions</span>
+              <span><strong>2</strong> project files</span>
+              <span><strong>0</strong> silent losses</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="workspace-shell">
+          <div class="workspace-toolbar">
+            <div class="file-switcher">
+              <button class="file-pill is-active" data-file="main.typ"><span class="file-icon">T</span> main.typ</button>
+              <button class="file-pill" data-file="chapter.typ"><span class="file-icon">T</span> chapter.typ <i class="dirty-dot"></i></button>
+            </div>
+            <div class="toolbar-center">
+              <span class="sync-pulse"><i></i> Review package linked</span>
+            </div>
+            <div class="toolbar-actions">
+              <button class="button subtle" id="reset-button">Reset</button>
+              <button class="button primary" id="review-button">Review changes <span>⌘↵</span></button>
+            </div>
+          </div>
+
+          <div class="split-workspace">
+            <section class="editor-panel" aria-label="Typst source editor">
+              <div class="panel-heading">
+                <div><span class="panel-kicker">Student</span><h2>Typst source</h2></div>
+                <span class="language-badge">TYP</span>
+              </div>
+              <div class="code-wrap">
+                <ol class="line-numbers" id="line-numbers" aria-hidden="true"></ol>
+                <textarea id="source-editor" spellcheck="false" aria-label="Typst source"></textarea>
+              </div>
+              <div class="editor-status">
+                <span>main.typ</span><span>UTF-8</span><span>Ln <b id="cursor-line">1</b>, Col <b id="cursor-column">1</b></span>
+              </div>
+            </section>
+
+            <div class="split-handle" aria-hidden="true"><span>↔</span></div>
+
+            <section class="word-panel" aria-label="Word-style advisor editor">
+              <div class="panel-heading word-heading">
+                <div><span class="panel-kicker">Advisor</span><h2>Word review</h2></div>
+                <div class="word-tools" aria-label="Formatting simulation">
+                  <button id="bold-button" title="Toggle bold formatting conflict"><b>B</b></button>
+                  <button id="comment-button" title="Add advisor comment">▱ <span>Comment</span></button>
+                  <button id="insert-button" title="Insert an unmapped paragraph">＋ <span>Paragraph</span></button>
+                </div>
+              </div>
+              <div class="document-stage">
+                <article class="word-page" id="word-page">
+                  <div class="running-head">RESEARCH NOTE · JULY 2026</div>
+                  <h1 contenteditable="true" data-region="heading" data-source="= _|_">A practical path to better collaboration</h1>
+                  <p contenteditable="true" data-region="paragraph">Typst gives authors a fast, programmable writing environment while Word remains the lingua franca of academic review.</p>
+                  <p>Our central claim is <strong contenteditable="true" data-region="inline">round trips should preserve intent</strong>, not merely copy visible text.</p>
+                  <h3>What survives the trip</h3>
+                  <ul>
+                    <li contenteditable="true" data-region="list">Headings, paragraphs, lists, links, captions, and table cells</li>
+                    <li>Comments, tracked edits, headers, footers, and footnotes</li>
+                  </ul>
+                  <table>
+                    <thead><tr><th>Review surface</th><th>Result</th></tr></thead>
+                    <tbody>
+                      <tr><td contenteditable="true" data-region="table">Literal source-backed text</td><td><span class="status-chip ready">Ready</span></td></tr>
+                      <tr><td>Formatting or structural edits</td><td><span class="status-chip guarded">Guarded</span></td></tr>
+                    </tbody>
+                  </table>
+                  <p class="caption">Figure 1: <span contenteditable="true" data-region="caption">A conflict-safe advisor workflow</span></p>
+                  <p class="footnote"><sup>1</sup> <span contenteditable="true" data-region="footnote">The source remains the student's authority.</span></p>
+                  <div class="page-number">1</div>
+                </article>
+                <aside class="comment-card" id="comment-card" hidden>
+                  <div class="comment-meta"><span class="avatar">AS</span><strong>Advisor</strong><time>now</time></div>
+                  <textarea aria-label="Advisor comment">Can we make this claim more concrete?</textarea>
+                  <div><button id="save-comment">Save comment</button><button id="cancel-comment">Cancel</button></div>
+                </aside>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <section class="review-drawer" id="review-drawer" aria-live="polite">
+          <div class="drawer-heading">
+            <div>
+              <span class="panel-kicker">Round-trip inspector</span>
+              <h2 id="review-title">Make an advisor edit to begin</h2>
+            </div>
+            <div class="drawer-actions">
+              <span class="review-summary" id="review-summary">Waiting for changes</span>
+              <button class="button apply" id="apply-button" disabled>Apply to Typst</button>
+            </div>
+          </div>
+          <div class="change-list" id="change-list">
+            <div class="empty-state">
+              <span>↳</span>
+              <p>Edit any blue-outlined Word region, add a comment, or simulate a guarded formatting/structure change.</p>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="view info-view" id="coverage-view">
+        <div class="info-hero"><p class="eyebrow">Implemented coverage</p><h1>What crosses the boundary?</h1><p>Every green feature maps to an exact Typst source island. Amber features are detected and reported rather than guessed.</p></div>
+        <div class="coverage-grid">
+          <article><span>01</span><h3>Block text</h3><p>Headings, paragraphs, styled list items, and multi-paragraph table cells.</p><b>Round-trips</b></article>
+          <article><span>02</span><h3>Inline text</h3><p>Mixed fragments, link labels, and caption bodies without flattening generated neighbors.</p><b>Round-trips</b></article>
+          <article><span>03</span><h3>Word stories</h3><p>Headers, footers, footnotes, project imports, and transactional multi-file apply.</p><b>Round-trips</b></article>
+          <article><span>04</span><h3>Comments</h3><p>Advisor, date, region, and comment text are preserved in the review report.</p><b>Captured</b></article>
+          <article class="guard"><span>05</span><h3>Formatting</h3><p>Bold, italic, font, size, color, highlighting, and more are fingerprinted.</p><b>Conflict-safe</b></article>
+          <article class="guard"><span>06</span><h3>Structure</h3><p>Paragraph insertion, control movement, and table-shape changes cannot disappear silently.</p><b>Conflict-safe</b></article>
+        </div>
+      </section>
+
+      <section class="view info-view" id="flow-view">
+        <div class="info-hero"><p class="eyebrow">The provenance loop</p><h1>One source of truth.<br />Two editing worlds.</h1></div>
+        <div class="flow-map">
+          <article><span class="flow-number">1</span><div><small>AUTHOR</small><h3>Compile Typst</h3><p>The exporter identifies uniquely source-backed regions and writes opaque Word content controls.</p></div><code>typst compile paper.typ paper.docx<br />  --docx-review-state</code></article>
+          <i>↓</i>
+          <article><span class="flow-number">2</span><div><small>ADVISOR</small><h3>Edit in Word</h3><p>Text and comments stay inside tagged review regions. Formatting and structure remain observable.</p></div><div class="mini-document"><b>Word</b><span></span><span></span><span></span></div></article>
+          <i>↓</i>
+          <article><span class="flow-number">3</span><div><small>STUDENT</small><h3>Review the merge</h3><p>A three-way merge compares baseline source, current Typst, and returned Word content.</p></div><code>typst review advisor.docx<br />  --state paper.json --apply</code></article>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
