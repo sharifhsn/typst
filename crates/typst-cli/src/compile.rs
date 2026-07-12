@@ -630,7 +630,44 @@ fn build_review_state(
                 review_source_range(candidate.kind, text, candidate.baseline.as_str())
             })
             .is_some();
-        if !direct_match
+        if !direct_match && candidate.kind == typst_docx::ReviewCandidateKind::InlineText
+        {
+            let text = source.text();
+            if let Some(open) = text[..span_range.start].rfind("#(")
+                && let Some(close) = text[span_range.end..].find(')')
+            {
+                let canonical = open..span_range.end + close + 1;
+                if review_source_range(
+                    candidate.kind,
+                    &text[canonical.clone()],
+                    candidate.baseline.as_str(),
+                )
+                .is_some()
+                {
+                    span_range = canonical;
+                }
+            }
+            if review_source_range(
+                candidate.kind,
+                &text[span_range.clone()],
+                candidate.baseline.as_str(),
+            )
+            .is_none()
+                && let Some(open) = text[..span_range.start].rfind('[')
+                && let Some(close) = text[span_range.end..].find(']')
+            {
+                let nested = open + 1..span_range.end + close;
+                if review_source_range(
+                    candidate.kind,
+                    &text[nested.clone()],
+                    candidate.baseline.as_str(),
+                )
+                .is_some()
+                {
+                    span_range = nested;
+                }
+            }
+        } else if !direct_match
             && matches!(
                 candidate.kind,
                 typst_docx::ReviewCandidateKind::Paragraph
@@ -729,7 +766,7 @@ fn build_review_state(
         bail!(
             Span::detached(),
             "this document has no source regions eligible for DOCX review";
-            hint: "DOCX review supports uniquely realized plain headings, paragraphs, list items, and table cells";
+            hint: "DOCX review supports uniquely realized source-backed block and inline text";
         );
     }
 
@@ -873,6 +910,8 @@ fn review_source_range(
             let range = styled_literal_source_range(body, baseline)?;
             Some(("table_cell", 1 + range.start..1 + range.end))
         }
+        ReviewCandidateKind::InlineText => styled_literal_source_range(source, baseline)
+            .map(|range| ("inline_text", range)),
         _ => None,
     }
 }

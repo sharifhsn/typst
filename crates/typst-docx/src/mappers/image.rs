@@ -716,7 +716,12 @@ fn caption_runs(
     // (byte-identical to the previous behaviour for unnumbered captions).
     let Some(numbering) = elem.numbering.get_ref(styles) else {
         let realized = cap.realize(ctx.engine(), styles)?;
-        return ctx.inline_runs(&realized, styles, RunProps::default());
+        let mut props = RunProps::default();
+        props.review_origin = Some(ctx.review_origin(
+            crate::convert::review_span(&cap.body),
+            crate::dom::ReviewCandidateKind::InlineText,
+        ));
+        return ctx.inline_runs(&realized, styles, props);
     };
 
     let mut runs: Vec<Run> = Vec::new();
@@ -836,8 +841,14 @@ fn caption_runs(
         runs.extend(ctx.inline_runs(&sep, styles, RunProps::default())?);
     }
 
-    // Caption body.
-    runs.extend(ctx.inline_runs(&cap.body, styles, RunProps::default())?);
+    // Caption body. Keep its authored source span distinct from the generated
+    // supplement/number/separator so Word edits cannot flatten those fields.
+    let mut body_props = RunProps::default();
+    body_props.review_origin = Some(ctx.review_origin(
+        crate::convert::review_span(&cap.body),
+        crate::dom::ReviewCandidateKind::InlineText,
+    ));
+    runs.extend(ctx.inline_runs(&cap.body, styles, body_props)?);
 
     Ok(runs)
 }

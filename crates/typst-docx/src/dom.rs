@@ -32,6 +32,7 @@ pub enum ReviewCandidateKind {
     Paragraph,
     ListItem,
     TableCell,
+    InlineText,
 }
 
 /// Source provenance carried by a paragraph through nested DOCX structures.
@@ -356,6 +357,8 @@ pub(crate) struct HeadingStyleSample {
 /// Flattened character formatting → `<w:rPr>`.
 #[derive(Default, Clone, PartialEq)]
 pub struct RunProps {
+    /// Non-serialized provenance for opt-in inline Word review controls.
+    pub(crate) review_origin: Option<ReviewOrigin>,
     pub style: Option<EcoString>,
     pub font: Option<EcoString>,
     /// True when bold came from Typst's semantic `#strong` wrapper. This lets

@@ -78,7 +78,7 @@ fn state_json_is_full_and_verified() {
 
 #[test]
 fn validates_every_supported_region_kind_and_rejects_unknown_ones() {
-    for kind in ["heading", "paragraph", "list_item", "table_cell"] {
+    for kind in ["heading", "paragraph", "list_item", "table_cell", "inline_text"] {
         let mut candidate = state("old", "old");
         candidate.regions[0].kind = RegionKind(kind.into());
         candidate.validate().unwrap();
@@ -118,6 +118,24 @@ fn direct_edit_merges_and_escapes_utf8_markup() {
     let report = dry_run(&state, &edits, &current("before old after")).unwrap();
     assert_eq!(report.regions[0].status, RegionStatus::Ready);
     assert_eq!(report.files[0].contents, r#"before #("été #[x] *_$<@ `~ \\") after"#);
+}
+
+#[test]
+fn inline_review_controls_accept_runs_but_reject_paragraph_structure() {
+    let mut state = state("old", "old");
+    state.regions[0].kind = RegionKind("inline_text".into());
+    let inline = zip_xml(
+        r#"<?xml version="1.0"?><w:document xmlns:w="urn:w"><w:body><w:p><w:sdt><w:sdtPr><w:tag w:val="typst:v1:export:one"/></w:sdtPr><w:sdtContent><w:r><w:t>new</w:t></w:r></w:sdtContent></w:sdt></w:p></w:body></w:document>"#,
+    );
+    let edits = parse_docx(&inline, &state).unwrap();
+    assert_eq!(edits.regions["one"], "new");
+    assert!(matches!(
+        parse_docx(
+            &docx(&[("typst:v1:export:one", "<w:r><w:t>new</w:t></w:r>")]),
+            &state
+        ),
+        Err(Error::StructuralEdit(_))
+    ));
 }
 
 #[test]

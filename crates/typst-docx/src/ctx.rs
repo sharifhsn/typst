@@ -1376,8 +1376,18 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             if self.span_is_raw(elem.span()) {
                 rp.no_proof = true;
             }
-            for (font, span) in self.split_by_font_coverage(&text, styles) {
+            let spans = self.split_by_font_coverage(&text, styles);
+            let review_origin = (spans.len() == 1)
+                .then(|| {
+                    (!elem.span().is_detached()).then(|| {
+                        self.review_origin(elem.span(), ReviewCandidateKind::InlineText)
+                    })
+                })
+                .flatten()
+                .or(rp.review_origin);
+            for (font, span) in spans {
                 let mut span_rp = rp.clone();
+                span_rp.review_origin = review_origin;
                 if !font.is_empty() {
                     span_rp.font = Some(font);
                 }
@@ -1439,24 +1449,34 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             self.push_text(out, rp, quote);
         } else if let Some(elem) = child.to_packed::<StrongElem>() {
             let mut p = props.clone();
+            p.review_origin =
+                Some(self.review_origin(child.span(), ReviewCandidateKind::InlineText));
             p.strong = true;
             p.bold = true;
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<EmphElem>() {
             let mut p = props.clone();
+            p.review_origin =
+                Some(self.review_origin(child.span(), ReviewCandidateKind::InlineText));
             p.emphasis = true;
             p.italic = true;
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<SubElem>() {
             let mut p = props.clone();
+            p.review_origin =
+                Some(self.review_origin(child.span(), ReviewCandidateKind::InlineText));
             p.vert_align = Some(VertAlign::Sub);
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<SuperElem>() {
             let mut p = props.clone();
+            p.review_origin =
+                Some(self.review_origin(child.span(), ReviewCandidateKind::InlineText));
             p.vert_align = Some(VertAlign::Super);
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<UnderlineElem>() {
             let mut p = props.clone();
+            p.review_origin =
+                Some(self.review_origin(child.span(), ReviewCandidateKind::InlineText));
             use typst_library::foundations::{Resolve, Smart};
             p.underline = Some(match elem.stroke.get_cloned(styles) {
                 Smart::Custom(stroke) => underline_from_stroke(&stroke.resolve(styles)),
@@ -1465,10 +1485,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<StrikeElem>() {
             let mut p = props.clone();
+            p.review_origin =
+                Some(self.review_origin(child.span(), ReviewCandidateKind::InlineText));
             p.strike = true;
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<HighlightElem>() {
             let mut p = props.clone();
+            p.review_origin =
+                Some(self.review_origin(child.span(), ReviewCandidateKind::InlineText));
             apply_highlight(&mut p, elem.fill.get_cloned(styles));
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<RawElem>() {
@@ -1804,7 +1828,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
         props: &RunProps,
     ) -> SourceResult<Vec<crate::dom::ParaChild>> {
-        mappers::reference::link(elem, styles, props.clone(), self)
+        let mut props = props.clone();
+        props.review_origin =
+            Some(self.review_origin(elem.span(), ReviewCandidateKind::InlineText));
+        mappers::reference::link(elem, styles, props, self)
     }
 
     /// Pushes a text run, coalescing with a preceding identical-props run.
