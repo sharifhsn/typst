@@ -11,7 +11,7 @@ use typst_library::model::{
 use typst_library::routines::Pair;
 
 use crate::ctx::DocxCtx;
-use crate::dom::{Block, Para, ParaChild, ParaProps, Run, RunProps};
+use crate::dom::{Block, Para, ParaChild, ParaProps, ReviewCandidateKind, Run, RunProps};
 use crate::mappers;
 use crate::report::DecisionReason;
 
@@ -114,6 +114,10 @@ pub fn convert_children(
                 // *after* the flush so `blocks.last()` is the previous paragraph.
                 let prev_was_para = matches!(blocks.last(), Some(Block::Para(_)));
                 let mut props = ctx.resolve_par_props(par, *styles);
+                props.review_origin = Some(ctx.review_origin(
+                    review_span(&par.body),
+                    ReviewCandidateKind::Paragraph,
+                ));
                 if prev_was_para
                     && props.ind.as_ref().and_then(|i| i.first_line).is_none()
                     && let Some(amount) = ctx.consecutive_first_line_indent(*styles)
@@ -165,6 +169,9 @@ pub fn convert_children(
             // it flushes the surrounding text and breaks the sentence onto
             // separate lines. (Block equations fall through to `handle_block`.)
             push_inline(ctx, child, *styles, &mut pending)?;
+            if let Some(props) = pending_props.as_mut() {
+                props.review_origin = None;
+            }
             have_pending = true;
             last_was_par = false;
         } else if let Some(raw) = child.to_packed::<typst_library::text::RawElem>()
@@ -173,9 +180,18 @@ pub fn convert_children(
             // A surviving inline raw element must stay in the current paragraph;
             // `handle_inline` enters raw scope before re-realizing it.
             push_inline(ctx, child, *styles, &mut pending)?;
+            if let Some(props) = pending_props.as_mut() {
+                props.review_origin = None;
+            }
             have_pending = true;
             last_was_par = false;
         } else if is_inline(child) {
+            if !have_pending && pending.is_empty() {
+                let mut props = ParaProps::default();
+                props.review_origin =
+                    Some(ctx.review_origin(child.span(), ReviewCandidateKind::Paragraph));
+                pending_props = Some(props);
+            }
             push_inline(ctx, child, *styles, &mut pending)?;
             have_pending = true;
             last_was_par = false;
@@ -305,6 +321,24 @@ fn flush(
     let props = props.take().unwrap_or_default();
     blocks.push(Block::Para(Para { props, content }));
     *have_pending = false;
+}
+
+pub(crate) fn review_span(content: &Content) -> typst_syntax::Span {
+    use std::ops::ControlFlow;
+
+    let mut span = content.span();
+    if !span.is_detached() {
+        return span;
+    }
+    let _ = content.traverse(&mut |child: Content| {
+        if child.span().is_detached() {
+            ControlFlow::Continue(())
+        } else {
+            span = child.span();
+            ControlFlow::Break(())
+        }
+    });
+    span
 }
 
 /// Whether a native element is inline-level (formatting/text/refs/etc.).
@@ -698,7 +732,10 @@ fn handle_block_inner(
             content: vec![ParaChild::Run(Run::PageBreak)],
         }));
     } else if let Some(elem) = child.to_packed::<ParElem>() {
-        let props = ctx.resolve_par_props(elem, styles);
+        let mut props = ctx.resolve_par_props(elem, styles);
+        props.review_origin = Some(
+            ctx.review_origin(review_span(&elem.body), ReviewCandidateKind::Paragraph),
+        );
         let content = ctx.inline_pchildren(&elem.body, styles, RunProps::default())?;
         out.push(Block::Para(Para { props, content }));
     } else if child.is::<ParbreakElem>() {

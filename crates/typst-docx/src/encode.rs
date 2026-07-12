@@ -372,32 +372,8 @@ fn build_document(
     w.open(xml::W_BODY).start_children();
 
     let mut ends_with_para = false;
-    for (body_index, block) in document.body.iter().enumerate() {
-        let selected = document
-            .review_candidates
-            .iter()
-            .find(|candidate| candidate.body_index == body_index)
-            .and_then(|candidate| review_tags.get(&candidate.join_id));
-        if let Some(tag) = selected {
-            let id = document
-                .review_candidates
-                .iter()
-                .filter(|candidate| candidate.body_index <= body_index)
-                .filter(|candidate| review_tags.contains_key(&candidate.join_id))
-                .count() as u32;
-            w.open("w:sdt").start_children();
-            w.open("w:sdtPr").start_children();
-            w.open("w:id").attr(xml::W_VAL, &id.max(1).to_string()).empty();
-            let value = format!("typst:v1:{}:{}", tag.export, tag.region);
-            w.open("w:tag").attr(xml::W_VAL, &value).empty();
-            w.close();
-            w.open("w:sdtContent").start_children();
-            ends_with_para = write_block(&mut w, block);
-            w.close();
-            w.close();
-        } else {
-            ends_with_para = write_block(&mut w, block);
-        }
+    for block in &document.body {
+        ends_with_para = write_block(&mut w, block, Some(review_tags));
     }
 
     // The body must end in a paragraph before the sectPr.
@@ -413,14 +389,35 @@ fn build_document(
 }
 
 /// Writes a block; returns whether it ended with a paragraph.
-fn write_block(w: &mut XmlWriter, block: &Block) -> bool {
+fn write_block(
+    w: &mut XmlWriter,
+    block: &Block,
+    review_tags: Option<&BTreeMap<ReviewJoinId, ReviewTag>>,
+) -> bool {
     match block {
         Block::Para(para) => {
-            write_para(w, para);
+            let selected = para.props.review_origin.and_then(|origin| {
+                review_tags?.get(&origin.join_id).map(|tag| (origin, tag))
+            });
+            if let Some((origin, tag)) = selected {
+                w.open("w:sdt").start_children();
+                w.open("w:sdtPr").start_children();
+                let id = u32::try_from(origin.join_id.0).unwrap_or(u32::MAX).max(1);
+                w.open("w:id").attr(xml::W_VAL, &id.to_string()).empty();
+                let value = format!("typst:v1:{}:{}", tag.export, tag.region);
+                w.open("w:tag").attr(xml::W_VAL, &value).empty();
+                w.close();
+                w.open("w:sdtContent").start_children();
+                write_para(w, para);
+                w.close();
+                w.close();
+            } else {
+                write_para(w, para);
+            }
             true
         }
         Block::Table(tbl) => {
-            write_table(w, tbl);
+            write_table(w, tbl, review_tags);
             // A table must be followed by a paragraph in Word; report "not a
             // paragraph" so the body terminator inserts one if this is the last
             // block.
@@ -489,7 +486,11 @@ fn write_para(w: &mut XmlWriter, para: &Para) {
 }
 
 /// Serializes a `w:tbl` (grid + rows + cells) into `document.xml`.
-fn write_table(w: &mut XmlWriter, tbl: &Tbl) {
+fn write_table(
+    w: &mut XmlWriter,
+    tbl: &Tbl,
+    review_tags: Option<&BTreeMap<ReviewJoinId, ReviewTag>>,
+) {
     w.open("w:tbl").start_children();
 
     // -- w:tblPr -----------------------------------------------------------
@@ -526,13 +527,17 @@ fn write_table(w: &mut XmlWriter, tbl: &Tbl) {
 
     // -- rows --------------------------------------------------------------
     for row in &tbl.rows {
-        write_row(w, row);
+        write_row(w, row, review_tags);
     }
 
     w.close(); // w:tbl
 }
 
-fn write_row(w: &mut XmlWriter, row: &Row) {
+fn write_row(
+    w: &mut XmlWriter,
+    row: &Row,
+    review_tags: Option<&BTreeMap<ReviewJoinId, ReviewTag>>,
+) {
     w.open("w:tr").start_children();
 
     if row.header || row.cant_split || row.height.is_some() {
@@ -553,13 +558,17 @@ fn write_row(w: &mut XmlWriter, row: &Row) {
     }
 
     for cell in &row.cells {
-        write_cell(w, cell);
+        write_cell(w, cell, review_tags);
     }
 
     w.close(); // w:tr
 }
 
-fn write_cell(w: &mut XmlWriter, cell: &Cell) {
+fn write_cell(
+    w: &mut XmlWriter,
+    cell: &Cell,
+    review_tags: Option<&BTreeMap<ReviewJoinId, ReviewTag>>,
+) {
     w.open("w:tc").start_children();
 
     // -- w:tcPr ------------------------------------------------------------
@@ -604,7 +613,17 @@ fn write_cell(w: &mut XmlWriter, cell: &Cell) {
 
     // -- cell content (always ≥1 block, ending in a w:p) -------------------
     for block in &cell.blocks {
-        write_block(w, block);
+        write_block(w, block, review_tags);
+    }
+    // A block content control may wrap the final editable cell paragraph, but
+    // Word still requires the `w:tc` itself to end in a direct `w:p` child.
+    if cell.blocks.last().is_some_and(|block| {
+        let Block::Para(para) = block else { return false };
+        para.props.review_origin.is_some_and(|origin| {
+            review_tags.is_some_and(|tags| tags.contains_key(&origin.join_id))
+        })
+    }) {
+        w.leaf(xml::W_P);
     }
 
     w.close(); // w:tc
@@ -738,7 +757,7 @@ fn write_vml_textbox(
     w.open("w:txbxContent").start_children();
     let mut ends_with_para = false;
     for block in &tb.blocks {
-        ends_with_para = write_block(w, block);
+        ends_with_para = write_block(w, block, None);
     }
     if !ends_with_para {
         w.leaf(xml::W_P);
@@ -1028,7 +1047,7 @@ fn write_wsp(
             w.open("w:txbxContent").start_children();
             let mut ends_with_para = false;
             for block in &tb.blocks {
-                ends_with_para = write_block(w, block);
+                ends_with_para = write_block(w, block, None);
             }
             // `w:txbxContent` (like the document body) must end with a paragraph;
             // this also gives an empty text box its one required paragraph.
@@ -1392,7 +1411,7 @@ fn build_hdrftr(part: &HdrFtrPart, base: u32, pretty: bool) -> String {
     w.start_children();
     let mut ends_with_para = false;
     for block in &part.blocks {
-        ends_with_para = write_block(&mut w, block);
+        ends_with_para = write_block(&mut w, block, None);
     }
     if !ends_with_para {
         w.leaf(xml::W_P);
@@ -1670,7 +1689,7 @@ fn write_footnote(w: &mut XmlWriter, footnote: &Footnote) {
         .start_children();
     let mut ended_para = false;
     for block in &footnote.blocks {
-        ended_para = write_block(w, block);
+        ended_para = write_block(w, block, None);
     }
     if !ended_para {
         w.leaf(xml::W_P);

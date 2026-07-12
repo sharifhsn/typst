@@ -3,7 +3,6 @@
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use typst_library::World;
 use typst_library::diag::SourceResult;
@@ -19,8 +18,8 @@ use crate::dom::{
     Block, BookmarkTable, DocxDocument, Field, FieldCacheStatus as DomFieldCacheStatus,
     FieldDisplay, FieldMode, Footnote, HdrFtrPart, HdrFtrRef, HeadingStyle,
     HeadingStyleSample, LineNumbering, MediaPart, NumberingTable, Para, ParaChild,
-    ParaProps, PgNumType, ReviewCandidate, ReviewCandidateKind, ReviewJoinId, Run,
-    RunProps, SectPr, SectType, Spacing, TextDefaults, TocFigure, TocHeading,
+    ParaProps, PgNumType, ReviewCandidate, ReviewCandidateKind, Run, RunProps, SectPr,
+    SectType, Spacing, TextDefaults, TocFigure, TocHeading,
 };
 use crate::introspect::DocxIntrospector;
 use crate::package::Rels;
@@ -450,8 +449,7 @@ fn docx_document_impl(
         &mut toc_planning,
     );
 
-    let review_candidates =
-        collect_review_candidates(&body, &toc_headings, &export_snapshot);
+    let review_candidates = collect_review_candidates(&body, &export_snapshot);
 
     // Synthetic page model: a flowing document has no real pages, but templates
     // legitimately read paged introspection (`@target(form: "page")`,
@@ -579,54 +577,64 @@ fn docx_document_impl(
     })
 }
 
-static NEXT_REVIEW_JOIN_ID: AtomicU64 = AtomicU64::new(1);
-
 fn collect_review_candidates(
     body: &[Block],
-    headings: &[TocHeading],
     snapshot: &crate::snapshot::ExportSnapshot,
 ) -> Vec<ReviewCandidate> {
-    let mut candidates = Vec::new();
-    for heading in headings {
-        let (Some(location), Some(anchor)) = (heading.location, heading.anchor.as_ref())
-        else {
-            continue;
-        };
-        let mut nodes = snapshot.nodes().iter().filter(|node| {
-            node.source.location == Some(location)
-                && node.source.element.as_str() == "heading"
-                && node.semantic_occurrences == 1
-                && node.paged_positions.len() == 1
-                && !node.source.span.is_detached()
-        });
-        let Some(node) = nodes.next() else { continue };
-        if nodes.next().is_some() {
-            continue;
-        }
-        let Some((body_index, baseline)) =
-            body.iter().enumerate().find_map(|(index, block)| {
-                let Block::Para(para) = block else { return None };
-                let has_anchor = para.content.iter().any(|child| {
-                    matches!(child, ParaChild::BookmarkStart { name, .. } if name == anchor)
+    let mut paragraphs = Vec::new();
+    collect_review_paragraphs(body, &mut paragraphs);
+    paragraphs
+        .iter()
+        .filter_map(|para| {
+            let origin = para.props.review_origin?;
+            if origin.span.is_detached()
+                || paragraphs
+                    .iter()
+                    .filter(|other| {
+                        other.props.review_origin.map(|item| item.span)
+                            == Some(origin.span)
+                    })
+                    .count()
+                    != 1
+            {
+                return None;
+            }
+            if origin.kind == ReviewCandidateKind::Heading {
+                let mut nodes = snapshot.nodes().iter().filter(|node| {
+                    node.source.span == origin.span
+                        && node.source.element.as_str() == "heading"
+                        && node.semantic_occurrences == 1
+                        && node.paged_positions.len() == 1
                 });
-                has_anchor
-                    .then(|| plain_review_text(para))
-                    .flatten()
-                    .map(|text| (index, text))
+                nodes.next()?;
+                if nodes.next().is_some() {
+                    return None;
+                }
+            }
+            Some(ReviewCandidate {
+                join_id: origin.join_id,
+                span: origin.span,
+                kind: origin.kind,
+                baseline: plain_review_text(para)?,
             })
-        else {
-            continue;
-        };
-        let join = NEXT_REVIEW_JOIN_ID.fetch_add(1, Ordering::Relaxed).max(1);
-        candidates.push(ReviewCandidate {
-            join_id: ReviewJoinId(join),
-            span: node.source.span,
-            kind: ReviewCandidateKind::Heading,
-            baseline,
-            body_index,
-        });
+        })
+        .collect()
+}
+
+fn collect_review_paragraphs<'a>(blocks: &'a [Block], out: &mut Vec<&'a Para>) {
+    for block in blocks {
+        match block {
+            Block::Para(para) if para.props.review_origin.is_some() => out.push(para),
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        collect_review_paragraphs(&cell.blocks, out);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
-    candidates
 }
 
 fn plain_review_text(para: &Para) -> Option<ecow::EcoString> {
@@ -634,7 +642,9 @@ fn plain_review_text(para: &Para) -> Option<ecow::EcoString> {
     for child in &para.content {
         match child {
             ParaChild::Run(Run::Text { text: part, .. }) => text.push_str(part),
-            ParaChild::BookmarkStart { .. } | ParaChild::BookmarkEnd { .. } => {}
+            ParaChild::BookmarkStart { .. }
+            | ParaChild::BookmarkEnd { .. }
+            | ParaChild::Tag(_) => {}
             _ => return None,
         }
     }

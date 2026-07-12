@@ -53,19 +53,30 @@ escapes Word text as literal Typst markup. Local edits elsewhere in a file are
 allowed when the original source island still has one unambiguous match. An
 overlapping or ambiguous local edit becomes a conflict.
 
-The MVP applies at most one changed source file per invocation so replacement
+The importer applies at most one changed source file per invocation so replacement
 remains atomic. A review spanning edits in multiple Typst files can be inspected
 but cannot yet be applied automatically.
 
 ## Current supported contract
 
-The first slice enrolls plain, uniquely realized, source-backed headings. It
-preserves the heading marker and changes only its authored text. It accepts
-Word run splitting and the final view of tracked insertions/deletions.
+The current slice enrolls plain, uniquely realized, source-backed:
+
+- headings, preserving the heading marker;
+- ordinary paragraph text;
+- bullet and numbered list-item text, preserving the list marker and numbering;
+- single-paragraph table-cell text, preserving the table structure and cell formatting.
+
+Each edit replaces only the exact authored source island. Imported heading,
+paragraph, and list text uses an identifier-free literal markup expression;
+table cells use the same expression inside a content block so the result remains
+valid in `table`'s code-mode argument list. All four forms are eligible again on
+the next export, so repeated advisor cycles do not degrade coverage. Word run
+splitting and the final view of tracked insertions/deletions are accepted.
 
 It intentionally rejects or leaves unenrolled:
 
-- paragraphs, list restructuring, and table edits;
+- styled or computed text, multi-paragraph cells, list restructuring, and table
+  row/column/cell restructuring;
 - generated, repeated, package, bibliography, reference, equation, and raster content;
 - paragraph insertion/deletion and manual line breaks inside a region;
 - missing, duplicated, copied, or foreign content controls;
@@ -74,8 +85,8 @@ It intentionally rejects or leaves unenrolled:
 
 These exclusions prevent a visually plausible Word edit from silently
 flattening Typst code, macros, counters, or templates. Future slices can add
-literal paragraphs, list-item text, table-cell text, comments, and formatting
-only after each has exact source-segment ownership and conflict tests.
+comments, formatting changes, and structural edits only after each has exact
+source-segment ownership and conflict tests.
 
 ## Security boundary
 

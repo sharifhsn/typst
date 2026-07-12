@@ -26,8 +26,8 @@ use typst_utils::Numeric;
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, Border, Cell, CellBorders, Jc, Para, ParaChild, ParaProps, Row, RowHeight,
-    Run, RunProps, Tbl, TblProps, VAlign, VMerge,
+    Block, Border, Cell, CellBorders, Jc, Para, ParaChild, ParaProps,
+    ReviewCandidateKind, Row, RowHeight, Run, RunProps, Tbl, TblProps, VAlign, VMerge,
 };
 use crate::report::{DecisionReason, LossSet, Representation};
 
@@ -463,6 +463,22 @@ fn cell_blocks(
     } else {
         ctx.blocks(&content, styles)?
     };
+
+    if blocks
+        .iter()
+        .all(|block| matches!(block, Block::Para(_) | Block::Tag(_)))
+        && blocks.iter().filter(|block| matches!(block, Block::Para(_))).count() == 1
+    {
+        let origin = ctx.review_origin(
+            crate::convert::review_span(&content),
+            ReviewCandidateKind::TableCell,
+        );
+        if let Some(Block::Para(para)) =
+            blocks.iter_mut().find(|block| matches!(block, Block::Para(_)))
+        {
+            para.props.review_origin = Some(origin);
+        }
+    }
 
     if let Some(jc) = jc {
         for block in &mut blocks {

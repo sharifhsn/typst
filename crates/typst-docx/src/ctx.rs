@@ -30,8 +30,9 @@ use typst_syntax::{FileId, Span};
 
 use crate::dom::{
     Block, BookmarkTable, Field, FieldCacheStatus, FieldDisplay, FieldMode, Footnote,
-    HeadingStyleSample, ListSpec, NumberingTable, ParaProps, Run, RunProps, TocFigure,
-    TocHeading, Underline, VertAlign,
+    HeadingStyleSample, ListSpec, NumberingTable, ParaProps, ReviewCandidateKind,
+    ReviewJoinId, ReviewOrigin, Run, RunProps, TocFigure, TocHeading, Underline,
+    VertAlign,
 };
 use crate::fallback::CachedOverlay;
 use crate::mappers;
@@ -71,6 +72,7 @@ pub struct DocxCtx<'a, 'e> {
     pub(crate) numbering: NumberingTable,
     list_shapes: FxHashMap<ListSpec, u32>,
     next_num_id: u32,
+    next_review_join_id: u64,
 
     pub(crate) media: MediaRegistry,
 
@@ -204,6 +206,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             numbering: NumberingTable::default(),
             list_shapes: FxHashMap::default(),
             next_num_id: 1,
+            next_review_join_id: 1,
             media: MediaRegistry::new("word/media"),
             doc_rels: Rels::new(),
             footnote_rels: Rels::new(),
@@ -239,6 +242,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             suppress_text_box: false,
             overlay_cache: FxHashMap::default(),
         }
+    }
+
+    pub(crate) fn review_origin(
+        &mut self,
+        span: Span,
+        kind: ReviewCandidateKind,
+    ) -> ReviewOrigin {
+        let join_id = ReviewJoinId(self.next_review_join_id);
+        self.next_review_join_id = self.next_review_join_id.saturating_add(1);
+        ReviewOrigin { join_id, span, kind }
     }
 
     pub(crate) fn set_paged_geometry(
