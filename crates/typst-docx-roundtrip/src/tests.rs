@@ -64,6 +64,29 @@ fn state_json_is_full_and_verified() {
 }
 
 #[test]
+fn validates_every_supported_region_kind_and_rejects_unknown_ones() {
+    for kind in ["heading", "paragraph", "list_item", "table_cell"] {
+        let mut candidate = state("old", "old");
+        candidate.regions[0].kind = RegionKind(kind.into());
+        candidate.validate().unwrap();
+    }
+    let mut unknown = state("old", "old");
+    unknown.regions[0].kind = RegionKind("future".into());
+    assert!(matches!(unknown.validate(), Err(Error::InvalidState(_))));
+}
+
+#[test]
+fn table_cell_edits_remain_content_in_code_mode() {
+    let mut state = state("[old]", "old");
+    state.regions[0].kind = RegionKind("table_cell".into());
+    let edits = WordEdits {
+        regions: HashMap::from([("one".into(), "new #[literal]".into())]),
+    };
+    let report = dry_run(&state, &edits, &current("before [old] after")).unwrap();
+    assert_eq!(report.files[0].contents, r#"before [#("new #[literal]")] after"#);
+}
+
+#[test]
 fn direct_edit_merges_and_escapes_utf8_markup() {
     let state = state("old", "old");
     let edits = parse_docx(

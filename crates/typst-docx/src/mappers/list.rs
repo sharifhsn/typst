@@ -34,7 +34,7 @@ use typst_library::model::{
 use crate::ctx::DocxCtx;
 use crate::dom::{
     Block, Indent, ListLevel, ListSpec, MultiLevelType, NumFmt, Para, ParaChild,
-    ParaProps, Run, RunProps,
+    ParaProps, ReviewCandidateKind, Run, RunProps,
 };
 
 /// The `w:pStyle` applied to every list/enum item paragraph.
@@ -413,6 +413,8 @@ fn emit_item(
     ilvl: u8,
     out: &mut Vec<Block>,
 ) -> SourceResult<()> {
+    let review_origin = ctx
+        .review_origin(crate::convert::review_span(body), ReviewCandidateKind::ListItem);
     // Fold `ListElem::depth += 1` onto the item body (exactly as the layout
     // pipeline does, `typst-layout/src/lists.rs`), so a list NESTED inside this
     // item sees the incremented depth and indents one level deeper. Without it
@@ -431,6 +433,7 @@ fn emit_item(
                     // surfaces here is never hijacked.)
                     para.props.style = Some(LIST_PARAGRAPH.into());
                     para.props.num = Some((num_id, ilvl));
+                    para.props.review_origin = Some(review_origin);
                     numbered = true;
                 } else if para.props.num.is_none() {
                     // A continuation paragraph in the same item: keep it inside

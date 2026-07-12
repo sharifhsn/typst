@@ -619,16 +619,61 @@ fn build_review_state(
             .source(id)
             .map_err(|err| eco_format!("failed to load review source ({err})"))
             .at(candidate.span)?;
-        let Some(span_range) = (match candidate.span.get() {
+        let Some(mut span_range) = (match candidate.span.get() {
             SpanKind::Number { num, .. } => source.range(num, None),
             SpanKind::Range { range, .. } => Some(range),
             SpanKind::Detached => None,
         }) else {
             continue;
         };
+        if matches!(
+            candidate.kind,
+            typst_docx::ReviewCandidateKind::Paragraph
+                | typst_docx::ReviewCandidateKind::ListItem
+        ) {
+            let text = source.text();
+            let start = text[..span_range.start].rfind('\n').map_or(0, |index| index + 1);
+            let end = text[span_range.end..]
+                .find('\n')
+                .map_or(text.len(), |index| span_range.end + index);
+            span_range = start..end;
+        } else if candidate.kind == typst_docx::ReviewCandidateKind::TableCell {
+            let text = source.text();
+            let line_start =
+                text[..span_range.start].rfind('\n').map_or(0, |index| index + 1);
+            let line_end = text[span_range.end..]
+                .find('\n')
+                .map_or(text.len(), |index| span_range.end + index);
+            let canonical = encode_typst_text(candidate.baseline.as_str());
+            let code_string = canonical
+                .strip_prefix("#(")
+                .and_then(|value| value.strip_suffix(')'))
+                .unwrap_or(canonical.as_str());
+            let patterns = [
+                format!("[{}]", candidate.baseline),
+                format!("[{canonical}]"),
+                format!("[{code_string}]"),
+                code_string.to_owned(),
+            ];
+            let line = &text[line_start..line_end];
+            let matches = patterns
+                .iter()
+                .flat_map(|pattern| {
+                    line.match_indices(pattern).map(move |(start, _)| {
+                        line_start + start..line_start + start + pattern.len()
+                    })
+                })
+                .filter(|range| {
+                    range.start <= span_range.start && range.end >= span_range.end
+                })
+                .collect::<Vec<_>>();
+            if let [range] = matches.as_slice() {
+                span_range = range.clone();
+            }
+        }
         let Some(span_text) = source.text().get(span_range.clone()) else { continue };
-        let Some(authored_range) =
-            plain_heading_source_range(span_text, candidate.baseline.as_str())
+        let Some((kind, authored_range)) =
+            review_source_range(candidate.kind, span_text, candidate.baseline.as_str())
         else {
             continue;
         };
@@ -643,7 +688,7 @@ fn build_review_state(
             end,
             source: span_text[authored_range].to_owned(),
             word: candidate.baseline.to_string(),
-            kind: format!("{:?}", candidate.kind).to_ascii_lowercase(),
+            kind: kind.to_owned(),
         });
     }
 
@@ -651,7 +696,7 @@ fn build_review_state(
         bail!(
             Span::detached(),
             "this document has no source regions eligible for DOCX review";
-            hint: "the current review MVP supports uniquely realized plain headings";
+            hint: "DOCX review supports uniquely realized plain headings, paragraphs, list items, and table cells";
         );
     }
 
@@ -726,9 +771,51 @@ fn plain_heading_source_range(
         .then_some(offset..source.len())
 }
 
+fn review_source_range(
+    kind: typst_docx::ReviewCandidateKind,
+    source: &str,
+    baseline: &str,
+) -> Option<(&'static str, std::ops::Range<usize>)> {
+    use typst_docx::ReviewCandidateKind;
+
+    let canonical = encode_typst_text(baseline);
+    let exact = || (source == baseline || source == canonical).then_some(0..source.len());
+    match kind {
+        ReviewCandidateKind::Heading => {
+            plain_heading_source_range(source, baseline).map(|range| ("heading", range))
+        }
+        ReviewCandidateKind::Paragraph => exact().map(|range| ("paragraph", range)),
+        ReviewCandidateKind::ListItem => {
+            if let Some(range) = exact() {
+                return Some(("list_item", range));
+            }
+            for prefix in ["- ", "+ "] {
+                if let Some(body) = source.strip_prefix(prefix)
+                    && (body == baseline || body == canonical)
+                {
+                    return Some(("list_item", prefix.len()..source.len()));
+                }
+            }
+            None
+        }
+        ReviewCandidateKind::TableCell => {
+            let code_string = canonical.strip_prefix("#(")?.strip_suffix(')')?;
+            if source == baseline || source == canonical || source == code_string {
+                let range = 0..source.len();
+                return Some(("table_cell", range));
+            }
+            let body = source.strip_prefix('[')?.strip_suffix(']')?;
+            (body == baseline || body == canonical || body == code_string)
+                .then_some(("table_cell", 0..source.len()))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod review_source_tests {
-    use super::plain_heading_source_range;
+    use super::{plain_heading_source_range, review_source_range};
+    use typst_docx::ReviewCandidateKind;
 
     #[test]
     fn enrolls_only_exact_literal_heading_text() {
@@ -744,6 +831,30 @@ mod review_source_tests {
         assert_eq!(plain_heading_source_range("= \\#", "#"), None);
         assert_eq!(plain_heading_source_range("= *Alpha*", "Alpha"), None);
         assert_eq!(plain_heading_source_range("= Alpha <label>", "Alpha"), None);
+    }
+
+    #[test]
+    fn enrolls_only_exact_plain_review_regions() {
+        assert_eq!(
+            review_source_range(ReviewCandidateKind::Paragraph, "Alpha", "Alpha"),
+            Some(("paragraph", 0..5))
+        );
+        assert_eq!(
+            review_source_range(ReviewCandidateKind::ListItem, "- Alpha", "Alpha"),
+            Some(("list_item", 2..7))
+        );
+        assert_eq!(
+            review_source_range(ReviewCandidateKind::TableCell, "[Alpha]", "Alpha"),
+            Some(("table_cell", 0..7))
+        );
+        assert_eq!(
+            review_source_range(ReviewCandidateKind::Paragraph, "*Alpha*", "Alpha"),
+            None
+        );
+        assert_eq!(
+            review_source_range(ReviewCandidateKind::TableCell, "[*Alpha*]", "Alpha"),
+            None
+        );
     }
 }
 

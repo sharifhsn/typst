@@ -29,6 +29,17 @@ pub struct ReviewJoinId(pub u64);
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum ReviewCandidateKind {
     Heading,
+    Paragraph,
+    ListItem,
+    TableCell,
+}
+
+/// Source provenance carried by a paragraph through nested DOCX structures.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub(crate) struct ReviewOrigin {
+    pub join_id: ReviewJoinId,
+    pub span: Span,
+    pub kind: ReviewCandidateKind,
 }
 
 /// One conservative source-backed block that can be wrapped in a Word content
@@ -39,7 +50,6 @@ pub struct ReviewCandidate {
     pub span: Span,
     pub kind: ReviewCandidateKind,
     pub baseline: EcoString,
-    pub(crate) body_index: usize,
 }
 
 /// Output document: realized native tree lowered to the OOXML IR + metadata +
@@ -418,6 +428,8 @@ impl Underline {
 /// Paragraph formatting → `<w:pPr>`.
 #[derive(Default, Clone, PartialEq)]
 pub struct ParaProps {
+    /// Non-serialized provenance for opt-in Word review controls.
+    pub(crate) review_origin: Option<ReviewOrigin>,
     pub style: Option<EcoString>,
     pub keep_next: bool,
     /// `<w:keepLines/>` (keep all lines on one page). Default false.

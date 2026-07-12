@@ -30,7 +30,10 @@ fn test_compile_pdf() {
 #[test]
 fn test_docx_review_two_cycles() {
     let project = tempfs();
-    let main = project.write("main.typ", "= Original heading\n\nBody.");
+    let main = project.write(
+        "main.typ",
+        "= Original heading\n\nOriginal paragraph.\n\n- Original item\n\n#table(columns: 1, [Original cell])",
+    );
 
     exec()
         .arg("compile")
@@ -47,8 +50,20 @@ fn test_docx_review_two_cycles() {
         .arg(&first)
         .arg("--docx-review-state")
         .must_succeed();
+    project
+        .read("first.docx.typst-review.json")
+        .must_contain("\"paragraph\"");
     let first_edited = project.resolve("first-edited.docx");
-    edit_docx_text(&first, &first_edited, "Original heading", "First edit");
+    edit_docx_texts(
+        &first,
+        &first_edited,
+        &[
+            ("Original heading", "First heading edit"),
+            ("Original paragraph.", "First paragraph edit."),
+            ("Original item", "First item edit"),
+            ("Original cell", "First cell edit"),
+        ],
+    );
     exec()
         .arg("review")
         .arg(&first_edited)
@@ -70,7 +85,12 @@ fn test_docx_review_two_cycles() {
         .arg(project.path())
         .arg("--apply")
         .must_succeed();
-    project.read("main.typ").must_contain("= #(\"First edit\")");
+    project
+        .read("main.typ")
+        .must_contain("= #(\"First heading edit\")")
+        .must_contain("#(\"First paragraph edit.\")")
+        .must_contain("- #(\"First item edit\")")
+        .must_contain("[#(\"First cell edit\")]");
 
     let second = project.resolve("second.docx");
     exec()
@@ -79,8 +99,21 @@ fn test_docx_review_two_cycles() {
         .arg(&second)
         .arg("--docx-review-state")
         .must_succeed();
+    project
+        .read("second.docx.typst-review.json")
+        .must_contain("list_item")
+        .must_contain("table_cell");
     let second_edited = project.resolve("second-edited.docx");
-    edit_docx_text(&second, &second_edited, "First edit", "Second edit");
+    edit_docx_texts(
+        &second,
+        &second_edited,
+        &[
+            ("First heading edit", "Second heading edit"),
+            ("First paragraph edit.", "Second paragraph edit."),
+            ("First item edit", "Second item edit"),
+            ("First cell edit", "Second cell edit"),
+        ],
+    );
     let review = exec()
         .arg("review")
         .arg(&second_edited)
@@ -91,11 +124,16 @@ fn test_docx_review_two_cycles() {
         .arg("--apply")
         .must_succeed();
     review.stdout.must_contain("\"status\": \"ready\"");
-    project.read("main.typ").must_contain("= #(\"Second edit\")");
+    project
+        .read("main.typ")
+        .must_contain("= #(\"Second heading edit\")")
+        .must_contain("#(\"Second paragraph edit.\")")
+        .must_contain("- #(\"Second item edit\")")
+        .must_contain("[#(\"Second cell edit\")]");
     exec().arg("compile").arg(&main).must_succeed();
 }
 
-fn edit_docx_text(input: &Path, output: &Path, old: &str, new: &str) {
+fn edit_docx_texts(input: &Path, output: &Path, replacements: &[(&str, &str)]) {
     let source = std::fs::File::open(input).unwrap();
     let mut archive = ZipArchive::new(source).unwrap();
     let target = std::fs::File::create(output).unwrap();
@@ -105,7 +143,10 @@ fn edit_docx_text(input: &Path, output: &Path, old: &str, new: &str) {
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).unwrap();
         if entry.name() == "word/document.xml" {
-            let xml = String::from_utf8(bytes).unwrap().replace(old, new);
+            let mut xml = String::from_utf8(bytes).unwrap();
+            for (old, new) in replacements {
+                xml = xml.replace(old, new);
+            }
             bytes = xml.into_bytes();
         }
         writer.start_file(entry.name(), SimpleFileOptions::default()).unwrap();

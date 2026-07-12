@@ -221,9 +221,10 @@ typst compile --format docx document.typ document.docx
 ```
 
 For the experimental advisor-review round trip, add `--docx-review-state` and
-retain the generated state file locally. Common heading-text edits can then be
-reviewed or applied with `typst review`; unsupported or ambiguous changes are
-reported as conflicts rather than flattened into Typst source. See
+retain the generated state file locally. Plain heading, paragraph, list-item,
+and single-paragraph table-cell edits can then be reviewed or applied with
+`typst review`; unsupported or ambiguous changes are reported as conflicts
+rather than flattened into Typst source. See
 [`docs/dev/docx-roundtrip.md`](../../docs/dev/docx-roundtrip.md) for the exact
 supported contract and security boundary.
 

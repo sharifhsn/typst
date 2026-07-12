@@ -55,8 +55,8 @@ pub struct Region {
     pub kind: RegionKind,
 }
 
-/// Region kinds are intentionally opaque to this engine. Unknown future kinds
-/// remain round-trippable instead of being silently reinterpreted.
+/// A versioned review-region discriminator validated against the kinds whose
+/// source replacement semantics this engine understands.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct RegionKind(pub String);
@@ -115,7 +115,10 @@ impl RoundtripState {
                     "region source does not match its baseline range",
                 ));
             }
-            if region.kind.0 != "heading" {
+            if !matches!(
+                region.kind.0.as_str(),
+                "heading" | "paragraph" | "list_item" | "table_cell"
+            ) {
                 return Err(Error::InvalidState("unsupported review region kind"));
             }
         }
@@ -377,7 +380,7 @@ pub fn dry_run(
                     current_region = file.get(range.clone()).map(str::to_owned);
                     replacements.entry(&region.file).or_default().push((
                         range,
-                        encode_typst_text(word),
+                        encode_region_text(&region.kind, word),
                         index,
                     ));
                     status = RegionStatus::Ready;
@@ -491,10 +494,20 @@ fn char_boundaries(text: &str) -> Vec<usize> {
 
 /// Escape Word text so it is inserted as literal Typst markup text.
 pub fn encode_typst_text(text: &str) -> String {
+    format!("#({})", encode_typst_string(text))
+}
+
+fn encode_region_text(kind: &RegionKind, text: &str) -> String {
+    if kind.0 == "table_cell" {
+        format!("[{}]", encode_typst_text(text))
+    } else {
+        encode_typst_text(text)
+    }
+}
+
+fn encode_typst_string(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len() + 10);
-    // An identifier-free parenthesized string expression cannot be shadowed by
-    // user bindings and is coerced to content in markup context.
-    escaped.push_str("#(\"");
+    escaped.push('"');
     for character in text.chars() {
         match character {
             '\\' => escaped.push_str("\\\\"),
@@ -502,7 +515,7 @@ pub fn encode_typst_text(text: &str) -> String {
             _ => escaped.push(character),
         }
     }
-    escaped.push_str("\")");
+    escaped.push('"');
     escaped
 }
 

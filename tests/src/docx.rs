@@ -475,12 +475,18 @@ fn docx_export_is_byte_deterministic() {
 }
 
 #[test]
-fn review_candidates_are_opt_in_and_preserve_exact_heading_text() {
-    let document = compile_docx("= Alpha heading\n\nBody.\n\n= Beta heading", &[]);
+fn review_candidates_are_opt_in_and_preserve_exact_plain_text() {
+    let document = compile_docx(
+        "= Alpha heading\n\nBody.\n\n- List item\n\n#table(columns: 1, [Cell text])\n\n= Beta heading",
+        &[],
+    );
     let candidates = document.review_candidates();
-    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates.len(), 5);
     assert_eq!(candidates[0].baseline.as_str(), "Alpha heading");
-    assert_eq!(candidates[1].baseline.as_str(), "Beta heading");
+    assert_eq!(candidates[1].baseline.as_str(), "Body.");
+    assert_eq!(candidates[2].baseline.as_str(), "List item");
+    assert_eq!(candidates[3].baseline.as_str(), "Cell text");
+    assert_eq!(candidates[4].baseline.as_str(), "Beta heading");
 
     let ordinary = text_parts(&document);
     let ordinary_xml = &ordinary["word/document.xml"];
@@ -488,14 +494,15 @@ fn review_candidates_are_opt_in_and_preserve_exact_heading_text() {
     assert!(!ordinary_xml.contains("typst:v1:"));
 
     let mut tags = BTreeMap::new();
-    tags.insert(
-        candidates[0].join_id,
-        ReviewTag { export: "export-a".into(), region: "alpha".into() },
-    );
-    tags.insert(
-        candidates[1].join_id,
-        ReviewTag { export: "export-a".into(), region: "beta".into() },
-    );
+    for (index, candidate) in candidates.iter().enumerate() {
+        tags.insert(
+            candidate.join_id,
+            ReviewTag {
+                export: "export-a".into(),
+                region: format!("region-{index}").into(),
+            },
+        );
+    }
     let options = DocxOptions { pretty: false };
     let first = docx_with_review_tags(&document, &options, &tags).unwrap();
     let second = docx_with_review_tags(&document, &options, &tags).unwrap();
@@ -503,11 +510,10 @@ fn review_candidates_are_opt_in_and_preserve_exact_heading_text() {
 
     let parts = unzip(first);
     let xml = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
-    assert_eq!(xml.matches("<w:sdt>").count(), 2);
-    assert!(xml.contains("w:tag w:val=\"typst:v1:export-a:alpha\""));
-    assert!(xml.contains("w:tag w:val=\"typst:v1:export-a:beta\""));
+    assert_eq!(xml.matches("<w:sdt>").count(), 5);
+    assert!(xml.contains("w:tag w:val=\"typst:v1:export-a:region-0\""));
+    assert!(xml.contains("w:tag w:val=\"typst:v1:export-a:region-4\""));
     assert!(xml.contains("w:id w:val=\"1\""));
-    assert!(xml.contains("w:id w:val=\"2\""));
     assert!(!xml.contains("w:dataBinding"));
     assert!(!xml.contains("w:lock"));
 

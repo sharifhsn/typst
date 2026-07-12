@@ -18,7 +18,7 @@ use typst_library::foundations::{Packed, StyleChain};
 use typst_library::model::HeadingElem;
 
 use crate::ctx::DocxCtx;
-use crate::dom::{Block, Para, ParaChild, ParaProps, Run, RunProps};
+use crate::dom::{Block, Para, ParaChild, ParaProps, ReviewCandidateKind, Run, RunProps};
 
 pub fn heading(
     elem: &Packed<HeadingElem>,
@@ -44,6 +44,7 @@ pub fn heading(
     // up) and a `w:customStyle="1"` style `basedOn` Heading9 for level >= 10.
     // This mapper only references the style id; it cannot emit the style itself.
     let props = ParaProps {
+        review_origin: Some(ctx.review_origin(elem.span(), ReviewCandidateKind::Heading)),
         style: Some(ecow::eco_format!("Heading{level}")),
         // Keep the heading with the paragraph that follows it.
         keep_next: true,
