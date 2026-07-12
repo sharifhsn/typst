@@ -30,9 +30,10 @@ fn test_compile_pdf() {
 #[test]
 fn test_docx_review_two_cycles() {
     let project = tempfs();
+    project.write("chapter.typ", "Imported paragraph.");
     let main = project.write(
         "main.typ",
-        "= Original heading\n\nOriginal paragraph.\n\n- Original item\n\n#table(columns: 1, [Original cell])",
+        "= Original heading\n\nOriginal paragraph.\n\n- Original item\n\n#table(columns: 1, [Original cell])\n\n#include \"chapter.typ\"",
     );
 
     exec()
@@ -62,6 +63,7 @@ fn test_docx_review_two_cycles() {
             ("Original paragraph.", "First paragraph edit."),
             ("Original item", "First item edit"),
             ("Original cell", "First cell edit"),
+            ("Imported paragraph.", "First imported edit."),
         ],
     );
     exec()
@@ -91,6 +93,9 @@ fn test_docx_review_two_cycles() {
         .must_contain("#(\"First paragraph edit.\")")
         .must_contain("- #(\"First item edit\")")
         .must_contain("[#(\"First cell edit\")]");
+    project
+        .read("chapter.typ")
+        .must_contain("#(\"First imported edit.\")");
 
     let second = project.resolve("second.docx");
     exec()
@@ -112,6 +117,7 @@ fn test_docx_review_two_cycles() {
             ("First paragraph edit.", "Second paragraph edit."),
             ("First item edit", "Second item edit"),
             ("First cell edit", "Second cell edit"),
+            ("First imported edit.", "Second imported edit."),
         ],
     );
     let review = exec()
@@ -130,6 +136,9 @@ fn test_docx_review_two_cycles() {
         .must_contain("#(\"Second paragraph edit.\")")
         .must_contain("- #(\"Second item edit\")")
         .must_contain("[#(\"Second cell edit\")]");
+    project
+        .read("chapter.typ")
+        .must_contain("#(\"Second imported edit.\")");
     exec().arg("compile").arg(&main).must_succeed();
 }
 

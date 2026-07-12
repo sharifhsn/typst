@@ -299,10 +299,9 @@ pub struct MergeReport {
 
 impl MergeReport {
     pub fn can_apply(&self) -> bool {
-        self.files.len() <= 1
-            && self.regions.iter().all(|region| {
-                matches!(region.status, RegionStatus::Ready | RegionStatus::Unchanged)
-            })
+        self.regions.iter().all(|region| {
+            matches!(region.status, RegionStatus::Ready | RegionStatus::Unchanged)
+        })
     }
 
     pub fn changed_files(&self) -> impl Iterator<Item = &str> {
@@ -531,9 +530,6 @@ pub fn apply_atomic(project_root: &Path, report: &MergeReport) -> Result<(), Err
         return Err(Error::ConflictedPlan);
     }
     let root = project_root.canonicalize().map_err(Error::Io)?;
-    if report.files.len() > 1 {
-        return Err(Error::MultiFileApplyUnsupported);
-    }
     let mut prepared = Vec::new();
     for (index, file) in report.files.iter().enumerate() {
         validate_relative_path(&file.path)?;
@@ -576,27 +572,65 @@ pub fn apply_atomic(project_root: &Path, report: &MergeReport) -> Result<(), Err
             let _ = fs::remove_file(&temporary);
             return Err(Error::Io(error));
         }
-        prepared.push((temporary, target));
+        let backup = parent.join(format!(
+            ".{name}.typst-roundtrip-backup-{}-{index}",
+            std::process::id()
+        ));
+        prepared.push((temporary, target, backup, file.path.clone()));
     }
-    for (temporary, target) in &prepared {
-        let planned = report
-            .files
-            .iter()
-            .find(|file| root.join(&file.path) == *target)
-            .expect("prepared file has a merge plan");
+    // Recheck every input before creating any backup or replacing any source.
+    for (_, target, _, path) in &prepared {
+        let planned = report.files.iter().find(|file| file.path == *path).unwrap();
         if sha256(&fs::read(target).map_err(Error::Io)?) != planned.expected_sha256 {
             cleanup_temps(&prepared);
             return Err(Error::SourceChanged(planned.path.clone()));
         }
-        fs::rename(temporary, target).map_err(Error::Io)?;
     }
+    // Hard-link backups are created beside every source before the first
+    // replacement. If a later rename fails, committed files can be restored
+    // without copying or losing their original permissions and metadata.
+    for index in 0..prepared.len() {
+        let (_, target, backup, _) = &prepared[index];
+        if fs::symlink_metadata(backup).is_ok() {
+            cleanup_temps(&prepared);
+            cleanup_backups(&prepared[..index]);
+            return Err(Error::InvalidState("round-trip backup path already exists"));
+        }
+        if let Err(error) = fs::hard_link(target, backup) {
+            cleanup_temps(&prepared);
+            cleanup_backups(&prepared[..index]);
+            return Err(Error::Io(error));
+        }
+    }
+    for index in 0..prepared.len() {
+        let (temporary, target, _, _) = &prepared[index];
+        if let Err(error) = fs::rename(temporary, target) {
+            for (_, committed_target, backup, _) in prepared[..index].iter().rev() {
+                let _ = fs::rename(backup, committed_target);
+            }
+            cleanup_prepared(&prepared);
+            return Err(Error::Io(error));
+        }
+    }
+    cleanup_backups(&prepared);
     Ok(())
 }
 
-fn cleanup_temps(prepared: &[(PathBuf, PathBuf)]) {
-    for (temporary, _) in prepared {
+fn cleanup_temps(prepared: &[(PathBuf, PathBuf, PathBuf, String)]) {
+    for (temporary, _, _, _) in prepared {
         let _ = fs::remove_file(temporary);
     }
+}
+
+fn cleanup_backups(prepared: &[(PathBuf, PathBuf, PathBuf, String)]) {
+    for (_, _, backup, _) in prepared {
+        let _ = fs::remove_file(backup);
+    }
+}
+
+fn cleanup_prepared(prepared: &[(PathBuf, PathBuf, PathBuf, String)]) {
+    cleanup_temps(prepared);
+    cleanup_backups(prepared);
 }
 
 fn validate_relative_path(path: &str) -> Result<(), Error> {
@@ -628,7 +662,6 @@ pub enum Error {
     StructuralEdit(String),
     MissingCurrentFile(String),
     ConflictedPlan,
-    MultiFileApplyUnsupported,
     SourceChanged(String),
 }
 
@@ -659,9 +692,6 @@ impl fmt::Display for Error {
                 write!(f, "current source file is missing: {path}")
             }
             Self::ConflictedPlan => f.write_str("merge plan contains conflicts"),
-            Self::MultiFileApplyUnsupported => {
-                f.write_str("atomic apply currently supports one changed source file")
-            }
             Self::SourceChanged(path) => {
                 write!(f, "source changed since dry run: {path}")
             }
