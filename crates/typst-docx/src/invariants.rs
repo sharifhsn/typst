@@ -127,14 +127,25 @@ pub(crate) fn validate(document: &DocxDocument) -> Result<(), DocumentInvariantE
         }
     }
 
+    // Bookmark identity is scoped PER PART, not document-wide: repeated page
+    // furniture legitimately re-emits the same logical bookmark (same id and
+    // name, from the idempotent per-`Location` allocation) once per header/
+    // footer part — a labeled element shown in a running head appears in
+    // every section's header part. That pattern has shipped and been verified
+    // in real Word/LibreOffice; both tolerate the cross-part repetition (the
+    // OOXML name-uniqueness nicety notwithstanding). A duplicate WITHIN one
+    // part is the real corruption signal and stays fatal.
     state.visit_blocks(&document.body)?;
+    state.finish_part()?;
     for part in document.header_parts.iter().chain(&document.footer_parts) {
         state.visit_blocks(&part.blocks)?;
+        state.finish_part()?;
     }
+    // All footnotes serialize into one part (word/footnotes.xml).
     for footnote in &document.footnotes {
         state.visit_blocks(&footnote.blocks)?;
     }
-    state.finish()
+    state.finish_part()
 }
 
 #[derive(Default)]
@@ -300,7 +311,10 @@ impl State {
         Ok(())
     }
 
-    fn finish(self) -> Result<(), DocumentInvariantError> {
+    /// Checks start/end pairing for the part walked so far and resets the
+    /// bookmark scope for the next part (see `validate` for why bookmark
+    /// identity is per-part while every other id space stays document-wide).
+    fn finish_part(&mut self) -> Result<(), DocumentInvariantError> {
         if let Some(id) =
             self.bookmark_end_ids.difference(&self.bookmark_start_ids).next()
         {
@@ -311,6 +325,9 @@ impl State {
         {
             return Err(DocumentInvariantError::MissingBookmarkEnd(*id));
         }
+        self.bookmark_start_ids.clear();
+        self.bookmark_end_ids.clear();
+        self.bookmark_names.clear();
         Ok(())
     }
 }
@@ -334,7 +351,10 @@ mod tests {
     fn unpaired_bookmarks_are_rejected() {
         let mut state = State::default();
         state.bookmark_start_ids.insert(3);
-        assert_eq!(state.finish(), Err(DocumentInvariantError::MissingBookmarkEnd(3)));
+        assert_eq!(
+            state.finish_part(),
+            Err(DocumentInvariantError::MissingBookmarkEnd(3))
+        );
     }
 
     #[test]
