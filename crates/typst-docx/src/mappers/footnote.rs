@@ -23,7 +23,7 @@ use typst_library::introspection::QueryFirstIntrospection;
 use typst_library::model::FootnoteElem;
 
 use crate::ctx::DocxCtx;
-use crate::dom::{Block, ParaChild, Run, RunProps};
+use crate::dom::{Block, ParaChild, ReviewCandidateKind, Run, RunProps};
 
 /// The conventional Word character-style id for the superscript footnote mark.
 /// It is defined in `styles_part.rs` and applied to BOTH the inline
@@ -114,7 +114,7 @@ fn body_blocks(
     };
     ctx.in_footnote = was_in_footnote;
 
-    let mut blocks = match body {
+    let mut blocks = match &body {
         Some(_) => lowered?,
         // A reference whose target could not be resolved, or an empty footnote:
         // emit a single empty footnote-text paragraph so the `w:id` still has a
@@ -125,6 +125,17 @@ fn body_blocks(
             content: Vec::new(),
         })],
     };
+
+    if let Some(content) = body.as_ref()
+        && blocks.iter().filter(|block| matches!(block, Block::Para(_))).count() == 1
+        && let Some(Block::Para(para)) =
+            blocks.iter_mut().find(|block| matches!(block, Block::Para(_)))
+    {
+        para.props.review_origin = Some(ctx.review_origin(
+            crate::convert::review_span(content),
+            ReviewCandidateKind::Paragraph,
+        ));
+    }
 
     // Apply the `FootnoteText` paragraph style to every body paragraph that does
     // not already carry an explicit style (e.g. a list item keeps its style).

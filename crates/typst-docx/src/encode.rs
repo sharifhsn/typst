@@ -186,7 +186,7 @@ fn docx_impl(
     // -- word/footnotes.xml + word/endnotes.xml --
     // Word writes both parts in every document — a stub with just the separator
     // definitions when there are no notes — so emit them unconditionally.
-    let footnotes_xml = build_footnotes(document, pretty);
+    let footnotes_xml = build_footnotes(document, review_tags, pretty);
     package.add_xml("word/footnotes.xml", CT_FOOTNOTES, footnotes_xml);
     doc_rels.add(REL_FOOTNOTES, "footnotes.xml", RelMode::Internal);
     // A footnote body that holds an image / external link references it by r:id;
@@ -205,12 +205,14 @@ fn docx_impl(
     // the `0x0000_0000` lane; headers `0x1nnn_….`, footers `0x4nnn_…`, notes
     // `0x7000_0000` (see `build_footnotes`).
     for (i, part) in document.header_parts.iter().enumerate() {
-        let xml = build_hdrftr(part, 0x1000_0000 + i as u32 * 0x0010_0000, pretty);
+        let xml =
+            build_hdrftr(part, 0x1000_0000 + i as u32 * 0x0010_0000, review_tags, pretty);
         package.add_xml(&format!("word/{}", part.part_name), CT_HEADER, xml);
         write_part_rels(&mut package, &format!("word/{}", part.part_name), &part.rels)?;
     }
     for (i, part) in document.footer_parts.iter().enumerate() {
-        let xml = build_hdrftr(part, 0x4000_0000 + i as u32 * 0x0010_0000, pretty);
+        let xml =
+            build_hdrftr(part, 0x4000_0000 + i as u32 * 0x0010_0000, review_tags, pretty);
         package.add_xml(&format!("word/{}", part.part_name), CT_FOOTER, xml);
         write_part_rels(&mut package, &format!("word/{}", part.part_name), &part.rels)?;
     }
@@ -1419,7 +1421,12 @@ fn write_part_rels(
 /// Serializes a header (`w:hdr`) or footer (`w:ftr`) part. Never emits an empty
 /// root: a trailing empty `<w:p/>` is appended if the content doesn't end in a
 /// paragraph (a bare `w:hdr`/`w:ftr` is non-conformant in some Word builds).
-fn build_hdrftr(part: &HdrFtrPart, base: u32, pretty: bool) -> String {
+fn build_hdrftr(
+    part: &HdrFtrPart,
+    base: u32,
+    review_tags: &BTreeMap<ReviewJoinId, ReviewTag>,
+    pretty: bool,
+) -> String {
     let root = if part.is_header { "w:hdr" } else { "w:ftr" };
     let mut w = XmlWriter::new(pretty);
     w.set_para_base(base);
@@ -1431,7 +1438,7 @@ fn build_hdrftr(part: &HdrFtrPart, base: u32, pretty: bool) -> String {
     w.start_children();
     let mut ends_with_para = false;
     for block in &part.blocks {
-        ends_with_para = write_block(&mut w, block, None);
+        ends_with_para = write_block(&mut w, block, Some(review_tags));
     }
     if !ends_with_para {
         w.leaf(xml::W_P);
@@ -1655,7 +1662,11 @@ fn build_numbering(document: &DocxDocument, pretty: bool) -> String {
 // word/footnotes.xml
 // ---------------------------------------------------------------------------
 
-fn build_footnotes(document: &DocxDocument, pretty: bool) -> String {
+fn build_footnotes(
+    document: &DocxDocument,
+    review_tags: &BTreeMap<ReviewJoinId, ReviewTag>,
+    pretty: bool,
+) -> String {
     let mut w = XmlWriter::new(pretty);
     // The notes lane for `w14:paraId` (disjoint from body/header/footer ranges).
     w.set_para_base(0x7000_0000);
@@ -1669,7 +1680,7 @@ fn build_footnotes(document: &DocxDocument, pretty: bool) -> String {
     write_separator(&mut w, "w:footnote", 0, "continuationSeparator");
 
     for footnote in &document.footnotes {
-        write_footnote(&mut w, footnote);
+        write_footnote(&mut w, footnote, review_tags);
     }
 
     w.close();
@@ -1703,13 +1714,17 @@ fn write_separator(w: &mut XmlWriter, elem: &'static str, id: i32, kind: &'stati
     w.close();
 }
 
-fn write_footnote(w: &mut XmlWriter, footnote: &Footnote) {
+fn write_footnote(
+    w: &mut XmlWriter,
+    footnote: &Footnote,
+    review_tags: &BTreeMap<ReviewJoinId, ReviewTag>,
+) {
     w.open("w:footnote")
         .attr("w:id", &footnote.id.to_string())
         .start_children();
     let mut ended_para = false;
     for block in &footnote.blocks {
-        ended_para = write_block(w, block, None);
+        ended_para = write_block(w, block, Some(review_tags));
     }
     if !ended_para {
         w.leaf(xml::W_P);

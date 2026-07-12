@@ -623,18 +623,53 @@ fn build_review_state(
         }) else {
             continue;
         };
-        if matches!(
-            candidate.kind,
-            typst_docx::ReviewCandidateKind::Paragraph
-                | typst_docx::ReviewCandidateKind::ListItem
-        ) {
+        let direct_match = source
+            .text()
+            .get(span_range.clone())
+            .and_then(|text| {
+                review_source_range(candidate.kind, text, candidate.baseline.as_str())
+            })
+            .is_some();
+        if !direct_match
+            && matches!(
+                candidate.kind,
+                typst_docx::ReviewCandidateKind::Paragraph
+                    | typst_docx::ReviewCandidateKind::ListItem
+            )
+        {
             let text = source.text();
-            let start = text[..span_range.start].rfind('\n').map_or(0, |index| index + 1);
-            let end = text[span_range.end..]
-                .find('\n')
-                .map_or(text.len(), |index| span_range.end + index);
-            span_range = start..end;
-        } else if candidate.kind == typst_docx::ReviewCandidateKind::TableCell {
+            if candidate.kind == typst_docx::ReviewCandidateKind::Paragraph
+                && let Some(open) = text[..span_range.start].rfind('[')
+                && let Some(close) = text[span_range.end..].find(']')
+            {
+                let nested = open + 1..span_range.end + close;
+                if review_source_range(
+                    candidate.kind,
+                    &text[nested.clone()],
+                    candidate.baseline.as_str(),
+                )
+                .is_some()
+                {
+                    span_range = nested;
+                }
+            }
+            if review_source_range(
+                candidate.kind,
+                &text[span_range.clone()],
+                candidate.baseline.as_str(),
+            )
+            .is_none()
+            {
+                let start =
+                    text[..span_range.start].rfind('\n').map_or(0, |index| index + 1);
+                let end = text[span_range.end..]
+                    .find('\n')
+                    .map_or(text.len(), |index| span_range.end + index);
+                span_range = start..end;
+            }
+        } else if !direct_match
+            && candidate.kind == typst_docx::ReviewCandidateKind::TableCell
+        {
             let text = source.text();
             let line_start =
                 text[..span_range.start].rfind('\n').map_or(0, |index| index + 1);
