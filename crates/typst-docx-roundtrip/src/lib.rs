@@ -497,11 +497,8 @@ pub fn encode_typst_text(text: &str) -> String {
 }
 
 fn encode_region_text(kind: &RegionKind, text: &str) -> String {
-    if kind.0 == "table_cell" {
-        format!("[{}]", encode_typst_text(text))
-    } else {
-        encode_typst_text(text)
-    }
+    let _ = kind;
+    encode_typst_text(text)
 }
 
 fn encode_typst_string(text: &str) -> String {
