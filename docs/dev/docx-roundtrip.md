@@ -38,6 +38,10 @@ typst review advisor-edited.docx \
 The command prints a JSON result for every enrolled region. `ready` means the
 Word edit can be applied; `unchanged` means Word did not alter that region; a
 `conflict` is never applied implicitly. Save the report with `--report path`.
+Word comments anchored inside an enrolled region are included in the same JSON
+under `comments`, with their Word id, region id, author, initials, date, and
+plain comment text. They are preserved as review annotations and are never
+injected into executable Typst source.
 
 Apply only a conflict-free plan:
 
@@ -89,12 +93,13 @@ It intentionally rejects or leaves unenrolled:
 - paragraph insertion/deletion and manual line breaks inside a region;
 - missing, duplicated, copied, or foreign content controls;
 - ambiguous source relocation or overlapping student edits;
-- formatting-only round trips, comments, and arbitrary Word objects.
+- formatting-only round trips and arbitrary Word objects. Comments outside an
+  enrolled source-backed region remain outside the importer boundary.
 
 These exclusions prevent a visually plausible Word edit from silently
 flattening Typst code, macros, counters, or templates. Future slices can add
-comments, formatting changes, and structural edits only after each has exact
-source-segment ownership and conflict tests.
+formatting changes and structural edits only after each has exact source-segment
+ownership and conflict tests.
 
 ## Security boundary
 
