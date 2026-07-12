@@ -821,7 +821,16 @@ fn build_review_state(
         .into_iter()
         .map(|(path, text)| BaselineFile { path, sha256: sha256(text.as_bytes()), text })
         .collect();
-    Ok((RoundtripState { export_id, main, files, regions }, tags))
+    Ok((
+        RoundtripState {
+            export_id,
+            main,
+            files,
+            regions,
+            stories: Vec::new(),
+        },
+        tags,
+    ))
 }
 
 fn compact_review_id(digest: &str) -> String {

@@ -27,6 +27,7 @@ fn state(source: &str, word: &str) -> RoundtripState {
             kind: RegionKind("heading".into()),
             word_format_baseline: vec![],
         }],
+        stories: vec![],
     }
 }
 
@@ -101,6 +102,7 @@ fn table_cell_edits_remain_content_in_code_mode() {
         regions: HashMap::from([("one".into(), "new #[literal]".into())]),
         comments: vec![],
         formats: HashMap::new(),
+        stories: vec![],
     };
     let report = dry_run(&state, &edits, &current("before [old] after")).unwrap();
     assert_eq!(report.files[0].contents, r#"before [#("new #[literal]")] after"#);
@@ -158,6 +160,7 @@ fn formatting_changes_are_explicit_conflicts_instead_of_silent_loss() {
                 style: WordTextStyle { bold: true, ..WordTextStyle::default() },
             }],
         )]),
+        stories: vec![],
     };
     let report = dry_run(&state, &edits, &current("before old after")).unwrap();
     assert_eq!(
@@ -165,6 +168,26 @@ fn formatting_changes_are_explicit_conflicts_instead_of_silent_loss() {
         RegionStatus::Conflict(ConflictKind::FormattingChange)
     );
     assert!(!report.can_apply());
+}
+
+#[test]
+fn story_insertions_and_reorders_are_explicit_structural_conflicts() {
+    let mut state = state("old", "old");
+    let baseline = docx(&[("typst:v1:export:one", "<w:r><w:t>old</w:t></w:r>")]);
+    capture_format_baselines(&baseline, &mut state).unwrap();
+    assert_eq!(state.stories[0].paragraphs, 1);
+
+    let changed = zip_xml(
+        r#"<?xml version="1.0"?><w:document xmlns:w="urn:w"><w:body><w:p><w:r><w:t>Inserted paragraph</w:t></w:r></w:p><w:sdt><w:sdtPr><w:tag w:val="typst:v1:export:one"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>old</w:t></w:r></w:p></w:sdtContent></w:sdt></w:body></w:document>"#,
+    );
+    let edits = parse_docx(&changed, &state).unwrap();
+    let report = dry_run(&state, &edits, &current("before old after")).unwrap();
+    assert_eq!(
+        report.regions[0].status,
+        RegionStatus::Conflict(ConflictKind::StructuralChange)
+    );
+    assert_eq!(report.baseline_stories[0].paragraphs, 1);
+    assert_eq!(report.word_stories[0].paragraphs, 2);
 }
 
 #[test]
@@ -188,6 +211,7 @@ fn unrelated_local_edit_remaps_exact_source_island() {
         regions: HashMap::from([("one".into(), "new".into())]),
         comments: vec![],
         formats: HashMap::new(),
+        stories: vec![],
     };
     let report =
         dry_run(&state, &edits, &current("new prelude before old after")).unwrap();
@@ -201,6 +225,7 @@ fn overlapping_local_edit_conflicts() {
         regions: HashMap::from([("one".into(), "new".into())]),
         comments: vec![],
         formats: HashMap::new(),
+        stories: vec![],
     };
     let report =
         dry_run(&state, &edits, &current("before locally-changed after")).unwrap();
@@ -218,6 +243,7 @@ fn repeated_relocated_islands_conflict() {
         regions: HashMap::from([("one".into(), "new".into())]),
         comments: vec![],
         formats: HashMap::new(),
+        stories: vec![],
     };
     let report = dry_run(&state, &edits, &current("shift old and old")).unwrap();
     assert_eq!(
@@ -316,6 +342,7 @@ fn apply_is_explicit_atomic_and_detects_stale_sources() {
         regions: HashMap::from([("one".into(), "new".into())]),
         comments: vec![],
         formats: HashMap::new(),
+        stories: vec![],
     };
     let report = dry_run(&state, &edits, &current("before old after")).unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -344,6 +371,8 @@ fn multi_file_plan_applies_transactionally_and_preflights_every_source() {
             status: RegionStatus::Ready,
         }],
         comments: vec![],
+        baseline_stories: vec![],
+        word_stories: vec![],
         files: vec![
             PlannedFile {
                 path: "a.typ".into(),
@@ -388,6 +417,7 @@ fn symbolic_link_source_is_rejected() {
         regions: HashMap::from([("one".into(), "new".into())]),
         comments: vec![],
         formats: HashMap::new(),
+        stories: vec![],
     };
     let report = dry_run(&state, &edits, &current("before old after")).unwrap();
     assert!(matches!(apply_atomic(temp.path(), &report), Err(Error::InvalidState(_))));
