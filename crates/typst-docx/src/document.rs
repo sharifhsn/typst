@@ -200,9 +200,9 @@ fn docx_document_impl(
     let LoweredDocx {
         mut body,
         sect,
-        header_parts,
-        footer_parts,
-        footnotes,
+        mut header_parts,
+        mut footer_parts,
+        mut footnotes,
         numbering,
         media,
         doc_rels,
@@ -516,6 +516,16 @@ fn docx_document_impl(
         || body.iter().any(|block| {
             matches!(block, Block::SectionBreak(sect) if section_uses_even_furniture(sect))
         });
+
+    // Repeated content (subslides, running heads) re-emits the same bookmark;
+    // keep only each part's first start/end pair so the finalized IR satisfies
+    // the uniqueness invariants (see `invariants::dedupe_repeated_bookmarks`).
+    crate::invariants::dedupe_repeated_bookmarks(
+        &mut body,
+        &mut header_parts,
+        &mut footer_parts,
+        &mut footnotes,
+    );
 
     record_dynamic_field_inventory(
         &mut fidelity_report,

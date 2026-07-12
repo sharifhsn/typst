@@ -11,8 +11,112 @@ use std::fmt::{self, Display, Formatter};
 use ecow::EcoString;
 
 use crate::dom::{
-    Block, DocxDocument, FieldCacheStatus, FieldDisplay, FieldMode, Para, ParaChild, Run,
+    Block, DocxDocument, FieldCacheStatus, FieldDisplay, FieldMode, Footnote,
+    HdrFtrPart, Para, ParaChild, Run,
 };
+
+/// Strips redundant re-emissions of the same bookmark within one part.
+///
+/// Repeated content legitimately lowers the same `Location` more than once —
+/// a slide deck re-shows a labeled element on every subslide, a labeled
+/// element in a running head repeats per header part — and the idempotent
+/// per-`Location` allocation then emits the same bookmark id/name at each
+/// occurrence. Consumers resolve a bookmark name to its FIRST occurrence, so
+/// only the first start/end pair carries meaning; later repeats are dropped
+/// here so the serialized parts satisfy [`validate`]'s uniqueness invariants
+/// instead of shipping spec-invalid duplicates for Word to repair. The walk
+/// and per-part scoping mirror [`validate`] exactly.
+pub(crate) fn dedupe_repeated_bookmarks(
+    body: &mut [Block],
+    headers: &mut [HdrFtrPart],
+    footers: &mut [HdrFtrPart],
+    footnotes: &mut [Footnote],
+) {
+    let mut scope = BookmarkScope::default();
+    dedupe_blocks(body, &mut scope);
+    for part in headers.iter_mut().chain(footers.iter_mut()) {
+        let mut scope = BookmarkScope::default();
+        dedupe_blocks(&mut part.blocks, &mut scope);
+    }
+    // All footnotes serialize into one part (word/footnotes.xml).
+    let mut scope = BookmarkScope::default();
+    for footnote in footnotes {
+        dedupe_blocks(&mut footnote.blocks, &mut scope);
+    }
+}
+
+#[derive(Default)]
+struct BookmarkScope {
+    starts: BTreeSet<u32>,
+    ends: BTreeSet<u32>,
+}
+
+fn dedupe_blocks(blocks: &mut [Block], scope: &mut BookmarkScope) {
+    for block in blocks.iter_mut() {
+        match block {
+            Block::Para(para) => dedupe_para(para, scope),
+            Block::Table(table) => {
+                for row in &mut table.rows {
+                    for cell in &mut row.cells {
+                        dedupe_blocks(&mut cell.blocks, scope);
+                    }
+                }
+            }
+            Block::Toc(toc) => {
+                for entry in &mut toc.entries {
+                    dedupe_para(entry, scope);
+                }
+                for run in &mut toc.fallback {
+                    dedupe_run(run, scope);
+                }
+            }
+            Block::FlowSpace { .. } | Block::SectionBreak(_) | Block::Tag(_) => {}
+        }
+    }
+}
+
+fn dedupe_para(para: &mut Para, scope: &mut BookmarkScope) {
+    para.content.retain_mut(|child| match child {
+        ParaChild::BookmarkStart { id, .. } => scope.starts.insert(*id),
+        ParaChild::BookmarkEnd { id } => scope.ends.insert(*id),
+        ParaChild::Run(run) => {
+            dedupe_run(run, scope);
+            true
+        }
+        ParaChild::Hyperlink { runs, .. } => {
+            for run in runs {
+                dedupe_run(run, scope);
+            }
+            true
+        }
+        ParaChild::OmmlPara(_) | ParaChild::Tag(_) => true,
+    });
+}
+
+fn dedupe_run(run: &mut Run, scope: &mut BookmarkScope) {
+    match run {
+        Run::Drawing(drawing) => {
+            if let Some(text_box) =
+                drawing.shape.as_mut().and_then(|shape| shape.txbx.as_mut())
+            {
+                dedupe_blocks(&mut text_box.blocks, scope);
+            }
+            if let Some(group) = drawing.group.as_mut() {
+                for child in &mut group.children {
+                    if let Some(text_box) = child.shape.txbx.as_mut() {
+                        dedupe_blocks(&mut text_box.blocks, scope);
+                    }
+                }
+            }
+        }
+        Run::Field(field) => {
+            for result in &mut field.result {
+                dedupe_run(result, scope);
+            }
+        }
+        _ => {}
+    }
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum DocumentInvariantError {
