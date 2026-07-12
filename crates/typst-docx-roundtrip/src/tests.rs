@@ -77,8 +77,12 @@ fn validates_every_supported_region_kind_and_rejects_unknown_ones() {
 
 #[test]
 fn table_cell_edits_remain_content_in_code_mode() {
-    let mut state = state("[old]", "old");
+    let mut state = state("old", "old");
     state.regions[0].kind = RegionKind("table_cell".into());
+    state.files[0].text = "before [old] after".into();
+    state.files[0].sha256 = sha256(state.files[0].text.as_bytes());
+    state.regions[0].baseline_start += 1;
+    state.regions[0].baseline_end += 1;
     let edits = WordEdits {
         regions: HashMap::from([("one".into(), "new #[literal]".into())]),
     };

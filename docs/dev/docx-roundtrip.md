@@ -66,7 +66,13 @@ The current slice enrolls plain, uniquely realized, source-backed:
 - headings, preserving the heading marker;
 - ordinary paragraph text;
 - bullet and numbered list-item text, preserving the list marker and numbering;
-- single-paragraph table-cell text, preserving the table structure and cell formatting.
+- each source-backed paragraph in single- or multi-paragraph table cells,
+  preserving the table structure and cell formatting.
+
+Literal text may be nested in Typst strong, emphasis, underline, strike,
+highlight, small-caps, superscript, or subscript wrappers. The importer replaces
+only the innermost literal source island, so those existing Typst styles survive
+every Word text-edit cycle.
 
 Each edit replaces only the exact authored source island. Imported heading,
 paragraph, and list text uses an identifier-free literal markup expression;
@@ -77,8 +83,8 @@ splitting and the final view of tracked insertions/deletions are accepted.
 
 It intentionally rejects or leaves unenrolled:
 
-- styled or computed text, multi-paragraph cells, list restructuring, and table
-  row/column/cell restructuring;
+- computed text, mixed literal/computed paragraphs, list restructuring, and
+  table row/column/cell restructuring;
 - generated, repeated, package, bibliography, reference, equation, and raster content;
 - paragraph insertion/deletion and manual line breaks inside a region;
 - missing, duplicated, copied, or foreign content controls;

@@ -464,10 +464,22 @@ fn cell_blocks(
         ctx.blocks(&content, styles)?
     };
 
-    if blocks
-        .iter()
-        .all(|block| matches!(block, Block::Para(_) | Block::Tag(_)))
-        && blocks.iter().filter(|block| matches!(block, Block::Para(_))).count() == 1
+    let paragraph_count =
+        blocks.iter().filter(|block| matches!(block, Block::Para(_))).count();
+    for block in &mut blocks {
+        let Block::Para(para) = block else { continue };
+        if let Some(origin) = para.props.review_origin.as_mut() {
+            origin.kind = ReviewCandidateKind::TableCell;
+        }
+    }
+    let has_review_origin = blocks.iter().any(
+        |block| matches!(block, Block::Para(para) if para.props.review_origin.is_some()),
+    );
+    if paragraph_count == 1
+        && !has_review_origin
+        && blocks
+            .iter()
+            .all(|block| matches!(block, Block::Para(_) | Block::Tag(_)))
     {
         let origin = ctx.review_origin(
             crate::convert::review_span(&content),

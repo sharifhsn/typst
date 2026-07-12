@@ -33,7 +33,7 @@ fn test_docx_review_two_cycles() {
     project.write("chapter.typ", "Imported paragraph.");
     let main = project.write(
         "main.typ",
-        "= Original heading\n\nOriginal paragraph.\n\n- Original item\n\n#table(columns: 1, [Original cell])\n\n#include \"chapter.typ\"",
+        "= _Original heading_\n\n#highlight[Original paragraph.]\n\n- *Original item*\n\n#table(columns: 1, [#underline[Original cell]])\n\n#table(columns: 1, [\nFirst cell paragraph.\n\nSecond cell paragraph.\n])\n\n#include \"chapter.typ\"",
     );
 
     exec()
@@ -42,7 +42,7 @@ fn test_docx_review_two_cycles() {
         .arg(project.resolve("collision.docx"))
         .arg(format!("--docx-review-state={}", main.display()))
         .must_fail();
-    project.read("main.typ").must_contain("= Original heading");
+    project.read("main.typ").must_contain("= _Original heading_");
 
     let first = project.resolve("first.docx");
     exec()
@@ -63,6 +63,8 @@ fn test_docx_review_two_cycles() {
             ("Original paragraph.", "First paragraph edit."),
             ("Original item", "First item edit"),
             ("Original cell", "First cell edit"),
+            ("First cell paragraph.", "First multi-cell edit."),
+            ("Second cell paragraph.", "Second multi-cell edit."),
             ("Imported paragraph.", "First imported edit."),
         ],
     );
@@ -77,7 +79,7 @@ fn test_docx_review_two_cycles() {
         .arg(&main)
         .arg("--apply")
         .must_fail();
-    project.read("main.typ").must_contain("= Original heading");
+    project.read("main.typ").must_contain("= _Original heading_");
     exec()
         .arg("review")
         .arg(&first_edited)
@@ -89,10 +91,12 @@ fn test_docx_review_two_cycles() {
         .must_succeed();
     project
         .read("main.typ")
-        .must_contain("= #(\"First heading edit\")")
-        .must_contain("#(\"First paragraph edit.\")")
-        .must_contain("- #(\"First item edit\")")
-        .must_contain("[#(\"First cell edit\")]");
+        .must_contain("= _#(\"First heading edit\")_")
+        .must_contain("#highlight[#(\"First paragraph edit.\")]")
+        .must_contain("- *#(\"First item edit\")*")
+        .must_contain("[#underline[#(\"First cell edit\")]]")
+        .must_contain("#(\"First multi-cell edit.\")")
+        .must_contain("#(\"Second multi-cell edit.\")");
     project
         .read("chapter.typ")
         .must_contain("#(\"First imported edit.\")");
@@ -117,6 +121,8 @@ fn test_docx_review_two_cycles() {
             ("First paragraph edit.", "Second paragraph edit."),
             ("First item edit", "Second item edit"),
             ("First cell edit", "Second cell edit"),
+            ("First multi-cell edit.", "Third multi-cell edit."),
+            ("Second multi-cell edit.", "Fourth multi-cell edit."),
             ("First imported edit.", "Second imported edit."),
         ],
     );
@@ -132,10 +138,12 @@ fn test_docx_review_two_cycles() {
     review.stdout.must_contain("\"status\": \"ready\"");
     project
         .read("main.typ")
-        .must_contain("= #(\"Second heading edit\")")
-        .must_contain("#(\"Second paragraph edit.\")")
-        .must_contain("- #(\"Second item edit\")")
-        .must_contain("[#(\"Second cell edit\")]");
+        .must_contain("= _#(\"Second heading edit\")_")
+        .must_contain("#highlight[#(\"Second paragraph edit.\")]")
+        .must_contain("- *#(\"Second item edit\")*")
+        .must_contain("[#underline[#(\"Second cell edit\")]]")
+        .must_contain("#(\"Third multi-cell edit.\")")
+        .must_contain("#(\"Fourth multi-cell edit.\")");
     project
         .read("chapter.typ")
         .must_contain("#(\"Second imported edit.\")");

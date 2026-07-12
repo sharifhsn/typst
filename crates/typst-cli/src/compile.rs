@@ -650,6 +650,7 @@ fn build_review_state(
                 format!("[{}]", candidate.baseline),
                 format!("[{canonical}]"),
                 format!("[{code_string}]"),
+                canonical.to_owned(),
                 code_string.to_owned(),
             ];
             let line = &text[line_start..line_end];
@@ -664,8 +665,8 @@ fn build_review_state(
                     range.start <= span_range.start && range.end >= span_range.end
                 })
                 .collect::<Vec<_>>();
-            if let [range] = matches.as_slice() {
-                span_range = range.clone();
+            if let Some(range) = matches.into_iter().max_by_key(|range| range.len()) {
+                span_range = range;
             }
         }
         let Some(span_text) = source.text().get(span_range.clone()) else { continue };
@@ -764,8 +765,40 @@ fn plain_heading_source_range(
     }
     let offset = marker_len + 1;
     let body = source.get(offset..)?;
-    (body == baseline || body == encode_typst_text(baseline))
-        .then_some(offset..source.len())
+    let range = styled_literal_source_range(body, baseline)?;
+    Some(offset + range.start..offset + range.end)
+}
+
+fn styled_literal_source_range(
+    source: &str,
+    baseline: &str,
+) -> Option<std::ops::Range<usize>> {
+    let canonical = encode_typst_text(baseline);
+    let mut start = 0;
+    let mut end = source.len();
+    for _ in 0..16 {
+        let body = source.get(start..end)?;
+        if body == baseline || body == canonical {
+            return Some(start..end);
+        }
+        let wrapper = [
+            ("*", "*"),
+            ("_", "_"),
+            ("#strong[", "]"),
+            ("#emph[", "]"),
+            ("#underline[", "]"),
+            ("#strike[", "]"),
+            ("#highlight[", "]"),
+            ("#smallcaps[", "]"),
+            ("#super[", "]"),
+            ("#sub[", "]"),
+        ]
+        .into_iter()
+        .find(|(prefix, suffix)| body.starts_with(prefix) && body.ends_with(suffix))?;
+        start += wrapper.0.len();
+        end -= wrapper.1.len();
+    }
+    None
 }
 
 fn review_source_range(
@@ -775,35 +808,35 @@ fn review_source_range(
 ) -> Option<(&'static str, std::ops::Range<usize>)> {
     use typst_docx::ReviewCandidateKind;
 
-    let canonical = encode_typst_text(baseline);
-    let exact = || (source == baseline || source == canonical).then_some(0..source.len());
     match kind {
         ReviewCandidateKind::Heading => {
             plain_heading_source_range(source, baseline).map(|range| ("heading", range))
         }
-        ReviewCandidateKind::Paragraph => exact().map(|range| ("paragraph", range)),
+        ReviewCandidateKind::Paragraph => styled_literal_source_range(source, baseline)
+            .map(|range| ("paragraph", range)),
         ReviewCandidateKind::ListItem => {
-            if let Some(range) = exact() {
+            if let Some(range) = styled_literal_source_range(source, baseline) {
                 return Some(("list_item", range));
             }
             for prefix in ["- ", "+ "] {
                 if let Some(body) = source.strip_prefix(prefix)
-                    && (body == baseline || body == canonical)
+                    && let Some(range) = styled_literal_source_range(body, baseline)
                 {
-                    return Some(("list_item", prefix.len()..source.len()));
+                    return Some((
+                        "list_item",
+                        prefix.len() + range.start..prefix.len() + range.end,
+                    ));
                 }
             }
             None
         }
         ReviewCandidateKind::TableCell => {
-            let code_string = canonical.strip_prefix("#(")?.strip_suffix(')')?;
-            if source == baseline || source == canonical || source == code_string {
-                let range = 0..source.len();
+            if let Some(range) = styled_literal_source_range(source, baseline) {
                 return Some(("table_cell", range));
             }
             let body = source.strip_prefix('[')?.strip_suffix(']')?;
-            (body == baseline || body == canonical || body == code_string)
-                .then_some(("table_cell", 0..source.len()))
+            let range = styled_literal_source_range(body, baseline)?;
+            Some(("table_cell", 1 + range.start..1 + range.end))
         }
         _ => None,
     }
@@ -826,7 +859,7 @@ mod review_source_tests {
         );
         assert_eq!(plain_heading_source_range("= #[Alpha]", "Alpha"), None);
         assert_eq!(plain_heading_source_range("= \\#", "#"), None);
-        assert_eq!(plain_heading_source_range("= *Alpha*", "Alpha"), None);
+        assert_eq!(plain_heading_source_range("= *Alpha*", "Alpha"), Some(3..8));
         assert_eq!(plain_heading_source_range("= Alpha <label>", "Alpha"), None);
     }
 
@@ -842,15 +875,39 @@ mod review_source_tests {
         );
         assert_eq!(
             review_source_range(ReviewCandidateKind::TableCell, "[Alpha]", "Alpha"),
-            Some(("table_cell", 0..7))
+            Some(("table_cell", 1..6))
         );
         assert_eq!(
-            review_source_range(ReviewCandidateKind::Paragraph, "*Alpha*", "Alpha"),
+            review_source_range(ReviewCandidateKind::Paragraph, "*_Alpha_*", "Alpha"),
+            Some(("paragraph", 2..7))
+        );
+        assert_eq!(
+            review_source_range(
+                ReviewCandidateKind::ListItem,
+                "- #underline[Alpha]",
+                "Alpha"
+            ),
+            Some(("list_item", 13..18))
+        );
+        assert_eq!(
+            review_source_range(
+                ReviewCandidateKind::TableCell,
+                "[#highlight[Alpha]]",
+                "Alpha"
+            ),
+            Some(("table_cell", 12..17))
+        );
+        assert_eq!(
+            review_source_range(
+                ReviewCandidateKind::Paragraph,
+                "#text(red)[Alpha]",
+                "Alpha"
+            ),
             None
         );
         assert_eq!(
             review_source_range(ReviewCandidateKind::TableCell, "[*Alpha*]", "Alpha"),
-            None
+            Some(("table_cell", 2..7))
         );
     }
 }
