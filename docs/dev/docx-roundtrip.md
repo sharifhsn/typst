@@ -53,9 +53,11 @@ escapes Word text as literal Typst markup. Local edits elsewhere in a file are
 allowed when the original source island still has one unambiguous match. An
 overlapping or ambiguous local edit becomes a conflict.
 
-The importer applies at most one changed source file per invocation so replacement
-remains atomic. A review spanning edits in multiple Typst files can be inspected
-but cannot yet be applied automatically.
+Source-backed regions from project imports and includes are enrolled alongside
+the main file. A conflict-free review can update multiple Typst files in one
+transaction: every source is validated and prepared first, original files are
+hard-linked to same-directory rollback backups, and any replacement failure
+restores already-committed files before returning an error.
 
 ## Current supported contract
 

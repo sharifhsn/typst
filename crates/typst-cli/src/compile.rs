@@ -609,9 +609,6 @@ fn build_review_state(
     let mut enrolled = Vec::new();
     for candidate in document.review_candidates() {
         let Some(id) = candidate.span.id() else { continue };
-        if id != main_id {
-            continue;
-        }
         if !matches!(id.root(), typst::syntax::VirtualRoot::Project) {
             continue;
         }

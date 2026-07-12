@@ -244,7 +244,7 @@ fn apply_is_explicit_atomic_and_detects_stale_sources() {
 }
 
 #[test]
-fn multi_file_plan_is_not_claimed_as_atomically_applicable() {
+fn multi_file_plan_applies_transactionally_and_preflights_every_source() {
     let report = MergeReport {
         regions: vec![RegionReport {
             id: "one".into(),
@@ -267,12 +267,22 @@ fn multi_file_plan_is_not_claimed_as_atomically_applicable() {
             },
         ],
     };
-    assert!(!report.can_apply());
+    assert!(report.can_apply());
     let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("a.typ"), "a").unwrap();
+    fs::write(temp.path().join("b.typ"), "a").unwrap();
+    apply_atomic(temp.path(), &report).unwrap();
+    assert_eq!(fs::read_to_string(temp.path().join("a.typ")).unwrap(), "b");
+    assert_eq!(fs::read_to_string(temp.path().join("b.typ")).unwrap(), "b");
+
+    fs::write(temp.path().join("a.typ"), "a").unwrap();
+    fs::write(temp.path().join("b.typ"), "stale").unwrap();
     assert!(matches!(
         apply_atomic(temp.path(), &report),
-        Err(Error::MultiFileApplyUnsupported)
+        Err(Error::SourceChanged(path)) if path == "b.typ"
     ));
+    assert_eq!(fs::read_to_string(temp.path().join("a.typ")).unwrap(), "a");
+    assert_eq!(fs::read_to_string(temp.path().join("b.typ")).unwrap(), "stale");
 }
 
 #[cfg(unix)]
