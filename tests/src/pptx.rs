@@ -1109,6 +1109,38 @@ fn rounded_cover_image_crops_the_overflow_with_src_rect() {
 }
 
 #[test]
+fn svg_cover_crop_preserves_native_source_and_src_rect() {
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40"><rect width="10" height="40" fill="red"/><rect x="10" width="60" height="40" fill="blue"/><rect x="70" width="10" height="40" fill="green"/></svg>"##;
+    let src = format!(
+        "#set page(width: 180pt, height: 180pt, margin: 0pt)\n\
+         #box(width: 144pt, height: 144pt, clip: true,\n\
+         image({}, width: 100%, height: 100%, fit: \"cover\"))",
+        bytes_literal(SVG),
+    );
+
+    let p = binary_parts(&src);
+    let slide = std::str::from_utf8(&p["ppt/slides/slide1.xml"]).unwrap();
+    assert!(
+        slide.contains("<a:srcRect l=\"25000\" t=\"0\" r=\"25000\" b=\"0\"/>"),
+        "2:1 SVG cover-fitted into a square should keep a native center crop: {slide}"
+    );
+    assert!(slide.contains("<asvg:svgBlip"), "picture should retain native SVG media");
+
+    let svg_parts: Vec<_> = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("ppt/media/") && name.ends_with(".svg"))
+        .collect();
+    let png_parts: Vec<_> = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("ppt/media/") && name.ends_with(".png"))
+        .collect();
+    assert_eq!(svg_parts.len(), 1, "one native SVG source");
+    assert_eq!(svg_parts[0].1.as_slice(), SVG, "SVG bytes stay original and editable");
+    assert_eq!(png_parts.len(), 1, "one full-canvas compatibility fallback");
+    assert_all_wellformed(&text_parts_from_binary(&p));
+}
+
+#[test]
 fn out_of_range_page_link_is_dropped() {
     // A jump to a page that does not exist must not emit a slide relationship
     // (PowerPoint treats a dangling slide target as a corrupt file).

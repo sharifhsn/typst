@@ -61,9 +61,40 @@ pub(crate) fn embed_original_image(
     ctx: &mut SlideCtx,
     image: &Image,
     size: Size,
-) -> Option<(MediaId, Point, Size)> {
-    let embeddable = media::embeddable_image_bytes(image)?;
-    Some((ctx.add_media(embeddable.bytes, embeddable.ext), Point::zero(), size))
+) -> Option<EmbeddedImage> {
+    if let Some(embeddable) = media::embeddable_image_bytes(image) {
+        return Some(EmbeddedImage {
+            media: ctx.add_media(embeddable.bytes, embeddable.ext),
+            svg_media: None,
+            offset: Point::zero(),
+            size,
+        });
+    }
+
+    // Preserve an SVG as the editable/native source behind `a:srcRect`, with
+    // a full-canvas PNG fallback for consumers without SVG support. Cropping
+    // the fallback to ink here would change its coordinate system and make the
+    // shared source rectangle incorrect.
+    if let ImageKind::Svg(svg) = image.kind() {
+        let svg_media = ctx.add_media(svg.data().as_slice(), "svg");
+        let mut frame = Frame::soft(size);
+        frame.push(
+            Point::zero(),
+            FrameItem::Image(image.clone(), size, typst_syntax::Span::detached()),
+        );
+        let raster = render::render_frame_to_png(
+            frame,
+            RasterOptions { pixel_per_pt: 2.0, crop_to_ink: false },
+        )?;
+        return Some(EmbeddedImage {
+            media: ctx.add_media(&raster.png, "png"),
+            svg_media: Some(svg_media),
+            offset: Point::zero(),
+            size,
+        });
+    }
+
+    None
 }
 
 /// Rasterize an already laid-out frame to a cropped PNG media part.

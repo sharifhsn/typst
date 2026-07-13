@@ -711,18 +711,17 @@ impl<'a, 'b> Walker<'a, 'b> {
         // Embed the original bytes and place the picture at the frame's bounds
         // (in outer coordinates); the geom rounds it and the srcRect crops the
         // cover overflow.
-        let Some((media, off, _sz)) =
-            crate::image::embed_original_image(self.ctx, image, size)
+        let Some(embedded) = crate::image::embed_original_image(self.ctx, image, size)
         else {
             return false;
         };
-        if !point_is_zero(off) {
+        if !point_is_zero(embedded.offset) {
             return false;
         }
         let pic_pos = Point::zero().transform(group_transform);
         self.push_pic_with_geom(
             order,
-            (media, None),
+            (embedded.media, embedded.svg_media),
             pic_pos,
             frame.size(),
             image.alt().map(Into::into),

@@ -99,6 +99,10 @@ pub(crate) fn clip_to_pic_geom(clip: &Curve, size: Size) -> Option<PicGeom> {
         return Some(PicGeom::Ellipse);
     }
 
+    if *clip == Curve::rect(size) {
+        return Some(PicGeom::Rect);
+    }
+
     let radius = dml::rounded_rect_radius(clip, size)?;
     Some(PicGeom::RoundRect { adj_100k: dml::round_rect_adj(radius, size) })
 }
