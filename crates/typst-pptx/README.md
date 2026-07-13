@@ -79,8 +79,6 @@ slide stays native and editable.
 - **Native tables are conservative and incomplete.** Transformed or partially
   captured tables can still require a whole-table picture fallback; cell-level
   fills, strokes, gutters, math, and inset geometry need broader coverage.
-- **Rotated live text** (`#rotate(90deg)[…]`) may be offset from Typst; the text
-  stays editable but its box position is approximate.
 - **Hyperlinks on a shape or image** (rather than on text) are dropped; the shape
   still renders.
 - **Mixed page sizes** cannot be represented directly because PowerPoint has one

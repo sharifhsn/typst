@@ -91,9 +91,12 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   crop or leave empty space.
 - Table capture does not carry the complete resolved fill, stroke, inset, alignment,
   gutter, or cell-math contract.
-- Live text regrouping lacks a complete font, language, shaping, and embedding policy;
-  consumer font substitution and text-box metrics can reflow text.
-- Rotated live text is approximate, and shape/image hyperlinks are dropped.
+- Live text regrouping still lacks a complete language and shaping policy. Licensed
+  fonts are embedded when their OpenType permissions allow it, but consumer text-box
+  metrics can still reflow text.
+- Shape/image hyperlinks are dropped. Rotated live text now retains editable
+  DrawingML rotation and uses rotation-neutral bounds, validated at 90, -90, and 45
+  degrees in LibreOffice; broader angle/font/consumer coverage remains a release gate.
 - Math fallback quality varies by consumer, especially in LibreOffice and older
   Office versions.
 - Page filtering does not remap every slide-jump link.

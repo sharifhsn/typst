@@ -1525,6 +1525,57 @@ fn baseline_position_uses_measured_box_top_rule() {
     assert_all_wellformed(&p);
 }
 
+#[test]
+fn rotated_live_text_uses_rotation_neutral_bounds() {
+    let p = parts(
+        r#"#set page(width: 240pt, height: 160pt, margin: 10pt)
+#rotate(90deg)[Rotated *live* text]"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let (x, y, cx, cy, rot) = text_box_transform(slide, "Rotated");
+    assert_eq!(rot, 90 * 60_000, "keeps the editable DrawingML rotation");
+    assert!(x >= 0 && y >= 0, "rotated text box must stay on-slide: ({x}, {y})");
+    assert!(cx > cy, "the unrotated text box retains horizontal text extents");
+    assert_eq!(
+        text_shape_count(slide),
+        1,
+        "styled runs on one rotated line stay in one editable text box"
+    );
+    assert_all_wellformed(&p);
+}
+
+fn text_box_transform(slide: &str, needle: &str) -> (i64, i64, i64, i64, i32) {
+    let doc = roxmltree::Document::parse(slide).unwrap();
+    for shape in doc.descendants().filter(|node| node.tag_name().name() == "sp") {
+        let has_text = shape.descendants().any(|node| {
+            node.tag_name().name() == "t"
+                && node.text().is_some_and(|text| text.contains(needle))
+        });
+        if has_text {
+            let xfrm = shape
+                .descendants()
+                .find(|node| node.tag_name().name() == "xfrm")
+                .expect("text box should have a:xfrm");
+            let off = xfrm
+                .children()
+                .find(|node| node.tag_name().name() == "off")
+                .expect("text box should have a:xfrm/a:off");
+            let ext = xfrm
+                .children()
+                .find(|node| node.tag_name().name() == "ext")
+                .expect("text box should have a:xfrm/a:ext");
+            return (
+                off.attribute("x").unwrap().parse().unwrap(),
+                off.attribute("y").unwrap().parse().unwrap(),
+                ext.attribute("cx").unwrap().parse().unwrap(),
+                ext.attribute("cy").unwrap().parse().unwrap(),
+                xfrm.attribute("rot").unwrap_or("0").parse().unwrap(),
+            );
+        }
+    }
+    panic!("missing text box for {needle}");
+}
+
 fn text_box_y(slide: &str, needle: &str) -> i64 {
     let doc = roxmltree::Document::parse(slide).unwrap();
     for shape in doc.descendants().filter(|node| node.tag_name().name() == "sp") {

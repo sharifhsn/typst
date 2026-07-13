@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use ecow::EcoString;
-use typst_library::layout::{Abs, Point};
+use typst_library::layout::{Abs, Angle, Point};
 use typst_library::text::{FontStyle, TextItem};
 use typst_library::visualize::Paint;
 
@@ -455,15 +455,18 @@ fn build_flow_box(group: &[usize], lines: &[LineSegment]) -> ClusteredText {
     let max_sz_100pt = selected.iter().map(|line| line.max_sz_100pt).max().unwrap_or(0);
     let order = selected.iter().map(|line| line.order).min().unwrap_or(0);
 
+    let width = (right - left).max(Abs::pt(0.1));
+    let height = (bottom - top).max(Abs::pt(0.1));
+    let (x, y) = rotated_box_position(left, top, width, height, selected[0].rot_60k);
     ClusteredText {
         order,
         max_sz_100pt,
         title_eligible: true,
         shape: SlideShape::TextBox(TextBox {
-            x_emu: emu(left),
-            y_emu: emu(top),
-            w_emu: extent_emu((right - left).max(Abs::pt(0.1))),
-            h_emu: extent_emu((bottom - top).max(Abs::pt(0.1))),
+            x_emu: emu(x),
+            y_emu: emu(y),
+            w_emu: extent_emu(width),
+            h_emu: extent_emu(height),
             rot_60k: selected[0].rot_60k,
             wrap: TextWrap::Square,
             columns: None,
@@ -525,15 +528,18 @@ fn build_bullet_box(group: &[usize], lines: &[LineSegment]) -> ClusteredText {
     let max_sz_100pt = selected.iter().map(|line| line.max_sz_100pt).max().unwrap_or(0);
     let order = selected.iter().map(|line| line.order).min().unwrap_or(0);
 
+    let width = (right - left).max(Abs::pt(0.1));
+    let height = (bottom - top).max(Abs::pt(0.1));
+    let (x, y) = rotated_box_position(left, top, width, height, selected[0].rot_60k);
     ClusteredText {
         order,
         max_sz_100pt,
         title_eligible: false,
         shape: SlideShape::TextBox(TextBox {
-            x_emu: emu(left),
-            y_emu: emu(top),
-            w_emu: extent_emu((right - left).max(Abs::pt(0.1))),
-            h_emu: extent_emu((bottom - top).max(Abs::pt(0.1))),
+            x_emu: emu(x),
+            y_emu: emu(y),
+            w_emu: extent_emu(width),
+            h_emu: extent_emu(height),
             rot_60k: selected[0].rot_60k,
             wrap,
             columns: None,
@@ -544,15 +550,18 @@ fn build_bullet_box(group: &[usize], lines: &[LineSegment]) -> ClusteredText {
 }
 
 fn build_single_line_box(line: &LineSegment) -> ClusteredText {
+    let width = ((line.right - line.left) * 1.02).max(Abs::pt(0.1));
+    let height = (line.bottom - line.top).max(Abs::pt(0.1));
+    let (x, y) = rotated_box_position(line.left, line.top, width, height, line.rot_60k);
     ClusteredText {
         order: line.order,
         max_sz_100pt: line.max_sz_100pt,
         title_eligible: line.bullet.is_none(),
         shape: SlideShape::TextBox(TextBox {
-            x_emu: emu(line.left),
-            y_emu: emu(line.top),
-            w_emu: extent_emu(((line.right - line.left) * 1.02).max(Abs::pt(0.1))),
-            h_emu: extent_emu((line.bottom - line.top).max(Abs::pt(0.1))),
+            x_emu: emu(x),
+            y_emu: emu(y),
+            w_emu: extent_emu(width),
+            h_emu: extent_emu(height),
             rot_60k: line.rot_60k,
             wrap: TextWrap::None,
             columns: None,
@@ -1184,8 +1193,8 @@ fn item_order(source: &FlowItem<'_>) -> usize {
 
 fn item_baseline(source: &FlowItem<'_>) -> Point {
     match source {
-        FlowItem::Text(source) => source.baseline,
-        FlowItem::Math(math) => math.baseline,
+        FlowItem::Text(source) => neutral_text_baseline(source),
+        FlowItem::Math(math) => unrotate_point(math.baseline, math.rot_60k),
     }
 }
 
@@ -1198,32 +1207,34 @@ fn item_rot(source: &FlowItem<'_>) -> i32 {
 
 fn item_left_x(source: &FlowItem<'_>) -> Abs {
     match source {
-        FlowItem::Text(source) => source.baseline.x,
-        FlowItem::Math(math) => math.min.x,
+        FlowItem::Text(_) => item_baseline(source).x,
+        FlowItem::Math(math) => neutral_math_bounds(math).0.x,
     }
 }
 
 fn item_end_x(source: &FlowItem<'_>) -> Abs {
     match source {
         FlowItem::Text(source) => text_item_end_x(source),
-        FlowItem::Math(math) => math.max.x,
+        FlowItem::Math(math) => neutral_math_bounds(math).1.x,
     }
 }
 
 fn item_top(source: &FlowItem<'_>) -> Abs {
     match source {
-        FlowItem::Text(source) => box_top(source.baseline.y, scaled_size(source)),
-        FlowItem::Math(math) => math.min.y,
+        FlowItem::Text(source) => {
+            box_top(neutral_text_baseline(source).y, scaled_size(source))
+        }
+        FlowItem::Math(math) => neutral_math_bounds(math).0.y,
     }
 }
 
 fn item_bottom(source: &FlowItem<'_>) -> Abs {
     match source {
         FlowItem::Text(source) => {
-            source.baseline.y
+            neutral_text_baseline(source).y
                 + (-source.item.font.metrics().descender).at(scaled_size(source))
         }
-        FlowItem::Math(math) => math.max.y,
+        FlowItem::Math(math) => neutral_math_bounds(math).1.y,
     }
 }
 
@@ -1232,7 +1243,10 @@ fn item_descent(source: &FlowItem<'_>) -> Abs {
         FlowItem::Text(source) => {
             (-source.item.font.metrics().descender).at(scaled_size(source))
         }
-        FlowItem::Math(math) => (math.max.y - math.baseline.y).max(Abs::zero()),
+        FlowItem::Math(math) => {
+            let (_, max) = neutral_math_bounds(math);
+            (max.y - item_baseline(source).y).max(Abs::zero())
+        }
     }
 }
 
@@ -1275,12 +1289,16 @@ fn text_color(fill: &Paint) -> [u8; 4] {
     }
 }
 
-fn text_item_end_x(source: &TextSource<'_>) -> Abs {
-    source.baseline.x + scaled_width(source)
-}
-
 fn scaled_width(source: &TextSource<'_>) -> Abs {
     source.item.width() * source.scale
+}
+
+fn neutral_text_baseline(source: &TextSource<'_>) -> Point {
+    unrotate_point(source.baseline, source.rot_60k)
+}
+
+fn text_item_end_x(source: &TextSource<'_>) -> Abs {
+    neutral_text_baseline(source).x + scaled_width(source)
 }
 
 fn scaled_size(source: &TextSource<'_>) -> Abs {
@@ -1295,6 +1313,59 @@ pub(crate) fn box_top(baseline: Abs, max_size: Abs) -> Abs {
 /// Box height uses max size plus descender; position never uses ascent.
 pub(crate) fn box_height(max_size: Abs, descent: Abs) -> Abs {
     (max_size + descent).max(Abs::pt(0.1))
+}
+
+/// DrawingML rotates a shape about the center of its unrotated transform box,
+/// while Typst's frame walk gives us points after a rotation about the frame
+/// origin. Build text in rotation-neutral coordinates, then move the box so
+/// its center lands at the rotated neutral center. This keeps live rotated
+/// text on the same ink bounds instead of shifting it by half its width/height.
+fn rotated_box_position(
+    left: Abs,
+    top: Abs,
+    width: Abs,
+    height: Abs,
+    rot_60k: i32,
+) -> (Abs, Abs) {
+    if rot_60k == 0 {
+        return (left, top);
+    }
+    let half = Point::new(width / 2.0, height / 2.0);
+    let center = rotate_point(Point::new(left, top) + half, rot_60k);
+    (center.x - half.x, center.y - half.y)
+}
+
+fn unrotate_point(point: Point, rot_60k: i32) -> Point {
+    rotate_point(point, -rot_60k)
+}
+
+fn rotate_point(point: Point, rot_60k: i32) -> Point {
+    if rot_60k == 0 {
+        return point;
+    }
+    let angle = Angle::deg(rot_60k as f64 / 60_000.0);
+    let (sin, cos) = (angle.sin(), angle.cos());
+    Point::new(point.x * cos - point.y * sin, point.x * sin + point.y * cos)
+}
+
+fn neutral_math_bounds(math: &InlineMathSource) -> (Point, Point) {
+    if math.rot_60k == 0 {
+        return (math.min, math.max);
+    }
+    let points = [
+        math.min,
+        Point::new(math.max.x, math.min.y),
+        Point::new(math.min.x, math.max.y),
+        math.max,
+    ];
+    let mut min = Point::splat(Abs::inf());
+    let mut max = Point::splat(-Abs::inf());
+    for point in points {
+        let neutral = unrotate_point(point, math.rot_60k);
+        min = min.min(neutral);
+        max = max.max(neutral);
+    }
+    (min, max)
 }
 
 pub(crate) fn emu(abs: Abs) -> i64 {
