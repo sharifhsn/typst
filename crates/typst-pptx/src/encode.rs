@@ -281,7 +281,7 @@ fn math_fallback_run(math: &MathBox) -> TextRun {
     TextRun {
         text: math.fallback.clone(),
         family: EcoString::from("New Computer Modern Math"),
-        sz_100pt: 1800,
+        sz_100pt: math.fallback_sz_100pt,
         b: false,
         i: false,
         color: [0, 0, 0, 255],

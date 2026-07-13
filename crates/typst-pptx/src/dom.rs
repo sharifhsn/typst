@@ -78,6 +78,7 @@ pub struct MathBox {
     pub rot_60k: i32,
     pub omml: String,
     pub fallback: EcoString,
+    pub fallback_sz_100pt: i32,
 }
 
 /// A positioned editable PowerPoint table.

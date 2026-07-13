@@ -561,6 +561,7 @@ $ sum_(i=1)^n i = (n(n+1))/2 $"#,
 fn math_fallback_preserves_scripts_limits_and_fraction_semantics() {
     let p = parts(
         r#"#set page(width: 300pt, height: 140pt, margin: 12pt)
+#set text(size: 28pt)
 $ integral_0^1 x^2 dif x = 1/3 $"#,
     );
     let slide = &p["ppt/slides/slide1.xml"];
@@ -589,6 +590,19 @@ $ integral_0^1 x^2 dif x = 1/3 $"#,
     );
     assert!(fallback.contains('²'), "exponent should remain a superscript: {fallback}");
     assert!(fallback.contains("1/3"), "fraction bar should remain readable: {fallback}");
+    assert!(!fallback.contains("^("), "single limits should not gain parentheses");
+    let fallback_run = doc
+        .descendants()
+        .find(|node| {
+            node.tag_name().name() == "Fallback"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/markup-compatibility/2006")
+        })
+        .and_then(|node| {
+            node.descendants().find(|child| child.tag_name().name() == "rPr")
+        })
+        .expect("fallback run properties");
+    assert_eq!(fallback_run.attribute("sz"), Some("2800"));
     assert_all_wellformed(&p);
 }
 

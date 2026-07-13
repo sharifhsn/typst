@@ -57,6 +57,10 @@ conservative editable tables, eligible OMML math with a DrawingML fallback, note
 slide numbers, and inferred title/body placeholders. Unsupported visual regions can
 become positioned pictures while the rest of the slide remains editable.
 
+The math compatibility fallback uses the captured authored size and compact
+Unicode scripts/limits so non-OMML consumers remain readable and editable. It
+does not reproduce stacked fractions, radicals, or native limit placement.
+
 ### Pandoc
 
 The target emits typed Pandoc JSON for headings, paragraphs, inline formatting,

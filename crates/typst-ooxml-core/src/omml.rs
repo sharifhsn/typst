@@ -106,7 +106,11 @@ fn linearize_omml(node: Node<'_, '_>) -> String {
             let degree = child_text(node, "deg");
             let body = child_text(node, "e");
             if degree.trim().is_empty() {
-                format!("√({body})")
+                if readable_math_atom(&body) {
+                    format!("√{}", body.trim())
+                } else {
+                    format!("√({body})")
+                }
             } else {
                 format!("root_{}({body})", degree.trim())
             }
@@ -164,12 +168,29 @@ fn script_text(text: &str, superscript: bool) -> String {
         .chars()
         .map(|chr| script_char(chr, superscript))
         .collect::<Option<String>>();
-    converted.unwrap_or_else(|| {
-        if superscript { format!("^({trimmed})") } else { format!("_({trimmed})") }
+    converted.unwrap_or_else(|| match (superscript, trimmed.chars().count()) {
+        (true, 1) => format!("^{trimmed}"),
+        (false, 1) => format!("_{trimmed}"),
+        (true, _) => format!("^({trimmed})"),
+        (false, _) => format!("_({trimmed})"),
     })
 }
 
 fn script_char(chr: char, superscript: bool) -> Option<char> {
+    if superscript {
+        if "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿˣ".contains(chr) {
+            return Some(chr);
+        }
+        if chr == '−' {
+            return Some('⁻');
+        }
+        if chr == 'x' {
+            return Some('ˣ');
+        }
+    } else if "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₙ".contains(chr) {
+        return Some(chr);
+    }
+
     let table = if superscript {
         "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ"
     } else {
@@ -184,11 +205,15 @@ fn script_char(chr: char, superscript: bool) -> Option<char> {
 
 fn fraction_operand(text: &str) -> String {
     let trimmed = text.trim();
-    if trimmed.chars().all(|chr| chr.is_alphanumeric()) {
-        trimmed.to_owned()
-    } else {
-        format!("({trimmed})")
-    }
+    if readable_math_atom(trimmed) { trimmed.to_owned() } else { format!("({trimmed})") }
+}
+
+fn readable_math_atom(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().all(|chr| {
+            chr.is_alphanumeric() || "√⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿˣ₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₙ".contains(chr)
+        })
 }
 
 #[cfg(test)]
@@ -199,6 +224,12 @@ mod fallback_tests {
     fn linearizes_structured_math_for_plain_text_consumers() {
         let omml = r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:nary><m:naryPr><m:chr m:val="∫"/></m:naryPr><m:sub><m:r><m:t>0</m:t></m:r></m:sub><m:sup><m:r><m:t>1</m:t></m:r></m:sup><m:e><m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:e></m:nary><m:r><m:t>=</m:t></m:r><m:f><m:num><m:r><m:t>1</m:t></m:r></m:num><m:den><m:r><m:t>3</m:t></m:r></m:den></m:f></m:oMath>"#;
         assert_eq!(omml_fallback_text(omml).as_deref(), Some("∫₀¹x²=1/3"));
+    }
+
+    #[test]
+    fn compacts_common_unicode_math_fallbacks() {
+        let omml = r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:nary><m:naryPr><m:chr m:val="∫"/></m:naryPr><m:sub><m:r><m:t>0</m:t></m:r></m:sub><m:sup><m:r><m:t>∞</m:t></m:r></m:sup><m:e><m:sSup><m:e><m:r><m:t>e</m:t></m:r></m:e><m:sup><m:r><m:t>−x²</m:t></m:r></m:sup></m:sSup></m:e></m:nary><m:r><m:t>=</m:t></m:r><m:f><m:num><m:rad><m:deg/><m:e><m:r><m:t>π</m:t></m:r></m:e></m:rad></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:oMath>"#;
+        assert_eq!(omml_fallback_text(omml).as_deref(), Some("∫₀^∞e⁻ˣ²=√π/2"));
     }
 }
 

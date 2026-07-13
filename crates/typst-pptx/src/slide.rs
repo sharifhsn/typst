@@ -130,6 +130,7 @@ struct ActiveMath {
     baseline: Option<Point>,
     rot_60k: i32,
     fallback: EcoString,
+    fallback_size: Abs,
 }
 
 struct ActiveSlideNumber {
@@ -368,6 +369,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                         baseline: None,
                         rot_60k: 0,
                         fallback: EcoString::new(),
+                        fallback_size: Abs::zero(),
                     });
                 }
             }
@@ -610,7 +612,7 @@ impl<'a, 'b> Walker<'a, 'b> {
 
     fn record_math_text(
         &mut self,
-        _text: &typst_library::text::TextItem,
+        text: &typst_library::text::TextItem,
         item_transform: Transform,
     ) {
         let Some(similarity) = classify_similarity(item_transform) else {
@@ -621,6 +623,8 @@ impl<'a, 'b> Walker<'a, 'b> {
             active.baseline = Some(Point::zero().transform(item_transform));
             active.rot_60k = similarity.rot_60k;
         }
+        active.fallback_size =
+            active.fallback_size.max(text.size * similarity.scale.abs());
     }
 
     fn add_math_bounds(&mut self, rect: Rect) {
@@ -657,6 +661,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                     rot_60k: 0,
                     omml,
                     fallback,
+                    fallback_sz_100pt: math_fallback_size_100pt(active.fallback_size),
                 }),
             });
         } else {
@@ -670,6 +675,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                 rot_60k: active.rot_60k,
                 omml,
                 fallback,
+                fallback_sz_100pt: math_fallback_size_100pt(active.fallback_size),
             };
             // A table cell cannot host a free-standing slide shape, but its
             // text body can carry OMML. Keep both inline and display equations
@@ -948,6 +954,15 @@ fn equation_sources(document: &PagedDocument) -> FxHashMap<Location, MathSource>
             Some((loc, MathSource { omml, fallback, block }))
         })
         .collect()
+}
+
+fn math_fallback_size_100pt(size: Abs) -> i32 {
+    let points = size.to_pt();
+    if points.is_finite() && points > 0.0 {
+        (points * 100.0).round().clamp(100.0, i32::MAX as f64) as i32
+    } else {
+        1800
+    }
 }
 
 fn column_shapes(active: ActiveColumnRegion<'_>) -> Vec<OrderedShape> {

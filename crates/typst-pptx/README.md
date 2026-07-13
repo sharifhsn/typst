@@ -61,7 +61,8 @@ an error.
   transformed-table fallback are still incomplete, and consumer line-box
   metrics can expand automatic row heights.
 - **Math** — eligible equations are emitted as OMML inside an Office
-  compatibility wrapper, with a plain DrawingML text fallback.
+  compatibility wrapper, with an authored-size compact Unicode DrawingML text
+  fallback for consumers that do not support the native math branch.
 - **Presentation UX** — notes, slide numbers, and inferred title/body
   placeholders are preserved when the source exposes enough structure.
 

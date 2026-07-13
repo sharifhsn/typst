@@ -39,6 +39,7 @@ pub(crate) struct InlineMathSource {
     pub rot_60k: i32,
     pub omml: String,
     pub fallback: EcoString,
+    pub fallback_sz_100pt: i32,
 }
 
 /// A clustered text box and the walk order of its first contributing item.
@@ -1070,7 +1071,7 @@ fn math_fallback_run(math: &InlineMathSource, spc_100pt: Option<i32>) -> TextRun
     TextRun {
         text: math.fallback.clone(),
         family: EcoString::from("New Computer Modern Math"),
-        sz_100pt: (inline_math_size(math).to_pt() * 100.0).round() as i32,
+        sz_100pt: math.fallback_sz_100pt,
         b: false,
         i: false,
         color: [0, 0, 0, 255],
