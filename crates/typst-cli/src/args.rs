@@ -595,6 +595,7 @@ pub enum OutputFormat {
     Html,
     Bundle,
     Docx,
+    Pandoc,
     Pptx,
 }
 

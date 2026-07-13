@@ -4,7 +4,7 @@ use smallvec::smallvec;
 use typst_library::diag::{At, SourceResult, bail};
 use typst_library::foundations::{
     Content, Context, NativeElement, NativeRuleMap, Packed, Resolve, ShowFn, Smart,
-    StyleChain, Synthesize, Target, dict,
+    StyleChain, Synthesize, Target, TargetElem, dict,
 };
 use typst_library::introspection::{Counter, Locator, LocatorLink};
 use typst_library::layout::{
@@ -37,7 +37,7 @@ use typst_utils::{Get, Numeric};
 
 /// Register show rules for the [paged target](Target::Paged).
 pub fn register(rules: &mut NativeRuleMap) {
-    use Target::{Docx, Paged};
+    use Target::{Docx, Paged, Pandoc};
 
     // Model.
     rules.register(Paged, STRONG_RULE);
@@ -124,6 +124,46 @@ pub fn register(rules: &mut NativeRuleMap) {
     rules.register(Docx, BIBLIOGRAPHY_RULE);
     rules.register(Docx, CSL_LIGHT_RULE);
     rules.register(Docx, CSL_INDENT_RULE);
+
+    // The Pandoc target mirrors the Docx target's reuse of the inline-formatting
+    // normalization rules: they fold `StrongElem`/`EmphElem`/`SubElem`/… into
+    // `TextElem` style flags (`delta`, `emph`, `shift_settings`, `deco`,
+    // `smallcaps`), which keeps inline formatting *inline* during realization (so
+    // paragraphs aren't split and the surrounding spaces survive) instead of
+    // leaving raw formatting elements that would interrupt paragraph grouping.
+    // The Pandoc backend reads these flags back off the style chain and wraps the
+    // run in the matching Pandoc inline node (`Strong`/`Emph`/…). Without these,
+    // the spaces around `*bold*`/`_emph_` are trimmed (paragraph-boundary
+    // collapse) — the canonical inter-word-space defect.
+    rules.register(Pandoc, STRONG_RULE);
+    rules.register(Pandoc, EMPH_RULE);
+    rules.register(Pandoc, SUB_RULE);
+    rules.register(Pandoc, SUPER_RULE);
+    rules.register(Pandoc, UNDERLINE_RULE);
+    rules.register(Pandoc, OVERLINE_RULE);
+    rules.register(Pandoc, STRIKE_RULE);
+    rules.register(Pandoc, HIGHLIGHT_RULE);
+    rules.register(Pandoc, SMALLCAPS_RULE);
+
+    // `#align(..)[body]` normalizes into a `set align` on the body so it does not
+    // interrupt paragraph grouping (the Pandoc backend currently ignores the
+    // resulting alignment — Pandoc has no per-block alignment node — but keeping
+    // the content inline preserves spaces and paragraph structure).
+    rules.register(Pandoc, ALIGN_RULE);
+
+    // `@key` references → citations / cross-reference links; citations and
+    // bibliographies resolve through citeproc here (building the `Works` that
+    // citations look up). Without them a citation stays a raw `RefElem`, no
+    // `CiteGroup` forms, and the bibliography can never locate its citations
+    // (a convergence deadlock). The Pandoc backend lowers the resulting formatted
+    // content like any other inline text.
+    rules.register(Pandoc, REF_RULE);
+    rules.register(Pandoc, LINK_MARKER_RULE);
+    rules.register(Pandoc, DIRECT_LINK_RULE);
+    rules.register(Pandoc, CITE_GROUP_RULE);
+    rules.register(Pandoc, BIBLIOGRAPHY_RULE);
+    rules.register(Pandoc, CSL_LIGHT_RULE);
+    rules.register(Pandoc, CSL_INDENT_RULE);
 
     // Layout.
     rules.register(Paged, ALIGN_RULE);
@@ -510,7 +550,18 @@ const BIBLIOGRAPHY_RULE: ShowFn<BibliographyElem> = |elem, engine, styles| {
     let works = Works::generate(engine, elem.span())?;
     let bibliography = works.bibliography(loc, span)?;
 
-    if bibliography.entries.iter().any(|entry| entry.prefix.is_some()) {
+    // The Pandoc target has no native two-column grid node and rasterizes any
+    // grid wholesale — which would turn the reference list into one opaque image
+    // and, fatally, drop the per-entry backlink anchors that in-text citations
+    // resolve to (`ref-<location>`), leaving every cite Link dangling. So for
+    // Pandoc we always take the linear-block path (even for numbered styles whose
+    // `prefix` would normally build a grid), prepending the `[1]` marker inline
+    // and locating each entry's body with its backlink. This keeps the reference
+    // list selectable text and the cite anchors live. `Works::generate` above is
+    // unchanged, so citation lookup / convergence is unaffected.
+    let pandoc = styles.get(TargetElem::target) == Target::Pandoc;
+
+    if !pandoc && bibliography.entries.iter().any(|entry| entry.prefix.is_some()) {
         let row_gutter = styles.get(ParElem::spacing);
 
         let mut cells = vec![];
@@ -543,8 +594,20 @@ const BIBLIOGRAPHY_RULE: ShowFn<BibliographyElem> = |elem, engine, styles| {
     } else {
         let mut body = vec![];
         for entry in &bibliography.entries {
-            let realized =
-                PdfMarkerTag::BibEntry(entry.body.clone().located(entry.backlink));
+            // For Pandoc, a numbered/prefixed style (`[1]`, `[Smith 2020]`)
+            // lands here too (the grid path is skipped above). Prepend the
+            // prefix marker inline so the reference reads `[1] Author, …`. The
+            // whole entry is wrapped in a single `BibEntry` located with the
+            // backlink so the converter can read the anchor off it.
+            let inner = match entry.prefix.clone() {
+                Some(prefix) => {
+                    PdfMarkerTag::ListItemLabel(prefix)
+                        + HElem::new(Em::new(0.65).into()).pack()
+                        + entry.body.clone()
+                }
+                None => entry.body.clone(),
+            };
+            let realized = PdfMarkerTag::BibEntry(inner.located(entry.backlink));
             let block = if bibliography.hanging_indent {
                 let body = HElem::new((-INDENT).into()).pack() + realized;
                 let inset = Sides::default()

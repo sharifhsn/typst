@@ -19,7 +19,10 @@ use typst_library::foundations::{Packed, StyleChain};
 use typst_library::layout::{Axis, StackChild, StackElem};
 
 use crate::ctx::DocxCtx;
-use crate::dom::{Block, Cell, CellBorders, Para, ParaChild, ParaProps, Row, Run, RunProps, Tbl, TblProps};
+use crate::dom::{
+    Block, Cell, CellBorders, Para, ParaChild, ParaProps, Row, Run, RunProps, Tbl,
+    TblProps,
+};
 
 /// Default content width (dxa) used to size a horizontal stack's columns; the
 /// real text-area width is not known at this post-realize stage. Matches the
@@ -82,7 +85,12 @@ pub fn stack(
         let tbl = Tbl {
             props: TblProps { width_dxa: Some(col_w * ncols as i32), style: None },
             grid: col_dxa,
-            rows: vec![Row { header: false, cant_split: false, height: None, cells }],
+            rows: vec![Row {
+                header: false,
+                cant_split: false,
+                height: None,
+                cells,
+            }],
         };
         Ok(vec![Block::Table(tbl)])
     }
@@ -93,7 +101,10 @@ fn ensure_ends_in_para(blocks: &mut Vec<Block>) {
     if !matches!(blocks.last(), Some(Block::Para(_))) {
         blocks.push(Block::Para(Para {
             props: ParaProps::default(),
-            content: vec![ParaChild::Run(Run::Text { props: RunProps::default(), text: "".into() })],
+            content: vec![ParaChild::Run(Run::Text {
+                props: RunProps::default(),
+                text: "".into(),
+            })],
         }));
     }
 }

@@ -26,7 +26,10 @@ pub fn run(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Vec<Block>> {
 /// block-level elements rather than pre-grouped into `ParElem`s. We therefore
 /// coalesce consecutive inline children into a single paragraph here, flushing
 /// the buffer whenever a block-level element or paragraph break is hit.
-pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Vec<Block>> {
+pub fn convert_children(
+    ctx: &mut DocxCtx,
+    children: &[Pair],
+) -> SourceResult<Vec<Block>> {
     use typst_library::foundations::Resolve;
     use typst_library::layout::VElem;
 
@@ -70,6 +73,27 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
             continue;
         }
         if let Some(par) = child.to_packed::<ParElem>() {
+            // A bare inline-level framed container (`#box`/`#rect`/`#square`)
+            // sitting alone at block scope gets paragraph-wrapped by Typst's
+            // own realize (there is no bare-inline-content block variant) —
+            // it would otherwise be forced through the run-only inline path
+            // in `handle_inline`, which structurally cannot carry
+            // multi-paragraph block content or a non-uniform per-side stroke
+            // (see `paragraph_sole_block_container`'s doc comment for both
+            // regressions this fixes). Detect that narrow, validated-safe
+            // shape and route it through the full block dispatch instead —
+            // unless it's a link target (labels on a redirected block aren't
+            // bookmarked below).
+            if child.label().is_none()
+                && let Some(sole) = paragraph_sole_block_container(&par.body, *styles)
+            {
+                let from = blocks.len();
+                flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
+                pending_v = apply_pending_v(&mut blocks, from, pending_v);
+                handle_block(ctx, sole, *styles, &mut blocks)?;
+                last_was_par = false;
+                continue;
+            }
             // Consecutive `ParElem`s are separate paragraphs and must be flushed
             // apart (`ParbreakElem`s are consumed during realization), otherwise
             // the whole document would merge into one `<w:p>` and per-paragraph
@@ -93,7 +117,8 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
                     && props.ind.as_ref().and_then(|i| i.first_line).is_none()
                     && let Some(amount) = ctx.consecutive_first_line_indent(*styles)
                 {
-                    props.ind.get_or_insert_with(Default::default).first_line = Some(amount);
+                    props.ind.get_or_insert_with(Default::default).first_line =
+                        Some(amount);
                 }
                 pending_props = Some(props);
             }
@@ -140,6 +165,14 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
             push_inline(ctx, child, *styles, &mut pending)?;
             have_pending = true;
             last_was_par = false;
+        } else if let Some(raw) = child.to_packed::<typst_library::text::RawElem>()
+            && !raw.block.get(*styles)
+        {
+            // A surviving inline raw element must stay in the current paragraph;
+            // `handle_inline` enters raw scope before re-realizing it.
+            push_inline(ctx, child, *styles, &mut pending)?;
+            have_pending = true;
+            last_was_par = false;
         } else if is_inline(child) {
             push_inline(ctx, child, *styles, &mut pending)?;
             have_pending = true;
@@ -163,7 +196,10 @@ pub fn convert_children(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Ve
     // ever removes the spurious closing one.
     while let Some(Block::Para(para)) = blocks.last() {
         if !para.content.is_empty()
-            && para.content.iter().all(|c| matches!(c, ParaChild::Run(Run::PageBreak)))
+            && para
+                .content
+                .iter()
+                .all(|c| matches!(c, ParaChild::Run(Run::PageBreak)))
         {
             blocks.pop();
         } else {
@@ -267,8 +303,8 @@ fn is_inline(child: &Content) -> bool {
     use typst_library::layout::HElem;
     use typst_library::model::{EmphElem, LinkElem, RefElem, StrongElem};
     use typst_library::text::{
-        HighlightElem, LinebreakElem, SmallcapsElem, SmartQuoteElem, SpaceElem, StrikeElem,
-        SubElem, SuperElem, TextElem, UnderlineElem,
+        HighlightElem, LinebreakElem, SmallcapsElem, SmartQuoteElem, SpaceElem,
+        StrikeElem, SubElem, SuperElem, TextElem, UnderlineElem,
     };
     use typst_library::visualize::ImageElem;
 
@@ -434,6 +470,110 @@ pub(crate) fn body_is_wrap_figure(body: &Content) -> bool {
     has_grid && has_figure
 }
 
+/// Peels transparent `#set`-style and pure single-child join wrappers
+/// (`StyledElem`, a `SequenceElem` with exactly one non-trivial child) off a
+/// content value, returning whatever is structurally underneath. Used to see
+/// through the styling/joining Typst's own realization wraps around a bare
+/// expression so the *actual* element can be identified.
+fn peel_wrappers(mut body: &Content) -> &Content {
+    use typst_library::foundations::{SequenceElem, StyledElem};
+    use typst_library::introspection::TagElem;
+    use typst_library::model::ParbreakElem;
+    use typst_library::text::SpaceElem;
+
+    loop {
+        if let Some(styled) = body.to_packed::<StyledElem>() {
+            body = &styled.child;
+            continue;
+        }
+        if let Some(seq) = body.to_packed::<SequenceElem>() {
+            let mut rest = seq.children.iter().filter(|c| {
+                !c.is::<SpaceElem>() && !c.is::<ParbreakElem>() && !c.is::<TagElem>()
+            });
+            if let (Some(only), None) = (rest.next(), rest.next()) {
+                body = only;
+                continue;
+            }
+        }
+        return body;
+    }
+}
+
+/// Whether a frameless box/rect/square body IS (after [`peel_wrappers`])
+/// directly one of the ordinary flowing block containers — `#columns`,
+/// `#stack`, or a non-figure `#grid` — rather than some more elaborate
+/// composition.
+///
+/// Deliberately narrow, mirroring [`body_is_wrap_figure`]'s "one specific
+/// shape, not just contains X anywhere" contract: when a frameless box's
+/// *entire* content collapses to one of these, flattening it via
+/// `ctx.blocks` can only ever lose the (single-column-approximated) column
+/// split — never introspection-order-dependent content buried inside a more
+/// elaborate composition. That broader case is the "designed full-page
+/// layout box" that a wholesale frameless-box unwrap previously regressed by
+/// -148 words (ca8ce358d); this signature stays clear of it by requiring the
+/// container to BE the whole body, not merely present somewhere inside it.
+pub(crate) fn body_is_frameless_flow_container(body: &Content) -> bool {
+    use typst_library::layout::{ColumnsElem, GridElem, StackElem};
+
+    let inner = peel_wrappers(body);
+    if inner.is::<ColumnsElem>() || inner.is::<StackElem>() {
+        return true;
+    }
+    if inner.is::<GridElem>() {
+        // A grid-of-figure is the `wrap-content` shape, already handled by
+        // `body_is_wrap_figure` via the well-tested grid→figure/table mapper;
+        // keep that gate separate rather than double-widening here.
+        return !body_is_wrap_figure(inner);
+    }
+    false
+}
+
+/// Whether a `ParElem`'s body reduces, after [`peel_wrappers`], to a SOLE
+/// framed container (`#box`/`#rect`/`#square`) that [`handle_block_framed`]
+/// would render MORE faithfully than the run-only inline path can — i.e.
+/// Typst paragraph-wrapped a bare inline-level container at block scope
+/// (there is no bare-inline-content block variant) purely because it's
+/// nominally inline, not because it sits alongside real running text. Two
+/// narrow, independent triggers, each because the run-only inline path
+/// structurally cannot represent the case correctly:
+/// - the body is directly one ordinary flowing container (`body_is_wrap_
+///   figure` / `body_is_frameless_flow_container`) — `handle_inline` has no
+///   way to carry multi-paragraph block content, so e.g. `box(inset:
+///   ..)[#columns(2, ..)]` rasterized an entire two-column A0 poster as one
+///   page-spanning image (~26 near-blank pages; the pollux poster template);
+/// - the stroke is non-uniform across sides (`stroke_sides_nonuniform`) —
+///   the inline path's only bordered-run form (`w:bdr`, via `mappers::
+///   shape::inline_frame`) is inherently a uniform box, so e.g. `box(stroke:
+///   (bottom: ..))` (a common "border as a section-title underline" idiom in
+///   CV/resume templates) silently became a full four-sided box.
+///
+/// Mirrors `handle_block_framed`'s own acceptance tests exactly so a
+/// redirect here only ever routes to a call it would have accepted anyway.
+fn paragraph_sole_block_container<'a>(
+    body: &'a Content,
+    styles: typst_library::foundations::StyleChain,
+) -> Option<&'a Content> {
+    let inner = peel_wrappers(body);
+    if !is_framed_container(inner) {
+        return None;
+    }
+    let (fbody, fill, stroke_sides, _inset) = block_framed_parts(inner, styles)?;
+    if !body_extractable(&fbody) {
+        return None;
+    }
+    if stroke_sides_nonuniform(&stroke_sides) {
+        return Some(inner);
+    }
+    if fill.is_some() {
+        return None;
+    }
+    if block_borders(&stroke_sides, styles).is_some() {
+        return None;
+    }
+    (body_is_wrap_figure(&fbody) || body_is_frameless_flow_container(&fbody)).then_some(inner)
+}
+
 /// Whether an equation body carries a label *inside* it (a per-line label),
 /// whose location only exists once the equation is laid out per visual line.
 ///
@@ -450,11 +590,7 @@ fn equation_has_inner_label(eq_body: &Content) -> bool {
                     matches!(&r.text, RawContent::Text(s)
                         if s.len() > 2 && s.starts_with('<') && s.ends_with('>'))
                 });
-            if is_label {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            }
+            if is_label { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
         })
         .is_break()
 }
@@ -508,6 +644,8 @@ fn handle_block_inner(
 ) -> SourceResult<()> {
     if let Some(elem) = child.to_packed::<TagElem>() {
         out.push(Block::Tag(elem.tag.clone()));
+    } else if child.is::<typst_library::text::RawElem>() {
+        out.extend(ctx.with_raw_scope(|ctx| ctx.blocks(child, styles))?);
     } else if let Some(elem) = child.to_packed::<typst_library::pdf::PdfMarkerTag>() {
         // A PDF accessibility delimiter wraps real content (`body`); it has no DOCX
         // meaning itself, so unwrap it and lower the body (otherwise the wrapped
@@ -569,11 +707,9 @@ fn handle_block_inner(
         // rasterizing the whole block.
         out.extend(mappers::stack::stack(elem, styles, ctx)?);
     } else if let Some(elem) = child.to_packed::<typst_library::layout::ColumnsElem>() {
-        // `#columns(n)[..]` balances flowing content across n columns. There is
-        // no per-block multi-column construct in a flowing story (columns are a
-        // section property), so lower the body as ordinary blocks — the text
-        // stays editable instead of being rasterized to an image. The visual
-        // column split is approximated as a single column.
+        // Top-level `#columns(n)[..]` is wrapped in a continuous Word section by
+        // `resolve_sections`; nested columns still lower as ordinary editable
+        // blocks rather than rasterizing the body.
         out.extend(ctx.blocks(&elem.body, styles)?);
     } else if let Some(elem) = child.to_packed::<typst_library::layout::LayoutElem>() {
         // `#layout(size => ..)` hands the closure the container size and uses the
@@ -612,7 +748,11 @@ fn handle_block_inner(
             let em = crate::props::abs_to_twip(
                 typst_library::layout::Em::new(1.0).resolve(styles),
             );
-            crate::dom::Indent { left: Some(em), right: Some(em), ..Default::default() }
+            crate::dom::Indent {
+                left: Some(em),
+                right: Some(em),
+                ..Default::default()
+            }
         });
 
         // Lower the body as blocks (not flat runs) so a multi-paragraph quote
@@ -633,9 +773,7 @@ fn handle_block_inner(
 
         // The attribution ("— author", or a prose citation) renders below a
         // block quote, right-aligned (Typst's default). Was previously dropped.
-        if block
-            && let Some(attribution) = elem.attribution.get_cloned(styles)
-        {
+        if block && let Some(attribution) = elem.attribution.get_cloned(styles) {
             let realized = attribution.realize(elem.span());
             let attr_runs = ctx.inline_runs(&realized, styles, RunProps::default())?;
             if !attr_runs.is_empty() {
@@ -726,7 +864,8 @@ fn handle_block_inner(
         // Top-level `#place(..)` → an anchored drawing, or (for a float with
         // text-bearing content) the flowed blocks. See `mappers::image::place`.
         out.extend(mappers::image::place(elem, styles, ctx)?);
-    } else if (child.is::<typst_library::layout::BlockElem>() || is_framed_container(child))
+    } else if (child.is::<typst_library::layout::BlockElem>()
+        || is_framed_container(child))
         && contains_place(child)
         && placed_bodies_shape_only(child, styles)
         && let Some(run) = mappers::shape::transformed(child, styles, ctx)?
@@ -750,7 +889,8 @@ fn handle_block_inner(
         }));
     } else if let Some(elem) = child.to_packed::<typst_library::layout::BlockElem>() {
         handle_block_box(ctx, elem, styles, out)?;
-    } else if is_framed_container(child) && handle_block_framed(ctx, child, styles, out)? {
+    } else if is_framed_container(child) && handle_block_framed(ctx, child, styles, out)?
+    {
         // A block-level framed container (`#rect`/`#box`/`#square` standing as its
         // own block) with flowing content → shaded + bordered paragraphs that
         // break across pages, mirroring `#block`.
@@ -759,7 +899,9 @@ fn handle_block_inner(
         // `wps:txbx` text box does not flow its text in LibreOffice. Rasterize the
         // box to an image instead — a centered inline image renders correctly in
         // every consumer (Word renders the text box fine, but this keeps both).
-        if let Some(para) = fallback_para(mappers::image::laid_out_fallback(child, styles, ctx)?) {
+        if let Some(para) =
+            fallback_para(mappers::image::laid_out_fallback(child, styles, ctx)?)
+        {
             out.push(para);
         } else {
             ctx.warn_ignored(child.elem().name(), child.span());
@@ -827,9 +969,11 @@ fn handle_layout(
             out.extend(ctx.blocks(&content, styles)?);
         }
         None => {
-            if let Some(para) =
-                fallback_para(mappers::image::laid_out_fallback(elem.pack_ref(), styles, ctx)?)
-            {
+            if let Some(para) = fallback_para(mappers::image::laid_out_fallback(
+                elem.pack_ref(),
+                styles,
+                ctx,
+            )?) {
                 out.push(para);
             }
         }
@@ -900,9 +1044,11 @@ fn handle_block_box(
             // A layouter body (`#block(width => ..)`) is an opaque closure with
             // no extractable content: rasterize the whole box (and recover its
             // laid-out text as hidden searchable runs beside the image).
-            if let Some(para) =
-                fallback_para(mappers::image::laid_out_fallback(elem.pack_ref(), styles, ctx)?)
-            {
+            if let Some(para) = fallback_para(mappers::image::laid_out_fallback(
+                elem.pack_ref(),
+                styles,
+                ctx,
+            )?) {
                 out.push(para);
             }
             return Ok(());
@@ -947,7 +1093,12 @@ fn handle_block_box(
         &mut inner,
         shd_fill,
         &pbdr,
-        Insets { left: ind_left, right: ind_right, top: inset_top, bottom: inset_bottom },
+        Insets {
+            left: ind_left,
+            right: ind_right,
+            top: inset_top,
+            bottom: inset_bottom,
+        },
         above,
         below,
     );
@@ -991,9 +1142,10 @@ fn stamp_box_decorations(
             p.shd_fill.get_or_insert(f);
         }
         if let Some(b) = pbdr
-            && p.pbdr.is_none() {
-                p.pbdr = Some(b.clone());
-            }
+            && p.pbdr.is_none()
+        {
+            p.pbdr = Some(b.clone());
+        }
         if has_box && multi_para {
             p.keep_lines = true;
             if i != last {
@@ -1096,7 +1248,8 @@ pub(crate) fn body_shape_only(
     use typst_library::foundations::{SequenceElem, StyledElem};
     use typst_library::introspection::TagElem;
     use typst_library::layout::{
-        AlignElem, BoxElem, MoveElem, PadElem, PlaceElem, RotateElem, ScaleElem, StackElem,
+        AlignElem, BoxElem, MoveElem, PadElem, PlaceElem, RotateElem, ScaleElem,
+        StackElem,
     };
     use typst_library::visualize::{
         CircleElem, CurveElem, EllipseElem, LineElem, PolygonElem, RectElem, SquareElem,
@@ -1184,7 +1337,8 @@ fn handle_block_framed(
 ) -> SourceResult<bool> {
     use typst_library::visualize::Paint;
 
-    let Some((body, fill, stroke_sides, inset)) = block_framed_parts(child, styles) else {
+    let Some((body, fill, stroke_sides, inset)) = block_framed_parts(child, styles)
+    else {
         return Ok(false);
     };
     // A gradient/tiling fill has no flat-shading form: keep it for the text-box /
@@ -1212,8 +1366,14 @@ fn handle_block_framed(
         // the well-tested grid mapper doesn't drop content. We deliberately do
         // NOT lower an arbitrary frameless box here — a designed full-page
         // layout box can lose content through a native re-walk — so the body
-        // must structurally be a grid-of-figure, not just "non-text".
-        if body_is_wrap_figure(&body) {
+        // must structurally be a grid-of-figure (`body_is_wrap_figure`) or —
+        // the second recoverable case — directly one ordinary flowing
+        // container (`#columns`/`#stack`/a non-figure `#grid`,
+        // `body_is_frameless_flow_container`): a frameless box whose *whole*
+        // body is one of these (e.g. a poster's `box(inset: ..)[#columns(2,
+        // ..)]`) has nothing else that could be lost by flattening it, unlike
+        // a more elaborate full-page composition.
+        if body_is_wrap_figure(&body) || body_is_frameless_flow_container(&body) {
             let inner = ctx.blocks(&body, styles)?;
             crate::document::collect_tags(&inner, &mut ctx.deferred_tags);
             out.extend(inner);
@@ -1223,12 +1383,20 @@ fn handle_block_framed(
     }
     // Only flowing/block content takes the main-story paragraph path; a short
     // single-line callout stays a (standalone, sized) text box — UNLESS the body
-    // has a footnote (illegal in a text box) or content that is Word-fragile /
-    // mis-laid inside one (figures, images, tables, math, nested frames), in
-    // which case it must flow here to stay correct. Decided before extraction.
+    // has a footnote (illegal in a text box), content that is Word-fragile /
+    // mis-laid inside one (figures, images, tables, math, nested frames), OR the
+    // stroke is non-uniform across sides (`stroke_sides_nonuniform` — e.g.
+    // `box(stroke: (bottom: ..))`, the common "border as a section-title
+    // underline" idiom): a DrawingML shape outline is inherently uniform around
+    // all four sides, so routing a bottom-only stroke through the text-box path
+    // would silently turn it into a full box — only this paragraph border
+    // (`w:pBdr`, via `block_borders` below) can express per-side strokes
+    // independently. In all these cases it must flow here to stay correct.
+    // Decided before extraction.
     if !body_is_flowing(&body, styles)
         && !body_has_footnote(&body)
         && body_textbox_safe(&body)
+        && !stroke_sides_nonuniform(&stroke_sides)
     {
         return Ok(false);
     }
@@ -1262,14 +1430,21 @@ fn block_framed_parts(
     Content,
     Option<typst_library::visualize::Paint>,
     typst_library::layout::Sides<Option<Option<typst_library::visualize::Stroke>>>,
-    typst_library::layout::Sides<Option<typst_library::layout::Rel<typst_library::layout::Length>>>,
+    typst_library::layout::Sides<
+        Option<typst_library::layout::Rel<typst_library::layout::Length>>,
+    >,
 )> {
     use typst_library::layout::BoxElem;
     use typst_library::visualize::{RectElem, SquareElem};
 
     if let Some(e) = child.to_packed::<BoxElem>() {
         let body = e.body.get_cloned(styles)?;
-        Some((body, e.fill.get_cloned(styles), e.stroke.get_cloned(styles), e.inset.get_cloned(styles)))
+        Some((
+            body,
+            e.fill.get_cloned(styles),
+            e.stroke.get_cloned(styles),
+            e.inset.get_cloned(styles),
+        ))
     } else if let Some(e) = child.to_packed::<RectElem>() {
         let body = e.body.get_cloned(styles)?;
         let fill = e.fill.get_cloned(styles);
@@ -1298,7 +1473,9 @@ fn shape_stroke_sides(
     match stroke {
         Smart::Custom(sides) => sides,
         Smart::Auto if fill.is_some() => Sides::splat(None),
-        Smart::Auto => Sides::splat(Some(Some(typst_library::visualize::Stroke::default()))),
+        Smart::Auto => {
+            Sides::splat(Some(Some(typst_library::visualize::Stroke::default())))
+        }
     }
 }
 
@@ -1307,7 +1484,10 @@ fn shape_stroke_sides(
 /// table) rather than a short inline label. Checked on the raw body (no
 /// extraction): flowing iff it contains a paragraph break, a block raw listing,
 /// a list/enum/term list, a table/grid, or a nested block.
-fn body_is_flowing(body: &Content, styles: typst_library::foundations::StyleChain) -> bool {
+fn body_is_flowing(
+    body: &Content,
+    styles: typst_library::foundations::StyleChain,
+) -> bool {
     use std::ops::ControlFlow;
     use typst_library::layout::{BlockElem, GridElem};
     use typst_library::model::{EnumElem, ListElem, TableElem, TermsElem};
@@ -1342,6 +1522,28 @@ fn nonzero_twip(
     use typst_library::foundations::Resolve;
     let twips = crate::props::abs_to_twip(rel.abs.resolve(styles));
     (twips != 0).then_some(twips)
+}
+
+/// Whether a per-side stroke definition has SOME sides set and others not —
+/// e.g. `box(stroke: (bottom: 1pt + black))`, the common "border as a
+/// section-title underline" idiom. Only a paragraph border (`w:pBdr`, via
+/// [`block_borders`]/`handle_block_framed`'s bordered-paragraph path) can
+/// express this independently per side; both the inline character border
+/// (`w:bdr`, via `mappers::shape::inline_frame`) and a DrawingML shape
+/// outline (the text-box path) are inherently uniform around all four
+/// sides, so either would silently turn a bottom-only stroke into a full box.
+pub(crate) fn stroke_sides_nonuniform(
+    sides: &typst_library::layout::Sides<
+        Option<Option<typst_library::visualize::Stroke>>,
+    >,
+) -> bool {
+    let set = [
+        matches!(sides.top, Some(Some(_))),
+        matches!(sides.right, Some(Some(_))),
+        matches!(sides.bottom, Some(Some(_))),
+        matches!(sides.left, Some(Some(_))),
+    ];
+    set.contains(&true) && set.contains(&false)
 }
 
 /// Maps a block's stroke sides to paragraph borders, or `None` when no side is

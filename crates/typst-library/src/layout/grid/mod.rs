@@ -10,13 +10,13 @@ use typst_utils::NonZeroExt;
 use crate::diag::{At, HintedStrResult, HintedString, SourceResult, bail};
 use crate::engine::Engine;
 use crate::foundations::{
-    Array, CastInfo, Content, Context, Fold, FromValue, Func, IntoValue, Packed, Reflect,
-    Resolve, Smart, StyleChain, Synthesize, Value, cast, elem, scope,
+    Args, Array, CastInfo, Construct, Content, Context, Fold, FromValue, Func, IntoValue,
+    Packed, Reflect, Resolve, Smart, StyleChain, Synthesize, Value, cast, elem, scope,
 };
-use crate::introspection::Tagged;
+use crate::introspection::{Locatable, Tagged, Unqueriable};
 use crate::layout::resolve::{CellGrid, grid_to_cellgrid};
 use crate::layout::{
-    Alignment, Length, OuterHAlignment, OuterVAlignment, Rel, Sides, Sizing,
+    Abs, Alignment, Length, OuterHAlignment, OuterVAlignment, Rel, Sides, Sizing,
 };
 use crate::model::{TableCell, TableFooter, TableHLine, TableHeader, TableVLine};
 use crate::visualize::{Paint, Stroke};
@@ -884,6 +884,55 @@ impl From<Content> for GridCell {
     fn from(value: Content) -> Self {
         #[allow(clippy::unwrap_or_default)]
         value.unpack::<Self>().unwrap_or_else(Self::new)
+    }
+}
+
+/// Internal post-layout marker for native table export.
+///
+/// The grid/table layouter emits this as a hidden tag around the physical cell
+/// region. It is intentionally non-introspectable; consumers that do not know
+/// about it simply ignore the tag.
+#[elem(Construct, Unqueriable, Locatable)]
+pub struct GridCellRegion {
+    /// The resolved `GridCell` or `TableCell` body.
+    #[required]
+    #[internal]
+    pub body: Content,
+
+    /// The non-gutter column index.
+    #[required]
+    #[internal]
+    pub x: usize,
+
+    /// The non-gutter row index.
+    #[required]
+    #[internal]
+    pub y: usize,
+
+    /// The number of non-gutter columns spanned by the cell.
+    #[required]
+    #[internal]
+    pub colspan: NonZeroUsize,
+
+    /// The number of non-gutter rows spanned by the cell.
+    #[required]
+    #[internal]
+    pub rowspan: NonZeroUsize,
+
+    /// The physical cell width in the laid-out frame.
+    #[required]
+    #[internal]
+    pub width: Abs,
+
+    /// The physical cell height in the laid-out frame.
+    #[required]
+    #[internal]
+    pub height: Abs,
+}
+
+impl Construct for GridCellRegion {
+    fn construct(_: &mut Engine, args: &mut Args) -> SourceResult<Content> {
+        bail!(args.span, "cannot be constructed manually")
     }
 }
 

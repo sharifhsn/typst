@@ -3,6 +3,7 @@
 
 use typst_library::layout::Abs;
 use typst_library::visualize::Color;
+use typst_ooxml_core::{color as ooxml_color, units};
 
 use crate::dom::{Indent, Jc, ParaBorders, ParaProps, RunProps, Spacing, VertAlign};
 use crate::xml::{self, XmlWriter};
@@ -13,28 +14,27 @@ use crate::xml::{self, XmlWriter};
 
 /// Points → half-points (the unit of `w:sz`).
 pub fn pt_to_half_pt(pt: f64) -> u32 {
-    (pt * 2.0).round().max(0.0) as u32
+    units::pt_to_half_point(pt)
 }
 
 /// Points → eighths of a point (the unit of a border's `w:sz`).
 pub fn pt_to_eighth_pt(pt: f64) -> u32 {
-    (pt * 8.0).round().max(0.0) as u32
+    units::pt_to_eighth_point(pt)
 }
 
 /// An absolute length → twips (twentieths of a point), the `w:pgSz`/`w:ind` unit.
 pub fn abs_to_twip(abs: Abs) -> i32 {
-    (abs.to_pt() * 20.0).round() as i32
+    units::abs_to_twip(abs)
 }
 
 /// An absolute length → EMU (914400 per inch = 12700 per point), the DrawingML unit.
 pub fn abs_to_emu(abs: Abs) -> i64 {
-    (abs.to_pt() * 12700.0).round() as i64
+    units::abs_to_emu(abs)
 }
 
 /// A color → `RRGGBB` hex.
 pub fn color_to_hex(color: &Color) -> [u8; 3] {
-    let [r, g, b, _] = color.to_vec4_u8();
-    [r, g, b]
+    ooxml_color::raw_rgb(color)
 }
 
 /// A gradient approximated by a single solid colour — its first stop — for a
@@ -58,7 +58,7 @@ pub fn gradient_shade_hex(
 
 /// Formats an `RRGGBB` byte triple as uppercase hex.
 pub fn hex(rgb: [u8; 3]) -> String {
-    format!("{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])
+    ooxml_color::hex_rgb(rgb)
 }
 
 // ---------------------------------------------------------------------------
@@ -68,7 +68,55 @@ pub fn hex(rgb: [u8; 3]) -> String {
 impl RunProps {
     /// Whether this run carries any formatting at all.
     pub fn is_empty(&self) -> bool {
-        *self == RunProps::default()
+        self.style.is_none()
+            && self.semantic_rstyle().is_none()
+            && self.font.is_none()
+            && !self.writes_direct_bold()
+            && !self.writes_direct_italic()
+            && !self.caps
+            && !self.smallcaps
+            && !self.strike
+            && !self.no_proof
+            && self.color.is_none()
+            && self.tracking.is_none()
+            && self.position_half_pt.is_none()
+            && self.size_half_pt.is_none()
+            && self.highlight.is_none()
+            && self.shd_fill.is_none()
+            && self.bdr.is_none()
+            && self.underline.is_none()
+            && !self.vanish
+            && self.vert_align.is_none()
+            && !self.rtl
+            && !self.cs
+            && self.lang.is_none()
+    }
+
+    /// The Word semantic character style represented by Typst `#strong` or
+    /// `#emph`, when no other character style already occupies `w:rStyle`.
+    ///
+    /// Word permits one `w:rStyle` plus direct run properties. For nested
+    /// strong/emphasis we keep the stronger semantic style as `w:rStyle` and
+    /// write the italic half as direct formatting.
+    fn semantic_rstyle(&self) -> Option<&'static str> {
+        if self.style.is_some() {
+            return None;
+        }
+        if self.strong && self.bold {
+            Some("Strong")
+        } else if self.emphasis && self.italic {
+            Some("Emphasis")
+        } else {
+            None
+        }
+    }
+
+    fn writes_direct_bold(&self) -> bool {
+        self.bold && self.semantic_rstyle() != Some("Strong")
+    }
+
+    fn writes_direct_italic(&self) -> bool {
+        self.italic && self.semantic_rstyle() != Some("Emphasis")
     }
 
     /// Writes `<w:rPr>...</w:rPr>` in canonical order. Emits nothing if empty.
@@ -81,6 +129,8 @@ impl RunProps {
         // 1. rStyle
         if let Some(style) = &self.style {
             w.open(xml::W_RSTYLE).attr(xml::W_VAL, style).empty();
+        } else if let Some(style) = self.semantic_rstyle() {
+            w.open(xml::W_RSTYLE).attr(xml::W_VAL, style).empty();
         }
         // 2. rFonts
         if let Some(font) = &self.font {
@@ -92,16 +142,19 @@ impl RunProps {
                 .empty();
         }
         // 3. b / bCs
-        if self.bold {
+        if self.writes_direct_bold() {
             w.leaf(xml::W_B);
             w.leaf(xml::W_BCS);
         }
         // 4. i / iCs
-        if self.italic {
+        if self.writes_direct_italic() {
             w.leaf(xml::W_I);
             w.leaf(xml::W_ICS);
         }
-        // 5. smallCaps
+        // 5. caps / smallCaps
+        if self.caps {
+            w.leaf("w:caps");
+        }
         if self.smallcaps {
             w.leaf(xml::W_SMALLCAPS);
         }
@@ -109,24 +162,37 @@ impl RunProps {
         if self.strike {
             w.leaf(xml::W_STRIKE);
         }
-        // 7. color
+        // 7. noProof (after strike/dstrike/outline/shadow/emboss/imprint;
+        // before vanish/color/spacing).
+        if self.no_proof {
+            w.leaf("w:noProof");
+        }
+        // 8. vanish — hidden text (`#hide`).
+        if self.vanish {
+            w.open("w:vanish").empty();
+        }
+        // 9. color
         if let Some(c) = self.color {
             w.open(xml::W_COLOR).attr(xml::W_VAL, &hex(c)).empty();
         }
-        // 8. spacing (character tracking)
+        // 10. spacing (character tracking)
         if let Some(tracking) = self.tracking {
             w.open(xml::W_SPACING).attr(xml::W_VAL, &tracking.to_string()).empty();
         }
-        // 9. position (baseline shift, signed half-points)
+        // 11. position (baseline shift, signed half-points)
         if let Some(pos) = self.position_half_pt {
             w.open("w:position").attr(xml::W_VAL, &pos.to_string()).empty();
         }
-        // 10. sz / szCs
+        // 12. sz / szCs
         if let Some(sz) = self.size_half_pt {
             w.open(xml::W_SZ).attr(xml::W_VAL, &sz.to_string()).empty();
             w.open(xml::W_SZCS).attr(xml::W_VAL, &sz.to_string()).empty();
         }
-        // 11. u (canonical pos 27, before shd at 30)
+        // 13. highlight (after sz/szCs; before u/effect/bdr/shd).
+        if let Some(value) = self.highlight {
+            w.open("w:highlight").attr(xml::W_VAL, value).empty();
+        }
+        // 14. u (canonical pos 27, before shd at 30)
         if let Some(u) = &self.underline {
             w.open(xml::W_U).attr(xml::W_VAL, u.val);
             if let Some(c) = u.color {
@@ -134,11 +200,7 @@ impl RunProps {
             }
             w.empty();
         }
-        // 11b. vanish — hidden text (`#hide`).
-        if self.vanish {
-            w.open("w:vanish").empty();
-        }
-        // 11c. bdr — run border box (inline framed container).
+        // 15. bdr — run border box (inline framed container).
         if let Some(b) = &self.bdr {
             w.open("w:bdr")
                 .attr(xml::W_VAL, b.style)
@@ -147,7 +209,7 @@ impl RunProps {
                 .attr("w:color", &hex(b.color))
                 .empty();
         }
-        // 12. shd
+        // 16. shd
         if let Some(fill) = self.shd_fill {
             w.open(xml::W_SHD)
                 .attr(xml::W_VAL, "clear")
@@ -155,7 +217,7 @@ impl RunProps {
                 .attr("w:fill", &hex(fill))
                 .empty();
         }
-        // 13. vertAlign
+        // 17. vertAlign
         if let Some(va) = self.vert_align {
             let val = match va {
                 VertAlign::Super => "superscript",
@@ -163,14 +225,14 @@ impl RunProps {
             };
             w.open(xml::W_VERTALIGN).attr(xml::W_VAL, val).empty();
         }
-        // 14. rtl / cs (run reading order + complex-script formatting)
+        // 18. rtl / cs (run reading order + complex-script formatting)
         if self.rtl {
             w.leaf("w:rtl");
         }
         if self.cs {
             w.leaf("w:cs");
         }
-        // 15. lang
+        // 19. lang
         if let Some(lang) = &self.lang {
             w.open(xml::W_LANG).attr(xml::W_VAL, lang).empty();
         }
@@ -190,6 +252,7 @@ impl ParaProps {
             && !self.keep_next
             && !self.keep_lines
             && self.num.is_none()
+            && !self.suppress_line_numbers
             && !self.bidi
             && self.spacing.is_none()
             && self.ind.is_none()
@@ -227,11 +290,15 @@ impl ParaProps {
             w.open("w:numId").attr(xml::W_VAL, &num_id.to_string()).empty();
             w.close();
         }
-        // 5. bidi (paragraph base reading order)
+        // 5. suppressLineNumbers (paragraph opt-out inside a numbered section)
+        if self.suppress_line_numbers {
+            w.leaf("w:suppressLineNumbers");
+        }
+        // 6. bidi (paragraph base reading order)
         if self.bidi {
             w.leaf("w:bidi");
         }
-        // 6. tabs
+        // 7. tabs
         if !self.tabs.is_empty() {
             w.open("w:tabs").start_children();
             for tab in &self.tabs {
@@ -253,11 +320,11 @@ impl ParaProps {
             }
             w.close();
         }
-        // 7. pBdr (paragraph borders, before shd)
+        // 8. pBdr (paragraph borders, before shd)
         if let Some(b) = &self.pbdr {
             write_pbdr(w, b);
         }
-        // 8. shd (paragraph shading)
+        // 9. shd (paragraph shading)
         if let Some(fill) = self.shd_fill {
             w.open(xml::W_SHD)
                 .attr(xml::W_VAL, "clear")
@@ -265,19 +332,19 @@ impl ParaProps {
                 .attr("w:fill", &hex(fill))
                 .empty();
         }
-        // 9. spacing
+        // 10. spacing
         if let Some(sp) = &self.spacing {
             write_spacing(w, sp);
         }
-        // 10. ind
+        // 11. ind
         if let Some(ind) = &self.ind {
             write_indent(w, ind);
         }
-        // 11. contextualSpacing
+        // 12. contextualSpacing
         if self.contextual_spacing {
             w.leaf("w:contextualSpacing");
         }
-        // 12. jc
+        // 13. jc
         if let Some(jc) = self.jc {
             let val = match jc {
                 Jc::Start => "start",
@@ -287,7 +354,7 @@ impl ParaProps {
             };
             w.open("w:jc").attr(xml::W_VAL, val).empty();
         }
-        // 13. outlineLvl
+        // 14. outlineLvl
         if let Some(lvl) = self.outline_lvl {
             w.open("w:outlineLvl").attr(xml::W_VAL, &lvl.to_string()).empty();
         }

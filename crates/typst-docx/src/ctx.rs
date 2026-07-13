@@ -1,32 +1,38 @@
 //! The mutable conversion context [`DocxCtx`] and the inline/block flow.
 
+use std::ops::Range;
+use std::sync::Arc;
+
 use ecow::{EcoString, eco_format};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use typst_library::{World, WorldExt};
 use typst_library::diag::{SourceResult, warning};
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Packed, StyleChain};
 use typst_library::introspection::{Locator, SplitLocator, Tag, TagElem};
 use typst_library::layout::{Abs, Frame, FrameItem, HElem};
 use typst_library::math::EquationElem;
+use typst_library::model::{
+    Destination, DirectLinkElem, FootnoteElem, LinkElem, LinkMarker, RefElem,
+};
 use typst_library::model::{EmphElem, StrongElem};
 use typst_library::routines::{Arenas, FragmentKind, RealizationKind};
-use typst_library::text::{
-    LinebreakElem, SmartQuoteElem, SmartQuoter, SmartQuotes, SpaceElem, TextElem,
-    SubElem, SuperElem,
-};
 use typst_library::text::{HighlightElem, SmallcapsElem, StrikeElem, UnderlineElem};
-use typst_library::visualize::ImageElem;
-use typst_library::model::{
-    DirectLinkElem, Destination, FootnoteElem, LinkElem, LinkMarker, RefElem,
+use typst_library::text::{
+    LinebreakElem, RawContent, RawElem, RawLine, SmartQuoteElem, SmartQuoter,
+    SmartQuotes, SpaceElem, SubElem, SuperElem, TextElem,
 };
-use typst_syntax::Span;
+use typst_library::visualize::{ImageElem, Paint};
+use typst_ooxml_core::media::MediaRegistry;
+use typst_ooxml_core::{ns, render};
+use typst_syntax::{FileId, Span};
 
 use crate::dom::{
-    BookmarkTable, Block, Footnote, ListSpec, MediaPart, NumberingTable,
+    Block, BookmarkTable, Footnote, HeadingStyleSample, ListSpec, NumberingTable,
     ParaProps, Run, RunProps, TocFigure, TocHeading, Underline, VertAlign,
 };
-use crate::package::{RelMode, Rels};
 use crate::mappers;
+use crate::package::{RelMode, Rels};
 use crate::props;
 
 use typst_library::introspection::Location;
@@ -36,18 +42,20 @@ use typst_library::introspection::Location;
 /// laid-out frame (for hidden searchable runs).
 pub(crate) type Rasterized = Option<(EcoString, typst_library::layout::Size, String)>;
 
+#[derive(Clone, PartialEq)]
+struct RawRange {
+    id: FileId,
+    range: Range<usize>,
+}
+
 /// The relationship-type URI for an image part.
-pub const REL_IMAGE: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+pub const REL_IMAGE: &str = ns::rel::IMAGE;
 /// The relationship-type URI for an external hyperlink.
-pub const REL_HYPERLINK: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
+pub const REL_HYPERLINK: &str = ns::rel::HYPERLINK;
 /// The relationship-type URI for a header part.
-pub const REL_HEADER: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header";
+pub const REL_HEADER: &str = ns::rel::HEADER;
 /// The relationship-type URI for a footer part.
-pub const REL_FOOTER: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer";
+pub const REL_FOOTER: &str = ns::rel::FOOTER;
 
 /// The mutable package state accumulated during the post-realize walk.
 pub struct DocxCtx<'a, 'e> {
@@ -62,8 +70,7 @@ pub struct DocxCtx<'a, 'e> {
     list_shapes: FxHashMap<ListSpec, u32>,
     next_num_id: u32,
 
-    pub(crate) media: Vec<MediaPart>,
-    media_dedup: FxHashMap<u128, EcoString>,
+    pub(crate) media: MediaRegistry,
 
     pub(crate) doc_rels: Rels,
     /// Relationships for footnote-body content (→ `footnotes.xml.rels`); used
@@ -89,10 +96,17 @@ pub struct DocxCtx<'a, 'e> {
     /// [`Self::rasterize`]), so labels/refs inside an element that we rendered to
     /// an image remain present in the introspector.
     pub(crate) deferred_tags: Vec<Tag>,
+    /// DOCX locations from page furniture (headers/footers) that may need to be
+    /// aliased back to their repeated paged-layout locations.
+    pub(crate) real_alias_locations: FxHashSet<Location>,
 
     /// Headings recorded in document order as they are converted, used to
     /// populate any table of contents once each heading's real bookmark exists.
     pub(crate) toc_headings: Vec<TocHeading>,
+
+    /// Resolved heading style samples by emitted heading. The document pass
+    /// majority-votes these into `HeadingN` style definitions.
+    pub(crate) heading_style_samples: Vec<HeadingStyleSample>,
 
     /// Captioned figures/tables recorded in document order, used to populate any
     /// list of figures/tables once each figure's real bookmark exists.
@@ -120,6 +134,20 @@ pub struct DocxCtx<'a, 'e> {
     /// The last character emitted into a text run, for smart quoting.
     last_char: Option<char>,
 
+    /// Nesting depth while the DOCX walker is explicitly inside raw/code
+    /// content. Used for paths where `RawElem`/`RawLine` survives to this layer.
+    raw_depth: usize,
+
+    /// Source ranges covered by raw/code content before realization. Inline raw
+    /// can be unwrapped to styled `TextElem`s before DOCX sees a `RawElem`; this
+    /// keeps the origin check tied to source raw spans instead of monospace font.
+    raw_ranges: Vec<RawRange>,
+
+    /// Whether the current body section emits Word line numbering. Paragraphs
+    /// whose own style chain disables Typst line numbers become
+    /// `w:suppressLineNumbers` only while this is true.
+    pub(crate) line_numbering_active: bool,
+
     /// Whether we are currently lowering a footnote's body (into `footnotes.xml`).
     /// Word forbids a footnote *inside* a footnote — a `w:footnoteReference` in
     /// the footnote story makes the file unopenable — so an inner `FootnoteElem`
@@ -132,6 +160,29 @@ pub struct DocxCtx<'a, 'e> {
     /// it fine, but for cross-consumer fidelity a framed box in this context is
     /// rasterized to a centered image instead.
     pub(crate) suppress_text_box: bool,
+
+    /// Cache for page-overlay rasterization (`Self::rasterize_page_overlay`),
+    /// keyed by a hash of the content, styles, and target box. A page
+    /// background/foreground is lowered up to 5 times per section (to detect
+    /// first/odd/even variance) and DOCX opens a new section on every
+    /// header/footer/numbering change — a slide deck with a per-section
+    /// context-sensitive header (e.g. "current chapter title") but a *static*
+    /// background image re-runs the full layout+render+crop pipeline for
+    /// byte-identical output dozens to hundreds of times (observed: a
+    /// touying-style 50-slide deck went from timing out past 3 minutes to a
+    /// few seconds). Caches the rendered PNG bytes and frame tags, not the
+    /// per-part image relationship (which must stay scoped to that part's own
+    /// `.rels`) — `add_image` is still called on every hit, but its own
+    /// content-hash dedup (`MediaRegistry::add`) makes that cheap.
+    overlay_cache: FxHashMap<u128, Arc<CachedOverlay>>,
+}
+
+/// A cached [`Self::rasterize_page_overlay`] result, keyed on its inputs.
+struct CachedOverlay {
+    png: Arc<[u8]>,
+    size: typst_library::layout::Size,
+    frame_text: String,
+    tags: Vec<Tag>,
 }
 
 impl<'a, 'e> DocxCtx<'a, 'e> {
@@ -146,8 +197,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             numbering: NumberingTable::default(),
             list_shapes: FxHashMap::default(),
             next_num_id: 1,
-            media: Vec::new(),
-            media_dedup: FxHashMap::default(),
+            media: MediaRegistry::new("word/media"),
             doc_rels: Rels::new(),
             footnote_rels: Rels::new(),
             part_rels: None,
@@ -160,7 +210,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             uses_math: false,
             bookmarks: BookmarkTable::default(),
             deferred_tags: Vec::new(),
+            real_alias_locations: FxHashSet::default(),
             toc_headings: Vec::new(),
+            heading_style_samples: Vec::new(),
             toc_figures: Vec::new(),
             // A sane finite default (~A4 text width); overridden from the real
             // page geometry by `docx_document` before any conversion happens.
@@ -168,8 +220,12 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             raster_height: Abs::pt(842.0),
             quoter: SmartQuoter::new(),
             last_char: None,
+            raw_depth: 0,
+            raw_ranges: Vec::new(),
+            line_numbering_active: false,
             in_footnote: false,
             suppress_text_box: false,
+            overlay_cache: FxHashMap::default(),
         }
     }
 
@@ -212,13 +268,35 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         span: Span,
         height: typst_library::layout::Abs,
     ) -> SourceResult<Option<typst_library::layout::Frame>> {
+        self.layout_export_frame_in(content, styles, span, height, false)
+    }
+
+    /// Like [`Self::layout_export_frame`], but with `expand` control over the
+    /// region: `false` shrink-fits to the content's own extent (the default,
+    /// used when the caller wants to *measure* the content), `true` forces
+    /// the frame to the full requested `(raster_width, height)` box regardless
+    /// of what the content itself measures to. The latter is required for
+    /// page-relative content built purely from `place(..)` (a watermark, a
+    /// full-page background) — `place` positions content absolutely without
+    /// contributing to the parent's measured size, so a shrink-fit region
+    /// collapses such content to a degenerate zero-size frame and the caller
+    /// would wrongly conclude it laid out to nothing.
+    pub(crate) fn layout_export_frame_in(
+        &mut self,
+        content: &Content,
+        styles: StyleChain,
+        span: Span,
+        height: typst_library::layout::Abs,
+        expand: bool,
+    ) -> SourceResult<Option<typst_library::layout::Frame>> {
         use comemo::Track;
         use typst_library::foundations::{Target, TargetElem};
         use typst_library::layout::{Axes, Region, Size};
 
         let target = TargetElem::target.set(Target::Paged).wrap();
         let styles = styles.chain(&target);
-        let region = Region::new(Size::new(self.raster_width, height), Axes::splat(false));
+        let region =
+            Region::new(Size::new(self.raster_width, height), Axes::splat(expand));
         let loc = self.locator.next(&span);
         let layout_frame = self.engine.library.routines.layout_frame;
 
@@ -266,17 +344,18 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     /// Lays out arbitrary content and rasterizes it to a PNG, embedding it as a
     /// media part. Returns the media relationship id and the content's size, or
     /// `None` if the content lays out to nothing. This is the universal fallback
-    /// for content that has no idiomatic OOXML representation (drawn shapes, SVG
-    /// images, externally-rendered figures, …).
+    /// for content that has no idiomatic OOXML representation (drawn shapes,
+    /// PDF images, externally-rendered figures, …).
     /// Rasterizes `content` to a PNG media part and returns its relationship
     /// id, size, and the plain text recovered from the laid-out frame (empty if
     /// none) — the caller can attach that text as hidden runs so the
     /// rasterized region stays searchable/selectable/accessible.
     ///
     /// The render is tightened to its ink bounding box (see
-    /// [`Self::rasterize_uncropped`] for the one caller that must not crop): a
-    /// layout region can be far larger than what actually draws in it, and
-    /// embedding the blank expanse would reserve phantom space in the flow.
+    /// [`Self::rasterize_page_overlay`] for the page background/foreground
+    /// caller that must not crop): a layout region can be far larger than
+    /// what actually draws in it, and embedding the blank expanse would
+    /// reserve phantom space in the flow.
     pub fn rasterize(
         &mut self,
         content: &Content,
@@ -288,19 +367,55 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         Ok(rasterized)
     }
 
-    /// Like [`Self::rasterize`], but keeps the full render even when most of it
-    /// is blank. The page-background caller stretches the image to the whole
-    /// page, so an ink-cropped render would distort (a corner watermark would
-    /// be blown up to full-bleed).
-    pub(crate) fn rasterize_uncropped(
+    /// Like [`Self::rasterize`], but for content that is rendered
+    /// purely for its page-relative placement (a page background/foreground
+    /// overlay): the region is forced (expanded) to exactly `(raster_width,
+    /// height)` rather than shrink-fit to the content's own measured extent.
+    /// This is what lets `place(..)`-only content (which reports a degenerate
+    /// zero size under shrink-fit, since `place` doesn't contribute to the
+    /// parent's measured size) still rasterize instead of being silently
+    /// dropped — the caller always stretches the result to the full page box
+    /// anyway, so the content's *own* measured size was never load-bearing.
+    pub(crate) fn rasterize_page_overlay(
         &mut self,
         content: &Content,
         styles: StyleChain,
         span: Span,
+        height: typst_library::layout::Abs,
     ) -> SourceResult<Rasterized> {
-        let (tags, rasterized) = self.rasterize_impl(content, styles, span, false)?;
-        self.deferred_tags.extend(tags);
-        Ok(rasterized)
+        let key = typst_utils::hash128(&(content, styles, height, self.raster_width));
+        if let Some(cached) = self.overlay_cache.get(&key) {
+            let cached = Arc::clone(cached);
+            self.deferred_tags.extend(cached.tags.iter().cloned());
+            return Ok(Some((
+                self.add_image(&cached.png, "png"),
+                cached.size,
+                cached.frame_text.clone(),
+            )));
+        }
+
+        let Some(frame) = self.layout_export_frame_in(content, styles, span, height, true)?
+        else {
+            return Ok(None);
+        };
+        let mut tags = Vec::new();
+        collect_frame_tags(&frame, &mut tags);
+        self.deferred_tags.extend(tags.iter().cloned());
+        let frame_text = frame_to_text(&frame);
+        let Some(raster) = render::render_full_frame_to_png(frame, 2.0) else {
+            return Ok(None);
+        };
+        let rel = self.add_image(&raster.png, "png");
+        self.overlay_cache.insert(
+            key,
+            Arc::new(CachedOverlay {
+                png: Arc::from(raster.png),
+                size: raster.size,
+                frame_text: frame_text.clone(),
+                tags,
+            }),
+        );
+        Ok(Some((rel, raster.size, frame_text)))
     }
 
     /// Same as [`Self::rasterize`], but returns the frame tags to the caller
@@ -322,8 +437,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         span: Span,
         crop: bool,
     ) -> SourceResult<(Vec<Tag>, Rasterized)> {
-        use typst_library::foundations::Smart;
-        use typst_library::layout::{Abs, Sides};
+        use typst_library::layout::Abs;
 
         if std::env::var_os("DOCX_DEBUG_RASTER").is_some() {
             eprintln!("RASTERIZE: {}", content.elem().name());
@@ -359,7 +473,12 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         // resolve and rasterize instead of being dropped.
         let frame = match inf_frame {
             Some(frame) if usable_size(frame.size()) => frame,
-            _ => match self.layout_export_frame(content, styles, span, self.raster_height)? {
+            _ => match self.layout_export_frame(
+                content,
+                styles,
+                span,
+                self.raster_height,
+            )? {
                 Some(frame) if usable_size(frame.size()) => frame,
                 _ => return Ok((tags, None)),
             },
@@ -369,104 +488,13 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         // hidden runs alongside the image.
         let frame_text = frame_to_text(&frame);
 
-        // A frame's items can draw OUTSIDE its own [0, size] box — `#move`
-        // offsets its child without growing the frame — so rendering only the
-        // frame's own extent produces a blank or clipped image (the pre-crop
-        // code shipped exactly such invisible PNGs, thousands per code-heavy
-        // book). Compute the geometric bounds of everything that draws and
-        // render a canvas that covers them.
-        let mut ink = None;
-        frame_ink_rect(&frame, typst_library::layout::Point::zero(), &mut ink);
-        let Some(ink) = ink else {
-            // Nothing draws at all (e.g. an `#uncover` step whose payload is
-            // hidden): drop the raster; tags were already harvested.
-            return Ok((tags, None));
-        };
-        if !ink.min.x.to_pt().is_finite()
-            || !ink.min.y.to_pt().is_finite()
-            || !ink.max.x.to_pt().is_finite()
-            || !ink.max.y.to_pt().is_finite()
-        {
-            return Ok((tags, None));
-        }
-        // Ordinary fallback images render only their ink. The uncropped page-
-        // background path must preserve the frame's blank coordinate space as
-        // well: the caller stretches this bitmap to the full page, so reducing
-        // a corner watermark to its ink would blow it up to full-bleed. Include
-        // out-of-frame ink in both cases so `#move`d content is never clipped.
-        let render_rect = if crop {
-            ink
-        } else {
-            let frame_rect = typst_library::layout::Rect::from_pos_size(
-                typst_library::layout::Point::zero(),
-                frame.size(),
-            );
-            typst_library::layout::Rect::new(
-                typst_library::layout::Point::new(
-                    ink.min.x.min(frame_rect.min.x),
-                    ink.min.y.min(frame_rect.min.y),
-                ),
-                typst_library::layout::Point::new(
-                    ink.max.x.max(frame_rect.max.x),
-                    ink.max.y.max(frame_rect.max.y),
-                ),
-            )
-        };
-        // Floor degenerate axes (a hairline) to keep the pixmap constructible.
-        let size = typst_library::layout::Size::new(
-            render_rect.size().x.max(Abs::pt(0.5)),
-            render_rect.size().y.max(Abs::pt(0.5)),
-        );
-        let mut canvas = Frame::hard(size);
-        canvas.push_frame(
-            typst_library::layout::Point::new(-render_rect.min.x, -render_rect.min.y),
+        let Some(raster) = render::render_frame_to_png(
             frame,
-        );
-
-        // Render to a pixmap at 2× for crispness, then PNG-encode.
-        let page = typst_layout::Page {
-            frame: canvas,
-            bleed: Sides::splat(Abs::zero()),
-            fill: Smart::Custom(None),
-            numbering: None,
-            supplement: Content::empty(),
-            number: 1,
+            render::RasterOptions { pixel_per_pt: 2.0, crop_to_ink: crop },
+        ) else {
+            return Ok((tags, None));
         };
-        let options = typst_render::RenderOptions {
-            pixel_per_pt: 2.0.into(),
-            ..Default::default()
-        };
-        // The rasterizer can panic on pathological sub-frames (e.g. a gradient or
-        // tiling that resolves to a zero-dimension pixmap: `tiny-skia` asserts
-        // "Canvas length must be != 0"). Such a panic must not abort the whole
-        // export — this is a best-effort fallback. Catch it and drop just this
-        // one image; the introspection tags were already harvested above, so
-        // convergence is unaffected.
-        let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            typst_render::render(&page, &options)
-        }));
-        let Ok(pixmap) = rendered else { return Ok((tags, None)) };
-
-        // Tighten the render to its ink. The layout region can be far larger
-        // than what actually draws in it — page-relative content rasterized
-        // under the full page region (a slide's `#uncover` step whose content
-        // is currently hidden, a placed overlay that resolves to a corner)
-        // renders mostly or entirely blank, and embedding the blank expanse
-        // reserves a full page of phantom space in the flow. A blank render is
-        // dropped outright (its introspection tags were harvested above); a
-        // mostly-blank one is cropped to its ink bounding box, with the
-        // display size scaled to match so the visual keeps its physical scale.
-        let (pixmap, size) = if crop {
-            match crop_to_ink(pixmap, size) {
-                Some(cropped) => cropped,
-                None => return Ok((tags, None)),
-            }
-        } else {
-            (pixmap, size)
-        };
-
-        let Ok(png) = pixmap.encode_png() else { return Ok((tags, None)) };
-        Ok((tags, Some((self.add_image(&png, "png"), size, frame_text))))
+        Ok((tags, Some((self.add_image(&raster.png, "png"), raster.size, frame_text))))
     }
 
     /// Forward introspection tags from a laid-out frame whose visual is consumed
@@ -487,7 +515,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         use typst_library::foundations::{Context, dict};
 
         let context = Context::new(elem.location(), Some(styles));
-        let args = [dict! { "width" => self.raster_width, "height" => self.raster_height }];
+        let args =
+            [dict! { "width" => self.raster_width, "height" => self.raster_height }];
         elem.func
             .call(self.engine, context.track(), args)
             .ok()
@@ -505,7 +534,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         span: Span,
     ) -> SourceResult<Option<typst_library::layout::Size>> {
         use typst_library::layout::Abs;
-        let Some(frame) = self.layout_export_frame(content, styles, span, Abs::inf())? else {
+        let Some(frame) = self.layout_export_frame(content, styles, span, Abs::inf())?
+        else {
             return Ok(None);
         };
         let size = frame.size();
@@ -590,25 +620,13 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     /// shared across the package); returns the rId of a relationship to it,
     /// allocated in the *active* part's relationships (see [`Self::active_rels`]).
     pub fn add_image(&mut self, bytes: &[u8], ext: &str) -> EcoString {
-        let hash = typst_utils::hash128(bytes);
-        // Resolve (or create) the shared media part → its `word/`-relative target.
-        let target = if let Some(t) = self.media_dedup.get(&hash) {
-            t.clone()
-        } else {
-            let n = self.media.len() + 1;
-            let ext = ext.to_ascii_lowercase();
-            let part_name: EcoString = eco_format!("word/media/image{n}.{ext}");
-            let target: EcoString = eco_format!("media/image{n}.{ext}");
-            self.media.push(MediaPart {
-                // The rId is per-referencing-part (allocated below), not a
-                // property of the media part itself.
-                part_name,
-                ext: ext.into(),
-                bytes: bytes.to_vec(),
-            });
-            self.media_dedup.insert(hash, target.clone());
-            target
-        };
+        let id = self.media.add(bytes, ext);
+        let part = self.media.part(id);
+        let target: EcoString = part
+            .part_name
+            .strip_prefix("word/")
+            .unwrap_or(part.part_name.as_str())
+            .into();
         self.active_rels().add(REL_IMAGE, &target, RelMode::Internal)
     }
 
@@ -641,9 +659,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     /// Registers (or reuses) a numbering shape; returns the `numId`.
     pub fn register_list(&mut self, spec: ListSpec) -> u32 {
         if !spec.restart_at_1
-            && let Some(&num_id) = self.list_shapes.get(&spec) {
-                return num_id;
-            }
+            && let Some(&num_id) = self.list_shapes.get(&spec)
+        {
+            return num_id;
+        }
 
         // Find or create the abstract num for this shape.
         let abstract_id = self
@@ -718,16 +737,95 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         self.uses_math = true;
     }
 
+    /// Runs `f` while marking emitted text as originating from raw/code.
+    pub(crate) fn with_raw_scope<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> SourceResult<T>,
+    ) -> SourceResult<T> {
+        self.raw_depth += 1;
+        let result = f(self);
+        self.raw_depth -= 1;
+        result
+    }
+
+    /// Records raw/code source ranges before realization can unwrap them into
+    /// ordinary styled text.
+    pub(crate) fn record_raw_ranges(&mut self, content: &Content) {
+        use std::ops::ControlFlow;
+
+        let _ = content.traverse(&mut |element: Content| {
+            if let Some(raw) = element.to_packed::<RawElem>() {
+                match &raw.text {
+                    RawContent::Text(_) => self.record_raw_span(raw.span()),
+                    RawContent::Lines(lines) => {
+                        for (_, span) in lines {
+                            self.record_raw_span(*span);
+                        }
+                        if lines.is_empty() {
+                            self.record_raw_span(raw.span());
+                        }
+                    }
+                }
+            }
+            if let Some(line) = element.to_packed::<RawLine>() {
+                self.record_raw_span(line.span());
+            }
+            ControlFlow::<()>::Continue(())
+        });
+    }
+
+    fn record_raw_span(&mut self, span: Span) {
+        if let Some(range) = self.raw_range(span)
+            && range.range.start < range.range.end
+            && !self.raw_ranges.contains(&range)
+        {
+            self.raw_ranges.push(range);
+        }
+    }
+
+    fn raw_range(&self, span: Span) -> Option<RawRange> {
+        let id = span.id()?;
+        let range = self.engine.world.range(span)?;
+        Some(RawRange { id, range })
+    }
+
+    fn span_is_raw(&self, span: Span) -> bool {
+        if self.raw_depth > 0 {
+            return true;
+        }
+        let Some(span) = self.raw_range(span) else {
+            return false;
+        };
+        self.raw_ranges.iter().any(|raw| {
+            raw.id == span.id
+                && raw.range.start <= span.range.start
+                && span.range.end <= raw.range.end
+        })
+    }
+
     /// Notes the deepest heading level seen.
     pub fn note_heading_level(&mut self, level: u8) {
         self.max_heading_level = self.max_heading_level.max(level);
     }
 
+    /// Records the resolved run properties that should define this heading level.
+    pub fn note_heading_style(&mut self, level: u8, props: RunProps) {
+        self.heading_style_samples
+            .push(HeadingStyleSample { level, rpr: style_owned_heading_props(props) });
+    }
+
     // -- Property resolvers -------------------------------------------------
 
     /// Resolves a `TextElem`'s effective run properties.
-    pub fn resolve_text_props(&self, styles: StyleChain, inherited: RunProps) -> RunProps {
+    pub fn resolve_text_props(
+        &self,
+        styles: StyleChain,
+        inherited: RunProps,
+    ) -> RunProps {
         let mut p = inherited;
+        if self.raw_depth > 0 {
+            p.no_proof = true;
+        }
 
         // Size. The document's most common size is later hoisted into
         // `docDefaults` and stripped from the runs that match it (see
@@ -735,18 +833,13 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         let size = props::pt_to_half_pt(styles.resolve(TextElem::size).to_pt());
         p.size_half_pt = Some(size);
 
-        // Colour. Black is Word's own default (in `docDefaults`), so omit it and
-        // inherit — this both keeps the body compact and lets a run carrying the
-        // `Hyperlink` character style keep that style's blue (emitting black would
-        // override it back to invisible body text). An explicitly non-black fill
-        // (e.g. `#text(red)` or `#show link: set text(red)`) still wins.
+        // Colour. Record the resolved value, including black. The document pass
+        // strips it only when it matches the governing style/default; this lets a
+        // black run remain black when `Normal` is non-black.
         if let typst_library::visualize::Paint::Solid(color) =
             styles.get_ref(TextElem::fill)
         {
-            let hex = props::color_to_hex(color);
-            if hex != [0, 0, 0] {
-                p.color = Some(hex);
-            }
+            p.color = Some(props::color_to_hex(color));
         }
 
         // Font (first family). The most common one is later hoisted into
@@ -755,9 +848,12 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             p.font = Some(first.as_str().into());
         }
 
-        // Weight → bold (base weight plus the `strong` delta).
-        let weight =
-            styles.get(TextElem::weight).to_number() as i64 + styles.get(TextElem::delta).0;
+        // Weight → bold (base weight plus the semantic `strong` delta).
+        let strong_delta = styles.get(TextElem::delta).0;
+        if strong_delta > 0 {
+            p.strong = true;
+        }
+        let weight = styles.get(TextElem::weight).to_number() as i64 + strong_delta;
         if weight >= 600 {
             p.bold = true;
         }
@@ -766,7 +862,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         if styles.get(TextElem::style) != typst_library::text::FontStyle::Normal {
             p.italic = true;
         }
-        if styles.get(TextElem::emph).0 {
+        let emph = styles.get(TextElem::emph).0;
+        if emph {
+            p.emphasis = true;
             p.italic = !p.italic;
         }
 
@@ -785,14 +883,17 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                     p.underline = Some(underline_from_stroke(stroke));
                 }
                 typst_library::text::DecoLine::Strikethrough { .. } => p.strike = true,
-                typst_library::text::DecoLine::Highlight { .. } => {
-                    p.shd_fill = Some([0xFF, 0xFF, 0x00]);
+                typst_library::text::DecoLine::Highlight { fill, .. } => {
+                    apply_highlight(&mut p, fill.clone());
                 }
                 _ => {}
             }
         }
 
-        // Small capitals.
+        // Case and small capitals.
+        if matches!(styles.get(TextElem::case), Some(typst_library::text::Case::Upper)) {
+            p.caps = true;
+        }
         if styles.get(TextElem::smallcaps).is_some() {
             p.smallcaps = true;
         }
@@ -832,12 +933,106 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         p
     }
 
+    /// Splits `text` into contiguous spans, each paired with the font family
+    /// that should render it — mirroring Typst's own per-glyph font
+    /// fallback (used during paged layout's shaping, `typst-layout`'s
+    /// `get_font_and_covers`) instead of always using only the first
+    /// declared family. A single declared font commonly can't cover every
+    /// script in a run (e.g. a Latin heading font next to CJK glyphs);
+    /// Typst's PDF path substitutes a covering font per-glyph during frame
+    /// shaping, but typst-docx builds its runs from the pre-layout Content
+    /// tree (a consequence of DOCX needing its own separate flowing
+    /// realize — see `lib.rs`) and has no access to that per-glyph
+    /// decision, so it previously just baked the first family into every
+    /// OOXML font slot (including `w:eastAsia`), producing tofu wherever
+    /// that family didn't cover a character (confirmed visually via a
+    /// LibreOffice render: a Latin-only heading font produced tofu for CJK
+    /// heading text while CJK body text, whose font matched the document's
+    /// hoisted default, rendered fine). This walks `text` character by
+    /// character using the same family list Typst's shaping code consults
+    /// (`typst_library::text::families`), picks the first family (in
+    /// priority order) that covers each character, falls back to the font
+    /// book's script-aware fallback search when none of the declared
+    /// families do, then coalesces consecutive same-font characters into
+    /// maximal spans — so a single-script run (the common case) still
+    /// produces exactly one span.
+    fn split_by_font_coverage(&self, text: &str, styles: StyleChain) -> Vec<(EcoString, EcoString)> {
+        let book = self.engine.world.book();
+        let variant = typst_library::text::variant(styles);
+        let families: Vec<&typst_library::text::FontFamily> =
+            typst_library::text::families(styles).collect();
+        let Some(first) = families.first() else {
+            return vec![(EcoString::new(), text.into())];
+        };
+
+        // If the leading requested family isn't resolvable at all on this
+        // machine, there is no coverage data to justify overriding it: DOCX
+        // preserves font names as portable references for whatever
+        // application eventually opens the file (unlike PDF, which must
+        // embed real glyph outlines from a locally available font and so
+        // is already limited to what's installed here) — a font simply
+        // being absent from the compiling machine's font book is the
+        // ordinary case, not evidence it lacks coverage. Keep the exact
+        // original single-font behavior rather than guessing a local
+        // substitute.
+        let Some(first_info) =
+            book.select(first.as_str(), variant).and_then(|id| book.info(id))
+        else {
+            return vec![(first.as_str().into(), text.into())];
+        };
+
+        // Fast path: the (locally resolvable) leading font already covers
+        // every character — the overwhelming common case.
+        if text.chars().all(|c| first_info.coverage.contains(c as u32)) {
+            return vec![(first.as_str().into(), text.into())];
+        }
+
+        let like = Some(first_info);
+        let mut spans: Vec<(EcoString, EcoString)> = Vec::new();
+        for c in text.chars() {
+            let mut chosen: Option<&str> = None;
+            for family in &families {
+                if let Some(id) = book.select(family.as_str(), variant)
+                    && let Some(info) = book.info(id)
+                    && info.coverage.contains(c as u32)
+                {
+                    chosen = Some(family.as_str());
+                    break;
+                }
+            }
+            let font_name: EcoString = match chosen.or_else(|| {
+                // None of the declared families cover this character — fall
+                // back the same way Typst's own shaping does.
+                book.select_fallback(like, variant, c.encode_utf8(&mut [0; 4]))
+                    .and_then(|id| book.info(id))
+                    .map(|info| info.family.as_str())
+            }) {
+                Some(name) => name.into(),
+                // No installed font covers this character at all — keep the
+                // originally requested family; Word falls back to its own
+                // missing-glyph handling, no worse than before this split.
+                None => families
+                    .first()
+                    .map(|f| f.as_str().into())
+                    .unwrap_or_default(),
+            };
+            match spans.last_mut() {
+                Some((last_font, last_text)) if *last_font == font_name => {
+                    last_text.push(c);
+                }
+                _ => spans.push((font_name, c.into())),
+            }
+        }
+        spans
+    }
+
     /// Applies `TextElem::case` to a string.
     pub fn apply_case(&self, styles: StyleChain, text: &EcoString) -> EcoString {
-        if let Some(case) = styles.get(TextElem::case) {
-            case.apply(text.as_str()).into()
-        } else {
-            text.clone()
+        match styles.get(TextElem::case) {
+            Some(typst_library::text::Case::Lower) => {
+                typst_library::text::Case::Lower.apply(text.as_str()).into()
+            }
+            Some(typst_library::text::Case::Upper) | None => text.clone(),
         }
     }
 
@@ -849,10 +1044,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     ) -> ParaProps {
         use typst_library::foundations::Resolve;
         use typst_library::layout::{AlignElem, Em, FixedAlignment};
-        use typst_library::model::ParElem;
+        use typst_library::model::{ParElem, ParLine};
         use typst_library::text::TextElem;
 
         let mut p = ParaProps::default();
+
+        if self.line_numbering_active && styles.get_ref(ParLine::numbering).is_none() {
+            p.suppress_line_numbers = true;
+        }
 
         // G3 alignment. Justification (`w:jc="both"`) wins over horizontal
         // alignment; a left/start paragraph stays `None` for byte-identity with
@@ -933,6 +1132,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
         props: RunProps,
     ) -> SourceResult<Vec<Run>> {
+        self.record_raw_ranges(body);
         // A `#place`-shape composition reached as paragraph content — e.g. a
         // `#box`/`#rect` with no visual of its own (so it has no block
         // structure of its own to preserve and its body is lowered here
@@ -978,6 +1178,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         props: RunProps,
     ) -> SourceResult<Vec<crate::dom::ParaChild>> {
         use crate::dom::ParaChild;
+        self.record_raw_ranges(body);
         // See the identical check in `inline_runs`.
         if crate::convert::contains_place(body)
             && crate::convert::placed_bodies_shape_only(body, styles)
@@ -1096,8 +1297,11 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 // `drafting` package stores page properties from inside a
                 // `box(place(layout(..)))`), and a later `state.get()` only
                 // sees the update if it precedes the read in tag order.
-                let (tags, runs) =
-                    mappers::image::laid_out_fallback_with_tags(child, child_styles, self)?;
+                let (tags, runs) = mappers::image::laid_out_fallback_with_tags(
+                    child,
+                    child_styles,
+                    self,
+                )?;
                 out.extend(tags.into_iter().map(ParaChild::Tag));
                 out.extend(runs.into_iter().map(ParaChild::Run));
             } else {
@@ -1160,8 +1364,17 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             self.push_text(out, props.clone(), " ".into());
         } else if let Some(elem) = child.to_packed::<TextElem>() {
             let text = self.apply_case(styles, &elem.text);
-            let rp = self.resolve_text_props(styles, props.clone());
-            self.push_text(out, rp, text);
+            let mut rp = self.resolve_text_props(styles, props.clone());
+            if self.span_is_raw(elem.span()) {
+                rp.no_proof = true;
+            }
+            for (font, span) in self.split_by_font_coverage(&text, styles) {
+                let mut span_rp = rp.clone();
+                if !font.is_empty() {
+                    span_rp.font = Some(font);
+                }
+                self.push_text(out, span_rp, span);
+            }
         } else if let Some(elem) = child.to_packed::<HElem>() {
             use typst_library::foundations::Resolve;
             use typst_library::layout::Spacing;
@@ -1218,10 +1431,12 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             self.push_text(out, rp, quote);
         } else if let Some(elem) = child.to_packed::<StrongElem>() {
             let mut p = props.clone();
+            p.strong = true;
             p.bold = true;
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<EmphElem>() {
             let mut p = props.clone();
+            p.emphasis = true;
             p.italic = true;
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<SubElem>() {
@@ -1246,9 +1461,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             out.extend(self.inline_runs(&elem.body, styles, p)?);
         } else if let Some(elem) = child.to_packed::<HighlightElem>() {
             let mut p = props.clone();
-            // Default highlight color (yellow) unless a fill is provided.
-            p.shd_fill = Some([0xFF, 0xFF, 0x00]);
+            apply_highlight(&mut p, elem.fill.get_cloned(styles));
             out.extend(self.inline_runs(&elem.body, styles, p)?);
+        } else if let Some(elem) = child.to_packed::<RawElem>() {
+            out.extend(self.with_raw_scope(|ctx| {
+                ctx.inline_runs(elem.pack_ref(), styles, props.clone())
+            })?);
+        } else if let Some(elem) = child.to_packed::<RawLine>() {
+            out.extend(self.with_raw_scope(|ctx| {
+                ctx.inline_runs(&elem.body, styles, props.clone())
+            })?);
         } else if let Some(elem) = child.to_packed::<SmallcapsElem>() {
             let mut p = props.clone();
             p.smallcaps = true;
@@ -1280,7 +1502,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<LinkMarker>() {
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
-        } else if let Some(elem) = child.to_packed::<typst_library::layout::LayoutElem>() {
+        } else if let Some(elem) = child.to_packed::<typst_library::layout::LayoutElem>()
+        {
             // An inline `#layout(size => ..)` is often pure layout-time
             // scaffolding whose only real output is a state/counter update —
             // e.g. the `drafting` package's `set-page-properties` stores the
@@ -1298,7 +1521,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             } else {
                 self.rasterize_fallback(child, styles, out)?;
             }
-        } else if let Some((body, fill, bdr)) = mappers::shape::inline_frame(child, styles)
+        } else if let Some((body, fill, bdr)) =
+            mappers::shape::inline_frame(child, styles)
             && (fill.is_some() || bdr.is_some())
             && crate::convert::body_extractable(&body)
         {
@@ -1324,40 +1548,74 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             match elem.body.get_cloned(styles) {
                 // An empty `#box` (`#box(width: 1em)` spacer): nothing to render.
                 None => {}
-                // A *plain* box — no fill, stroke or clip, so nothing visual to
-                // preserve — is just inline content held together (`#box[..]` to
-                // prevent a line break, `#box(width: ..)[label]`, a baseline
-                // shift). Extract its runs so the text stays selectable instead
-                // of rasterizing it to an image; the only thing lost is the box's
-                // geometric constraint, which has no inline-flow equivalent.
-                // `body_extractable` still guards the one layout-bound case (a
-                // per-line equation label inside).
-                Some(body)
-                    if box_is_plain(elem, styles)
-                        && crate::convert::body_extractable(&body)
-                        && crate::convert::body_inline_extractable(&body) =>
-                {
-                    out.extend(self.inline_runs(&body, styles, props.clone())?);
-                }
                 Some(body) => {
-                    // Rasterize the box (this keeps a styled box's visual and, for
-                    // a box that lays out real content, its labels via the frame
-                    // tag harvest). If it lays out to *nothing* — a degenerate box
-                    // whose rasterization would otherwise be dropped — extract its
-                    // text so the content survives. Such a box has no laid-out
-                    // content and hence no labels to orphan, so plain extraction is
-                    // safe; we discard any partial tag harvest first to be sure.
-                    let mark = self.deferred_tags.len();
-                    let runs = mappers::image::laid_out_fallback(child, styles, self)?;
-                    if !runs.is_empty() {
-                        // Keep Word's figure counter consistent with any
-                        // captioned figure the box rasterized (a hidden
-                        // `SEQ … \h`), as the generic fallback does.
-                        self.emit_rasterized_figure_seqs(mark, styles, out);
-                        out.extend(runs);
-                    } else {
-                        self.deferred_tags.truncate(mark);
+                    // A box whose sole body is a bare image with no size of its
+                    // own (the common icon idiom — `box(height: 10pt,
+                    // image(name))`, Typst's own documented example): the
+                    // *box's* height is the only sizing information for this
+                    // image, but the "plain box" extraction below discards the
+                    // box's geometric constraint entirely (it has no inline-flow
+                    // equivalent for ordinary text) — for an image that means
+                    // falling back to its full intrinsic pixel size, producing a
+                    // giant image where a small inline icon was intended
+                    // (confirmed visually: a CV's tiny GitHub/GitLab/LinkedIn
+                    // icons became half-page-sized images). Propagate the box's
+                    // height onto a cloned image before lowering it — matching
+                    // the aspect-ratio-preserving "height only" branch
+                    // `display_extents` already implements for an image with its
+                    // own explicit height — instead of discarding the
+                    // constraint.
+                    if let Some(image_elem) = body.to_packed::<ImageElem>()
+                        && matches!(
+                            image_elem.height.get(styles),
+                            typst_library::layout::Sizing::Auto
+                        )
+                        && let typst_library::foundations::Smart::Custom(rel) =
+                            elem.height.get(styles)
+                    {
+                        let sized = (**image_elem)
+                            .clone()
+                            .with_height(typst_library::layout::Sizing::Rel(rel));
+                        out.push(mappers::image::image(
+                            &typst_library::foundations::Packed::new(sized),
+                            styles,
+                            self,
+                        )?);
+                    } else if box_is_plain(elem, styles)
+                        && crate::convert::body_extractable(&body)
+                        && crate::convert::body_inline_extractable(&body)
+                    {
+                        // A *plain* box — no fill, stroke or clip, so nothing
+                        // visual to preserve — is just inline content held
+                        // together (`#box[..]` to prevent a line break,
+                        // `#box(width: ..)[label]`, a baseline shift). Extract
+                        // its runs so the text stays selectable instead of
+                        // rasterizing it to an image; the only thing lost is the
+                        // box's geometric constraint, which has no inline-flow
+                        // equivalent. `body_extractable` still guards the one
+                        // layout-bound case (a per-line equation label inside).
                         out.extend(self.inline_runs(&body, styles, props.clone())?);
+                    } else {
+                        // Rasterize the box (this keeps a styled box's visual
+                        // and, for a box that lays out real content, its labels
+                        // via the frame tag harvest). If it lays out to
+                        // *nothing* — a degenerate box whose rasterization would
+                        // otherwise be dropped — extract its text so the content
+                        // survives. Such a box has no laid-out content and hence
+                        // no labels to orphan, so plain extraction is safe; we
+                        // discard any partial tag harvest first to be sure.
+                        let mark = self.deferred_tags.len();
+                        let runs = mappers::image::laid_out_fallback(child, styles, self)?;
+                        if !runs.is_empty() {
+                            // Keep Word's figure counter consistent with any
+                            // captioned figure the box rasterized (a hidden
+                            // `SEQ … \h`), as the generic fallback does.
+                            self.emit_rasterized_figure_seqs(mark, styles, out);
+                            out.extend(runs);
+                        } else {
+                            self.deferred_tags.truncate(mark);
+                            out.extend(self.inline_runs(&body, styles, props.clone())?);
+                        }
                     }
                 }
             }
@@ -1380,9 +1638,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // `#pdf.artifact(..)`, one layer inside Typst's own uniform outer
             // cell wrapper). Unwrap and lower its body like any other wrapper.
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
-        } else if let Some(elem) =
-            child.to_packed::<typst_library::model::TableCell>()
-        {
+        } else if let Some(elem) = child.to_packed::<typst_library::model::TableCell>() {
             // Same as `GridCell` above, for `#table.cell(..)`.
             out.extend(self.inline_runs(&elem.body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<typst_library::layout::HideElem>() {
@@ -1411,7 +1667,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // A decorative vector shape (`#rect`/`#circle`/`#polygon`/…) maps to a
             // DrawingML `wps:wsp` shape instead of a rasterized image.
             out.push(run);
-        } else if let Some(elem) = child.to_packed::<typst_library::visualize::CurveElem>()
+        } else if let Some(elem) =
+            child.to_packed::<typst_library::visualize::CurveElem>()
             && let Some(run) = mappers::shape::curve(elem, styles, self)?
         {
             // `#curve` — straight and cubic-Bézier segments — maps to a native
@@ -1433,7 +1690,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 // real-world rasterize cause (a hand-drawn diagram built from a
                 // few `#move`d primitives).
                 out.push(run);
-            } else if let Some(runs) = mappers::shape::move_text(elem, styles, props, self)? {
+            } else if let Some(runs) =
+                mappers::shape::move_text(elem, styles, props, self)?
+            {
                 // A pure vertical nudge (`dx` ~0) of plain text/inline content —
                 // e.g. a baseline tweak on an icon's caption — recovers as real,
                 // searchable/editable runs carrying a `w:position` shift instead
@@ -1476,7 +1735,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         Ok(())
     }
 
-    /// No idiomatic representation (a drawn shape, an SVG/PDF image, an
+    /// No idiomatic representation (a drawn shape, a PDF image, an
     /// externally-rendered figure, …): rasterize it and embed as an image so
     /// the content survives instead of being dropped.
     fn rasterize_fallback(
@@ -1517,7 +1776,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     }
 
     /// Pushes a text run, coalescing with a preceding identical-props run.
-    fn push_text(&mut self, out: &mut Vec<Run>, props: RunProps, text: EcoString) {
+    fn push_text(&mut self, out: &mut Vec<Run>, mut props: RunProps, text: EcoString) {
+        if self.raw_depth > 0 {
+            props.no_proof = true;
+        }
         self.last_char = text.chars().last().or(self.last_char);
         if let Some(Run::Text { props: last_props, text: last_text }) = out.last_mut()
             && *last_props == props
@@ -1536,6 +1798,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         body: &Content,
         styles: StyleChain,
     ) -> SourceResult<Vec<Block>> {
+        self.record_raw_ranges(body);
         let arenas = Arenas::default();
         let children = self.realize_fragment(&arenas, body, styles)?;
         let pairs: Vec<_> = children.to_vec();
@@ -1641,14 +1904,82 @@ fn underline_from_stroke(stroke: &typst_library::visualize::Stroke<Abs>) -> Unde
     Underline { val, color }
 }
 
+const TYPST_DEFAULT_HIGHLIGHT: [u8; 3] = [0xFF, 0xFD, 0x11];
+
+fn apply_highlight(props: &mut RunProps, fill: Option<Paint>) {
+    let rgb = highlight_rgb(fill);
+    if let Some(name) = word_highlight_name(rgb) {
+        props.highlight = Some(name);
+        props.shd_fill = None;
+    } else {
+        props.highlight = None;
+        props.shd_fill = Some(rgb);
+    }
+}
+
+fn style_owned_heading_props(props: RunProps) -> RunProps {
+    RunProps {
+        font: props.font,
+        bold: props.bold,
+        italic: props.italic,
+        color: props.color,
+        size_half_pt: props.size_half_pt,
+        ..RunProps::default()
+    }
+}
+
+fn highlight_rgb(fill: Option<Paint>) -> [u8; 3] {
+    match fill {
+        Some(Paint::Solid(color)) => props::color_to_hex(&color),
+        Some(Paint::Gradient(gradient)) => {
+            props::gradient_shade_hex(&gradient).unwrap_or(TYPST_DEFAULT_HIGHLIGHT)
+        }
+        Some(Paint::Tiling(_)) | None => TYPST_DEFAULT_HIGHLIGHT,
+    }
+}
+
+fn word_highlight_name(rgb: [u8; 3]) -> Option<&'static str> {
+    const TOLERANCE: u8 = 24;
+    const VALUES: &[(&str, [u8; 3])] = &[
+        ("black", [0x00, 0x00, 0x00]),
+        ("blue", [0x00, 0x00, 0xFF]),
+        ("cyan", [0x00, 0xFF, 0xFF]),
+        ("darkBlue", [0x00, 0x00, 0x80]),
+        ("darkCyan", [0x00, 0x80, 0x80]),
+        ("darkGray", [0x80, 0x80, 0x80]),
+        ("darkGreen", [0x00, 0x80, 0x00]),
+        ("darkMagenta", [0x80, 0x00, 0x80]),
+        ("darkRed", [0x80, 0x00, 0x00]),
+        ("darkYellow", [0x80, 0x80, 0x00]),
+        ("green", [0x00, 0xFF, 0x00]),
+        ("lightGray", [0xC0, 0xC0, 0xC0]),
+        ("magenta", [0xFF, 0x00, 0xFF]),
+        ("red", [0xFF, 0x00, 0x00]),
+        ("white", [0xFF, 0xFF, 0xFF]),
+        ("yellow", [0xFF, 0xFF, 0x00]),
+    ];
+
+    VALUES
+        .iter()
+        .filter_map(|(name, candidate)| {
+            let distance = rgb
+                .into_iter()
+                .zip(*candidate)
+                .map(|(a, b)| u8::abs_diff(a, b))
+                .max()
+                .unwrap_or(0);
+            (distance <= TOLERANCE).then_some((*name, distance))
+        })
+        .min_by_key(|(_, distance)| *distance)
+        .map(|(name, _)| name)
+}
+
 /// Classifies a resolved dash array's "on" segments (the even indices; the odd
 /// ones are gaps) into the nearest Word underline style. The named Typst dash
 /// presets use a line-width "dot" for dotted lines and explicit lengths for
 /// dashes, so a dot-only pattern is `dotted`, a length-only one is `dash`, and a
 /// mix (dash-dotted) is `dotDash`.
-fn classify_dash(
-    array: &[typst_library::visualize::DashLength<Abs>],
-) -> &'static str {
+fn classify_dash(array: &[typst_library::visualize::DashLength<Abs>]) -> &'static str {
     use typst_library::visualize::DashLength;
     if array.is_empty() {
         return "single";
@@ -1711,168 +2042,6 @@ fn collect_frame_text(
 /// yields an opaque `Frame`, not re-realizable blocks) still contribute
 /// searchable/selectable text rather than being a pure image. Returned as a
 /// single string with `\n` line separators; the caller decides visibility.
-/// Crops a rendered pixmap to its ink bounding box — the pixels that actually
-/// carry any alpha. Returns `None` for a fully blank render (nothing drawn),
-/// and the pixmap unchanged when the ink already (nearly) fills it. The
-/// physical size is scaled by the same crop ratio, so the embedded image keeps
-/// its exact rendered scale — only the blank margin is removed.
-/// The geometric bounding box of everything a frame draws, in the frame's own
-/// coordinate space. Items are not confined to the frame's [0, size] box (a
-/// `#move`d child draws offset outside it), so the union is taken over the
-/// items themselves: text runs by their glyph-outline bbox (relative to the
-/// baseline origin), shapes by their stroke-inclusive bbox, images by their
-/// display size, and groups by the transformed AABB of their children's ink.
-fn frame_ink_rect(
-    frame: &Frame,
-    offset: typst_library::layout::Point,
-    out: &mut Option<typst_library::layout::Rect>,
-) {
-    use typst_library::layout::{Point, Rect};
-    fn push(out: &mut Option<Rect>, r: Rect) {
-        // A degenerate or non-finite item rect (an unstroked infinite line, an
-        // empty glyph run) must not poison the union — skip it instead.
-        if !r.min.x.to_pt().is_finite()
-            || !r.min.y.to_pt().is_finite()
-            || !r.max.x.to_pt().is_finite()
-            || !r.max.y.to_pt().is_finite()
-        {
-            return;
-        }
-        *out = Some(match *out {
-            None => r,
-            Some(a) => Rect::new(
-                Point::new(a.min.x.min(r.min.x), a.min.y.min(r.min.y)),
-                Point::new(a.max.x.max(r.max.x), a.max.y.max(r.max.y)),
-            ),
-        });
-    }
-    for (pos, item) in frame.items() {
-        let p = offset + *pos;
-        match item {
-            FrameItem::Text(text) => {
-                // Metrics-based, not glyph-outline-based: `TextItem::bbox()`
-                // relies on per-glyph outline extraction, which can come up
-                // empty (spaces, some CJK faces) and would erase the run from
-                // the ink bounds — collapsing the render canvas and losing the
-                // text entirely. Ascent/descent/advance are always available.
-                let m = text.font.metrics();
-                let ascent = m.ascender.at(text.size);
-                let descent = -m.descender.at(text.size);
-                push(
-                    out,
-                    Rect::new(
-                        p + Point::new(Abs::zero(), -ascent),
-                        p + Point::new(text.width(), descent.max(Abs::zero())),
-                    ),
-                );
-            }
-            FrameItem::Shape(shape, _) => {
-                let b = shape.bbox(true);
-                push(out, Rect::new(p + b.min, p + b.max));
-            }
-            FrameItem::Image(_, size, _) => {
-                push(out, Rect::from_pos_size(p, *size));
-            }
-            FrameItem::Group(group) => {
-                let mut inner = None;
-                frame_ink_rect(&group.frame, Point::zero(), &mut inner);
-                if let Some(b) = inner {
-                    // Transform the child box's corners into the parent space.
-                    let corners = [
-                        b.min,
-                        Point::new(b.max.x, b.min.y),
-                        Point::new(b.min.x, b.max.y),
-                        b.max,
-                    ];
-                    let mut min = Point::splat(Abs::inf());
-                    let mut max = Point::splat(-Abs::inf());
-                    for c in corners {
-                        let t = c.transform(group.transform);
-                        min.x = min.x.min(t.x);
-                        min.y = min.y.min(t.y);
-                        max.x = max.x.max(t.x);
-                        max.y = max.y.max(t.y);
-                    }
-                    push(out, Rect::new(p + min, p + max));
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn crop_to_ink(
-    pixmap: tiny_skia::Pixmap,
-    size: typst_library::layout::Size,
-) -> Option<(tiny_skia::Pixmap, typst_library::layout::Size)> {
-    let dbg = std::env::var_os("DOCX_DEBUG_CROP").is_some();
-    let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
-    if w == 0 || h == 0 {
-        if dbg {
-            eprintln!("CROP: zero-dim {w}x{h}");
-        }
-        return None;
-    }
-    // Premultiplied RGBA rows; ink = any nonzero alpha (the render surface is
-    // transparent — see the `fill: Smart::Custom(None)` on the page above).
-    let data = pixmap.data();
-    let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0usize, 0usize);
-    for y in 0..h {
-        let row = &data[y * w * 4..(y + 1) * w * 4];
-        let mut any = false;
-        for (x, px) in row.chunks_exact(4).enumerate() {
-            if px[3] != 0 {
-                min_x = min_x.min(x);
-                max_x = max_x.max(x);
-                any = true;
-            }
-        }
-        if any {
-            min_y = min_y.min(y);
-            max_y = y;
-        }
-    }
-    if min_x > max_x {
-        // Fully blank: nothing to embed.
-        if dbg {
-            eprintln!("CROP: blank {w}x{h}");
-        }
-        return None;
-    }
-    // Pad for antialiasing halos, clamped to the pixmap.
-    const PAD: usize = 2;
-    let x0 = min_x.saturating_sub(PAD);
-    let y0 = min_y.saturating_sub(PAD);
-    let x1 = (max_x + PAD + 1).min(w);
-    let y1 = (max_y + PAD + 1).min(h);
-    // Ink (nearly) fills the render: keep it as-is rather than re-crop for a
-    // sliver — the common case (an image, a diagram) stays byte-identical.
-    if (x1 - x0) * 100 >= w * 97 && (y1 - y0) * 100 >= h * 97 {
-        return Some((pixmap, size));
-    }
-    let rect = match tiny_skia::IntRect::from_ltrb(x0 as i32, y0 as i32, x1 as i32, y1 as i32) {
-        Some(r) => r,
-        None => {
-            if dbg {
-                eprintln!("CROP: from_ltrb FAILED {x0},{y0}..{x1},{y1} in {w}x{h}");
-            }
-            return None;
-        }
-    };
-    let cropped = match pixmap.clone_rect(rect) {
-        Some(c) => c,
-        None => {
-            if dbg {
-                eprintln!("CROP: clone_rect FAILED {x0},{y0}..{x1},{y1} in {w}x{h}");
-            }
-            return None;
-        }
-    };
-    let scale_x = (x1 - x0) as f64 / w as f64;
-    let scale_y = (y1 - y0) as f64 / h as f64;
-    Some((cropped, typst_library::layout::Size::new(size.x * scale_x, size.y * scale_y)))
-}
-
 fn frame_to_text(frame: &Frame) -> String {
     use typst_library::layout::Point;
     let mut items: Vec<(Point, EcoString, Abs, Abs)> = Vec::new();

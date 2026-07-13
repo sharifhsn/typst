@@ -29,6 +29,7 @@ use typst_library::pdf::ArtifactKind;
 use typst_library::routines::{Arenas, FragmentKind, Pair, RealizationKind};
 use typst_library::text::TextElem;
 use typst_library::{Library, World};
+use typst_syntax::Span;
 use typst_utils::{LazyHash, NonZeroExt, Numeric, Protected};
 
 use self::block::{layout_multi_block, layout_single_block};
@@ -72,7 +73,7 @@ pub fn layout_fragment(
         styles,
         regions,
         NonZeroUsize::ONE,
-        Rel::zero(),
+        ColumnLayout::default(),
     )
 }
 
@@ -100,7 +101,10 @@ pub fn layout_columns(
         styles,
         regions,
         elem.count.get(styles),
-        elem.gutter.resolve(styles),
+        ColumnLayout {
+            gutter: elem.gutter.resolve(styles),
+            region_span: Some(elem.span()),
+        },
     )
 }
 
@@ -119,7 +123,7 @@ fn layout_fragment_impl(
     styles: StyleChain,
     regions: Regions,
     columns: NonZeroUsize,
-    column_gutter: Rel<Abs>,
+    column_layout: ColumnLayout,
 ) -> SourceResult<Fragment> {
     if !regions.size.x.is_finite() && regions.expand.x {
         bail!(content.span(), "cannot expand into infinite width");
@@ -160,7 +164,8 @@ fn layout_fragment_impl(
         styles,
         regions,
         columns,
-        column_gutter,
+        column_layout.gutter,
+        column_layout.region_span,
         kind.into(),
     )
 }
@@ -196,10 +201,12 @@ pub fn layout_flow<'a>(
     mut regions: Regions,
     columns: NonZeroUsize,
     column_gutter: Rel<Abs>,
+    column_region_span: Option<Span>,
     mode: FlowMode,
 ) -> SourceResult<Fragment> {
     // Prepare configuration that is shared across the whole flow.
-    let config = configuration(shared, regions, columns, column_gutter, mode);
+    let config =
+        configuration(shared, regions, columns, column_gutter, column_region_span, mode);
 
     // Collect the elements into pre-processed children. These are much easier
     // to handle than the raw elements.
@@ -240,11 +247,13 @@ fn configuration<'x>(
     regions: Regions,
     columns: NonZeroUsize,
     column_gutter: Rel<Abs>,
+    column_region_span: Option<Span>,
     mode: FlowMode,
 ) -> Config<'x> {
     Config {
         mode,
         shared,
+        column_region_span,
         columns: {
             let mut count = columns.get();
             if !regions.size.x.is_finite() {
@@ -360,12 +369,27 @@ struct Config<'x> {
     /// The styles shared by the whole flow. This is used for footnotes and line
     /// numbers.
     shared: StyleChain<'x>,
+    /// Span of an explicit `columns` element whose physical region should be
+    /// marked for post-layout consumers.
+    column_region_span: Option<Span>,
     /// Settings for columns.
     columns: ColumnConfig,
     /// Settings for footnotes.
     footnote: FootnoteConfig,
     /// Settings for line numbers.
     line_numbers: Option<LineNumberConfig>,
+}
+
+#[derive(Debug, Copy, Clone, Hash)]
+struct ColumnLayout {
+    gutter: Rel<Abs>,
+    region_span: Option<Span>,
+}
+
+impl Default for ColumnLayout {
+    fn default() -> Self {
+        Self { gutter: Rel::zero(), region_span: None }
+    }
 }
 
 /// Configuration of footnotes.

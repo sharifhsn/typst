@@ -103,7 +103,7 @@ figure numbering stays consistent.
 | `@ref` to heading / figure / equation / labelled element | ✅ | clickable hyperlink → bookmark |
 | Footnotes | ✅ | `footnotes.xml` |
 | `#link` to a page *coordinate* | ❌ | text kept, link dropped |
-| `@ref` to a **page number** | ✅ | resolves against a synthetic page model (counting explicit page/section breaks) — exact for break-structured front matter, approximate where text auto-flows |
+| `@ref` to a **page number** | ✅ | resolves against the fixed-point paged introspector; DOCX-only/fallback locations use a synthetic explicit-break model |
 
 ### Figures, images & graphics
 
@@ -153,23 +153,15 @@ styles).
 
 ### Templates that assume a paged model
 
-One template of a 627-document corpus (with a target-conditional panic in its own code) **fails to compile**
-to docx although they compile to PDF. The error always originates in the
-template's own code, not in OOXML generation — it assumes the paged layout
-model that docx does not have:
+DOCX export first computes the standard paged fixed point and uses that
+introspector while realizing the editable DOCX tree. Page reads, positions,
+citations, bibliographies, and layout-time queries therefore generally see the
+same answers as PDF export. The exporter still keeps a synthetic explicit-break
+fallback for DOCX-only target branches and locations with no paged equivalent.
 
-- reading a page number that does not exist (`loc.page-numbering()` is `none`,
-  `query(..page..)`), the same root as page-number cross-references;
-- numbering or `query(...).first()`/`.last()`/`.at(n)` that assumes a
-  layout-time introspector state (e.g. "a heading always precedes this figure",
-  "every heading has two number components") which only holds once the document
-  is laid out into pages;
-- asserting a show rule runs an exact number of times across the laid-out
-  document.
-
-These are limitations of running a paged-only template through a flowing target,
-not exporter defects, and are left to the template author (typically a one-line
-guard such as `.at(1, default: 0)` or a `target`-conditional branch).
+Remaining failures in paged-only templates are expected when the document itself
+does not compile under paged layout, or when target-conditional code deliberately
+has no DOCX branch.
 
 ## Usage
 

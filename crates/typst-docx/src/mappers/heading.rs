@@ -32,6 +32,7 @@ pub fn heading(
 
     // Record the deepest level so `styles.xml` can generate `Heading1..N`.
     ctx.note_heading_level(level_u8);
+    ctx.note_heading_style(level_u8, ctx.resolve_text_props(styles, RunProps::default()));
 
     // -- Paragraph properties --------------------------------------------------
     // Levels 1..=9 map to the built-in `Heading1..Heading9` magic styles; deeper
@@ -60,11 +61,8 @@ pub fn heading(
         .bookmarked
         .get(styles)
         .unwrap_or_else(|| elem.outlined.get(styles));
-    let bookmark = if bookmarked {
-        elem.location().map(|loc| ctx.add_bookmark(loc))
-    } else {
-        None
-    };
+    let bookmark =
+        if bookmarked { elem.location().map(|loc| ctx.add_bookmark(loc)) } else { None };
 
     if let Some((id, ref name)) = bookmark {
         content.push(ParaChild::BookmarkStart { id, name: name.clone() });
@@ -75,13 +73,14 @@ pub fn heading(
     // synthesized field PDF bookmarks use; it is `Some` only when a `numbering`
     // pattern is set and the heading is located.
     if let Some(numbers) = &elem.numbers
-        && !numbers.is_empty() {
-            content.push(ParaChild::Run(Run::Text {
-                props: RunProps::default(),
-                text: numbers.clone(),
-            }));
-            content.push(ParaChild::Run(Run::Tab));
-        }
+        && !numbers.is_empty()
+    {
+        content.push(ParaChild::Run(Run::Text {
+            props: RunProps::default(),
+            text: numbers.clone(),
+        }));
+        content.push(ParaChild::Run(Run::Tab));
+    }
 
     // The heading title itself, lowered to flattened runs.
     let runs = ctx.inline_runs(&elem.body, styles, RunProps::default())?;

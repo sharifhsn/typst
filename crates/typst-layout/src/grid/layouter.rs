@@ -3,15 +3,15 @@ use std::fmt::Debug;
 use rustc_hash::FxHashMap;
 use typst_library::diag::{SourceResult, bail};
 use typst_library::engine::Engine;
-use typst_library::foundations::{Resolve, StyleChain};
-use typst_library::introspection::Locator;
+use typst_library::foundations::{Packed, Resolve, StyleChain};
+use typst_library::introspection::{Locator, Tag, TagFlags};
 use typst_library::layout::grid::resolve::{
     Cell, CellGrid, Header, LinePosition, Repeatable,
 };
 use typst_library::layout::resolve::Entry;
 use typst_library::layout::{
-    Abs, Axes, Dir, Fr, Fragment, Frame, FrameItem, Length, Point, Region, Regions, Rel,
-    Size, Sizing,
+    Abs, Axes, Dir, Fr, Fragment, Frame, FrameItem, GridCellRegion, Length, Point,
+    Region, Regions, Rel, Size, Sizing,
 };
 use typst_library::text::TextElem;
 use typst_library::visualize::Geometry;
@@ -231,6 +231,38 @@ impl Row {
             Self::Fr(_, y, _) => *y,
         }
     }
+}
+
+/// Wrap a final cell frame in hidden region tags for post-layout consumers
+/// such as the PPTX exporter. The tags are not introspectable and therefore do
+/// not affect normal queries or tagged output.
+pub(super) fn tag_cell_region(
+    mut frame: Frame,
+    cell: &Cell,
+    logical_pos: Axes<usize>,
+    size: Size,
+    locator: Locator,
+    engine: &mut Engine,
+) -> Frame {
+    let span = cell.body.span();
+    let mut region = Packed::new(GridCellRegion::new(
+        cell.body.clone(),
+        logical_pos.x,
+        logical_pos.y,
+        cell.colspan,
+        cell.rowspan,
+        size.x,
+        size.y,
+    ))
+    .spanned(span);
+    let key = typst_utils::hash128(&region);
+    let loc = locator.split().next_location(engine, key, span);
+    region.set_location(loc);
+
+    let flags = TagFlags { introspectable: false, tagged: false };
+    frame.prepend(Point::zero(), FrameItem::Tag(Tag::Start(region.pack(), flags)));
+    frame.push(Point::zero(), FrameItem::Tag(Tag::End(loc, key, flags)));
+    frame
 }
 
 impl<'a> GridLayouter<'a> {
@@ -1498,6 +1530,7 @@ impl<'a> GridLayouter<'a> {
                         pod.full = self.regions.full;
                     }
                     let locator = self.cell_locator(Axes::new(x, y), disambiguator);
+                    let region_locator = locator.relayout();
                     let frame = layout_cell(
                         cell,
                         engine,
@@ -1513,6 +1546,17 @@ impl<'a> GridLayouter<'a> {
                         // must additionally be offset by the cell's width.
                         pos.x = self.width - (pos.x + width);
                     }
+                    let frame = tag_cell_region(
+                        frame,
+                        cell,
+                        Axes::new(
+                            if self.grid.has_gutter { x / 2 } else { x },
+                            if self.grid.has_gutter { y / 2 } else { y },
+                        ),
+                        Size::new(width, height),
+                        region_locator,
+                        engine,
+                    );
                     output.push_frame(pos, frame);
                 }
             }

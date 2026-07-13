@@ -24,6 +24,8 @@ mod table;
 mod terms;
 mod title;
 
+pub use codex::numeral_systems::NamedNumeralSystem;
+
 pub use self::asset::*;
 pub use self::bibliography::*;
 pub use self::cite::*;

@@ -1,0 +1,25 @@
+[package]
+name = "typst-ooxml-core"
+description = "Shared OOXML primitives for Typst's Office exporters."
+version = { workspace = true }
+rust-version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+
+[dependencies]
+ecow = { workspace = true }
+rustc-hash = { workspace = true }
+tiny-skia = { workspace = true }
+typst-layout = { workspace = true }
+typst-library = { workspace = true }
+typst-render = { workspace = true }
+typst-utils = { workspace = true }
+zip = { workspace = true }
+
+[lints]
+workspace = true

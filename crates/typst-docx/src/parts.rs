@@ -7,9 +7,10 @@
 
 use crate::dom::TextDefaults;
 use crate::xml::escape_attr;
+use typst_ooxml_core::ns;
 
-const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
-const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const A_NS: &str = ns::A;
+const W_NS: &str = ns::W;
 
 /// The body/heading font for the theme, falling back to Word's own default.
 fn theme_font(defaults: &TextDefaults) -> &str {

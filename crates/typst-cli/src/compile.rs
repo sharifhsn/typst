@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::path::Path;
+use std::sync::Arc;
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use ecow::{EcoVec, eco_format, eco_vec};
@@ -19,8 +20,9 @@ use typst_html::{HtmlDocument, HtmlOptions};
 use typst_kit::diagnostics::DiagnosticWorld;
 use typst_kit::timer::Timer;
 use typst_layout::{Page, PagedDocument};
+use typst_pandoc::{PandocDocument, PandocOptions};
 use typst_pdf::{PdfOptions, PdfStandards, Timestamp};
-use typst_pptx::PptxOptions;
+use typst_pptx::{PptxOptions, SpeakerNote};
 use typst_render::RenderOptions;
 use typst_svg::SvgOptions;
 use typst_utils::Scalar;
@@ -120,6 +122,7 @@ impl CompileConfig {
                 Some(ext) if ext.eq_ignore_ascii_case("svg") => OutputFormat::Svg,
                 Some(ext) if ext.eq_ignore_ascii_case("html") => OutputFormat::Html,
                 Some(ext) if ext.eq_ignore_ascii_case("docx") => OutputFormat::Docx,
+                Some(ext) if ext.eq_ignore_ascii_case("pandoc") => OutputFormat::Pandoc,
                 Some(ext) if ext.eq_ignore_ascii_case("pptx") => OutputFormat::Pptx,
                 _ => bail!(
                     "could not infer output format for path {}.\n\
@@ -142,6 +145,7 @@ impl CompileConfig {
                     OutputFormat::Svg => "svg",
                     OutputFormat::Html => "html",
                     OutputFormat::Docx => "docx",
+                    OutputFormat::Pandoc => "pandoc",
                     OutputFormat::Pptx => "pptx",
                     OutputFormat::Bundle => "",
                 },
@@ -339,8 +343,7 @@ fn compile_and_export(
         | OutputFormat::Png
         | OutputFormat::Svg
         | OutputFormat::Pptx => {
-            let Warned { output, mut warnings } =
-                typst::compile::<PagedDocument>(world);
+            let Warned { output, mut warnings } = typst::compile::<PagedDocument>(world);
             let result = match output {
                 Ok(document) => {
                     if let Some(page) = document.pages().first() {
@@ -375,20 +378,60 @@ fn compile_and_export(
             Warned { output: result, warnings }
         }
         OutputFormat::Docx => {
-            let Warned { output, mut warnings } =
-                typst::compile::<DocxDocument>(world);
-            let result = match output {
-                Ok(document) => {
-                    if let Some(warning) = target_mismatch_warning(
-                        config.output_format,
-                        document.page_size_pt(),
-                    ) {
-                        warnings.push(warning);
+            let Warned { output: paged, mut warnings } =
+                typst::compile::<PagedDocument>(world);
+            let result = match paged {
+                Ok(paged_document) => {
+                    let primary = Arc::clone(paged_document.introspector());
+                    let seed = Arc::clone(&primary);
+                    // Each real page's true frame size, so an `auto` page axis
+                    // (a common ticket/certificate/single-page-diagram idiom)
+                    // resolves to Typst's own content-driven size rather than a
+                    // hardcoded A4 fallback (see `real_section_size` in
+                    // typst-docx).
+                    let page_sizes = Arc::new(
+                        paged_document
+                            .pages()
+                            .iter()
+                            .map(|page| page.frame.size())
+                            .collect::<Vec<_>>(),
+                    );
+                    let Warned { output, warnings: docx_warnings } =
+                        typst::compile_with::<DocxDocument, _>(
+                            world,
+                            Some(seed.as_ref()),
+                            move |engine, content, styles| {
+                                typst_docx::docx_document_with_paged_introspector(
+                                    engine,
+                                    content,
+                                    styles,
+                                    Arc::clone(&primary),
+                                    Arc::clone(&page_sizes),
+                                )
+                            },
+                        );
+                    warnings.extend(docx_warnings);
+                    match output {
+                        Ok(document) => {
+                            if let Some(warning) = target_mismatch_warning(
+                                config.output_format,
+                                document.page_size_pt(),
+                            ) {
+                                warnings.push(warning);
+                            }
+                            export_docx(&document, config)
+                                .map(|()| vec![config.output.clone()])
+                        }
+                        Err(errors) => Err(errors),
                     }
-                    export_docx(&document, config).map(|()| vec![config.output.clone()])
                 }
                 Err(errors) => Err(errors),
             };
+            Warned { output: result, warnings }
+        }
+        OutputFormat::Pandoc => {
+            let Warned { output, warnings } = typst::compile::<PandocDocument>(world);
+            let result = output.and_then(|document| export_pandoc(&document, config));
             Warned { output: result, warnings }
         }
     }
@@ -440,7 +483,10 @@ fn mixed_page_size_warning(
         .iter()
         .enumerate()
         .filter(|(i, _)| {
-            config.pages.as_ref().is_none_or(|ranges| ranges.includes_page_index(*i))
+            config
+                .pages
+                .as_ref()
+                .is_none_or(|ranges| ranges.includes_page_index(*i))
         })
         .map(|(_, page)| page.frame.size());
     let first = sizes.next()?;
@@ -465,6 +511,55 @@ fn export_docx(document: &DocxDocument, config: &CompileConfig) -> SourceResult<
         .write(&bytes)
         .map_err(|err| eco_format!("failed to write DOCX file ({err})"))
         .at(Span::detached())
+}
+
+/// Export to a Pandoc JSON AST.
+///
+/// When the document has a bibliography, also synthesizes a BibLaTeX `.bib`
+/// sidecar (via hayagriva's `to_biblatex_str`) next to the JSON output and
+/// records its filename in the document's `meta.bibliography`, so that
+/// `pandoc --citeproc` can re-resolve the structured `Cite` nodes the exporter
+/// emits. Returns every file written (the JSON, plus the sidecar if any) so the
+/// dependency tracker sees them.
+fn export_pandoc(
+    document: &PandocDocument,
+    config: &CompileConfig,
+) -> SourceResult<Vec<Output>> {
+    let mut written = Vec::with_capacity(2);
+
+    // If there is a bibliography and we are writing to a real path (not stdout),
+    // write the `.bib` sidecar next to the output and reference it in the
+    // metadata. With stdout (or no bibliography) we skip the sidecar, but still
+    // emit structured `Cite` + the self-contained fallback references, so the
+    // JSON is correct without citeproc either way.
+    let bib_meta = match (document.bibliography(), &config.output) {
+        (Some(bib), Output::Path(out_path)) => {
+            let bib_path = out_path.with_extension("bib");
+            std::fs::write(&bib_path, bib.as_bytes())
+                .map_err(|err| {
+                    eco_format!("failed to write bibliography sidecar ({err})")
+                })
+                .at(Span::detached())?;
+            written.push(Output::Path(bib_path.clone()));
+            // Record the sidecar's *filename* (relative to the JSON output) in the
+            // metadata, so the reference is portable: pandoc resolves a relative
+            // `bibliography` path against its working directory, and the common
+            // case runs pandoc from the output directory.
+            bib_path.file_name().map(|n| n.to_string_lossy().into_owned())
+        }
+        _ => None,
+    };
+
+    let options = PandocOptions { pretty: config.pretty, bibliography: bib_meta };
+    let bytes = typst_pandoc::pandoc(document, &options)?;
+    config
+        .output
+        .write(&bytes)
+        .map_err(|err| eco_format!("failed to write Pandoc file ({err})"))
+        .at(Span::detached())?;
+    written.push(config.output.clone());
+
+    Ok(written)
 }
 
 /// Export to HTML.
@@ -501,23 +596,25 @@ fn export_paged(
         OutputFormat::Pptx => {
             export_pptx(document, config).map(|()| vec![config.output.clone()])
         }
-        OutputFormat::Html | OutputFormat::Bundle | OutputFormat::Docx => unreachable!(),
+        OutputFormat::Html
+        | OutputFormat::Bundle
+        | OutputFormat::Docx
+        | OutputFormat::Pandoc => unreachable!(),
     }
 }
 
 /// Export to a PPTX.
 fn export_pptx(document: &PagedDocument, config: &CompileConfig) -> SourceResult<()> {
-    let exported_pages = document
-        .pages()
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| {
-            config.pages.as_ref().is_none_or(|exported_page_ranges| {
-                exported_page_ranges.includes_page_index(*i)
-            })
-        })
-        .map(|(_, page)| page.clone())
-        .collect::<EcoVec<_>>();
+    let mut exported_pages = EcoVec::new();
+    let mut page_to_slide = vec![None; document.pages().len()];
+    for (i, page) in document.pages().iter().enumerate() {
+        if config.pages.as_ref().is_none_or(|exported_page_ranges| {
+            exported_page_ranges.includes_page_index(i)
+        }) {
+            page_to_slide[i] = Some(exported_pages.len());
+            exported_pages.push(page.clone());
+        }
+    }
 
     if exported_pages.is_empty() {
         // A slide-less presentation has an empty `p:sldIdLst`, which PowerPoint
@@ -532,7 +629,15 @@ fn export_pptx(document: &PagedDocument, config: &CompileConfig) -> SourceResult
     }
 
     let filtered = PagedDocument::new(exported_pages, document.info().clone());
-    let bytes = typst_pptx::pptx(&filtered, &PptxOptions {})?;
+    let speaker_notes = typst_pptx::speaker_notes(document)
+        .into_iter()
+        .filter_map(|note| {
+            let slide_index = page_to_slide.get(note.slide_index).copied().flatten()?;
+            Some(SpeakerNote { slide_index, text: note.text })
+        })
+        .collect();
+    let bytes =
+        typst_pptx::pptx(&filtered, &PptxOptions { speaker_notes: Some(speaker_notes) })?;
     config
         .output
         .write(&bytes)

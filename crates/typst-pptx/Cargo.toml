@@ -13,6 +13,7 @@ keywords = { workspace = true }
 readme = { workspace = true }
 
 [dependencies]
+typst-ooxml-core = { workspace = true }
 typst-layout = { workspace = true }
 typst-library = { workspace = true }
 typst-render = { workspace = true }
@@ -20,7 +21,6 @@ typst-syntax = { workspace = true }
 typst-utils = { workspace = true }
 ecow = { workspace = true }
 rustc-hash = { workspace = true }
-tiny-skia = { workspace = true }
 time = { workspace = true }
 zip = { workspace = true }
 

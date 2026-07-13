@@ -81,7 +81,8 @@ pub fn equation(
     };
 
     let arenas = Arenas::default();
-    let item = resolve_equation(elem, ctx.engine(), Locator::synthesize(loc), &arenas, styles)?;
+    let item =
+        resolve_equation(elem, ctx.engine(), Locator::synthesize(loc), &arenas, styles)?;
 
     // Walk the IR into an `<m:oMath>…</m:oMath>` fragment. `ctx` is reborrowed
     // for the emitter and released when the block ends.
@@ -119,7 +120,9 @@ pub fn equation(
     if let Some(number) = equation_number(elem, styles, ctx)? {
         content.push(ParaChild::Run(Run::Tab));
         content.extend(number.into_iter().map(ParaChild::Run));
-        props.tabs.push(TabStop { val: TabAlign::End, leader: None, pos: 8640 });
+        props
+            .tabs
+            .push(TabStop { val: TabAlign::End, leader: None, pos: 8640 });
     }
 
     Ok(EquationOut::Block(vec![Block::Para(Para { props, content })]))
@@ -140,8 +143,13 @@ fn equation_number(
 
     let span = elem.span();
     let number = {
-        let result = Counter::of(EquationElem::ELEM)
-            .display_at(ctx.engine(), loc, styles, &numbering, span);
+        let result = Counter::of(EquationElem::ELEM).display_at(
+            ctx.engine(),
+            loc,
+            styles,
+            &numbering,
+            span,
+        );
         ctx.engine().delay(result).spanned(span)
     };
 
@@ -164,6 +172,8 @@ fn fallback(elem: &Packed<EquationElem>, styles: StyleChain, block: bool) -> Equ
         EquationOut::Inline(run)
     }
 }
+
+pub use typst_ooxml_core::omml::equation_omml_fragment;
 
 // ===========================================================================
 // IR → OMML emitter.
@@ -466,7 +476,10 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
 
     /// Emits the base with its left (pre) and right (post) sub/superscripts,
     /// returning the serialized fragment.
-    fn scripts_attach_horizontal(&mut self, scripts: &ScriptsItem) -> SourceResult<String> {
+    fn scripts_attach_horizontal(
+        &mut self,
+        scripts: &ScriptsItem,
+    ) -> SourceResult<String> {
         let base = self.render(&scripts.base)?;
         let tr = self.render_opt(scripts.top_right.as_ref())?;
         let br = self.render_opt(scripts.bottom_right.as_ref())?;
@@ -574,7 +587,8 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
         self.buf.open("m:chr").attr("m:val", &chr.to_string()).empty();
         // Limit location: under/over for ∑∏⋃… (or when the source used
         // under/over), sub/sup for integrals.
-        let lim = if lim_under_over && !is_integral_char(chr) { "undOvr" } else { "subSup" };
+        let lim =
+            if lim_under_over && !is_integral_char(chr) { "undOvr" } else { "subSup" };
         self.buf.open("m:limLoc").attr("m:val", lim).empty();
         self.buf.open("m:grow").attr("m:val", "1").empty();
         if lower.is_none() {
@@ -884,8 +898,14 @@ fn component_color(comp: &MathComponent) -> Option<[u8; 3]> {
 /// `start`. The operand binds the items that follow the operator up to — but not
 /// including — the next *relation* (`=`, `<`, …) or *binary operator* (`+`, `−`,
 /// `±`). Stopping at a binary operator keeps `∑_i a_i + ∑_j b_j` as two sibling
-/// sums (instead of nesting the second inside the first's operand), while a
-/// following n-ary operator is NOT a boundary, so `∑_i ∑_j a` still nests.
+/// sums (instead of nesting the second inside the first's operand).
+///
+/// A following n-ary operator ends the operand too, but only *after* at least
+/// one operand item — so `∑_i ∑_j a` still nests (the inner ∑ is the very first
+/// operand item), while `∏_i a_i quad ⋃_j b_j` keeps the two big operators as
+/// siblings instead of swallowing the second into the first's operand. Ordinary
+/// following content (e.g. the `dx` of `∫ f dx`) is not an n-ary, so it stays in
+/// the operand as before.
 fn operand_end(items: &[MathItem], start: usize) -> usize {
     let mut j = start;
     while j < items.len() {
@@ -894,9 +914,27 @@ fn operand_end(items: &[MathItem], start: usize) -> usize {
         {
             break;
         }
+        if j > start && item_starts_nary(&items[j]) {
+            break;
+        }
         j += 1;
     }
     j
+}
+
+/// Whether `item` begins an n-ary operator scope — a bare large-operator glyph,
+/// or a `Scripts` whose base is one (`∑_i`, `∫_a^b`). Mirrors the detection in
+/// `emit_items`, so `operand_end` treats a following *scripted* operator as a
+/// sibling boundary too, not only a bare glyph.
+fn item_starts_nary(item: &MathItem) -> bool {
+    if nary_operator_char(item).is_some() {
+        return true;
+    }
+    matches!(item, MathItem::Component(comp)
+        if matches!(&comp.kind, MathKind::Scripts(scripts)
+            if nary_operator_char(&scripts.base).is_some()
+                && scripts.top_left.is_none()
+                && scripts.bottom_left.is_none()))
 }
 
 fn nary_operator_char(item: &MathItem) -> Option<char> {
@@ -935,7 +973,7 @@ fn is_nary_operator(c: char) -> bool {
             | '⨀'   // n-ary circled dot U+2A00
             | '⨁'   // n-ary circled plus U+2A01
             | '⨂'   // n-ary circled times U+2A02
-            | '⫿'   // n-ary triple vertical bar U+2AFF
+            | '⫿' // n-ary triple vertical bar U+2AFF
         )
 }
 
@@ -1000,20 +1038,20 @@ fn accent_char(item: &MathItem) -> Option<char> {
 fn to_combining(c: char) -> char {
     match c {
         // Spacing → combining for the common math accents.
-        '`' => '\u{0300}',         // grave
-        '´' => '\u{0301}',         // acute
-        '^' => '\u{0302}',         // circumflex / hat
-        '~' => '\u{0303}',         // tilde
+        '`' => '\u{0300}',              // grave
+        '´' => '\u{0301}',              // acute
+        '^' => '\u{0302}',              // circumflex / hat
+        '~' => '\u{0303}',              // tilde
         '¯' | '\u{02C9}' => '\u{0304}', // macron / bar (+ modifier macron)
-        '\u{02D8}' => '\u{0306}',  // breve
-        '\u{02D9}' => '\u{0307}',  // dot above
-        '¨' => '\u{0308}',         // diaeresis / ddot
+        '\u{02D8}' => '\u{0306}',       // breve
+        '\u{02D9}' => '\u{0307}',       // dot above
+        '¨' => '\u{0308}',              // diaeresis / ddot
         '°' | '\u{02DA}' => '\u{030A}', // ring above
-        '\u{02DD}' => '\u{030B}',  // double acute
-        'ˇ' => '\u{030C}',         // caron / check
-        '→' => '\u{20D7}',         // rightwards arrow → combining (vec)
-        '←' => '\u{20D6}',         // leftwards arrow → combining
-        '↔' => '\u{20E1}',         // left-right arrow → combining
+        '\u{02DD}' => '\u{030B}',       // double acute
+        'ˇ' => '\u{030C}',              // caron / check
+        '→' => '\u{20D7}',              // rightwards arrow → combining (vec)
+        '←' => '\u{20D6}',              // leftwards arrow → combining
+        '↔' => '\u{20E1}',              // left-right arrow → combining
         // Already a combining mark, or a dedicated accent codepoint: keep it.
         _ => c,
     }
@@ -1041,11 +1079,19 @@ struct Omml {
 
 impl Omml {
     fn new() -> Self {
-        Self { buf: String::new(), stack: Vec::new(), open_tag: false }
+        Self {
+            buf: String::new(),
+            stack: Vec::new(),
+            open_tag: false,
+        }
     }
 
     fn into_string(self) -> String {
-        debug_assert!(self.stack.is_empty(), "Omml: unbalanced elements: {:?}", self.stack);
+        debug_assert!(
+            self.stack.is_empty(),
+            "Omml: unbalanced elements: {:?}",
+            self.stack
+        );
         debug_assert!(!self.open_tag, "Omml: dangling open tag");
         self.buf
     }

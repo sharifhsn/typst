@@ -66,12 +66,15 @@ Word's other semantic gallery character styles (`SubtleEmphasis`,
 define-only cosmetics; left out as not worth the styles.xml weight (revisit only
 if a consumer expects the full gallery).
 
-## 3. Known export failures (the ~2% that error)
+## 3. Historical export failures (the old ~2% tail)
 
-All compile to **PDF**; every error originates in **template/package code**, not
-in OOXML generation. They assume the paged layout model the flowing target lacks:
+This table records the corpus tail that motivated the paged-introspection work
+in §§10-11. The page-number, layout-time introspection, and citation/location
+classes are now handled by the real paged introspector plus the synthetic
+fallback. Current failures should be re-profiled from a fresh corpus run rather
+than assumed to match this historical list.
 
-| Class | Docs | Root |
+| Class | Docs | Original root |
 |---|---|---|
 | Margin notes (`marginalia`/`drafting` panic) | toffee-tufte, parcio-thesis, sos-ugent-style | package `panic!` in a non-paged model |
 | Page-number read | shuosc-shu-bachelor-thesis, splines-thesis-starter | `loc.page-numbering()` / page query → `none` |
@@ -79,9 +82,6 @@ in OOXML generation. They assume the paged layout model the flowing target lacks
 | Show-rule-count assertion | ijimai | `assert(used == 1)` over the laid-out doc |
 | Cross-ref to a parent-scope float label | wenyuan-campaign | label not in the introspector |
 | User `target`-conditional code | tracl | template has no `docx` branch |
-
-Not exporter bugs; the fix belongs in the template (a default-valued access or a
-`target` branch). See the README "Templates that assume a paged model".
 
 ## 4. This-session content recovery (rasterize → native)
 
@@ -790,31 +790,28 @@ identical; oracle A/B all-flags-verified-as-gains; `--pages` e2e errors for
 docx and still works for PDF; LibreOffice opens the newly multi-section
 output.
 
-## 10. The synthetic page model — clearing the paged-introspection tail
+## 10. Real paged introspection plus the synthetic fallback
 
-The remaining EXPORT_ERR class was templates that read *paged* introspection a
-flowing document doesn't have. Three mechanisms, found by root-causing each of
-the failing corpus docs individually (the first two hypotheses — anchor
-leniency for unknown locations — turned out to be redundant: the shared
-`ElementIntrospector` already treats an unknown `before()`/`count_before()`
-anchor as end-of-document; both attempted overrides were removed after an
-ablation confirmed they weren't load-bearing):
+DOCX export now computes the standard `PagedDocument` fixed point first and
+uses its introspector as the primary source while realizing the editable DOCX
+tree. This replaces the old approximation for page reads, positions,
+citations/bibliographies, and layout-time queries with the same converged
+answers PDF sees. The original synthetic model remains as a fallback for
+DOCX-only target branches and locations that genuinely have no paged
+equivalent.
 
-### 10a. Synthetic page numbers (`DocxIntrospector::set_page_model`)
-`page()`/`pages()`/`page_numbering()` returned `None`, so
-`@target(form: "page")` and `loc.page-numbering()` hard-failed the export.
-Now a walk over the lowered IR (mirroring `collect_tags`) counts explicit
-page breaks (`Run::PageBreak`) and section breaks, assigning every tag
+The earlier synthetic-only work is still relevant as the fallback layer and as
+history for the failures it cleared:
+
+### 10a. Paged-backed page numbers (`DocxIntrospector`)
+`page()`/`pages()`/`position()`/`page_numbering()` now delegate to the real
+paged introspector first. A walk over the lowered DOCX IR still counts explicit
+page breaks (`Run::PageBreak`) and section breaks, assigning every fallback tag
 location a (page, section) pair; `page_numbering` resolves against that
-section's real `set page(numbering:)`. The numbers are exact for
-break-structured front matter and a lower bound where text auto-flows —
-and most of them surface as *cached field values* that Word recomputes live.
-Locations outside the model (rasterize-deferred, header/footer tags) resolve
-to the final page, consistent with their append-at-end position. Recovered:
-shuosc-shu-bachelor-thesis, splines-thesis-starter. Corpus-wide the oracle
-flagged ~20 theses whose TOC/ref page numbers changed — every one previously
-showed a flat wrong "1" for all pages; the synthetic values are strictly
-closer to the PDF (and respect roman front-matter numbering).
+section's real `set page(numbering:)`. Header/footer locations are marked
+separately and may be aliased back to the corresponding repeated paged-layout
+location by tag key, so `here().page()` in page furniture can use paged truth
+instead of the final-page fallback.
 
 ### 10b. Header/footer introspection-tag harvest
 Page-furniture content lives outside the body IR, so a labeled element in a

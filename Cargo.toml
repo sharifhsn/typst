@@ -20,6 +20,8 @@ typst = { path = "crates/typst", version = "0.15.0" }
 typst-bundle = { path = "crates/typst-bundle", version = "0.15.0" }
 typst-cli = { path = "crates/typst-cli", version = "0.15.0" }
 typst-docx = { path = "crates/typst-docx", version = "0.15.0" }
+typst-ooxml-core = { path = "crates/typst-ooxml-core", version = "0.15.0" }
+typst-pandoc = { path = "crates/typst-pandoc", version = "0.15.0" }
 typst-eval = { path = "crates/typst-eval", version = "0.15.0" }
 typst-html = { path = "crates/typst-html", version = "0.15.0" }
 typst-ide = { path = "crates/typst-ide", version = "0.15.0" }
@@ -160,6 +162,12 @@ opt-level = 2
 [profile.dev-fast]
 inherits = "dev"
 opt-level = 2
+
+# Pin hayagriva to a fork that adds `hayagriva::io::to_biblatex_str`, the BibLaTeX
+# writer the Pandoc exporter needs to synthesize a `.bib` sidecar for its
+# structured-`Cite` + `--citeproc` round-trip. Drop once it lands in a release.
+[patch.crates-io]
+hayagriva = { git = "https://github.com/sharifhsn/hayagriva", rev = "b5b96fa5b57a1df17ad1f43df3af33eeb57510fd" }
 
 [profile.release]
 lto = "thin"

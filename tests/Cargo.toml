@@ -22,6 +22,13 @@ path = "src/docx.rs"
 name = "pptx"
 path = "src/pptx.rs"
 
+# Structural / round-trip tests for the Pandoc exporter (standard libtest
+# harness). Lives here for the same reason as the DOCX tests: so `typst-pandoc`
+# need not dev-depend on the `typst` facade (which depends back on it).
+[[test]]
+name = "pandoc"
+path = "src/pandoc.rs"
+
 [dependencies]
 typst = { workspace = true }
 typst-assets = { workspace = true, features = ["fonts"] }
@@ -33,6 +40,7 @@ typst-html = { workspace = true }
 typst-kit = { workspace = true, features = ["datetime"] }
 typst-layout = { workspace = true }
 typst-library = { workspace = true }
+typst-pandoc = { workspace = true }
 typst-pdf = { workspace = true }
 typst-pptx = { workspace = true }
 typst-render = { workspace = true }
@@ -55,6 +63,7 @@ rayon = { workspace = true }
 regex = { workspace = true }
 roxmltree = { workspace = true }
 rustc-hash = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 similar = { workspace = true }
 smallvec = { workspace = true }

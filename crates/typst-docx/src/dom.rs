@@ -8,6 +8,10 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Output, StyleChain, Target};
 use typst_library::introspection::{Introspector, Tag};
 use typst_library::model::{Document, DocumentInfo};
+pub use typst_ooxml_core::dml::{
+    FillSpec as ShapeFill, PathSegment, StrokeSpec as ShapeStroke,
+};
+pub use typst_ooxml_core::media::MediaPart;
 
 use crate::introspect::DocxIntrospector;
 use crate::package::Rels;
@@ -29,6 +33,8 @@ pub struct DocxDocument {
     pub(crate) max_heading_level: u8,
     /// The document's root text properties, hoisted into `docDefaults`.
     pub(crate) text_defaults: TextDefaults,
+    /// Document-derived heading style definitions (`Heading1..HeadingN`).
+    pub(crate) heading_styles: Vec<HeadingStyle>,
     pub(crate) uses_fields: bool,
     pub(crate) uses_math: bool,
     pub(crate) introspector: Arc<DocxIntrospector>,
@@ -44,11 +50,37 @@ pub struct DocxDocument {
     /// Whether the document enables hyphenation (`#set text(hyphenate: ..)`,
     /// resolved at the root style chain). Emits `w:autoHyphenation`.
     pub(crate) hyphenate: bool,
+    /// Whether any section emits distinct `even` header/footer references.
+    /// Word ignores those references unless `w:evenAndOddHeaders` is enabled
+    /// in `word/settings.xml`.
+    pub(crate) even_and_odd_headers: bool,
+    /// Whether any section uses inside/outside page margins. Emits the
+    /// document-wide `<w:mirrorMargins/>` setting.
+    pub(crate) mirror_margins: bool,
+    /// Whether any mirrored-margin section uses a right-side binding gutter.
+    /// Emits the document-wide `<w:rtlGutter/>` setting.
+    pub(crate) rtl_gutter: bool,
+    /// The document's bibliography, synthesized as a BibLaTeX (`.bib`) string
+    /// (same call the Pandoc exporter uses for its sidecar). `None` when the
+    /// document has no bibliography. Embedded as an inert sidecar part, not
+    /// Word-native `CITATION`/`BIBLIOGRAPHY` fields — see `encode.rs`.
+    pub(crate) bibliography: Option<String>,
+    /// The same bibliography, mapped onto Word's native `b:Source` schema
+    /// (see `crate::bibliography`), for the `customXml/item1.xml` part that
+    /// backs References → Manage Sources. Empty when the document has no
+    /// bibliography.
+    pub(crate) word_sources: Vec<crate::bibliography::WordSource>,
 }
 
 impl DocxDocument {
     pub fn info(&self) -> &DocumentInfo {
         &self.info
+    }
+
+    /// Provides the DOCX introspector, including DOCX bookmark anchors and the
+    /// synthetic fallback layer.
+    pub fn introspector(&self) -> &Arc<DocxIntrospector> {
+        &self.introspector
     }
 
     /// The primary section's page size in points (`width`, `height`).
@@ -154,9 +186,18 @@ pub enum ParaChild {
     /// A display equation `<m:oMathPara>` (serialized XML).
     OmmlPara(String),
     /// `<w:hyperlink r:id|w:anchor>` wrapping runs.
-    Hyperlink { rel: Option<EcoString>, anchor: Option<EcoString>, runs: Vec<Run> },
-    BookmarkStart { id: u32, name: EcoString },
-    BookmarkEnd { id: u32 },
+    Hyperlink {
+        rel: Option<EcoString>,
+        anchor: Option<EcoString>,
+        runs: Vec<Run>,
+    },
+    BookmarkStart {
+        id: u32,
+        name: EcoString,
+    },
+    BookmarkEnd {
+        id: u32,
+    },
     Tag(Tag),
 }
 
@@ -166,7 +207,10 @@ pub enum ParaChild {
 // worth the per-drawing allocation.
 #[allow(clippy::large_enum_variant)]
 pub enum Run {
-    Text { props: RunProps, text: EcoString },
+    Text {
+        props: RunProps,
+        text: EcoString,
+    },
     Break,
     PageBreak,
     /// A `#colbreak()` → `<w:br w:type="column"/>`: moves the following content to
@@ -177,7 +221,10 @@ pub enum Run {
     /// tab, but its paragraph gains a right-aligned tab stop at the content width
     /// so it pushes the following content to the right margin.
     FillTab,
-    FootnoteRef { props: RunProps, id: i32 },
+    FootnoteRef {
+        props: RunProps,
+        id: i32,
+    },
     /// The in-body footnote number mark (`<w:footnoteRef/>`, styled
     /// `FootnoteReference`). Prepended to a footnote body's first paragraph so
     /// Word/LibreOffice render the footnote's auto-number next to its text.
@@ -199,7 +246,7 @@ pub struct TextDefaults {
     pub font: Option<EcoString>,
     /// Default size in half-points.
     pub size_half_pt: u32,
-    /// Default text colour; `None` = black/auto (omitted, Word's own default).
+    /// Default text colour; `None` = not representable as a single solid colour.
     pub color: Option<[u8; 3]>,
     /// BCP-47 language tag for spell-check (e.g. `en-US`).
     pub lang: Option<EcoString>,
@@ -208,8 +255,30 @@ pub struct TextDefaults {
 impl Default for TextDefaults {
     fn default() -> Self {
         // 11pt, Word's own default, until the real root styles are resolved.
-        Self { font: None, size_half_pt: 22, color: None, lang: None }
+        Self {
+            font: None,
+            size_half_pt: 22,
+            color: None,
+            lang: None,
+        }
     }
+}
+
+/// A document-derived heading style definition.
+#[derive(Clone)]
+pub struct HeadingStyle {
+    pub level: u8,
+    /// Run properties owned by the style. Kept to the subset that can be safely
+    /// inherited by text runs: font, size, bold, italic and colour.
+    pub rpr: RunProps,
+    /// Paragraph spacing owned by the style when all headings at this level agree.
+    pub spacing: Option<Spacing>,
+}
+
+/// One resolved heading style sample recorded while lowering a heading.
+pub(crate) struct HeadingStyleSample {
+    pub level: u8,
+    pub rpr: RunProps,
 }
 
 /// Flattened character formatting → `<w:rPr>`.
@@ -217,10 +286,19 @@ impl Default for TextDefaults {
 pub struct RunProps {
     pub style: Option<EcoString>,
     pub font: Option<EcoString>,
+    /// True when bold came from Typst's semantic `#strong` wrapper. This lets
+    /// the encoder use Word's Strong character style instead of guessing from a
+    /// resolved bold value that may have come from `#text(weight:)` or a style.
+    pub strong: bool,
     pub bold: bool,
+    /// True when italic came from Typst's semantic `#emph` wrapper.
+    pub emphasis: bool,
     pub italic: bool,
+    pub caps: bool,
     pub smallcaps: bool,
     pub strike: bool,
+    /// `<w:noProof/>` — disables spelling/grammar proofing for code/raw runs.
+    pub no_proof: bool,
     pub color: Option<[u8; 3]>,
     /// Character spacing / tracking in signed twips (`<w:spacing w:val=…>` in
     /// `rPr`). `text(tracking:)`. Default none.
@@ -229,6 +307,8 @@ pub struct RunProps {
     /// `text(baseline:)` (downward-positive) is negated. Default none.
     pub position_half_pt: Option<i32>,
     pub size_half_pt: Option<u32>,
+    /// `<w:highlight w:val=...>` Word's named text highlighter colours.
+    pub highlight: Option<&'static str>,
     pub shd_fill: Option<[u8; 3]>,
     /// `<w:bdr>` run border (a character border box). Renders an *inline* framed
     /// container (`#box(stroke:)[..]` mid-line) as boxed text that flows in the
@@ -281,6 +361,9 @@ pub struct ParaProps {
     /// `<w:keepLines/>` (keep all lines on one page). Default false.
     pub keep_lines: bool,
     pub num: Option<(u32, u8)>,
+    /// `<w:suppressLineNumbers/>` for paragraphs whose Typst styles explicitly
+    /// disable `par.line(numbering:)` inside a numbered section.
+    pub suppress_line_numbers: bool,
     /// `<w:bidi/>` (paragraph base reading order is RTL). Default false.
     pub bidi: bool,
     pub spacing: Option<Spacing>,
@@ -386,7 +469,11 @@ pub struct Field {
 
 /// An image. Inline (`anchor: None`) or floating (`anchor: Some`).
 pub struct Drawing {
+    /// The fallback raster image relationship used by `<a:blip r:embed>`.
     pub rel: EcoString,
+    /// Optional native SVG relationship referenced from `<asvg:svgBlip>`.
+    /// When present, `rel` remains the required raster fallback.
+    pub svg_rel: Option<EcoString>,
     pub w_emu: i64,
     pub h_emu: i64,
     pub alt: Option<EcoString>,
@@ -437,17 +524,6 @@ pub struct ShapeSpec {
     pub txbx: Option<TextBox>,
 }
 
-/// A shape's fill: solid, or a linear gradient (`a:gradFill` + `a:lin`).
-/// Radial/conic gradients and tiling fills have no representable form here and
-/// are left to the rasterize path.
-pub enum ShapeFill {
-    Solid([u8; 3]),
-    /// Angle in 60,000ths of a degree (OOXML's `a:lin ang`), and colour stops
-    /// as (position in 0..=100000, colour) — both already in the OOXML
-    /// convention so the encoder only has to format them.
-    LinearGradient { angle_60000ths: i32, stops: Vec<(u32, [u8; 3])> },
-}
-
 /// The text-box content of a shape (`wps:txbx` → `w:txbxContent`): real
 /// paragraphs the consumer can edit, with the box's inset reproduced as the
 /// text-frame insets `[left, top, right, bottom]` in EMU.
@@ -468,25 +544,6 @@ pub enum ShapeGeom {
     /// pre-shifted so the whole path is non-negative, matching the shape's
     /// declared bounding box (the OOXML `a:custGeom` coordinate convention).
     Path(Vec<PathSegment>),
-}
-
-/// One command in a [`ShapeGeom::Path`], mapping to an OOXML `a:path` child
-/// element (`a:moveTo`/`a:lnTo`/`a:cubicBezTo`/`a:close`).
-pub enum PathSegment {
-    MoveTo(i64, i64),
-    LineTo(i64, i64),
-    /// Cubic Bézier: control 1, control 2, end point.
-    CubicTo(i64, i64, i64, i64, i64, i64),
-    Close,
-}
-
-pub struct ShapeStroke {
-    pub color: [u8; 3],
-    pub w_emu: i64,
-    /// OOXML `a:ln`'s `cap` attribute value (`"flat"`/`"rnd"`/`"sq"`).
-    pub cap: &'static str,
-    /// OOXML `a:prstDash`'s `val`, or `None` for a solid line.
-    pub dash: Option<&'static str>,
 }
 
 /// Floating-image placement (`<wp:anchor>`): positionH/V + wrap.
@@ -610,6 +667,9 @@ pub struct SectPr {
     pub gutter: i32,
     /// Equal-width column gutter in twips (Word `w:cols/@w:space`). Default 720.
     pub col_space: i32,
+    /// Section line numbering (`w:lnNumType`) when `par.line(numbering:)` is
+    /// active for this section.
+    pub line_numbers: Option<LineNumbering>,
     /// Page-number glyph format + start, if `set page(numbering:)` is active.
     pub pg_num: Option<PgNumType>,
     /// `w:type` (only for non-final sections / `pagebreak(to:)`); None = default `nextPage`.
@@ -620,6 +680,17 @@ pub struct SectPr {
     pub footers: Vec<HdrFtrRef>,
     /// `<w:titlePg/>` (distinct first page). Default false.
     pub title_pg: bool,
+}
+
+/// Line numbering settings for `<w:lnNumType>`.
+#[derive(Clone, PartialEq)]
+pub struct LineNumbering {
+    pub count_by: u32,
+    pub start: u32,
+    /// `continuous` | `newPage` | `newSection`.
+    pub restart: &'static str,
+    /// Distance between the body text and line number in twips.
+    pub distance: i32,
 }
 
 /// Page-number format + start for `<w:pgNumType>`.
@@ -682,6 +753,7 @@ impl Default for SectPr {
             columns: 1,
             gutter: 0,
             col_space: 720,
+            line_numbers: None,
             pg_num: None,
             sect_type: None,
             headers: Vec::new(),
@@ -695,13 +767,6 @@ impl Default for SectPr {
 pub struct Footnote {
     pub id: i32,
     pub blocks: Vec<Block>,
-}
-
-/// A media part to be embedded in `word/media/`.
-pub struct MediaPart {
-    pub part_name: EcoString,
-    pub ext: EcoString,
-    pub bytes: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------

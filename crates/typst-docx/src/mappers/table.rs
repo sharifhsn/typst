@@ -160,7 +160,11 @@ fn cellgrid(
                             }
                         });
 
-                        cells.push(continuation_cell(colspan as u32, Some(w_dxa), borders));
+                        cells.push(continuation_cell(
+                            colspan as u32,
+                            Some(w_dxa),
+                            borders,
+                        ));
                         x = span_end;
                     } else {
                         // Horizontal merge: absorbed by the origin cell's
@@ -283,7 +287,10 @@ fn cell_blocks(
 /// splits it into a paragraph `w:jc` (horizontal) + a `w:vAlign` (vertical).
 /// `Smart::Auto` leaves both unspecified (Word's defaults — top/left — already
 /// match Typst's cell defaults).
-fn cell_alignment(cell: &ResolvedCell, styles: StyleChain) -> (Option<Jc>, Option<VAlign>) {
+fn cell_alignment(
+    cell: &ResolvedCell,
+    styles: StyleChain,
+) -> (Option<Jc>, Option<VAlign>) {
     // The resolved cell body is a `TableCell` for a `#table` but a `GridCell` for
     // a `#grid` (which the DOCX backend also lowers to a `w:tbl`); read alignment
     // off whichever it is, or neither.
@@ -437,10 +444,7 @@ fn resolve_column_widths(grid: &CellGrid, ncols: usize) -> Vec<i32> {
         }
     }
 
-    widths
-        .into_iter()
-        .map(|w| (w.round() as i32).max(1))
-        .collect()
+    widths.into_iter().map(|w| (w.round() as i32).max(1)).collect()
 }
 
 /// Row height from the resolved row track, if it is an absolute size. `fr`/

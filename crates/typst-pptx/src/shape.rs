@@ -1,14 +1,11 @@
 #![allow(dead_code)]
 
-use crate::dom::{
-    FillSpec, GeomShape, GradientStop, PathGeom, PathSegment, StrokeSpec,
-};
+use crate::dom::{FillSpec, GeomKind, GeomShape, PathGeom, PicGeom, SlideCtx};
 
-use typst_library::layout::{Abs, Point, Transform};
-use typst_library::visualize::{
-    Color, ColorSpace, Curve, CurveItem, FixedStroke, Geometry, Gradient, LineCap, Paint,
-    ProcessColorSpace, Shape,
-};
+use typst_library::layout::{Size, Transform};
+use typst_library::visualize::{Color, Curve, Geometry, Paint, Shape, Tiling};
+use typst_ooxml_core::dml::{self, AlphaMode, TileImage};
+use typst_ooxml_core::{color as ooxml_color, units};
 
 /// Lower one laid-out Typst shape to the PPTX slide IR.
 ///
@@ -16,206 +13,53 @@ use typst_library::visualize::{
 /// may translate, rotate, reflect, or uniformly scale the geometry; skew and
 /// non-uniform scale return `None` so the caller can rasterize instead.
 pub(crate) fn shape_to_geom(
+    ctx: &mut SlideCtx,
     shape: &Shape,
     transform: Transform,
     rot_60k: i32,
 ) -> Option<GeomShape> {
-    let scale = similarity_scale(&transform)?;
-    let fill = resolved_fill(&shape.fill)?;
-    let stroke = resolved_stroke(&shape.stroke, scale)?;
-    let raw = geometry_to_raw(&shape.geometry, transform);
-    let normalized = normalize_segments(raw)?;
+    let scale = dml::similarity_scale(&transform)?;
+    let stroke = dml::resolved_stroke(&shape.stroke, scale, AlphaMode::Preserve)?;
+
+    if let Some(connector) = line_to_connector(shape, transform, rot_60k, stroke.clone())
+    {
+        return Some(connector);
+    }
+
+    let raw = dml::geometry_to_raw(&shape.geometry, transform);
+    let normalized = dml::normalize_segments(raw)?;
+    let fill = resolved_fill(ctx, &shape.fill)?;
 
     Some(GeomShape {
-        x_emu: abs_to_emu(normalized.min_x),
-        y_emu: abs_to_emu(normalized.min_y),
-        w_emu: abs_to_emu(normalized.w).max(1),
-        h_emu: abs_to_emu(normalized.h).max(1),
+        x_emu: units::abs_to_emu(normalized.min_x),
+        y_emu: units::abs_to_emu(normalized.min_y),
+        w_emu: units::abs_to_emu(normalized.w).max(1),
+        h_emu: units::abs_to_emu(normalized.h).max(1),
         rot_60k,
-        geom: PathGeom::Custom(normalized.segments),
+        geom: GeomKind::Path(PathGeom::Custom(normalized.segments)),
         fill,
         stroke,
     })
 }
 
-/// A 2D affine transform's uniform scale factor, if it is a similarity:
-/// translation, rotation/reflection, and optional uniform scale only.
-pub(crate) fn similarity_scale(t: &Transform) -> Option<f64> {
-    let (sx, ky, kx, sy) = (t.sx.get(), t.ky.get(), t.kx.get(), t.sy.get());
-    let col1 = sx * sx + ky * ky;
-    let col2 = kx * kx + sy * sy;
-    let dot = sx * kx + ky * sy;
-    const EPS: f64 = 1e-4;
-    if col1 <= EPS || (col1 - col2).abs() > EPS * col1.max(col2) || dot.abs() > EPS * col1
-    {
+fn line_to_connector(
+    shape: &Shape,
+    transform: Transform,
+    rot_60k: i32,
+    stroke: Option<dml::StrokeSpec>,
+) -> Option<GeomShape> {
+    let Geometry::Line(delta) = &shape.geometry else {
         return None;
-    }
-    Some(col1.sqrt())
-}
-
-fn geometry_to_raw(geometry: &Geometry, transform: Transform) -> Vec<RawSeg> {
-    let at = |p: Point| p.transform(transform);
-    match geometry {
-        Geometry::Curve(curve) => raw_segments_from_curve(curve, transform),
-        Geometry::Line(delta) => {
-            vec![RawSeg::Move(at(Point::zero())), RawSeg::Line(at(*delta))]
-        }
-        Geometry::Rect(size) => vec![
-            RawSeg::Move(at(Point::zero())),
-            RawSeg::Line(at(Point::new(size.x, Abs::zero()))),
-            RawSeg::Line(at(Point::new(size.x, size.y))),
-            RawSeg::Line(at(Point::new(Abs::zero(), size.y))),
-            RawSeg::Close,
-        ],
-    }
-}
-
-fn raw_segments_from_curve(curve: &Curve, transform: Transform) -> Vec<RawSeg> {
-    curve
-        .0
-        .iter()
-        .map(|item| match item {
-            CurveItem::Move(p) => RawSeg::Move(p.transform(transform)),
-            CurveItem::Line(p) => RawSeg::Line(p.transform(transform)),
-            CurveItem::Cubic(c1, c2, end) => RawSeg::Cubic(
-                c1.transform(transform),
-                c2.transform(transform),
-                end.transform(transform),
-            ),
-            CurveItem::Close => RawSeg::Close,
-        })
-        .collect()
-}
-
-pub(crate) fn resolved_fill(fill: &Option<Paint>) -> Option<Option<FillSpec>> {
-    match fill {
-        None => Some(None),
-        Some(Paint::Solid(color)) => Some(Some(FillSpec::Solid(srgb_bytes(color)))),
-        Some(Paint::Gradient(gradient)) => linear_gradient_fill(gradient).map(Some),
-        Some(Paint::Tiling(_)) => None,
-    }
-}
-
-fn linear_gradient_fill(gradient: &Gradient) -> Option<FillSpec> {
-    let Gradient::Linear(linear) = gradient else { return None };
-    let stops = linear
-        .stops
-        .iter()
-        .map(|(color, pos)| GradientStop {
-            pos_100k: (pos.get() * 100_000.0).round() as i32,
-            color: srgb_bytes(color),
-        })
-        .collect();
-    let angle_60k = (linear.angle.to_deg().rem_euclid(360.0) * 60_000.0).round() as i32;
-    Some(FillSpec::LinearGradient { angle_60k, stops })
-}
-
-fn resolved_stroke(
-    stroke: &Option<FixedStroke>,
-    scale: f64,
-) -> Option<Option<StrokeSpec>> {
-    match stroke {
-        None => Some(None),
-        Some(fixed) => match &fixed.paint {
-            Paint::Solid(color) => {
-                let thickness = fixed.thickness * scale;
-                Some(Some(StrokeSpec {
-                    color: srgb_bytes(color),
-                    w_emu: abs_to_emu(thickness),
-                    cap: line_cap_to_ooxml(fixed.cap),
-                    dash: fixed
-                        .dash
-                        .as_ref()
-                        .map(|dash| prst_dash(&dash.array, thickness)),
-                }))
-            }
-            Paint::Gradient(_) | Paint::Tiling(_) => None,
-        },
-    }
-}
-
-pub(crate) fn srgb_bytes(color: &Color) -> [u8; 4] {
-    let srgb = ColorSpace::Process(ProcessColorSpace::Srgb);
-    let color = color.to_space(&srgb).unwrap_or_else(|_| color.clone());
-    color.to_vec4_u8()
-}
-
-fn line_cap_to_ooxml(cap: LineCap) -> &'static str {
-    match cap {
-        LineCap::Butt => "flat",
-        LineCap::Round => "rnd",
-        LineCap::Square => "sq",
-    }
-}
-
-fn prst_dash(array: &[Abs], thickness: Abs) -> &'static str {
-    if array.is_empty() {
-        return "solid";
-    }
-
-    let (mut has_dot, mut has_dash) = (false, false);
-    for on in array.iter().step_by(2) {
-        if *on <= thickness * 1.2 {
-            has_dot = true;
-        } else {
-            has_dash = true;
-        }
-    }
-
-    match (has_dot, has_dash) {
-        (true, true) => "dashDot",
-        (true, false) => "sysDot",
-        _ => "dash",
-    }
-}
-
-enum RawSeg {
-    Move(Point),
-    Line(Point),
-    Cubic(Point, Point, Point),
-    Close,
-}
-
-struct NormalizedPath {
-    segments: Vec<PathSegment>,
-    min_x: Abs,
-    min_y: Abs,
-    w: Abs,
-    h: Abs,
-}
-
-/// Conservative control-point bounds for a raw path.
-///
-/// Seed from the first real coordinate, not the origin. Otherwise paths that
-/// live away from `(0, 0)` acquire phantom padding when normalized.
-fn raw_bounds(raw: &[RawSeg]) -> (Abs, Abs, Abs, Abs) {
-    let mut bounds: Option<(Abs, Abs, Abs, Abs)> = None;
-    let mut expand = |p: Point| {
-        bounds = Some(match bounds {
-            None => (p.x, p.y, p.x, p.y),
-            Some((min_x, min_y, max_x, max_y)) => {
-                (min_x.min(p.x), min_y.min(p.y), max_x.max(p.x), max_y.max(p.y))
-            }
-        });
     };
 
-    for seg in raw {
-        match seg {
-            RawSeg::Move(p) | RawSeg::Line(p) => expand(*p),
-            RawSeg::Cubic(c1, c2, end) => {
-                expand(*c1);
-                expand(*c2);
-                expand(*end);
-            }
-            RawSeg::Close => {}
-        }
+    if shape.fill.is_some() {
+        return None;
     }
 
-    bounds.unwrap_or((Abs::zero(), Abs::zero(), Abs::zero(), Abs::zero()))
-}
-
-fn normalize_segments(raw: Vec<RawSeg>) -> Option<NormalizedPath> {
-    let (min_x, min_y, max_x, max_y) = raw_bounds(&raw);
+    let start = typst_library::layout::Point::zero().transform(transform);
+    let end = delta.transform(transform);
+    let (min_x, min_y) = (start.x.min(end.x), start.y.min(end.y));
+    let (max_x, max_y) = (start.x.max(end.x), start.y.max(end.y));
     let (w, h) = (max_x - min_x, max_y - min_y);
     if !w.to_pt().is_finite() || !h.to_pt().is_finite() {
         return None;
@@ -224,52 +68,71 @@ fn normalize_segments(raw: Vec<RawSeg>) -> Option<NormalizedPath> {
         return None;
     }
 
-    let shift =
-        |p: Point| -> (i64, i64) { (abs_to_emu(p.x - min_x), abs_to_emu(p.y - min_y)) };
-    let segments = raw
-        .into_iter()
-        .map(|seg| match seg {
-            RawSeg::Move(p) => {
-                let (x, y) = shift(p);
-                PathSegment::MoveTo(x, y)
-            }
-            RawSeg::Line(p) => {
-                let (x, y) = shift(p);
-                PathSegment::LineTo(x, y)
-            }
-            RawSeg::Cubic(c1, c2, end) => {
-                let (c1x, c1y) = shift(c1);
-                let (c2x, c2y) = shift(c2);
-                let (ex, ey) = shift(end);
-                PathSegment::CubicTo(c1x, c1y, c2x, c2y, ex, ey)
-            }
-            RawSeg::Close => PathSegment::Close,
-        })
-        .collect();
-
-    Some(NormalizedPath { segments, min_x, min_y, w, h })
+    Some(GeomShape {
+        x_emu: units::abs_to_emu(min_x),
+        y_emu: units::abs_to_emu(min_y),
+        w_emu: units::abs_to_emu(w).max(1),
+        h_emu: units::abs_to_emu(h).max(1),
+        rot_60k,
+        geom: GeomKind::Connector { flip_h: start.x > end.x, flip_v: start.y > end.y },
+        fill: None,
+        stroke,
+    })
 }
 
-fn abs_to_emu(abs: Abs) -> i64 {
-    let emu = (abs.to_pt() * 12_700.0).round();
-    if emu.is_nan() {
-        0
-    } else if emu >= i64::MAX as f64 {
-        i64::MAX
-    } else if emu <= i64::MIN as f64 {
-        i64::MIN
-    } else {
-        emu as i64
+/// Classify a clip curve that can be represented as a preset picture geometry.
+///
+/// This is intentionally narrower than general shape lowering: it only accepts
+/// the full-frame mask geometries that can be applied to the picture itself.
+pub(crate) fn clip_to_pic_geom(clip: &Curve, size: Size) -> Option<PicGeom> {
+    if !size.x.to_pt().is_finite()
+        || !size.y.to_pt().is_finite()
+        || size.x.to_pt() <= 0.0
+        || size.y.to_pt() <= 0.0
+    {
+        return None;
     }
+
+    if *clip == Curve::ellipse(size) {
+        return Some(PicGeom::Ellipse);
+    }
+
+    let radius = dml::rounded_rect_radius(clip, size)?;
+    Some(PicGeom::RoundRect { adj_100k: dml::round_rect_adj(radius, size) })
+}
+
+pub(crate) fn resolved_fill(
+    ctx: &mut SlideCtx,
+    fill: &Option<Paint>,
+) -> Option<Option<FillSpec>> {
+    match fill {
+        Some(Paint::Tiling(tiling)) => tile_fill(ctx, tiling).map(Some),
+        _ => dml::resolved_fill(fill, AlphaMode::Preserve),
+    }
+}
+
+fn tile_fill(ctx: &mut SlideCtx, tiling: &Tiling) -> Option<FillSpec> {
+    let tile = dml::render_tiling_tile(tiling)?;
+    let media = ctx.add_media(&tile.png, "png");
+    Some(tile.fill(TileImage::Media(media)))
+}
+
+pub(crate) fn srgb_bytes(color: &Color) -> [u8; 4] {
+    ooxml_color::srgb_rgba(color)
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
+    use crate::dom::{GeomKind, PathSegment};
     use typst_library::foundations::Smart;
-    use typst_library::layout::{Angle, Ratio, Size};
-    use typst_library::visualize::{FillRule, LinearGradient, Oklab, ProcessColor, Rgb};
+    use typst_library::layout::{Abs, Angle, Point, Ratio, Size, Transform};
+    use typst_library::visualize::{
+        ColorSpace, FillRule, LinearGradient, Oklab, ProcessColor, ProcessColorSpace,
+        RadialGradient, Rgb,
+    };
+    use typst_library::visualize::{Geometry, Gradient};
 
     use super::*;
 
@@ -289,13 +152,14 @@ mod tests {
     #[test]
     fn rect_geometry_lowers_to_closed_four_corner_path() {
         let shape = bare_shape(Geometry::Rect(Size::new(Abs::pt(10.0), Abs::pt(20.0))));
-        let geom = shape_to_geom(&shape, Transform::identity(), 0).unwrap();
+        let mut ctx = SlideCtx::default();
+        let geom = shape_to_geom(&mut ctx, &shape, Transform::identity(), 0).unwrap();
 
         assert_eq!(geom.x_emu, 0);
         assert_eq!(geom.y_emu, 0);
         assert_eq!(geom.w_emu, emu_pt(10.0));
         assert_eq!(geom.h_emu, emu_pt(20.0));
-        let PathGeom::Custom(segments) = geom.geom else {
+        let GeomKind::Path(PathGeom::Custom(segments)) = geom.geom else {
             panic!("expected custom path");
         };
         assert_eq!(segments.len(), 5);
@@ -318,8 +182,9 @@ mod tests {
             Point::new(Abs::pt(20.0), Abs::pt(4.0)),
         );
         let shape = bare_shape(Geometry::Curve(curve));
-        let geom = shape_to_geom(&shape, Transform::identity(), 0).unwrap();
-        let PathGeom::Custom(segments) = geom.geom else {
+        let mut ctx = SlideCtx::default();
+        let geom = shape_to_geom(&mut ctx, &shape, Transform::identity(), 0).unwrap();
+        let GeomKind::Path(PathGeom::Custom(segments)) = geom.geom else {
             panic!("expected custom path");
         };
 
@@ -337,22 +202,35 @@ mod tests {
     }
 
     #[test]
-    fn negative_coordinates_shift_path_and_preserve_bounds() {
+    fn line_geometry_lowers_to_loose_connector() {
         let shape = bare_shape(Geometry::Line(Point::new(Abs::pt(5.0), Abs::pt(5.0))));
         let transform = Transform::translate(Abs::pt(-5.0), Abs::pt(-10.0));
-        let geom = shape_to_geom(&shape, transform, 0).unwrap();
+        let mut ctx = SlideCtx::default();
+        let geom = shape_to_geom(&mut ctx, &shape, transform, 0).unwrap();
 
         assert_eq!(geom.x_emu, emu_pt(-5.0));
         assert_eq!(geom.y_emu, emu_pt(-10.0));
         assert_eq!(geom.w_emu, emu_pt(5.0));
         assert_eq!(geom.h_emu, emu_pt(5.0));
-        let PathGeom::Custom(segments) = geom.geom else {
-            panic!("expected custom path");
-        };
-        assert!(matches!(segments[0], PathSegment::MoveTo(0, 0)));
-        assert!(
-            matches!(segments[1], PathSegment::LineTo(x, y) if x == emu_pt(5.0) && y == emu_pt(5.0))
-        );
+        assert!(matches!(
+            geom.geom,
+            GeomKind::Connector { flip_h: false, flip_v: false }
+        ));
+        assert!(geom.fill.is_none());
+    }
+
+    #[test]
+    fn descending_line_connector_records_flip() {
+        let shape = bare_shape(Geometry::Line(Point::new(Abs::pt(-5.0), Abs::pt(5.0))));
+        let transform = Transform::translate(Abs::pt(10.0), Abs::pt(0.0));
+        let mut ctx = SlideCtx::default();
+        let geom = shape_to_geom(&mut ctx, &shape, transform, 0).unwrap();
+
+        assert_eq!(geom.x_emu, emu_pt(5.0));
+        assert_eq!(geom.y_emu, 0);
+        assert_eq!(geom.w_emu, emu_pt(5.0));
+        assert_eq!(geom.h_emu, emu_pt(5.0));
+        assert!(matches!(geom.geom, GeomKind::Connector { flip_h: true, flip_v: false }));
     }
 
     #[test]
@@ -373,7 +251,10 @@ mod tests {
             anti_alias: true,
         }));
 
-        let fill = resolved_fill(&Some(Paint::Gradient(gradient))).unwrap().unwrap();
+        let mut ctx = SlideCtx::default();
+        let fill = resolved_fill(&mut ctx, &Some(Paint::Gradient(gradient)))
+            .unwrap()
+            .unwrap();
         let FillSpec::LinearGradient { angle_60k, stops } = fill else {
             panic!("expected linear gradient");
         };
@@ -383,5 +264,40 @@ mod tests {
         assert_eq!(stops[1].pos_100k, 100_000);
         assert_ne!(stops[0].color, raw);
         assert_eq!(stops[0].color, srgb_bytes(&oklab));
+    }
+
+    #[test]
+    fn radial_gradient_is_not_natively_mapped() {
+        // Radial gradients bail to the raster fallback rather than a native
+        // fill: an empirical LibreOffice check found the DrawingML
+        // `a:path path="circle"`/`a:fillToRect` model renders visibly more
+        // circular than Typst's own box-relative elliptical stretch on a
+        // non-square shape, so `gradient_fill` intentionally never produces
+        // `FillSpec::RadialGradient` for now (see its doc comment).
+        let gradient = Gradient::Radial(Arc::new(RadialGradient {
+            stops: vec![
+                (
+                    Color::Process(ProcessColor::Rgb(Rgb::new(1.0, 0.0, 0.0, 1.0))),
+                    Ratio::zero(),
+                ),
+                (
+                    Color::Process(ProcessColor::Rgb(Rgb::new(0.0, 0.0, 1.0, 1.0))),
+                    Ratio::one(),
+                ),
+            ],
+            center: typst_library::layout::Axes::new(Ratio::new(0.4), Ratio::new(0.6)),
+            radius: Ratio::new(0.7),
+            focal_center: typst_library::layout::Axes::new(
+                Ratio::new(0.3),
+                Ratio::new(0.45),
+            ),
+            focal_radius: Ratio::new(0.1),
+            space: ColorSpace::Process(ProcessColorSpace::Srgb),
+            relative: Smart::Auto,
+            anti_alias: true,
+        }));
+
+        let mut ctx = SlideCtx::default();
+        assert!(resolved_fill(&mut ctx, &Some(Paint::Gradient(gradient))).is_none());
     }
 }

@@ -9,14 +9,17 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::Arc;
 
 use typst::diag::{FileError, FileResult};
-use typst::foundations::{Bytes, Datetime, Duration};
+use typst::foundations::{Bytes, Datetime, Duration, Label};
+use typst::introspection::Introspector;
 use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
-use typst::utils::LazyHash;
+use typst::utils::{LazyHash, PicoStr};
 use typst::{Library, LibraryExt, World};
 use typst_docx::{DocxDocument, DocxOptions, docx};
+use typst_layout::PagedDocument;
 
 /// A minimal world: the embedded Typst fonts and a single detached source.
 struct TestWorld {
@@ -24,19 +27,39 @@ struct TestWorld {
     book: LazyHash<FontBook>,
     fonts: Vec<Font>,
     main: Source,
+    files: HashMap<FileId, Bytes>,
 }
 
 impl TestWorld {
     fn new(text: &str) -> Self {
+        Self::with_files(text, &[])
+    }
+
+    /// Serves the given `(path, bytes)` pairs as files resolvable from the
+    /// detached main source (for example, `bibliography("refs.bib")`).
+    fn with_files(text: &str, files: &[(&str, &[u8])]) -> Self {
         let fonts: Vec<Font> = typst_assets::fonts()
             .flat_map(|data| Font::iter(Bytes::new(data)))
             .collect();
         let book = FontBook::from_fonts(&fonts);
+        let main = Source::detached(text);
+        let files = files
+            .iter()
+            .map(|(path, bytes)| {
+                let id = typst::syntax::RootedPath::new(
+                    typst::syntax::VirtualRoot::Project,
+                    typst::syntax::VirtualPath::new(path).unwrap(),
+                )
+                .intern();
+                (id, Bytes::new(bytes.to_vec()))
+            })
+            .collect();
         Self {
             library: LazyHash::new(Library::builder().build()),
             book: LazyHash::new(book),
             fonts,
-            main: Source::detached(text),
+            main,
+            files,
         }
     }
 }
@@ -58,8 +81,11 @@ impl World for TestWorld {
             Err(FileError::NotFound(Default::default()))
         }
     }
-    fn file(&self, _: FileId) -> FileResult<Bytes> {
-        Err(FileError::NotFound(Default::default()))
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        self.files
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| FileError::NotFound(Default::default()))
     }
     fn font(&self, index: usize) -> Option<Font> {
         self.fonts.get(index).cloned()
@@ -71,10 +97,21 @@ impl World for TestWorld {
 
 /// Compiles `src` to a DOCX and returns its parts as `name -> text`.
 fn parts(src: &str) -> HashMap<String, String> {
-    let world = TestWorld::new(src);
-    let doc = typst::compile::<DocxDocument>(&world)
-        .output
-        .expect("compilation failed");
+    parts_with_files(src, &[])
+}
+
+fn parts_with_files(src: &str, files: &[(&str, &[u8])]) -> HashMap<String, String> {
+    package_bytes_with_files(src, files)
+        .into_iter()
+        .filter_map(|(name, bytes)| String::from_utf8(bytes).ok().map(|s| (name, s)))
+        .collect()
+}
+
+fn package_bytes_with_files(
+    src: &str,
+    files: &[(&str, &[u8])],
+) -> HashMap<String, Vec<u8>> {
+    let doc = compile_docx(src, files);
     let bytes = docx(&doc, &DocxOptions { pretty: false }).expect("docx export failed");
 
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
@@ -82,31 +119,81 @@ fn parts(src: &str) -> HashMap<String, String> {
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).unwrap();
         let name = f.name().to_string();
-        let mut s = String::new();
-        if f.read_to_string(&mut s).is_ok() {
-            map.insert(name, s);
-        }
+        let mut bytes = Vec::new();
+        f.read_to_end(&mut bytes).unwrap();
+        map.insert(name, bytes);
     }
     map
 }
 
 /// Compiles `src` and decodes the first embedded PNG.
 fn first_png(src: &str) -> tiny_skia::Pixmap {
-    let world = TestWorld::new(src);
-    let doc = typst::compile::<DocxDocument>(&world)
+    let package = package_bytes_with_files(src, &[]);
+    let png = package
+        .iter()
+        .find(|(name, _)| name.starts_with("word/media/") && name.ends_with(".png"))
+        .map(|(_, bytes)| bytes)
+        .expect("DOCX contains no PNG media part");
+    tiny_skia::Pixmap::decode_png(png).expect("embedded PNG decodes")
+}
+
+fn compile_docx(src: &str, files: &[(&str, &[u8])]) -> DocxDocument {
+    let world = TestWorld::with_files(src, files);
+    compile_docx_with_world(&world)
+}
+
+fn compile_docx_with_world(world: &TestWorld) -> DocxDocument {
+    let paged = typst::compile::<PagedDocument>(world)
         .output
-        .expect("compilation failed");
-    let bytes = docx(&doc, &DocxOptions { pretty: false }).expect("docx export failed");
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
-    for i in 0..zip.len() {
-        let mut file = zip.by_index(i).unwrap();
-        if file.name().starts_with("word/media/") && file.name().ends_with(".png") {
-            let mut png = Vec::new();
-            file.read_to_end(&mut png).unwrap();
-            return tiny_skia::Pixmap::decode_png(&png).expect("embedded PNG decodes");
-        }
-    }
-    panic!("DOCX contains no PNG media part");
+        .expect("paged compilation failed");
+    let primary = Arc::clone(paged.introspector());
+    let seed = Arc::clone(&primary);
+    let page_sizes = Arc::new(
+        paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>(),
+    );
+    typst::compile_with::<DocxDocument, _>(
+        world,
+        Some(seed.as_ref()),
+        move |engine, content, styles| {
+            typst_docx::docx_document_with_paged_introspector(
+                engine,
+                content,
+                styles,
+                Arc::clone(&primary),
+                Arc::clone(&page_sizes),
+            )
+        },
+    )
+    .output
+    .expect("docx compilation failed")
+}
+
+fn compile_paged_and_docx(src: &str) -> (PagedDocument, DocxDocument) {
+    let world = TestWorld::new(src);
+    let paged = typst::compile::<PagedDocument>(&world)
+        .output
+        .expect("paged compilation failed");
+    let primary = Arc::clone(paged.introspector());
+    let seed = Arc::clone(&primary);
+    let page_sizes = Arc::new(
+        paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>(),
+    );
+    let doc = typst::compile_with::<DocxDocument, _>(
+        &world,
+        Some(seed.as_ref()),
+        move |engine, content, styles| {
+            typst_docx::docx_document_with_paged_introspector(
+                engine,
+                content,
+                styles,
+                Arc::clone(&primary),
+                Arc::clone(&page_sizes),
+            )
+        },
+    )
+    .output
+    .expect("docx compilation failed");
+    (paged, doc)
 }
 
 /// Parses every XML part with the namespace-aware parser, asserting that no
@@ -129,9 +216,122 @@ fn visible_text(xml: &str) -> String {
         .filter(|node| {
             node.tag_name().name() == "t"
                 && node.tag_name().namespace()
-                    == Some("http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+                    == Some(
+                        "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                    )
         })
         .filter_map(|node| node.text())
+        .collect()
+}
+
+fn sect_pr_chunks(doc: &str) -> Vec<&str> {
+    let positions: Vec<_> = doc.match_indices("<w:sectPr>").map(|(pos, _)| pos).collect();
+    positions
+        .iter()
+        .enumerate()
+        .map(|(idx, start)| {
+            let end = positions.get(idx + 1).copied().unwrap_or(doc.len());
+            &doc[*start..end]
+        })
+        .collect()
+}
+
+const REFS_BIB: &[u8] = br#"@article{alpha,
+  title = {Alpha Source},
+  author = {Able, Alice},
+  year = {2020},
+  journal = {Journal of Sources},
+}
+
+@article{beta,
+  title = {Beta Source},
+  author = {Baker, Bob},
+  year = {2021},
+  journal = {Journal of Sources},
+}
+"#;
+
+/// Same as `REFS_BIB`, plus an entry ("gamma") that no test document below
+/// ever cites — used to verify uncited library entries stay out of the
+/// native Word sources part.
+const REFS_BIB_WITH_UNCITED: &[u8] = br#"@article{alpha,
+  title = {Alpha Source},
+  author = {Able, Alice},
+  year = {2020},
+  journal = {Journal of Sources},
+}
+
+@article{beta,
+  title = {Beta Source},
+  author = {Baker, Bob},
+  year = {2021},
+  journal = {Journal of Sources},
+}
+
+@article{gamma,
+  title = {Gamma Source},
+  author = {Carter, Cara},
+  year = {2022},
+  journal = {Journal of Sources},
+}
+"#;
+
+fn run_fragment_containing<'a>(doc_xml: &'a str, text: &str) -> &'a str {
+    for frag in doc_xml.split("<w:r>").skip(1) {
+        let Some(end) = frag.find("</w:r>") else { continue };
+        let run = &frag[..end];
+        if run.contains(text) {
+            return run;
+        }
+    }
+    panic!("run containing {text:?} not found");
+}
+
+fn para_fragment_containing<'a>(doc_xml: &'a str, text: &str) -> &'a str {
+    let text_at = doc_xml.find(text).unwrap_or_else(|| panic!("{text:?} not found"));
+    let start = doc_xml[..text_at].rfind("<w:p").expect("paragraph start");
+    let end = text_at + doc_xml[text_at..].find("</w:p>").expect("paragraph end");
+    &doc_xml[start..end]
+}
+
+fn style_fragment<'a>(styles_xml: &'a str, style_id: &str) -> &'a str {
+    let marker = format!("w:styleId=\"{style_id}\"");
+    let at = styles_xml
+        .find(&marker)
+        .unwrap_or_else(|| panic!("style {style_id} not found"));
+    let start = styles_xml[..at].rfind("<w:style").expect("style start");
+    let end =
+        at + styles_xml[at..].find("</w:style>").expect("style end") + "</w:style>".len();
+    &styles_xml[start..end]
+}
+
+fn run_text_and_child(doc_xml: &str, child: &str) -> Vec<(String, bool)> {
+    let doc = roxmltree::Document::parse(doc_xml).expect("document XML should parse");
+    doc.descendants()
+        .filter(|node| {
+            node.tag_name().name() == "r"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+        })
+        .map(|run| {
+            let text = run
+                .descendants()
+                .filter(|node| {
+                    node.tag_name().name() == "t"
+                        && node.tag_name().namespace()
+                            == Some(
+                                "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                            )
+                })
+                .filter_map(|node| node.text())
+                .collect();
+            let has_child = run.descendants().any(|node| {
+                node.tag_name().name() == child
+                    && node.tag_name().namespace()
+                        == Some("http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+            });
+            (text, has_child)
+        })
         .collect()
 }
 
@@ -154,9 +354,90 @@ fn heading_maps_to_heading_style() {
 }
 
 #[test]
-fn strong_maps_to_bold_run() {
+fn strong_maps_to_strong_character_style() {
     let p = parts("Normal *bold* text.");
-    assert!(p["word/document.xml"].contains("<w:b/>"), "strong should emit <w:b/>");
+    let run = run_fragment_containing(&p["word/document.xml"], "bold");
+    assert!(
+        run.contains("<w:rStyle w:val=\"Strong\"/>"),
+        "strong should emit the Strong character style: {run}"
+    );
+    assert!(
+        !run.contains("<w:b"),
+        "Strong style should supply bold without direct formatting: {run}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn raw_code_runs_disable_proofing_but_prose_does_not() {
+    let p = parts(
+        r#"Plain prose before `let inline_code = 1;` after.
+
+```rust
+let block_code = 2;
+```
+"#,
+    );
+    let doc = &p["word/document.xml"];
+    let runs = run_text_and_child(doc, "noProof");
+
+    assert!(
+        runs.iter()
+            .any(|(text, no_proof)| text.contains("inline_code") && *no_proof),
+        "inline raw code should emit <w:noProof/>"
+    );
+    assert!(
+        runs.iter()
+            .any(|(text, no_proof)| text.contains("block_code") && *no_proof),
+        "block raw code should emit <w:noProof/>"
+    );
+    assert!(
+        runs.iter()
+            .any(|(text, no_proof)| text.contains("Plain prose") && !*no_proof),
+        "ordinary prose should not emit <w:noProof/>"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn highlight_default_uses_word_highlight_yellow() {
+    let p = parts("#highlight[x]");
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<w:highlight w:val=\"yellow\"/>"),
+        "default Typst highlight should map to Word's yellow highlighter"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn highlight_custom_green_is_not_hard_coded_yellow() {
+    let p = parts("#highlight(fill: rgb(\"00FF00\"))[x]");
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<w:highlight w:val=\"green\"/>")
+            || doc.contains("w:fill=\"00FF00\""),
+        "custom green highlight should be emitted as green"
+    );
+    assert!(
+        !doc.contains("w:fill=\"FFFF00\"") && !doc.contains("w:val=\"yellow\""),
+        "custom green highlight must not fall back to the old hard-coded yellow"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn highlight_arbitrary_color_keeps_exact_shading() {
+    let p = parts("#highlight(fill: rgb(\"123456\"))[x]");
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"123456\"/>"),
+        "arbitrary highlight colors should keep exact run shading"
+    );
+    assert!(
+        !doc.contains("<w:highlight"),
+        "arbitrary highlight colors should not be forced into Word's named palette"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -201,7 +482,10 @@ fn curve_maps_to_a_native_bezier_path() {
     let doc = &p["word/document.xml"];
     assert!(doc.contains("<a:custGeom>"), "curve becomes a custom geometry");
     assert!(doc.contains("<a:cubicBezTo>"), "the Bézier segment is kept, not flattened");
-    assert!(!doc.contains("<w:drawing><wp:inline") || !doc.contains("<a:blip"), "not rasterized");
+    assert!(
+        !doc.contains("<w:drawing><wp:inline") || !doc.contains("<a:blip"),
+        "not rasterized"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -239,7 +523,10 @@ fn linear_gradient_fill_maps_to_native_gradfill() {
     let doc = &p["word/document.xml"];
     assert!(doc.contains("<a:gradFill"), "gradient fill becomes a:gradFill");
     assert!(doc.contains("<a:srgbClr val=\"FF0000\"/>"), "first stop is exact red");
-    assert!(doc.contains("<a:srgbClr val=\"0000FF\"/>"), "second stop is exact blue, not Oklab-misread");
+    assert!(
+        doc.contains("<a:srgbClr val=\"0000FF\"/>"),
+        "second stop is exact blue, not Oklab-misread"
+    );
     assert!(doc.contains("<a:lin ang=\"0\""), "0deg (left-to-right) maps to ang=0");
     assert!(!doc.contains("<a:blip"), "not rasterized");
 
@@ -254,7 +541,11 @@ fn linear_gradient_fill_maps_to_native_gradfill() {
     );
 
     // A radial gradient has no representable OOXML shape-relative form here and
-    // still rasterizes, same as before.
+    // still rasterizes, same as before. (An empirical LibreOffice check found
+    // the emitted a:path/a:fillToRect renders visibly more circular than
+    // Typst's own box-relative elliptical stretch on a non-square shape — the
+    // exact mismatch this comment originally warned about — so it stays
+    // scoped out rather than ship a subtly-wrong native mapping.)
     let r = parts("#rect(width: 100pt, height: 50pt, fill: gradient.radial(red, blue))");
     assert!(
         !r["word/document.xml"].contains("<a:gradFill"),
@@ -287,7 +578,10 @@ fn shape_stroke_dash_and_cap_are_carried_natively() {
 
     // A plain solid stroke still carries an explicit cap but no prstDash.
     let solid = parts("#rect(width: 100pt, height: 40pt, stroke: black)");
-    assert!(!solid["word/document.xml"].contains("<a:prstDash"), "solid line has no dash element");
+    assert!(
+        !solid["word/document.xml"].contains("<a:prstDash"),
+        "solid line has no dash element"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -300,12 +594,88 @@ fn rasterized_content_keeps_its_text_as_hidden_runs() {
     // the exact visual, the hidden text carries the words.
     let p = parts("#skew(ax: 20deg)[HiddenSkewWord]");
     let doc = &p["word/document.xml"];
-    assert!(doc.contains("<a:blip"), "skew has no native form, so it rasterizes to an image");
+    assert!(
+        doc.contains("<a:blip"),
+        "skew has no native form, so it rasterizes to an image"
+    );
     assert!(doc.contains("<w:vanish/>"), "the recovered text is emitted as a hidden run");
-    assert!(doc.contains("HiddenSkewWord"), "the rasterized word survives as searchable text");
+    assert!(
+        doc.contains("HiddenSkewWord"),
+        "the rasterized word survives as searchable text"
+    );
     // The image also gets the recovered text as accessibility alt text.
     assert!(doc.contains("descr=\"HiddenSkewWord\""), "the drawing carries alt text");
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn svg_image_embeds_native_svg_with_png_fallback() {
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40"><rect width="80" height="40" fill="#0b6"/><circle cx="20" cy="20" r="12" fill="#fff"/></svg>"##;
+
+    let raw = package_bytes_with_files(
+        r#"#image("logo.svg", width: 40pt, alt: "Brand mark")"#,
+        &[("logo.svg", SVG)],
+    );
+    let p: HashMap<String, String> = raw
+        .iter()
+        .filter_map(|(name, bytes)| {
+            String::from_utf8(bytes.clone()).ok().map(|s| (name.clone(), s))
+        })
+        .collect();
+    let doc = &p["word/document.xml"];
+    let rels = &p["word/_rels/document.xml.rels"];
+
+    assert!(doc.contains("<a:blip r:embed=\""), "PNG fallback is the normal blip");
+    assert!(doc.contains("uri=\"{28A0092B-C50C-407E-A947-70E740481C1C}\""));
+    assert!(doc.contains("<a14:useLocalDpi"));
+    assert!(doc.contains("uri=\"{96DAC541-7B7A-43D3-8B79-37D633B846F1}\""));
+    assert!(doc.contains("<asvg:svgBlip"));
+    assert!(doc.contains(
+        "xmlns:asvg=\"http://schemas.microsoft.com/office/drawing/2016/SVG/main\""
+    ));
+    assert!(doc.contains("descr=\"Brand mark\""));
+
+    let png_rel = doc
+        .split("<a:blip r:embed=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("fallback relationship id");
+    let svg_rel = doc
+        .split("<asvg:svgBlip")
+        .nth(1)
+        .and_then(|s| s.split("r:embed=\"").nth(1))
+        .and_then(|s| s.split('"').next())
+        .expect("svg relationship id");
+
+    let png_target = relationship_target(rels, png_rel);
+    let svg_target = relationship_target(rels, svg_rel);
+    assert!(png_target.ends_with(".png"), "fallback target is PNG: {png_target}");
+    assert!(svg_target.ends_with(".svg"), "native target is SVG: {svg_target}");
+
+    let png_part = format!("word/{png_target}");
+    let svg_part = format!("word/{svg_target}");
+    assert_eq!(&raw[&svg_part], SVG, "the SVG media part stores the source bytes");
+    assert!(
+        raw[&png_part].starts_with(b"\x89PNG\r\n\x1a\n"),
+        "fallback media part must be a valid PNG"
+    );
+    assert!(
+        p["[Content_Types].xml"]
+            .contains("<Default Extension=\"svg\" ContentType=\"image/svg+xml\"/>"),
+        "package declares the SVG media content type"
+    );
+    assert_all_wellformed(&p);
+}
+
+fn relationship_target(rels_xml: &str, id: &str) -> String {
+    let rels = roxmltree::Document::parse(rels_xml).expect("rels XML should parse");
+    rels.descendants()
+        .find(|node| {
+            node.tag_name().name() == "Relationship" && node.attribute("Id") == Some(id)
+        })
+        .and_then(|node| node.attribute("Target"))
+        .unwrap_or_else(|| panic!("relationship {id} should exist"))
+        .to_string()
 }
 
 #[test]
@@ -392,15 +762,155 @@ fn wrap_content_figure_is_recovered_not_rasterized() {
 }
 
 #[test]
-fn inline_columns_flow_their_text_natively() {
-    // `#columns(n)[..]` wraps flowing content (whole academic papers and
-    // cheatsheets do this). It must keep the text editable, not rasterize the
-    // body to an image — the column split is approximated as a single column.
-    let p = parts("#columns(2)[A first column paragraph. #colbreak() A second one.]");
+fn frameless_box_wrapping_columns_flows_instead_of_rasterizing() {
+    // A bare top-level `#box(inset: ..)[#columns(2, ..)]` (the poster-template
+    // idiom — pollux's own layout) is paragraph-wrapped by Typst's realize
+    // (there's no bare-inline-content block variant), which used to force it
+    // through the run-only inline path: `#columns` fails
+    // `body_inline_extractable`, so the *entire* multi-section body rasterized
+    // as ONE image many times taller than the page, spilling across dozens of
+    // near-blank pages in Word/LibreOffice. A frameless box whose whole body is
+    // `#columns`/`#stack`/a non-figure `#grid` now flows as ordinary native
+    // blocks instead (single-column-approximated — the box has no fill/stroke
+    // for a column split to interact with, so nothing else is lost).
+    let p = parts(
+        "#box(inset: 1cm)[#columns(2, [Introduction text here. Method text here.])]",
+    );
     let doc = &p["word/document.xml"];
-    assert!(doc.contains("first column paragraph"), "column text is kept");
-    assert!(doc.contains("A second one"), "all column content is kept");
+    assert!(doc.contains("Introduction text here"), "columns body is extracted");
+    assert!(doc.contains("Method text here"), "columns body is extracted");
+    assert!(!doc.contains("<w:drawing>"), "the box is not rasterized wholesale");
+    assert_all_wellformed(&p);
+
+    // A box with a fill/stroke around the SAME body is intentionally NOT
+    // widened by this change (only the frameless case is validated safe here)
+    // — it keeps its pre-existing rasterize behavior, preserving the visual.
+    let framed = parts(
+        "#box(inset: 1cm, fill: yellow)[#columns(2, [Framed section text.])]",
+    );
+    let doc = &framed["word/document.xml"];
+    assert!(doc.contains("<w:drawing>"), "a filled box still rasterizes its visual");
+    assert_all_wellformed(&framed);
+}
+
+#[test]
+fn box_with_bottom_only_stroke_keeps_a_bottom_only_border() {
+    // `box(height: 20pt, width: 100%, stroke: (bottom: 0.5pt + black))[Heading]`
+    // is the common CV/resume "border as a section-title underline" idiom
+    // (found in a real corpus doc, bwaklog-vita). Reached via a `ParElem` at
+    // block scope, it used to fall through to the run-only inline path's
+    // character border (`w:bdr`, via `mappers::shape::inline_frame`), which is
+    // inherently uniform around all four sides — silently turning the intended
+    // bottom-only underline into a full box. It must now flow as a genuine
+    // paragraph with a `w:pBdr` carrying ONLY the bottom side.
+    let p = parts(
+        "#box(height: 20pt, width: 100%, stroke: (bottom: 0.5pt + black))[Summary]",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("Summary"), "the heading text is extracted");
+    assert!(!doc.contains("<w:bdr"), "no uniform character border is emitted");
+    assert!(!doc.contains("<w:drawing>"), "the box is not rasterized");
+    assert!(doc.contains("<w:pBdr>"), "a paragraph border is used instead");
+    assert!(doc.contains("<w:bottom "), "the bottom side is bordered");
+    assert!(!doc.contains("<w:top "), "the top side is NOT bordered");
+    assert!(!doc.contains("<w:left "), "the left side is NOT bordered");
+    assert!(!doc.contains("<w:right "), "the right side is NOT bordered");
+    assert_all_wellformed(&p);
+
+    // Mid-sentence (genuinely inline, not a paragraph's sole content), the same
+    // partial stroke still can't be a run-level border — it now rasterizes
+    // (preserves the visual) instead of silently becoming a full box.
+    let inline = parts(
+        "before #box(stroke: (bottom: 0.5pt + black))[mid] after",
+    );
+    let doc = &inline["word/document.xml"];
+    assert!(doc.contains("before"), "surrounding text is preserved");
+    assert!(doc.contains("after"), "surrounding text is preserved");
+    assert!(!doc.contains("<w:bdr"), "no uniform character border is emitted");
+    assert_all_wellformed(&inline);
+}
+
+#[test]
+fn block_columns_emit_continuous_sections() {
+    // `#columns(n)[..]` is section-scoped in Word: split into a continuous
+    // multi-column section for the block, then immediately return to the
+    // surrounding column count.
+    let p = parts(
+        "Intro text.\n\
+         #columns(2, gutter: 12pt)[Column content starts here. #colbreak() \
+         Column content continues here.]\n\
+         More text after.",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("Intro text"), "pre-column text is kept");
+    assert!(doc.contains("Column content starts"), "column text is kept");
+    assert!(doc.contains("More text after"), "post-column text is kept");
     assert!(!doc.contains("<w:drawing>"), "columns are not rasterized");
+    assert!(doc.contains("w:type=\"column\""), "explicit column breaks survive");
+
+    let intro = doc.find("Intro text").unwrap();
+    let column = doc.find("Column content starts").unwrap();
+    let after = doc.find("More text after").unwrap();
+    let sects = sect_pr_chunks(doc);
+    assert_eq!(sects.len(), 3, "block columns create before/block/after sections");
+    assert!(intro < doc.find("<w:sectPr>").unwrap());
+    assert!(doc.find("<w:sectPr>").unwrap() < column);
+    assert!(column < doc.rfind("<w:sectPr>").unwrap());
+    assert!(after < doc.rfind("<w:sectPr>").unwrap());
+
+    // A section's `w:type` describes how *that* section itself starts
+    // (relative to the one before it) — so the type requested for a
+    // transition lives on the section that begins *after* it, not the one
+    // that ends there. The first section has no predecessor, so it carries
+    // no type; the continuous transitions into and out of the column block
+    // land on sections 1 and 2 respectively.
+    assert!(
+        !sects[0].contains("<w:type"),
+        "the first section has no predecessor to transition from"
+    );
+    assert!(sects[1].contains("<w:type w:val=\"continuous\"/>"));
+    assert!(sects[2].contains("<w:type w:val=\"continuous\"/>"));
+    assert!(
+        !sects[0].contains("w:num="),
+        "the surrounding section remains single-column"
+    );
+    assert!(
+        sects[1].contains("<w:cols w:num=\"2\"") && sects[1].contains("w:space=\"240\""),
+        "the columns block gets two columns and its 12pt gutter"
+    );
+    assert!(
+        !sects[2].contains("w:num="),
+        "the post-column section restores single-column layout"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn block_columns_restore_page_level_column_count() {
+    let p = parts(
+        "#set page(columns: 2)\n\
+         Before.\n\
+         #columns(3)[First. #colbreak() Second. #colbreak() Third.]\n\
+         After.",
+    );
+    let doc = &p["word/document.xml"];
+    let sects = sect_pr_chunks(doc);
+    assert_eq!(sects.len(), 3, "block columns split the page-level section");
+    assert!(sects[0].contains("<w:cols w:num=\"2\""));
+    assert!(
+        !sects[0].contains("<w:type"),
+        "the first section has no predecessor to transition from"
+    );
+    assert!(sects[1].contains("<w:cols w:num=\"3\""));
+    assert!(sects[1].contains("<w:type w:val=\"continuous\"/>"));
+    assert!(
+        sects[2].contains("<w:cols w:num=\"2\""),
+        "the section after #columns() restores page-level columns"
+    );
+    assert!(
+        sects[2].contains("<w:type w:val=\"continuous\"/>"),
+        "returning to page-level columns is also a continuous transition"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -419,12 +929,96 @@ fn nested_bullets_indent_by_level() {
 }
 
 #[test]
+fn ordered_enum_uses_native_word_numbering() {
+    let p = parts("+ first\n+ second\n+ third");
+    let doc = &p["word/document.xml"];
+    let numbering = &p["word/numbering.xml"];
+    assert!(doc.contains("<w:numPr>"), "enum paragraphs link to numbering");
+    assert!(
+        numbering.contains("<w:numFmt w:val=\"decimal\"/>"),
+        "default enum uses decimal Word numbering"
+    );
+    assert!(
+        numbering.contains("<w:lvlText w:val=\"%1.\"/>"),
+        "default enum level text remains 1."
+    );
+    assert!(
+        !doc.contains("<w:t>1.</w:t>"),
+        "native numbering must not bake marker text into document.xml"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn letter_and_roman_enums_use_native_word_numbering() {
+    let lettered = parts("#set enum(numbering: \"a.\")\n+ alpha\n+ beta");
+    let letter_numbering = &lettered["word/numbering.xml"];
+    assert!(
+        letter_numbering.contains("<w:numFmt w:val=\"lowerLetter\"/>"),
+        "lettered enum maps to lowerLetter"
+    );
+    assert!(
+        lettered["word/document.xml"].contains("<w:numPr>"),
+        "lettered enum uses native numPr"
+    );
+
+    let roman = parts("#set enum(numbering: \"I.\")\n+ one\n+ two");
+    let roman_numbering = &roman["word/numbering.xml"];
+    assert!(
+        roman_numbering.contains("<w:numFmt w:val=\"upperRoman\"/>"),
+        "Roman enum maps to upperRoman"
+    );
+    assert!(
+        roman["word/document.xml"].contains("<w:numPr>"),
+        "Roman enum uses native numPr"
+    );
+    assert_all_wellformed(&lettered);
+    assert_all_wellformed(&roman);
+}
+
+#[test]
+fn non_native_enums_keep_static_marker_fallback() {
+    let closure = parts("#set enum(numbering: n => str(n) + \")\")\n+ alpha\n+ beta");
+    let closure_doc = &closure["word/document.xml"];
+    assert!(
+        !closure_doc.contains("<w:numPr>"),
+        "numbering closures cannot use native Word counters"
+    );
+    assert!(
+        visible_text(closure_doc).contains("1)"),
+        "closure marker is baked as literal text"
+    );
+
+    let symbols = parts("#set enum(numbering: \"* \")\n+ alpha\n+ beta");
+    let symbol_doc = &symbols["word/document.xml"];
+    assert!(
+        !symbol_doc.contains("<w:numPr>"),
+        "symbol numbering stays on the static fallback"
+    );
+    assert!(
+        visible_text(symbol_doc).contains('*'),
+        "symbol marker is preserved as document text"
+    );
+    assert_all_wellformed(&closure);
+    assert_all_wellformed(&symbols);
+}
+
+#[test]
 fn nested_full_enum_numbers_include_ancestry() {
-    // `#set enum(full: true)` nested numbering must read `1.`, `1.1.`, `2.` — the
-    // parent ancestry folded onto each item body.
+    // `#set enum(full: true)` nested numbering must use a level-1 template that
+    // references the parent and child counters, with level-1 paragraph indents.
     let p = parts("#set enum(full: true)\n+ one\n  + one-a\n+ two");
     let doc = &p["word/document.xml"];
-    assert!(doc.contains("1.1."), "nested full enum shows the parent path (1.1.)");
+    let numbering = &p["word/numbering.xml"];
+    assert!(doc.contains("<w:ilvl w:val=\"1\"/>"), "nested enum reaches Word level 1");
+    assert!(
+        numbering.contains("<w:lvlText w:val=\"%1.%2.\"/>"),
+        "nested full enum shows parent and child counters"
+    );
+    assert!(
+        numbering.contains("w:left=\"1440\""),
+        "level-1 enum has the second-level indent"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -481,12 +1075,40 @@ fn bare_nary_operator_and_operand_boundary() {
 }
 
 #[test]
+fn spaced_scripted_nary_operators_are_siblings() {
+    // Two *scripted* big operators separated only by spacing must stay siblings,
+    // not nest the second inside the first's operand (which rendered garbled).
+    // The scripted `product_(i)` / `union.big_(j)` are `Scripts` items, so the
+    // boundary check has to see through the script wrapper, not just bare glyphs.
+    let p = parts("$ product_(i=1)^n a_i quad union.big_(j=1)^m b_j $");
+    let doc = &p["word/document.xml"];
+    assert_eq!(doc.matches("<m:nary>").count(), 2, "two n-ary operators");
+    let first_close = doc.find("</m:nary>").unwrap();
+    let second_open = doc.match_indices("<m:nary>").nth(1).unwrap().0;
+    assert!(
+        second_open > first_close,
+        "the second operator must not be nested inside the first's operand"
+    );
+    // A nested sum (no separator) must still nest: the inner operator is the
+    // very first operand item.
+    let q = parts("$ sum_(i) sum_(j) a_(i j) $");
+    let d2 = &q["word/document.xml"];
+    let fc = d2.find("</m:nary>").unwrap();
+    let so = d2.match_indices("<m:nary>").nth(1).unwrap().0;
+    assert!(so < fc, "adjacent sums still nest");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn colored_math_carries_its_color() {
     // `#text(red)[$x$]` inside an equation must color the math run (a `w:rPr`
     // colour on the math `m:r`), not render black.
     let p = parts("$ y = #text(red)[x] + b $");
     let doc = &p["word/document.xml"];
-    assert!(doc.contains("<w:color w:val=\"FF4136\""), "the red math run carries its color");
+    assert!(
+        doc.contains("<w:color w:val=\"FF4136\""),
+        "the red math run carries its color"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -546,9 +1168,8 @@ fn heading_outline_is_a_toc_content_control() {
 
 #[test]
 fn core_properties_carry_author_and_revision() {
-    let p = parts(
-        "#set document(title: \"T\", author: \"Ada Lovelace\")\n#outline()\n\n= H",
-    );
+    let p =
+        parts("#set document(title: \"T\", author: \"Ada Lovelace\")\n#outline()\n\n= H");
     let core = &p["docProps/core.xml"];
     assert!(core.contains("<dc:title>T</dc:title>"), "title is recorded");
     assert!(core.contains("Ada Lovelace"), "author is the creator");
@@ -637,7 +1258,10 @@ fn standard_word_parts_are_present() {
     // settings.xml carries the compat block + the standard settings.
     let s = &p["word/settings.xml"];
     assert!(s.contains("compatibilityMode") && s.contains("w:val=\"15\""), "compat 15");
-    assert!(s.contains("clrSchemeMapping") && s.contains("defaultTabStop"), "rich settings");
+    assert!(
+        s.contains("clrSchemeMapping") && s.contains("defaultTabStop"),
+        "rich settings"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -650,8 +1274,14 @@ fn standard_gallery_and_linked_heading_styles_are_defined() {
     let p = parts("= Heading one\n== Heading two\nBody.");
     let styles = &p["word/styles.xml"];
     for id in [
-        "Title", "TitleChar", "Subtitle", "Strong", "Emphasis", "TableGrid",
-        "FollowedHyperlink", "PageNumber",
+        "Title",
+        "TitleChar",
+        "Subtitle",
+        "Strong",
+        "Emphasis",
+        "TableGrid",
+        "FollowedHyperlink",
+        "PageNumber",
     ] {
         assert!(
             styles.contains(&format!("w:styleId=\"{id}\"")),
@@ -664,6 +1294,93 @@ fn standard_gallery_and_linked_heading_styles_are_defined() {
     assert!(
         styles.contains("<w:link w:val=\"Heading1Char\"/>"),
         "the heading paragraph style links to its char style"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn strong_and_emph_use_word_character_styles() {
+    let p = parts("#strong[semantic bold]\n\n#emph[semantic italic]");
+    let doc = &p["word/document.xml"];
+
+    let strong = run_fragment_containing(doc, "semantic bold");
+    assert!(
+        strong.contains("<w:rStyle w:val=\"Strong\"/>"),
+        "strong run should use the Strong character style: {strong}"
+    );
+    assert!(
+        !strong.contains("<w:b"),
+        "strong run should not duplicate bold as direct formatting: {strong}"
+    );
+
+    let emphasis = run_fragment_containing(doc, "semantic italic");
+    assert!(
+        emphasis.contains("<w:rStyle w:val=\"Emphasis\"/>"),
+        "emph run should use the Emphasis character style: {emphasis}"
+    );
+    assert!(
+        !emphasis.contains("<w:i"),
+        "emph run should not duplicate italic as direct formatting: {emphasis}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn manual_bold_and_italic_stay_direct_formatting() {
+    let p = parts(
+        "#text(weight: \"bold\")[manual bold]\n\n\
+         #text(style: \"italic\")[manual italic]",
+    );
+    let doc = &p["word/document.xml"];
+
+    let bold = run_fragment_containing(doc, "manual bold");
+    assert!(!bold.contains("w:rStyle w:val=\"Strong\""), "manual bold is not Strong");
+    assert!(bold.contains("<w:b/>"), "manual bold remains direct: {bold}");
+
+    let italic = run_fragment_containing(doc, "manual italic");
+    assert!(
+        !italic.contains("w:rStyle w:val=\"Emphasis\""),
+        "manual italic is not Emphasis"
+    );
+    assert!(italic.contains("<w:i/>"), "manual italic remains direct: {italic}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn heading_bold_is_not_misclassified_as_strong() {
+    let p = parts("= Styled Heading");
+    let styles = &p["word/styles.xml"];
+    let doc = &p["word/document.xml"];
+
+    let heading_style = style_fragment(styles, "Heading1");
+    assert!(heading_style.contains("<w:b/>"), "Heading1 owns heading bold");
+
+    let run = run_fragment_containing(doc, "Styled Heading");
+    assert!(
+        !run.contains("w:rStyle w:val=\"Strong\""),
+        "heading-inherited bold is not semantic Strong: {run}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn nested_strong_emphasis_layers_character_style_with_direct_formatting() {
+    let p = parts(
+        "Plain body text long enough to keep black as the document default.\n\n\
+         #strong[#emph[#text(fill: rgb(\"AA0000\"))[combined red]]]",
+    );
+    let doc = &p["word/document.xml"];
+
+    let run = run_fragment_containing(doc, "combined red");
+    assert!(
+        run.contains("<w:rStyle w:val=\"Strong\"/>"),
+        "combined strong/emph uses Strong as the character style: {run}"
+    );
+    assert!(!run.contains("<w:b"), "the Strong character style supplies bold: {run}");
+    assert!(run.contains("<w:i/>"), "nested emphasis is layered as direct italic: {run}");
+    assert!(
+        run.contains("<w:color w:val=\"AA0000\"/>"),
+        "other direct deviations must survive beside the character style: {run}"
     );
     assert_all_wellformed(&p);
 }
@@ -723,28 +1440,159 @@ fn paragraphs_carry_unique_w14_para_ids() {
 }
 
 #[test]
-fn document_default_font_size_are_hoisted_into_doc_defaults() {
-    // The document's most common font/size is hoisted into `docDefaults`; body
-    // runs that match inherit it (no per-run `rFonts`/`sz`), so editing the Normal
-    // style in Word restyles the whole document. Only deviations emit `rPr`.
+fn multi_slot_page_numbering_emits_page_of_numpages() {
+    // `numbering: "1 of 1"` is the "page X of Y" idiom: the first counting slot
+    // is the current page (a `PAGE` field), the second the document total (a
+    // `NUMPAGES` field), with the literal " of " between them — not a bare PAGE
+    // that silently drops the total.
+    let p = parts("#set page(numbering: \"1 of 1\")\nBody.");
+    let footer = p
+        .iter()
+        .find(|(name, _)| name.starts_with("word/footer"))
+        .map(|(_, xml)| xml.as_str())
+        .expect("a numbered footer part");
+    assert!(footer.contains("PAGE "), "current page is a PAGE field");
+    assert!(footer.contains("NUMPAGES "), "the total is a NUMPAGES field");
+    assert!(
+        footer.contains("> of <") || footer.contains("of"),
+        "keeps the ' of ' literal"
+    );
+    let page_at = footer.find("PAGE ").unwrap();
+    let num_at = footer.find("NUMPAGES ").unwrap();
+    assert!(page_at < num_at, "PAGE (current) precedes NUMPAGES (total)");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn roman_multi_slot_numbering_switches_both_fields() {
+    // A roman "i of i" must render the total in roman too, so both fields carry
+    // the `\* roman` format switch (NUMPAGES otherwise defaults to arabic).
+    let p = parts("#set page(numbering: \"i of i\")\nBody.");
+    let footer = p
+        .iter()
+        .find(|(name, _)| name.starts_with("word/footer"))
+        .map(|(_, xml)| xml.as_str())
+        .expect("a numbered footer part");
+    assert_eq!(footer.matches("\\* roman").count(), 2, "PAGE and NUMPAGES both roman");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn single_slot_numbering_stays_a_bare_page_field() {
+    // A plain `numbering: "1"` must not gain a spurious NUMPAGES.
+    let p = parts("#set page(numbering: \"1\")\nBody.");
+    let footer = p
+        .iter()
+        .find(|(name, _)| name.starts_with("word/footer"))
+        .map(|(_, xml)| xml.as_str())
+        .expect("a numbered footer part");
+    assert!(footer.contains("PAGE "), "has the PAGE field");
+    assert!(!footer.contains("NUMPAGES"), "no total for a single-slot numbering");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn uppercase_text_uses_caps_without_rewriting_text() {
+    let p = parts("#upper[Hello World]");
+    let doc = &p["word/document.xml"];
+    let run = run_fragment_containing(doc, "Hello World");
+    assert!(run.contains("<w:caps/>"), "upper-case text uses the Word caps toggle");
+    assert!(!doc.contains("HELLO WORLD"), "raw run text keeps the original mixed case");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn document_default_text_props_are_hoisted_into_doc_defaults_and_normal() {
+    // The root StyleChain's font/size/color is hoisted into `docDefaults` and
+    // Normal; body runs that match inherit it, while deviations stay direct.
     let p = parts(
-        "#set text(font: \"Liberation Serif\", size: 12pt)\n\
-         Plain body text here, repeated so it is the most common run.\n\n\
-         More plain body so the mode is clearly the body font.\n\n\
-         #text(font: \"Liberation Mono\")[deviating run]",
+        "#set text(font: \"Liberation Serif\", size: 12pt, fill: rgb(\"123456\"))\n\
+         Plain body text here.\n\n\
+         #text(font: \"Liberation Mono\", fill: rgb(\"AA0000\"))[deviating run]",
     );
     let styles = &p["word/styles.xml"];
     let doc = &p["word/document.xml"];
 
-    // docDefaults carries the document's font + size (the mode).
+    // docDefaults carries the document's root font + size + color.
     let dd = &styles[styles.find("<w:docDefaults>").unwrap()..];
     let dd = &dd[..dd.find("</w:docDefaults>").unwrap()];
     assert!(dd.contains("liberation serif"), "default font hoisted: {dd}");
-    assert!(dd.contains("w:val=\"24\""), "default size (12pt = 24 half-pt) hoisted: {dd}");
+    assert!(
+        dd.contains("w:val=\"24\""),
+        "default size (12pt = 24 half-pt) hoisted: {dd}"
+    );
+    assert!(dd.contains("<w:color w:val=\"123456\"/>"), "default color hoisted: {dd}");
 
-    // The body does NOT repeat the default font; only the deviating run does.
-    assert!(!doc.contains("liberation serif"), "body inherits the default font");
-    assert!(doc.contains("liberation mono"), "a deviating run still emits its font");
+    // Normal carries the same defaults so restyling Normal is effective.
+    let normal = style_fragment(styles, "Normal");
+    assert!(normal.contains("liberation serif"), "Normal owns default font");
+    assert!(normal.contains("w:val=\"24\""), "Normal owns default size");
+    assert!(normal.contains("<w:color w:val=\"123456\"/>"), "Normal owns color");
+
+    // The body run has no duplicate rPr; only the deviating run emits overrides.
+    let plain = run_fragment_containing(doc, "Plain body text here.");
+    assert!(!plain.contains("<w:rPr>"), "plain body inherits defaults: {plain}");
+    let deviating = run_fragment_containing(doc, "deviating run");
+    assert!(deviating.contains("liberation mono"), "deviating font stays direct");
+    assert!(
+        deviating.contains("<w:color w:val=\"AA0000\"/>"),
+        "deviating color stays direct: {deviating}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn heading_style_owns_matching_run_formatting() {
+    let p = parts(
+        "#set text(font: \"Liberation Serif\", size: 11pt)\n\
+         #show heading.where(level: 1): set text(font: \"Liberation Sans\", size: 20pt, fill: rgb(\"224466\"))\n\
+         = Styled Heading\n\n\
+         Body.",
+    );
+    let styles = &p["word/styles.xml"];
+    let doc = &p["word/document.xml"];
+
+    let heading_style = style_fragment(styles, "Heading1");
+    assert!(heading_style.contains("liberation sans"), "Heading1 owns font");
+    assert!(heading_style.contains("<w:sz w:val=\"40\"/>"), "Heading1 owns size");
+    assert!(heading_style.contains("<w:color w:val=\"224466\"/>"), "Heading1 owns color");
+    assert!(heading_style.contains("<w:b/>"), "Heading1 owns bold");
+
+    let para = para_fragment_containing(doc, "Styled Heading");
+    assert!(para.contains("w:pStyle w:val=\"Heading1\""), "heading uses style");
+    assert!(!para.contains("<w:keepNext/>"), "keepNext comes from style");
+    assert!(!para.contains("<w:outlineLvl"), "outline level comes from style");
+
+    let run = run_fragment_containing(doc, "Styled Heading");
+    assert!(!run.contains("<w:rFonts"), "matching font stripped: {run}");
+    assert!(!run.contains("<w:sz"), "matching size stripped: {run}");
+    assert!(!run.contains("<w:color"), "matching color stripped: {run}");
+    assert!(!run.contains("<w:b"), "matching bold stripped: {run}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn deviating_heading_run_keeps_only_the_deviation() {
+    let p = parts(
+        "#show heading.where(level: 1): set text(fill: rgb(\"224466\"))\n\
+         = #text(fill: rgb(\"AA0000\"))[Warning]",
+    );
+    let styles = &p["word/styles.xml"];
+    let doc = &p["word/document.xml"];
+
+    let heading_style = style_fragment(styles, "Heading1");
+    assert!(
+        heading_style.contains("<w:color w:val=\"224466\"/>"),
+        "Heading1 owns the style-chain color"
+    );
+
+    let run = run_fragment_containing(doc, "Warning");
+    assert!(
+        run.contains("<w:color w:val=\"AA0000\"/>"),
+        "manual heading color remains as a direct deviation: {run}"
+    );
+    assert!(!run.contains("<w:sz"), "matching heading size is stripped: {run}");
+    assert!(!run.contains("<w:b"), "matching heading bold is stripped: {run}");
     assert_all_wellformed(&p);
 }
 
@@ -761,12 +1609,76 @@ fn colbreak_becomes_a_column_break() {
 }
 
 #[test]
+fn page_level_columns_stay_a_single_section() {
+    let p = parts("#set page(columns: 2)\nLeft.\n#colbreak()\nNext column.");
+    let doc = &p["word/document.xml"];
+    assert_eq!(
+        doc.matches("<w:sectPr>").count(),
+        1,
+        "page-level columns are already native section columns"
+    );
+    assert!(doc.contains("<w:cols w:num=\"2\""));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn multi_paragraph_block_quote_keeps_its_paragraphs() {
     // A two-paragraph block quote must stay two paragraphs — the internal parbreak
     // is real separation, not something to silently drop (which would merge them).
     let p = parts("#quote(block: true)[First para.\n\nSecond para.]");
     let n = p["word/document.xml"].matches("w:val=\"Quote\"").count();
     assert_eq!(n, 2, "both quoted paragraphs keep the Quote style as separate <w:p>");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn par_line_numbering_becomes_section_line_numbering() {
+    // Typst line numbering is paragraph-style driven; Word enables it at the
+    // section level. Preserve the section-level controls Word can express.
+    let p = parts(
+        "#set par.line(numbering: \"1\", numbering-scope: \"page\", number-clearance: 5pt)\n\
+         Numbered first line. \\\n\
+         Numbered second line.",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<w:lnNumType"), "section enables line numbering");
+    assert!(doc.contains("w:countBy=\"1\""), "line numbers count every line");
+    assert!(doc.contains("w:start=\"1\""), "line numbering starts at one");
+    assert!(
+        doc.contains("w:restart=\"newPage\""),
+        "Typst page-scoped line numbering resets on each Word page"
+    );
+    assert!(doc.contains("w:distance=\"100\""), "5pt number-clearance becomes 100 twips");
+    let plain = parts("No line numbering here.");
+    assert!(
+        !plain["word/document.xml"].contains("<w:lnNumType"),
+        "plain documents do not gain section line numbering"
+    );
+    assert_all_wellformed(&p);
+    assert_all_wellformed(&plain);
+}
+
+#[test]
+fn block_columns_keep_line_numbering_on_split_sections() {
+    let p = parts(
+        "#set par.line(numbering: \"1\", numbering-scope: \"page\", number-clearance: 5pt)\n\
+         Before columns. \\\n\
+         #columns(2)[Column line one. \\\n\
+         Column line two.]\n\
+         After columns.",
+    );
+    let doc = &p["word/document.xml"];
+    let sects = sect_pr_chunks(doc);
+    assert_eq!(sects.len(), 3, "columns split into three sections");
+    assert_eq!(
+        doc.matches("<w:lnNumType").count(),
+        3,
+        "line numbering stays active in every split section"
+    );
+    for sect in sects {
+        assert!(sect.contains("w:restart=\"newPage\""));
+        assert!(sect.contains("w:distance=\"100\""));
+    }
     assert_all_wellformed(&p);
 }
 
@@ -811,6 +1723,65 @@ fn page_background_preserves_its_blank_coordinate_space() {
 }
 
 #[test]
+fn page_foreground_becomes_a_front_of_text_header_image() {
+    // `set page(foreground: ..)` uses the same page-anchored header drawing
+    // idiom as backgrounds, but in front of body text.
+    let p = parts("#set page(foreground: rotate(45deg)[DRAFT])\nBody text.");
+    let header = p
+        .iter()
+        .find(|(k, xml)| {
+            k.starts_with("word/header")
+                && k.ends_with(".xml")
+                && xml.contains("Foreground")
+        })
+        .map(|(_, xml)| xml)
+        .expect("a header part for the foreground");
+    assert!(header.contains("behindDoc=\"0\""), "foreground sits in front of text");
+    assert!(header.contains("relativeFrom=\"page\""), "positioned against the page");
+    assert!(header.contains("<a:blip"), "the foreground is an embedded image");
+    assert!(p["word/document.xml"].contains("Body text"), "body text remains in flow");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn place_only_foreground_still_rasterizes() {
+    // A watermark is commonly built purely from `place(..)`, which positions
+    // content absolutely without contributing to its parent's *measured*
+    // size. Rendering it in a shrink-fit region previously collapsed it to a
+    // degenerate zero-size frame, silently dropping the foreground entirely
+    // (no header part, no drawing, no media at all) — caught only by
+    // opening the export in real Microsoft Word. The overlay must be
+    // rendered into a region expanded to the full page box instead.
+    let raw = package_bytes_with_files(
+        "#set page(foreground: place(center, text(64pt)[DRAFT]))\nBody text.",
+        &[],
+    );
+    // `parts()` drops binary entries (only valid-UTF-8 parts survive), so a
+    // media part's mere presence must be checked against the raw byte map.
+    let p: HashMap<String, String> = raw
+        .iter()
+        .filter_map(|(name, bytes)| {
+            String::from_utf8(bytes.clone()).ok().map(|s| (name.clone(), s))
+        })
+        .collect();
+    let header = p
+        .iter()
+        .find(|(k, xml)| {
+            k.starts_with("word/header")
+                && k.ends_with(".xml")
+                && xml.contains("Foreground")
+        })
+        .map(|(_, xml)| xml)
+        .expect("a header part for the place()-only foreground");
+    assert!(header.contains("<a:blip"), "the foreground is an embedded image");
+    assert!(
+        raw.keys().any(|k| k.starts_with("word/media/")),
+        "the rasterized watermark is embedded as a media part"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn solid_page_fill_becomes_a_native_page_color() {
     // `set page(fill: solid-color)` (Word's "Page Color") maps to the
     // document-level `w:background` element — no image, no header part.
@@ -821,14 +1792,43 @@ fn solid_page_fill_becomes_a_native_page_color() {
     );
     // A gradient page fill has no native `w:background` form and is left unset
     // (distinct from `background:`, which still rasterizes to a behindDoc image).
-    let g = parts(
-        "#set page(fill: gradient.linear(red, blue))\nBody text.",
-    );
+    let g = parts("#set page(fill: gradient.linear(red, blue))\nBody text.");
     assert!(
         !g["word/document.xml"].contains("<w:background"),
         "a gradient page fill is not forced into a flat w:background"
     );
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn inside_outside_page_margins_emit_gutter_and_mirror_margins() {
+    let p = parts("#set page(margin: (inside: 3cm, outside: 2cm))\nBody text.");
+    let doc = &p["word/document.xml"];
+    let settings = &p["word/settings.xml"];
+    assert!(
+        settings.contains("<w:mirrorMargins/>"),
+        "inside/outside margins enable Word mirrored margins"
+    );
+    assert!(
+        doc.contains("w:gutter=\"567\""),
+        "inside margin extra becomes a nonzero Word gutter"
+    );
+    assert!(
+        doc.contains("w:left=\"1134\"") && doc.contains("w:right=\"1134\""),
+        "outside margin is the base margin on both sides"
+    );
+
+    let plain = parts("#set page(margin: (left: 3cm, right: 2cm))\nBody text.");
+    assert!(
+        !plain["word/settings.xml"].contains("mirrorMargins"),
+        "plain left/right margins do not enable mirrored margins"
+    );
+    assert!(
+        plain["word/document.xml"].contains("w:gutter=\"0\""),
+        "plain left/right margins keep a zero gutter"
+    );
+    assert_all_wellformed(&p);
+    assert_all_wellformed(&plain);
 }
 
 #[test]
@@ -864,7 +1864,8 @@ fn framed_box_in_a_figure_is_rasterized_not_a_textbox() {
     // A framed box (`#figure(rect[..])`) is centered by the figure, and a
     // *centered* `wps:txbx` text box does not flow its text in LibreOffice. Such a
     // body must rasterize to a (centered) image so it renders in every consumer.
-    let p = parts("#figure(rect(width: 3cm, height: 1cm, fill: aqua)[box], caption: [c])");
+    let p =
+        parts("#figure(rect(width: 3cm, height: 1cm, fill: aqua)[box], caption: [c])");
     let doc = &p["word/document.xml"];
     assert!(
         !doc.contains("<w:txbxContent"),
@@ -906,7 +1907,10 @@ fn labeled_targets_get_bookmarks_so_refs_resolve() {
     let bookmarks = collect("w:name=\"", 8);
     assert!(anchors.len() >= 2, "an equation ref and a label link, got {anchors:?}");
     let dangling: Vec<_> = anchors.difference(&bookmarks).collect();
-    assert!(dangling.is_empty(), "every link anchor resolves to a bookmark: {dangling:?}");
+    assert!(
+        dangling.is_empty(),
+        "every link anchor resolves to a bookmark: {dangling:?}"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -946,7 +1950,10 @@ fn inline_equation_stays_in_its_paragraph() {
         .expect("a paragraph with the text");
     let para = &para[..para.find("</w:p>").unwrap()];
     assert!(para.contains("m:oMath"), "the inline equation shares the text's paragraph");
-    assert!(para.contains("text after it"), "text after the equation stays in the paragraph");
+    assert!(
+        para.contains("text after it"),
+        "text after the equation stays in the paragraph"
+    );
     // The spaces flanking the equation must survive: Typst trims them when it
     // splits the paragraph at a raw inline equation, so the converter relies on
     // the PAR grouping rule keeping the equation inline. Check for a lone-space
@@ -1004,9 +2011,8 @@ fn header_link_relationship_lives_in_the_header_part_rels() {
     // A link/image in a header references a relationship by r:id; that id must
     // resolve against the header part's OWN .rels, not document.xml.rels, or Word
     // refuses to open the file.
-    let p = parts(
-        "#set page(header: [#link(\"https://example.com\")[site] head])\nBody.",
-    );
+    let p =
+        parts("#set page(header: [#link(\"https://example.com\")[site] head])\nBody.");
     let header = p
         .keys()
         .find(|k| k.starts_with("word/header") && k.ends_with(".xml"))
@@ -1160,7 +2166,10 @@ fn inline_styled_box_becomes_boxed_inline_text() {
     assert!(doc.contains("<w:hyperlink"), "a link inside the box stays clickable");
     let hl = &doc[doc.find("<w:hyperlink").unwrap()..];
     let hl = &hl[..hl.find("</w:hyperlink>").unwrap()];
-    assert!(hl.contains("<w:bdr") && hl.contains("<w:shd "), "with the box's shading + border");
+    assert!(
+        hl.contains("<w:bdr") && hl.contains("<w:shd "),
+        "with the box's shading + border"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -1190,7 +2199,10 @@ fn block_level_callout_flows_as_a_shaded_paragraph() {
     assert!(doc.contains("<w:pBdr>"), "it carries paragraph borders");
     assert!(doc.contains("<w:shd "), "and paragraph shading");
     assert!(doc.contains("keepNext"), "multi-paragraph box is held together");
-    assert!(doc.contains("First callout") && doc.contains("Second callout"), "text flows");
+    assert!(
+        doc.contains("First callout") && doc.contains("Second callout"),
+        "text flows"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -1205,10 +2217,14 @@ fn footnote_in_a_box_never_lands_in_a_text_box() {
         !inline["word/document.xml"].contains("wps:txbx"),
         "an inline box with a footnote must not become a text box"
     );
-    assert!(inline.contains_key("word/footnotes.xml"), "and the footnote body is emitted");
+    assert!(
+        inline.contains_key("word/footnotes.xml"),
+        "and the footnote body is emitted"
+    );
     assert_all_wellformed(&inline);
 
-    let block = parts("#rect(fill: green, inset: 6pt)[Callout with a #footnote[fn] here.]");
+    let block =
+        parts("#rect(fill: green, inset: 6pt)[Callout with a #footnote[fn] here.]");
     assert!(
         !block["word/document.xml"].contains("wps:txbx"),
         "a block callout with a footnote flows as a shaded paragraph, not a text box"
@@ -1261,6 +2277,63 @@ fn leading_page_setup_does_not_emit_a_blank_first_page() {
         q["word/document.xml"].matches("w:type=\"page\"").count(),
         1,
         "a real mid-document pagebreak is preserved"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn pagebreak_to_parity_emits_odd_even_section_breaks() {
+    // Word's `w:type` describes how *that* section itself starts (relative
+    // to the one before it) — so the oddPage/evenPage constraint requested
+    // by `#pagebreak(to: ..)` must land on the section that begins *after*
+    // the break (here, the final/body-level sectPr), not the one ending at
+    // the break (the first, paragraph-embedded sectPr, which has no
+    // predecessor and so carries no type). Landing it on the wrong section
+    // makes the constraint a no-op in real Word: verified interactively that
+    // only this placement actually makes Word insert a blank page to reach
+    // the next odd page.
+    let odd = parts("Before.\n#pagebreak(to: \"odd\")\nAfter.");
+    let odd_doc = &odd["word/document.xml"];
+    let odd_sects = sect_pr_chunks(odd_doc);
+    assert_eq!(
+        odd_sects.len(),
+        2,
+        "odd pagebreak should split the document into two sections"
+    );
+    assert!(
+        !odd_sects[0].contains("<w:type"),
+        "the first section has no predecessor to transition from"
+    );
+    assert!(
+        odd_sects[1].contains("<w:type w:val=\"oddPage\"/>"),
+        "the section starting after the break carries the oddPage constraint"
+    );
+    assert!(
+        !odd_doc.contains("w:type=\"page\""),
+        "parity pagebreak is not emitted as a plain page break"
+    );
+
+    let even = parts("Before.\n#pagebreak(to: \"even\")\nAfter.");
+    assert!(
+        even["word/document.xml"].contains("<w:type w:val=\"evenPage\"/>"),
+        "even pagebreak uses an evenPage section break"
+    );
+    assert_all_wellformed(&odd);
+    assert_all_wellformed(&even);
+}
+
+#[test]
+fn plain_pagebreak_stays_a_page_break() {
+    let p = parts("Before.\n#pagebreak()\nAfter.");
+    let doc = &p["word/document.xml"];
+    assert_eq!(
+        doc.matches("w:type=\"page\"").count(),
+        1,
+        "plain pagebreak remains a run-level page break"
+    );
+    assert!(
+        !doc.contains("oddPage") && !doc.contains("evenPage"),
+        "plain pagebreak does not become a parity section"
     );
     assert_all_wellformed(&p);
 }
@@ -1369,9 +2442,8 @@ fn figure_emits_seq_field() {
 fn image_in_header_declares_drawing_namespaces() {
     // An image in a header part used to leave `wp:`/`a:`/`pic:` undeclared on
     // the header root, making Word/LibreOffice refuse to open the document.
-    let p = parts(
-        "#set page(header: box(fill: blue, width: 30pt, height: 8pt))\n\nBody.",
-    );
+    let p =
+        parts("#set page(header: box(fill: blue, width: 30pt, height: 8pt))\n\nBody.");
     let header = p
         .iter()
         .find(|(n, _)| n.starts_with("word/header"))
@@ -1387,9 +2459,7 @@ fn page_geometry_change_emits_a_section_break() {
     // A mid-document orientation change must produce a second section: the
     // landscape `sectPr` lives in a paragraph's `pPr`, the final portrait one
     // at body level.
-    let p = parts(
-        "Portrait body.\n\n#set page(flipped: true)\n\nLandscape body.",
-    );
+    let p = parts("Portrait body.\n\n#set page(flipped: true)\n\nLandscape body.");
     let doc = &p["word/document.xml"];
     assert_eq!(
         doc.matches("<w:sectPr>").count(),
@@ -1446,6 +2516,453 @@ fn page_reference_resolves_via_the_synthetic_page_model() {
 }
 
 #[test]
+fn docx_locations_match_paged_locations_for_source_elements() {
+    // The real paged introspector can only back DOCX realization if source-
+    // derived locations line up across the Paged and Docx targets. Check both
+    // layers directly: the paged introspector and the DOCX synthetic fallback
+    // should assign the same `Location` to ordinary source labels.
+    let (paged, docx) = compile_paged_and_docx(
+        "= Intro <intro>\n\nBody.\n#pagebreak()\n= Second <second>\nMore.",
+    );
+
+    for name in ["intro", "second"] {
+        let label = Label::new(PicoStr::intern(name)).unwrap();
+        let paged_loc = paged
+            .introspector()
+            .query_label(label)
+            .expect("label exists in paged document")
+            .location()
+            .expect("paged label has a location");
+        let docx_loc = docx
+            .introspector()
+            .elements()
+            .query_label(label)
+            .expect("label exists in docx realization")
+            .location()
+            .expect("docx label has a location");
+        assert_eq!(docx_loc, paged_loc, "location mismatch for <{name}>");
+    }
+}
+
+#[test]
+fn auto_page_height_uses_the_true_paged_size_not_a4() {
+    // `set page(width: .., height: auto)` is an extremely common ticket/
+    // certificate/single-page-diagram idiom (a majority of a large real-world
+    // corpus sample uses it). DOCX pages are fixed-size, so an `auto` axis
+    // used to fall back to a hardcoded A4 dimension — silently clipping or
+    // misshaping content laid out for a very different true height. It must
+    // now resolve to the size Typst's own paged layout actually computed.
+    let src = "#set page(width: 5cm, height: auto, margin: 0pt)\n\
+               #lorem(2000)";
+    let (paged, docx_doc) = compile_paged_and_docx(src);
+    let real_size = paged.pages().first().expect("one real page").frame.size();
+    let real_h_twips = (real_size.y.to_pt() * 20.0).round() as i32;
+    // A 5cm-wide page filled with 400 lorem-ipsum words needs FAR more than a
+    // standard A4 height (16838 twips) — confirms this doc actually exercises
+    // the auto-height path, not a coincidentally-A4-sized one.
+    assert!(real_h_twips > 16838 * 2, "test doc must need much more than A4 height");
+
+    let bytes =
+        docx(&docx_doc, &DocxOptions { pretty: false }).expect("docx export failed");
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    zip.by_name("word/document.xml").unwrap().read_to_string(&mut xml).unwrap();
+
+    let caps = regex_pgsz(&xml).expect("a w:pgSz element exists");
+    assert_eq!(
+        caps, real_h_twips,
+        "DOCX page height must match the true paged layout's height, not a fallback"
+    );
+}
+
+/// Extracts the `w:h` (height, twips) attribute from the first `<w:pgSz>` in
+/// `xml`, without pulling in a regex dependency for one test.
+fn regex_pgsz(xml: &str) -> Option<i32> {
+    let start = xml.find("<w:pgSz")?;
+    let end = xml[start..].find('>')? + start;
+    let tag = &xml[start..end];
+    let key = "w:h=\"";
+    let h_start = tag.find(key)? + key.len();
+    let h_end = tag[h_start..].find('"')? + h_start;
+    tag[h_start..h_end].parse().ok()
+}
+
+#[test]
+fn body_here_page_uses_real_paged_page() {
+    let p = parts(
+        "#set page(numbering: \"1\")\n\
+         First page.\n#pagebreak()\n\
+         #context [BODY-#here().page()-END]",
+    );
+    let text = visible_text(&p["word/document.xml"]);
+    assert!(text.contains("BODY-2-END"), "body `here().page()` uses page 2");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn header_here_page_uses_real_paged_page() {
+    // Paged layout discovers tags in page furniture. Because repeated header
+    // content deduplicates by location, the shared header part should bake the
+    // first real paged occurrence, not the synthetic fallback's final-page
+    // guess.
+    let p = parts(
+        "#set page(header: context [HEAD-#here().page()-END])\n\
+         First page.\n#pagebreak()\nSecond page.",
+    );
+    let header = p
+        .iter()
+        .find(|(name, _)| name.starts_with("word/header"))
+        .map(|(_, xml)| xml)
+        .expect("a header part should exist");
+    let text = visible_text(header);
+    assert!(text.contains("HEAD-1-END"), "header uses the first real page");
+    assert!(
+        !text.contains("HEAD-2-END"),
+        "header must not fall back to the synthetic final page"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn contextual_odd_even_furniture_emits_even_references_and_setting() {
+    let p = parts(
+        "#set page(\n\
+         \theader: context if calc.odd(here().page()) [Odd header] else [Even header],\n\
+         \tfooter: context if calc.odd(here().page()) [Odd footer] else [Even footer],\n\
+         )\n\
+         First page.\n#pagebreak()\nSecond page.\n#pagebreak()\nThird page.",
+    );
+    let doc = &p["word/document.xml"];
+    let settings = &p["word/settings.xml"];
+
+    assert!(
+        settings.contains("<w:evenAndOddHeaders/>"),
+        "even/odd references require the document-level Word setting"
+    );
+    assert!(doc.contains("<w:headerReference w:type=\"default\""));
+    assert!(doc.contains("<w:headerReference w:type=\"even\""));
+    assert!(doc.contains("<w:footerReference w:type=\"default\""));
+    assert!(doc.contains("<w:footerReference w:type=\"even\""));
+    assert!(!doc.contains("<w:titlePg"), "parity-only furniture is not first-page");
+
+    let headers: Vec<_> = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("word/header") && name.ends_with(".xml"))
+        .map(|(_, xml)| visible_text(xml))
+        .collect();
+    assert!(headers.iter().any(|text| text.contains("Odd header")));
+    assert!(headers.iter().any(|text| text.contains("Even header")));
+
+    let footers: Vec<_> = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("word/footer") && name.ends_with(".xml"))
+        .map(|(_, xml)| visible_text(xml))
+        .collect();
+    assert!(footers.iter().any(|text| text.contains("Odd footer")));
+    assert!(footers.iter().any(|text| text.contains("Even footer")));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn block_columns_keep_contextual_odd_even_furniture() {
+    let p = parts(
+        "#set page(\n\
+         \theader: context if calc.odd(here().page()) [Odd header] else [Even header],\n\
+         \tfooter: context if calc.odd(here().page()) [Odd footer] else [Even footer],\n\
+         )\n\
+         Before.\n\
+         #columns(2)[Column section body.]\n\
+         #pagebreak()\nSecond page.\n#pagebreak()\nThird page.",
+    );
+    let doc = &p["word/document.xml"];
+    let settings = &p["word/settings.xml"];
+
+    assert_eq!(sect_pr_chunks(doc).len(), 3, "columns still split the body");
+    assert!(settings.contains("<w:evenAndOddHeaders/>"));
+    assert!(doc.contains("<w:headerReference w:type=\"default\""));
+    assert!(doc.contains("<w:headerReference w:type=\"even\""));
+    assert!(doc.contains("<w:footerReference w:type=\"default\""));
+    assert!(doc.contains("<w:footerReference w:type=\"even\""));
+
+    let headers: Vec<_> = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("word/header") && name.ends_with(".xml"))
+        .map(|(_, xml)| visible_text(xml))
+        .collect();
+    assert!(headers.iter().any(|text| text.contains("Odd header")));
+    assert!(headers.iter().any(|text| text.contains("Even header")));
+
+    let footers: Vec<_> = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("word/footer") && name.ends_with(".xml"))
+        .map(|(_, xml)| visible_text(xml))
+        .collect();
+    assert!(footers.iter().any(|text| text.contains("Odd footer")));
+    assert!(footers.iter().any(|text| text.contains("Even footer")));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn contextual_first_page_header_emits_titlepg_and_first_reference() {
+    let p = parts(
+        "#set page(header: context if here().page() == 1 [First header] else [Rest header])\n\
+         First page.\n#pagebreak()\nSecond page.\n#pagebreak()\nThird page.",
+    );
+    let doc = &p["word/document.xml"];
+    let settings = &p["word/settings.xml"];
+
+    assert!(doc.contains("<w:titlePg/>"), "section enables first-page header");
+    assert!(doc.contains("<w:headerReference w:type=\"first\""));
+    assert!(doc.contains("<w:headerReference w:type=\"default\""));
+    assert!(!doc.contains("<w:headerReference w:type=\"even\""));
+    assert!(
+        !settings.contains("<w:evenAndOddHeaders/>"),
+        "first-page-only furniture does not enable even/odd mode"
+    );
+
+    let headers: Vec<_> = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("word/header") && name.ends_with(".xml"))
+        .map(|(_, xml)| visible_text(xml))
+        .collect();
+    assert!(headers.iter().any(|text| text.contains("First header")));
+    assert!(headers.iter().any(|text| text.contains("Rest header")));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn per_page_literal_header_does_not_fake_an_odd_even_split() {
+    // A literal page number changes on page 3 vs page 5. Word's
+    // first/even/default references cannot express that, so the exporter must
+    // keep the existing single sampled header instead of pretending page 3 is
+    // the header for every later odd page.
+    let p = parts(
+        "#set page(header: context [HEAD-#here().page()-END])\n\
+         One.\n#pagebreak()\nTwo.\n#pagebreak()\nThree.\n#pagebreak()\nFour.\n#pagebreak()\nFive.",
+    );
+    let doc = &p["word/document.xml"];
+    let settings = &p["word/settings.xml"];
+
+    assert!(!settings.contains("<w:evenAndOddHeaders/>"));
+    assert!(!doc.contains("<w:titlePg"));
+    assert!(!doc.contains("w:type=\"even\""));
+    assert_eq!(
+        p.keys()
+            .filter(|name| name.starts_with("word/header") && name.ends_with(".xml"))
+            .count(),
+        1,
+        "non-parity-stable furniture stays a single sampled header"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn citations_and_bibliography_converge_against_paged_introspection() {
+    let p = parts_with_files(
+        "First @beta and then @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")",
+        &[("refs.bib", REFS_BIB)],
+    );
+    let text = visible_text(&p["word/document.xml"]);
+    assert!(text.contains("[1]"), "first citation number is present: {text}");
+    assert!(text.contains("[2]"), "second citation number is present: {text}");
+    assert!(text.contains("Beta Source"), "first cited bibliography entry is present");
+    assert!(text.contains("Alpha Source"), "second cited bibliography entry is present");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn bibliography_gets_a_biblatex_sidecar_part() {
+    // The visible body keeps the realized, formatted citation text (Word's own
+    // CITATION/BIBLIOGRAPHY field model is proprietary and lossy relative to
+    // Typst/Hayagriva); the sidecar is metadata only, for external tools that
+    // want the structured bibliography back.
+    let p = parts_with_files(
+        "First @beta and then @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")",
+        &[("refs.bib", REFS_BIB)],
+    );
+    let sidecar = p
+        .get("word/typstBibliography.xml")
+        .expect("bibliography sidecar part should be present");
+    assert!(sidecar.contains("https://typst.app/schema/2026/docx-bibliography"));
+    assert!(sidecar.contains("@article{alpha") || sidecar.contains("@article{beta"));
+    assert!(sidecar.contains("Alpha Source"));
+    assert!(sidecar.contains("Beta Source"));
+
+    let rels = &p["word/_rels/document.xml.rels"];
+    assert!(
+        rels.contains("https://typst.app/schema/2026/relationships/bibliography"),
+        "document.xml.rels should reference the sidecar under a private relationship type"
+    );
+    assert!(rels.contains("Target=\"typstBibliography.xml\""));
+
+    let content_types = &p["[Content_Types].xml"];
+    assert!(
+        content_types.contains("/word/typstBibliography.xml"),
+        "the sidecar's content type must be declared or strict consumers repair the file"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn no_bibliography_means_no_sidecar_part() {
+    let p = parts("Just some plain text, no citations at all.");
+    assert!(
+        !p.contains_key("word/typstBibliography.xml"),
+        "a document with no bibliography should not get a sidecar part"
+    );
+    assert!(!p["word/_rels/document.xml.rels"].contains("docx-bibliography"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn bibliography_gets_a_native_word_sources_part() {
+    // Alongside the lossless BibLaTeX sidecar, the document should also carry
+    // Word's own `b:Sources` schema so References -> Manage Sources shows
+    // real, correctly-typed sources — without live CITATION/BIBLIOGRAPHY
+    // fields wrapping the visible (already-realized) body text.
+    let p = parts_with_files(
+        "First @beta and then @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")",
+        &[("refs.bib", REFS_BIB)],
+    );
+
+    let item1 = p
+        .get("customXml/item1.xml")
+        .expect("native b:Sources part should be present");
+    assert!(item1.contains("<b:Sources"));
+    assert!(item1.contains(
+        "xmlns:b=\"http://schemas.openxmlformats.org/officeDocument/2006/bibliography\""
+    ));
+    assert_eq!(item1.matches("<b:Source>").count(), 2, "one b:Source per cited entry");
+    assert!(item1.contains("<b:Tag>alpha</b:Tag>"));
+    assert!(item1.contains("<b:Tag>beta</b:Tag>"));
+    assert!(item1.contains("<b:SourceType>ArticleInAPeriodical</b:SourceType>"));
+    assert!(item1.contains("<b:Title>Alpha Source</b:Title>"));
+    assert!(item1.contains("<b:Title>Beta Source</b:Title>"));
+    assert!(item1.contains("<b:Year>2020</b:Year>"));
+    assert!(item1.contains("<b:Year>2021</b:Year>"));
+    assert!(item1.contains("<b:JournalName>Journal of Sources</b:JournalName>"));
+    assert!(item1.contains("<b:Last>Able</b:Last>"));
+    assert!(item1.contains("<b:First>Alice</b:First>"));
+    assert!(item1.contains("<b:Last>Baker</b:Last>"));
+    assert!(item1.contains("<b:First>Bob</b:First>"));
+    // Two distinct, deterministic GUIDs (repeat exports must be byte-identical).
+    let guids: Vec<&str> = item1.match_indices("<b:Guid>").map(|(i, _)| &item1[i..i + 46]).collect();
+    assert_eq!(guids.len(), 2);
+    assert_ne!(guids[0], guids[1], "each source gets its own GUID");
+
+    let item_props = p
+        .get("customXml/itemProps1.xml")
+        .expect("schema-association part should accompany item1.xml");
+    assert!(item_props.contains("<ds:datastoreItem"));
+    assert!(item_props.contains(
+        "xmlns:ds=\"http://schemas.openxmlformats.org/officeDocument/2006/customXml\""
+    ));
+    assert!(item_props.contains(
+        "ds:uri=\"http://schemas.openxmlformats.org/officeDocument/2006/bibliography\""
+    ));
+
+    let item_rels = p
+        .get("customXml/_rels/item1.xml.rels")
+        .expect("item1.xml needs its own rels part pointing at itemProps1.xml");
+    assert!(item_rels.contains("customXmlProps"));
+    assert!(item_rels.contains("Target=\"itemProps1.xml\""));
+
+    let doc_rels = &p["word/_rels/document.xml.rels"];
+    assert!(
+        doc_rels.contains(
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml"
+        ),
+        "document.xml.rels should reference item1.xml under the real customXml relationship type"
+    );
+    assert!(doc_rels.contains("Target=\"../customXml/item1.xml\""));
+
+    let content_types = &p["[Content_Types].xml"];
+    assert!(content_types.contains("/customXml/itemProps1.xml"));
+    assert!(content_types.contains("customXmlProperties+xml"));
+
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn no_bibliography_means_no_native_word_sources_part() {
+    let p = parts("Just some plain text, no citations at all.");
+    assert!(!p.contains_key("customXml/item1.xml"));
+    assert!(!p.contains_key("customXml/itemProps1.xml"));
+    assert!(!p.contains_key("customXml/_rels/item1.xml.rels"));
+    assert!(!p["word/_rels/document.xml.rels"].contains("customXml"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn native_word_sources_excludes_uncited_library_entries() {
+    // A `.bib` source file commonly holds far more entries than any one
+    // document cites (a shared master reference list). References -> Manage
+    // Sources should reflect what THIS document actually cites, not the
+    // whole backing file.
+    let p = parts_with_files(
+        "Only @alpha is cited here.\n\n#bibliography(\"refs.bib\", style: \"ieee\")",
+        &[("refs.bib", REFS_BIB_WITH_UNCITED)],
+    );
+    let item1 = &p["customXml/item1.xml"];
+    assert_eq!(item1.matches("<b:Source>").count(), 1, "only the cited entry is included");
+    assert!(item1.contains("<b:Tag>alpha</b:Tag>"));
+    assert!(!item1.contains("<b:Tag>beta</b:Tag>"), "beta was never cited");
+    assert!(!item1.contains("<b:Tag>gamma</b:Tag>"), "gamma was never cited");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn native_word_sources_full_flag_includes_uncited_entries() {
+    // `#bibliography(full: true)` prints every reference from the library,
+    // cited or not — the native sources part should mirror that.
+    let p = parts_with_files(
+        "Only @alpha is cited here.\n\n#bibliography(\"refs.bib\", style: \"ieee\", full: true)",
+        &[("refs.bib", REFS_BIB_WITH_UNCITED)],
+    );
+    let item1 = &p["customXml/item1.xml"];
+    assert_eq!(item1.matches("<b:Source>").count(), 3, "full: true includes every entry");
+    assert!(item1.contains("<b:Tag>alpha</b:Tag>"));
+    assert!(item1.contains("<b:Tag>beta</b:Tag>"));
+    assert!(item1.contains("<b:Tag>gamma</b:Tag>"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn native_word_sources_dedupes_across_bibliography_elements() {
+    // Two separate #bibliography() calls loading the same file (e.g. a
+    // shared references list split by chapter) can both decode the same
+    // cited key. The native sources part must not emit `alpha` twice with
+    // the same Tag/Guid.
+    let p = parts_with_files(
+        "First chapter cites @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")\n\n\
+         Second chapter also cites @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")",
+        &[("refs.bib", REFS_BIB_WITH_UNCITED)],
+    );
+    let item1 = &p["customXml/item1.xml"];
+    assert_eq!(
+        item1.matches("<b:Tag>alpha</b:Tag>").count(),
+        1,
+        "the shared cited entry appears exactly once, not once per bibliography element"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn page_refs_follow_real_numbering_across_sections() {
+    let p = parts(
+        "#set page(numbering: \"i\")\n\
+         Front <front>\n#pagebreak()\n\
+         #set page(numbering: \"1\")\n#counter(page).update(1)\n\
+         Main <main>\n\n\
+         #context [FRONT-#ref(<front>, form: \"page\") MAIN-#ref(<main>, form: \"page\")]",
+    );
+    let text = visible_text(&p["word/document.xml"]).replace('\u{a0}', " ");
+    assert!(text.contains("FRONT-page i"), "front matter keeps roman numbering: {text}");
+    assert!(text.contains("MAIN-page 1"), "main matter resets to arabic 1: {text}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn leading_page_setup_does_not_advance_the_synthetic_page() {
     // A top-of-document `set page(..)` produces page-run machinery before the
     // first real body content. That setup must not count as a physical page,
@@ -1454,9 +2971,15 @@ fn leading_page_setup_does_not_advance_the_synthetic_page() {
         "#set page(numbering: \"1\")\n= Target <t>\nUNIQUE-#ref(<t>, form: \"page\")-END",
     );
     let doc = &p["word/document.xml"];
-    let text = visible_text(doc);
-    assert!(text.contains("UNIQUE-1-END"), "the first content page stays page 1");
-    assert!(!text.contains("UNIQUE-2-END"), "leading page setup must not advance to page 2");
+    let text = visible_text(doc).replace('\u{a0}', " ");
+    assert!(
+        text.contains("UNIQUE-page 1-END"),
+        "the first content page stays page 1: {text}"
+    );
+    assert!(
+        !text.contains("UNIQUE-page 2-END"),
+        "leading page setup must not advance to page 2"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -1540,7 +3063,7 @@ fn failing_figure_numbering_closure_does_not_abort_the_export() {
     // only exists in a paged model) must not abort the export: the caption's
     // cached number is best-effort — the SEQ field is the live truth in Word.
     let p = parts(
-        "#set figure(numbering: _ => (1,).at(9))\n\
+        "#set figure(numbering: _ => if target() == \"docx\" { (1,).at(9) } else { \"1\" })\n\
          #figure(rect(), caption: [Survives])",
     );
     let doc = &p["word/document.xml"];
