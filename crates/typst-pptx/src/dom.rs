@@ -17,6 +17,18 @@ pub enum SlideShape {
     Pic(Pic),
     Geom(GeomShape),
     Group(GroupShape),
+    LinkOverlay(LinkOverlay),
+}
+
+/// An invisible native shape carrying a hyperlink over authored linked text.
+/// Keeping click behavior outside the text run prevents Office consumers from
+/// replacing Typst's explicit run color with the presentation hyperlink theme.
+pub struct LinkOverlay {
+    pub x_emu: i64,
+    pub y_emu: i64,
+    pub w_emu: i64,
+    pub h_emu: i64,
+    pub link: RunLink,
 }
 
 /// A positioned text box.
@@ -158,7 +170,6 @@ pub struct TextRun {
     /// Native DrawingML text highlight color.
     pub highlight: Option<[u8; 4]>,
     pub spc_100pt: Option<i32>,
-    pub link: Option<RunLink>,
     pub field: Option<TextField>,
 }
 

@@ -6,8 +6,8 @@ use typst_library::text::{FontStyle, TextItem};
 use typst_library::visualize::Paint;
 
 use crate::dom::{
-    BulletKind, InlineMath, ParaBullet, Placeholder, RunLink, SlideShape, TextBox,
-    TextChild, TextField, TextPara, TextRun, TextWrap,
+    BulletKind, InlineMath, ParaBullet, Placeholder, SlideShape, TextBox, TextChild,
+    TextField, TextPara, TextRun, TextWrap,
 };
 
 /// Cloneable link target used before lowering into the frozen DOM.
@@ -26,7 +26,6 @@ pub(crate) struct TextSource<'a> {
     pub rot_60k: i32,
     pub scale: f64,
     pub highlight: Option<[u8; 4]>,
-    pub link: Option<LinkTarget>,
     pub slide_number: bool,
 }
 
@@ -635,7 +634,6 @@ fn push_separator(children: &mut Vec<TextChild>, line: &LineSegment, separator: 
     };
     let mut run = template.clone();
     run.text = EcoString::from(separator);
-    run.link = None;
     push_or_merge_run(children, run);
 }
 
@@ -1055,10 +1053,6 @@ fn text_run_props(source: &TextSource<'_>, spc_100pt: Option<i32>) -> TextRun {
         color: text_color(&source.item.fill),
         highlight: source.highlight,
         spc_100pt,
-        link: source.link.as_ref().map(|link| match link {
-            LinkTarget::Url(url) => RunLink::Url(url.clone()),
-            LinkTarget::Slide(slide) => RunLink::Slide(*slide),
-        }),
         field: source.slide_number.then_some(TextField::SlideNumber),
     }
 }
@@ -1073,7 +1067,6 @@ fn math_fallback_run(math: &InlineMathSource, spc_100pt: Option<i32>) -> TextRun
         color: [0, 0, 0, 255],
         highlight: None,
         spc_100pt,
-        link: None,
         field: None,
     }
 }
@@ -1130,7 +1123,6 @@ fn synthesize_gap(
             color: props.color,
             highlight: None,
             spc_100pt: props.spc_100pt,
-            link: None,
             field: None,
         },
     );
@@ -1145,16 +1137,6 @@ fn compatible_run(a: &TextRun, b: &TextRun) -> bool {
         && a.highlight == b.highlight
         && a.spc_100pt == b.spc_100pt
         && a.field == b.field
-        && same_link(&a.link, &b.link)
-}
-
-fn same_link(a: &Option<RunLink>, b: &Option<RunLink>) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(RunLink::Url(a)), Some(RunLink::Url(b))) => a == b,
-        (Some(RunLink::Slide(a)), Some(RunLink::Slide(b))) => a == b,
-        _ => false,
-    }
 }
 
 fn segment_tracking(segment: &[&FlowItem<'_>]) -> Option<i32> {

@@ -3,9 +3,9 @@ use typst_ooxml_core::{dml, ns};
 
 use crate::dom::{
     BulletKind, CellHAlign, CellVAlign, FillSpec, GeomKind, GeomShape, GroupShape,
-    InlineMath, MathBox, MediaId, PathGeom, Pic, PicGeom, Placeholder, RunLink, SlideIr,
-    SlideShape, StrokeSpec, TableBox, TableCell, TextBox, TextChild, TextColumns,
-    TextField, TextPara, TextRun, TextWrap,
+    InlineMath, LinkOverlay, MathBox, MediaId, PathGeom, Pic, PicGeom, Placeholder,
+    RunLink, SlideIr, SlideShape, StrokeSpec, TableBox, TableCell, TextBox, TextChild,
+    TextColumns, TextField, TextPara, TextRun, TextWrap,
 };
 use crate::xml::{self, XmlWriter};
 
@@ -80,6 +80,7 @@ fn write_shape(
         SlideShape::Pic(pic) => write_pic(w, pic, ids.next(), rels),
         SlideShape::Geom(geom) => write_geom_shape(w, geom, ids.next(), rels),
         SlideShape::Group(group) => write_group_shape(w, group, ids, rels),
+        SlideShape::LinkOverlay(link) => write_link_overlay(w, link, ids.next(), rels),
     }
 }
 
@@ -286,7 +287,6 @@ fn math_fallback_run(math: &MathBox) -> TextRun {
         color: [0, 0, 0, 255],
         highlight: None,
         spc_100pt: None,
-        link: None,
         field: None,
     }
 }
@@ -432,7 +432,7 @@ fn shape_contains_math(shape: &SlideShape) -> bool {
             .flat_map(|row| &row.cells)
             .any(|cell| paras_contain_math(&cell.paras)),
         SlideShape::Group(group) => group.children.iter().any(shape_contains_math),
-        SlideShape::Pic(_) | SlideShape::Geom(_) => false,
+        SlideShape::Pic(_) | SlideShape::Geom(_) | SlideShape::LinkOverlay(_) => false,
     }
 }
 
@@ -456,9 +456,9 @@ fn write_bullet(w: &mut XmlWriter, bullet: &crate::dom::ParaBullet) {
     }
 }
 
-fn write_text_run(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink) {
+fn write_text_run(w: &mut XmlWriter, run: &TextRun, _rels: &mut impl SlideRelSink) {
     if matches!(run.field, Some(TextField::SlideNumber)) {
-        write_slide_number_field(w, run, rels);
+        write_slide_number_field(w, run);
         return;
     }
 
@@ -472,17 +472,13 @@ fn write_text_run(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink
             continue;
         }
         w.open("a:r").start_children();
-        write_r_pr(w, run, rels);
+        write_r_pr(w, run);
         w.elem_text("a:t", part);
         w.close();
     }
 }
 
-fn write_slide_number_field(
-    w: &mut XmlWriter,
-    run: &TextRun,
-    rels: &mut impl SlideRelSink,
-) {
+fn write_slide_number_field(w: &mut XmlWriter, run: &TextRun) {
     if run.text.is_empty() {
         return;
     }
@@ -490,7 +486,7 @@ fn write_slide_number_field(
         .attr("id", &field_id(run))
         .attr("type", "slidenum")
         .start_children();
-    write_r_pr(w, run, rels);
+    write_r_pr(w, run);
     w.elem_text("a:t", &run.text);
     w.close();
 }
@@ -509,7 +505,7 @@ fn field_id(run: &TextRun) -> String {
     xml::guid_from_hash(hash)
 }
 
-fn write_r_pr(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink) {
+fn write_r_pr(w: &mut XmlWriter, run: &TextRun) {
     w.open("a:rPr")
         .attr("lang", "en-US")
         .attr("sz", &run.sz_100pt.to_string());
@@ -532,9 +528,31 @@ fn write_r_pr(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink) {
     w.open("a:latin").attr("typeface", &run.family).empty();
     w.open("a:ea").attr("typeface", &run.family).empty();
     w.open("a:cs").attr("typeface", &run.family).empty();
-    if let Some(link) = &run.link {
-        write_hlink_click(w, link, rels);
-    }
+    w.close();
+}
+
+fn write_link_overlay(
+    w: &mut XmlWriter,
+    overlay: &LinkOverlay,
+    id: u32,
+    rels: &mut impl SlideRelSink,
+) {
+    w.open("p:sp").start_children();
+    write_sp_nv(
+        w,
+        id,
+        &format!("Hyperlink {id}"),
+        false,
+        None,
+        Some(&overlay.link),
+        rels,
+    );
+    w.open("p:spPr").start_children();
+    write_xfrm(w, overlay.x_emu, overlay.y_emu, overlay.w_emu, overlay.h_emu, 0);
+    write_geom(w, &PathGeom::Rect, overlay.w_emu, overlay.h_emu);
+    dml::write_fill(w, Some(&FillSpec::Solid([255, 255, 255, 0])), "0");
+    dml::write_stroke(w, None, true);
+    w.close();
     w.close();
 }
 

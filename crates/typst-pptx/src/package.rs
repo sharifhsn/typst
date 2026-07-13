@@ -272,7 +272,8 @@ fn collect_placeholder_kinds(shape: &SlideShape, kinds: &mut SlidePlaceholderKin
         SlideShape::MathBox(_)
         | SlideShape::TableBox(_)
         | SlideShape::Pic(_)
-        | SlideShape::Geom(_) => {}
+        | SlideShape::Geom(_)
+        | SlideShape::LinkOverlay(_) => {}
     }
 }
 

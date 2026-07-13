@@ -1254,10 +1254,35 @@ fn url_link_emits_hlink_click_and_relationship() {
     let rels = &p["ppt/slides/_rels/slide1.xml.rels"];
     assert!(slide.contains("<a:t>linked</a:t>"));
     assert!(slide.contains("<a:hlinkClick"));
+    assert!(slide.contains("name=\"Hyperlink "), "linked text gets a native click area");
+    assert!(
+        slide.contains("<a:alpha val=\"0\"/>"),
+        "the click area must remain visually transparent"
+    );
     assert!(slide.contains("r:id=\"rId"));
     assert!(rels.contains("relationships/hyperlink"));
     assert!(rels.contains("Target=\"https://example.com/\""));
     assert!(rels.contains("TargetMode=\"External\""));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn explicitly_styled_url_link_keeps_run_appearance() {
+    let p = parts(
+        r#"#set text(fill: rgb("222222"))
+#link("https://example.com")[#text(fill: red, weight: "bold")[Styled link]]"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let rels = &p["ppt/slides/_rels/slide1.xml.rels"];
+    assert!(
+        slide.contains("<a:rPr lang=\"en-US\" sz=\"1100\" b=\"1\">"),
+        "styled link should stay bold without hyperlink theme formatting: {slide}"
+    );
+    assert!(slide.contains("<a:srgbClr val=\"FF4136\"/>"), "red remains direct");
+    assert!(slide.contains("name=\"Hyperlink "), "link gets an overlay shape");
+    assert!(slide.contains("<a:hlinkClick"), "overlay remains clickable");
+    assert!(slide.contains("<a:alpha val=\"0\"/>"), "overlay remains invisible");
+    assert!(rels.contains("Target=\"https://example.com\""));
     assert_all_wellformed(&p);
 }
 

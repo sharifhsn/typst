@@ -18,8 +18,8 @@ use crate::dom::{
     TableCell, TableRow, TextPara,
 };
 use crate::slide::{
-    LinkRect, OrderedShape, Rect, Walker, attach_links, classify_similarity,
-    debug_raster, frame_text_chars, transformed_rect,
+    LinkRect, OrderedShape, Rect, Walker, classify_similarity, debug_raster,
+    frame_text_chars, text_link_overlays, transformed_rect,
 };
 use crate::text::TextSource;
 
@@ -143,8 +143,9 @@ impl<'a, 'b> Walker<'a, 'b> {
         else {
             return false;
         };
-        let mut active = self.active_table_cells.remove(index);
-        attach_links(&mut active.text, &active.links);
+        let active = self.active_table_cells.remove(index);
+        self.link_overlays
+            .extend(text_link_overlays(&active.text, &active.links));
         let paras = table_cell_paras(active.text);
         let cell = CapturedTableCell {
             order: active.order,
@@ -222,7 +223,6 @@ impl<'a, 'b> Walker<'a, 'b> {
                         rot_60k: similarity.rot_60k,
                         scale: similarity.scale,
                         highlight: None,
-                        link: None,
                         slide_number: false,
                     });
                 } else {

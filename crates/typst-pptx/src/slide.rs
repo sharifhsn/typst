@@ -9,11 +9,11 @@ use typst_library::layout::{
 use typst_library::math::EquationElem;
 use typst_library::model::{Destination, Numbering};
 use typst_library::visualize::{Geometry, Paint, Shape};
-use typst_ooxml_core::dml;
+use typst_ooxml_core::{dml, units};
 
 use crate::dom::{
-    FillSpec, MathBox, PicGeom, RunLink, SlideCtx, SlideIr, SlideShape, TextBox,
-    TextColumns, TextPara, TextWrap,
+    FillSpec, LinkOverlay, MathBox, PicGeom, RunLink, SlideCtx, SlideIr, SlideShape,
+    TextBox, TextColumns, TextPara, TextWrap,
 };
 use crate::table::{ActiveTable, ActiveTableCell, CapturedTableCell};
 use crate::text::{InlineMathSource, LinkTarget, TextSource};
@@ -37,7 +37,9 @@ fn slide(
     let mut walker = Walker::new(document, page, slide_index, ctx);
     walker.walk_frame(&page.frame, Transform::identity());
     walker.emit_loose_tables();
-    attach_links(&mut walker.text, &walker.links);
+    walker
+        .link_overlays
+        .extend(text_link_overlays(&walker.text, &walker.links));
     attach_highlights(&mut walker.text, &mut walker.shapes, &walker.highlight_candidates);
     attach_shape_links(&mut walker.shapes, &walker.links);
 
@@ -49,10 +51,9 @@ fn slide(
     );
     ordered.sort_by_key(|entry| entry.order);
 
-    SlideIr {
-        bg: background(page),
-        shapes: ordered.into_iter().map(|entry| entry.shape).collect(),
-    }
+    let mut shapes: Vec<_> = ordered.into_iter().map(|entry| entry.shape).collect();
+    shapes.extend(walker.link_overlays.into_iter().map(SlideShape::LinkOverlay));
+    SlideIr { bg: background(page), shapes }
 }
 
 pub(super) struct Walker<'a, 'b> {
@@ -63,6 +64,7 @@ pub(super) struct Walker<'a, 'b> {
     text: Vec<TextSource<'a>>,
     inline_math: Vec<InlineMathSource>,
     links: Vec<LinkRect>,
+    pub(super) link_overlays: Vec<LinkOverlay>,
     highlight_candidates: Vec<HighlightCandidate>,
     equations: FxHashMap<Location, MathSource>,
     page_size: Size,
@@ -154,6 +156,7 @@ impl<'a, 'b> Walker<'a, 'b> {
             text: Vec::new(),
             inline_math: Vec::new(),
             links: Vec::new(),
+            link_overlays: Vec::new(),
             highlight_candidates: Vec::new(),
             equations: equation_sources(document),
             page_size: page.frame.size(),
@@ -241,7 +244,6 @@ impl<'a, 'b> Walker<'a, 'b> {
                             rot_60k: similarity.rot_60k,
                             scale: similarity.scale,
                             highlight: None,
-                            link: None,
                             slide_number: false,
                         });
                         self.record_slide_number_text(index, text, item_transform);
@@ -455,8 +457,9 @@ impl<'a, 'b> Walker<'a, 'b> {
         else {
             return false;
         };
-        let mut active = self.active_columns.remove(index);
-        attach_links(&mut active.text, &active.links);
+        let active = self.active_columns.remove(index);
+        self.link_overlays
+            .extend(text_link_overlays(&active.text, &active.links));
         if let Some(shape) = column_shape(active) {
             self.shapes.push(shape);
         }
@@ -486,7 +489,6 @@ impl<'a, 'b> Walker<'a, 'b> {
                     rot_60k: similarity.rot_60k,
                     scale: similarity.scale,
                     highlight: None,
-                    link: None,
                     slide_number: false,
                 });
                 true
@@ -1088,14 +1090,31 @@ fn attach_highlights(
     shapes.retain(|shape| !consumed.contains(&shape.order));
 }
 
-pub(super) fn attach_links(text: &mut [TextSource<'_>], links: &[LinkRect]) {
-    for source in text {
-        let rect = text_rect(source.item, source.baseline, source.scale);
-        source.link = links
-            .iter()
-            .find(|link| rect.overlaps(link.rect))
-            .map(|link| link.target.clone());
-    }
+pub(super) fn text_link_overlays(
+    text: &[TextSource<'_>],
+    links: &[LinkRect],
+) -> Vec<LinkOverlay> {
+    links
+        .iter()
+        .filter(|link| {
+            text.iter().any(|source| {
+                text_rect(source.item, source.baseline, source.scale).overlaps(link.rect)
+            })
+        })
+        .map(|link| {
+            let size = link.rect.size();
+            LinkOverlay {
+                x_emu: units::abs_to_emu(link.rect.min.x),
+                y_emu: units::abs_to_emu(link.rect.min.y),
+                w_emu: units::abs_to_emu(size.x),
+                h_emu: units::abs_to_emu(size.y),
+                link: match &link.target {
+                    LinkTarget::Url(url) => RunLink::Url(url.clone()),
+                    LinkTarget::Slide(slide) => RunLink::Slide(*slide),
+                },
+            }
+        })
+        .collect()
 }
 
 fn attach_shape_links(shapes: &mut [OrderedShape], links: &[LinkRect]) {
