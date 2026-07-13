@@ -467,15 +467,44 @@ pub fn place(
     let mut blocks = ctx.blocks(body, styles)?;
 
     // A single standalone drawing (a bare image, or a canvas/visual body we
-    // rasterized) → anchor it at the place position. Guarded to SOLELY one
-    // drawing so a richer body (several lowered blocks) isn't silently
-    // truncated to its first drawing.
-    let is_solely_one_drawing = matches!(
-        blocks.as_slice(),
-        [Block::Para(p)] if matches!(p.content.as_slice(), [ParaChild::Run(Run::Drawing(_))])
-    );
-    if is_solely_one_drawing && let Some(mut drawing) = take_first_drawing(&mut blocks) {
-        set_place_anchor(&mut drawing, elem, styles, ctx);
+    // rasterized) → anchor it at the place position. Introspection tags and
+    // bookmark markers may surround the drawing after realization; they are
+    // semantic metadata, not additional rendered content, and must remain in
+    // their original order instead of forcing the image down the flow fallback.
+    let mut drawing_count = 0;
+    let only_drawing_and_markers = blocks.iter().all(|block| match block {
+        Block::Tag(_) => true,
+        Block::Para(para) => para.content.iter().all(|child| match child {
+            ParaChild::Run(Run::Drawing(_)) => {
+                drawing_count += 1;
+                true
+            }
+            ParaChild::BookmarkStart { .. }
+            | ParaChild::BookmarkEnd { .. }
+            | ParaChild::Tag(_) => true,
+            _ => false,
+        }),
+        _ => false,
+    });
+    if only_drawing_and_markers && drawing_count == 1 {
+        for block in &mut blocks {
+            let Block::Para(para) = block else { continue };
+            let Some(drawing) = para.content.iter_mut().find_map(|child| match child {
+                ParaChild::Run(Run::Drawing(drawing)) => Some(drawing),
+                _ => None,
+            }) else {
+                continue;
+            };
+            set_place_anchor(drawing, elem, styles, ctx);
+            para.props.spacing = Some(crate::dom::Spacing {
+                before: Some(0),
+                after: Some(0),
+                line: Some(1),
+                line_rule_auto: false,
+                line_rule_at_least: false,
+            });
+            break;
+        }
         ctx.record_content_decision(
             &placed,
             Representation::Native,
@@ -483,7 +512,7 @@ pub fn place(
             LossSet::default(),
             0,
         );
-        return Ok(vec![para_drawing(drawing)]);
+        return Ok(blocks);
     }
 
     // Real block content (figure body + caption, table, text) → flow it in

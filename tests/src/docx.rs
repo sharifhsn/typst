@@ -1455,6 +1455,24 @@ fn floating_placed_text_keeps_clearance_and_wrap_policy() {
 }
 
 #[test]
+fn floating_bare_image_keeps_native_anchor_and_position() {
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40"><rect width="80" height="40" fill="#0b6"/></svg>"##;
+    let p = parts_with_files(
+        r#"#set page(width: 200pt, height: 160pt, margin: 20pt)
+#place(top + right, dx: -12pt, dy: 12pt, float: true)[#image("logo.svg", width: 40pt)]"#,
+        &[("logo.svg", SVG)],
+    );
+    let doc = &p["word/document.xml"];
+    assert_eq!(doc.matches("<wp:anchor ").count(), 1);
+    assert!(!doc.contains("<wp:inline"), "the bare image must not lose placement");
+    assert!(doc.contains("<wp:wrapTopAndBottom/>"));
+    assert!(doc.contains("<wp:positionH relativeFrom=\"column\">"));
+    assert!(doc.contains("<wp:positionV relativeFrom=\"margin\">"));
+    assert!(doc.contains("<a:blip"), "the image remains a native drawing");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn placed_simple_table_is_an_editable_anchored_text_box() {
     let src = "#place(top + left, dx: 8pt, dy: 12pt, \
                table(columns: 2, [Left cell], [Right cell]))";
