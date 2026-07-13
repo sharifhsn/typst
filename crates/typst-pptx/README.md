@@ -82,8 +82,8 @@ slide stays native and editable.
 - **Hyperlinks on a shape or image** (rather than on text) are dropped; the shape
   still renders.
 - **Mixed page sizes** cannot be represented directly because PowerPoint has one
-  global slide size. The CLI warns, but off-size pages are not yet transformed
-  into the first page's coordinate system and may crop or leave extra space.
+  global slide size. The CLI warns; off-size pages are uniformly scaled to fit
+  and centered on the first page's canvas, which can introduce letterboxing.
 - **Gradient/tiling *text* fills** are approximated with a representative solid
   color (a run can carry only one color), so the text stays visible.
 

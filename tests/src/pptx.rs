@@ -1544,6 +1544,33 @@ fn rotated_live_text_uses_rotation_neutral_bounds() {
     assert_all_wellformed(&p);
 }
 
+#[test]
+fn mixed_page_sizes_fit_inside_the_global_slide_canvas() {
+    let p = parts(
+        r#"#set page(width: 240pt, height: 160pt, margin: 10pt)
+First landscape page
+#pagebreak()
+#set page(width: 160pt, height: 240pt, margin: 10pt)
+#place(bottom + right)[Second portrait page]"#,
+    );
+    let presentation = &p["ppt/presentation.xml"];
+    assert!(
+        presentation.contains("<p:sldSz cx=\"3048000\" cy=\"2032000\""),
+        "the first page remains PowerPoint's one global slide size"
+    );
+
+    let (x, y, cx, cy, rot) =
+        text_box_transform(&p["ppt/slides/slide2.xml"], "Second portrait");
+    assert_eq!(rot, 0);
+    assert!(x >= 0 && y >= 0, "fitted content begins inside the canvas");
+    assert!(
+        x + cx <= 3_048_000 && y + cy <= 2_032_000,
+        "off-size page content must not be cropped: off=({x},{y}) ext=({cx},{cy})"
+    );
+    assert!(x > 0, "portrait page is centered with horizontal letterboxing");
+    assert_all_wellformed(&p);
+}
+
 fn text_box_transform(slide: &str, needle: &str) -> (i64, i64, i64, i64, i32) {
     let doc = roxmltree::Document::parse(slide).unwrap();
     for shape in doc.descendants().filter(|node| node.tag_name().name() == "sp") {

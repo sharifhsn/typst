@@ -87,8 +87,9 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 - Unsupported or transformed native-table regions can still be accepted by capture
   without a table or whole-region fallback.
-- Mixed page sizes are not transformed to PowerPoint's one global slide size and may
-  crop or leave empty space.
+- Mixed page sizes are uniformly scaled to fit and centered on PowerPoint's one
+  global slide canvas. This preserves content but can introduce letterboxing;
+  gradients and other page-relative backgrounds need broader mixed-size coverage.
 - Table capture does not carry the complete resolved fill, stroke, inset, alignment,
   gutter, or cell-math contract.
 - Live text regrouping still lacks a complete language and shaping policy. Licensed

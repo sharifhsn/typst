@@ -4,7 +4,7 @@ use typst_layout::{Page, PagedDocument};
 use typst_library::foundations::{NativeElement, StyleChain};
 use typst_library::introspection::{CounterDisplayElem, Introspector, Location, Tag};
 use typst_library::layout::{
-    Abs, ColumnRegion, Frame, FrameItem, Point, Size, Transform,
+    Abs, ColumnRegion, Frame, FrameItem, Point, Ratio, Size, Transform,
 };
 use typst_library::math::EquationElem;
 use typst_library::model::{Destination, Numbering};
@@ -20,11 +20,16 @@ use crate::text::{InlineMathSource, LinkTarget, TextSource};
 
 /// Convert all pages into slide IR.
 pub fn slides(document: &PagedDocument, ctx: &mut SlideCtx) -> Vec<SlideIr> {
+    let target_size = document
+        .pages()
+        .first()
+        .map(|page| page.frame.size())
+        .unwrap_or_else(|| Size::new(Abs::pt(720.0), Abs::pt(540.0)));
     document
         .pages()
         .iter()
         .enumerate()
-        .map(|(index, page)| slide(document, page, index, ctx))
+        .map(|(index, page)| slide(document, page, index, target_size, ctx))
         .collect()
 }
 
@@ -32,10 +37,11 @@ fn slide(
     document: &PagedDocument,
     page: &Page,
     slide_index: usize,
+    target_size: Size,
     ctx: &mut SlideCtx,
 ) -> SlideIr {
-    let mut walker = Walker::new(document, page, slide_index, ctx);
-    walker.walk_frame(&page.frame, Transform::identity());
+    let mut walker = Walker::new(document, page, slide_index, target_size, ctx);
+    walker.walk_frame(&page.frame, fit_page_transform(page.frame.size(), target_size));
     walker.emit_loose_tables();
     walker
         .link_overlays
@@ -54,6 +60,21 @@ fn slide(
     let mut shapes: Vec<_> = ordered.into_iter().map(|entry| entry.shape).collect();
     shapes.extend(walker.link_overlays.into_iter().map(SlideShape::LinkOverlay));
     SlideIr { bg: background(page), shapes }
+}
+
+/// PowerPoint has one global slide size. Preserve every off-size Typst page by
+/// fitting it uniformly into the first page's canvas and centering the result,
+/// instead of leaving shapes at source-page coordinates that may be cropped
+/// entirely. Equal-size pages keep the identity transform byte-for-byte.
+fn fit_page_transform(source: Size, target: Size) -> Transform {
+    if source == target || source.x == Abs::zero() || source.y == Abs::zero() {
+        return Transform::identity();
+    }
+    let scale = (target.x / source.x).min(target.y / source.y);
+    let fitted = source * scale;
+    let offset = (target - fitted) / 2.0;
+    Transform::translate(offset.x, offset.y)
+        .pre_concat(Transform::scale(Ratio::new(scale), Ratio::new(scale)))
 }
 
 pub(super) struct Walker<'a, 'b> {
@@ -149,6 +170,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         document: &'a PagedDocument,
         page: &Page,
         slide_index: usize,
+        page_size: Size,
         ctx: &'b mut SlideCtx,
     ) -> Self {
         Self {
@@ -162,7 +184,7 @@ impl<'a, 'b> Walker<'a, 'b> {
             link_overlays: Vec::new(),
             highlight_candidates: Vec::new(),
             equations: equation_sources(document),
-            page_size: page.frame.size(),
+            page_size,
             slide_number_fallback: slide_number_fallback(page, slide_index),
             active_math: Vec::new(),
             active_slide_numbers: Vec::new(),

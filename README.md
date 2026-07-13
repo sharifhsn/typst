@@ -308,8 +308,8 @@ clips, skew/non-uniform transforms, PDF art, CeTZ diagrams, and radial/conic
 gradients can still fall back to positioned pictures.
 
 PowerPoint has one global slide size. Mixed-size Typst pages currently produce a
-warning but are not yet transformed to that canvas; off-size content can crop or
-leave unused space.
+warning and are uniformly scaled to fit and centered on the first page's canvas;
+this preserves content but can introduce letterboxing.
 
 **Dated fidelity snapshot:** in the 2026-07-03 comparison, across 112 real
 presentation templates, PPTX-vs-PDF visual similarity averaged **0.995**

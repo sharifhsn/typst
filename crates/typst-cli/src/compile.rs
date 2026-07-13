@@ -531,7 +531,7 @@ fn mixed_page_size_warning(
             "the presentation mixes pages of different sizes",
         )
         .with_hint(
-            "every slide uses the first page's canvas; off-size content may crop or leave extra space",
+            "every slide uses the first page's canvas; off-size pages are uniformly scaled and centered",
         )
     })
 }
