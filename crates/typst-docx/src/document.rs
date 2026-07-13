@@ -2551,7 +2551,17 @@ fn lower_furniture(
             let lowered = ctx.blocks(content, styles);
             ctx.raster_height = saved_h;
             ctx.line_numbering_active = saved_line_numbering;
-            blocks.extend(lowered?);
+            let mut lowered = lowered?;
+            if let Some(jc) = furniture_horizontal_alignment(content, styles) {
+                for block in &mut lowered {
+                    if let Block::Para(para) = block
+                        && para.props.jc.is_none()
+                    {
+                        para.props.jc = Some(jc);
+                    }
+                }
+            }
+            blocks.extend(lowered);
         }
 
         if slot.is_header()
@@ -2571,6 +2581,24 @@ fn lower_furniture(
             signature,
             emit_empty: source.content.is_some(),
         })
+    })
+}
+
+/// `AlignElem` is a block-level layout wrapper and is consumed while a
+/// header/footer fragment is realized, before its synthesized paragraph sees
+/// the wrapper's style chain. Preserve the wrapper's explicit horizontal
+/// alignment on the resulting Word paragraphs.
+fn furniture_horizontal_alignment(
+    content: &Content,
+    styles: StyleChain,
+) -> Option<crate::dom::Jc> {
+    use typst_library::layout::{AlignElem, HAlignment};
+
+    let align = content.to_packed::<AlignElem>()?.alignment.get(styles);
+    align.x().map(|value| match value {
+        HAlignment::Start | HAlignment::Left => crate::dom::Jc::Start,
+        HAlignment::Center => crate::dom::Jc::Center,
+        HAlignment::Right | HAlignment::End => crate::dom::Jc::End,
     })
 }
 

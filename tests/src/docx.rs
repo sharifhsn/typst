@@ -2452,6 +2452,23 @@ fn paragraphs_carry_unique_w14_para_ids() {
 }
 
 #[test]
+fn explicit_header_and_footer_alignment_reaches_paragraphs() {
+    let p = parts(
+        "#set page(header: align(center)[Centered head], \
+                   footer: align(right)[Right foot])\nBody.",
+    );
+    assert!(
+        p["word/header1.xml"].contains("w:jc w:val=\"center\""),
+        "centered header should carry paragraph alignment"
+    );
+    assert!(
+        p["word/footer2.xml"].contains("w:jc w:val=\"end\""),
+        "right-aligned footer should carry paragraph alignment"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn multi_slot_page_numbering_emits_page_of_numpages() {
     // `numbering: "1 of 1"` is the "page X of Y" idiom: the first counting slot
     // is the current page (a `PAGE` field), the second the document total (a

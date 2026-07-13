@@ -1995,3 +1995,18 @@ rows. The first row still wraps against Typst's single-line layout. Temporary
 50-twip and zero-twip horizontal-margin probes showed that only removing all
 padding stopped both wraps, at the cost of text touching the cell border, so no
 consumer-specific margin fudge was retained.
+
+## 46. Explicit header/footer horizontal alignment reaches Word paragraphs
+
+A top-level `align(center)`/`align(right)` around page furniture is consumed as
+a block-layout wrapper while the isolated header/footer fragment is realized.
+Its synthesized paragraph therefore missed the wrapper's style chain and fell
+back to Word's left alignment. Furniture lowering now preserves an explicit
+outer horizontal alignment on each otherwise-unset top-level paragraph.
+
+Focused package tests cover centered headers and right-aligned footers. In the
+mixed-font visual fixture, LibreOffice moves the header from the left body
+margin to Typst's horizontal center and centers the footer within a few pixels.
+Their remaining vertical offsets (about 21 rendered pixels in opposite
+directions) are tracked separately as header/footer band-metric drift. All 206
+DOCX integration tests pass and the exporter remains clippy-clean.
