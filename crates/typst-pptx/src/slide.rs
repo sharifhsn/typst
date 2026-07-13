@@ -128,6 +128,7 @@ struct ActiveColumnRegion<'a> {
     text: Vec<TextSource<'a>>,
     math: Vec<InlineMathSource>,
     links: Vec<LinkRect>,
+    highlights: Vec<HighlightCandidate>,
 }
 
 #[derive(Copy, Clone)]
@@ -272,7 +273,11 @@ impl<'a, 'b> Walker<'a, 'b> {
                                 shape: SlideShape::Geom(geom),
                             });
                             if let Some(highlight) = highlight {
-                                self.highlight_candidates.push(highlight);
+                                if let Some(column) = self.active_columns.last_mut() {
+                                    column.highlights.push(highlight);
+                                } else {
+                                    self.highlight_candidates.push(highlight);
+                                }
                             }
                         }
                         None => {
@@ -452,6 +457,7 @@ impl<'a, 'b> Walker<'a, 'b> {
             text: Vec::new(),
             math: Vec::new(),
             links: Vec::new(),
+            highlights: Vec::new(),
         });
         true
     }
@@ -462,7 +468,8 @@ impl<'a, 'b> Walker<'a, 'b> {
         else {
             return false;
         };
-        let active = self.active_columns.remove(index);
+        let mut active = self.active_columns.remove(index);
+        attach_highlights(&mut active.text, &mut self.shapes, &active.highlights);
         self.link_overlays
             .extend(text_link_overlays(&active.text, &active.links));
         if let Some(shape) = column_shape(active) {

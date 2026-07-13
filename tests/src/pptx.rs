@@ -1252,6 +1252,24 @@ fn explicit_columns_keep_inline_math_in_the_editable_text_flow() {
 }
 
 #[test]
+fn explicit_columns_keep_highlight_as_a_native_run_property() {
+    let p = parts(
+        r#"#set page(width: 240pt, height: 120pt, margin: 10pt)
+#columns(2)[Before #highlight(fill: yellow)[Highlighted] after]"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("numCol=\"2\""), "columns stay native");
+    assert!(slide.contains("<a:highlight>"), "highlight should stay native");
+    assert!(slide.contains("<a:t>Highlighted</a:t>"));
+    assert_eq!(
+        slide.matches("<p:sp>").count(),
+        1,
+        "the detached highlight rectangle should be consumed by the text run"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn text_columns_split_into_separate_boxes() {
     let p = parts(
         r#"#set page(width: 200pt, height: 100pt, margin: 0pt)
