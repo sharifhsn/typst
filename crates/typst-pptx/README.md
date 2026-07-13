@@ -42,7 +42,9 @@ an error.
   used by editable runs are embedded as PresentationML EOT font parts when the
   OpenType license grants Installable or Editable embedding; restricted,
   preview/print-only, bitmap-only, and collection faces are left unembedded.
-- **Links** — external URLs and same-deck slide jumps (`#link((page: n))`).
+- **Links** — external URLs and same-deck slide jumps (`#link((page: n))`) on
+  editable text, vector shapes, and pictures; object links use the full authored
+  hit area.
 - **Vector shapes** — `#rect`, `#circle`/`#ellipse`, `#line`, `#curve`,
   `#polygon` become `prstGeom`/`custGeom` shapes with solid, **linear-gradient**,
   and **translucent** (alpha) fills, and native stroke width / dash / cap.
@@ -79,8 +81,6 @@ slide stays native and editable.
 - **Native tables are conservative and incomplete.** Transformed or partially
   captured tables can still require a whole-table picture fallback; cell-level
   fills, strokes, gutters, math, and inset geometry need broader coverage.
-- **Hyperlinks on a shape or image** (rather than on text) are dropped; the shape
-  still renders.
 - **Mixed page sizes** cannot be represented directly because PowerPoint has one
   global slide size. The CLI warns; off-size pages are uniformly scaled to fit
   and centered on the first page's canvas, which can introduce letterboxing.

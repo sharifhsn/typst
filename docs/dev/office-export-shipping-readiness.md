@@ -95,9 +95,10 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 - Live text regrouping still lacks a complete language and shaping policy. Licensed
   fonts are embedded when their OpenType permissions allow it, but consumer text-box
   metrics can still reflow text.
-- Shape/image hyperlinks are dropped. Rotated live text now retains editable
-  DrawingML rotation and uses rotation-neutral bounds, validated at 90, -90, and 45
-  degrees in LibreOffice; broader angle/font/consumer coverage remains a release gate.
+- Rotated live text retains editable DrawingML rotation and uses rotation-neutral
+  bounds, validated at 90, -90, and 45 degrees in LibreOffice; broader
+  angle/font/consumer coverage remains a release gate. External and same-deck
+  hyperlinks on text, vector shapes, and pictures retain full-object hit areas.
 - Math fallback quality varies by consumer, especially in LibreOffice and older
   Office versions.
 - Page filtering does not remap every slide-jump link.
