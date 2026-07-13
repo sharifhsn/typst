@@ -834,18 +834,27 @@ fn background_block(
     styles: StyleChain,
 ) -> SourceResult<Option<crate::dom::Block>> {
     use crate::dom::{Anchor, AnchorPos, AnchorWrap, Block, Drawing, Para, ParaChild, Run};
-    use typst_library::layout::Abs;
+    use typst_library::foundations::Smart;
+    use typst_library::layout::{Abs, BlockBody, BlockElem, Sizing};
 
     // EMU per twip = 914400 / 1440.
     const EMU_PER_TWIP: i64 = 635;
 
     let saved_w = ctx.raster_width;
     ctx.raster_width = Abs::pt(geom.page_w as f64 / 20.0);
+    let canvas = BlockElem::new()
+        .with_width(Smart::Custom(ctx.raster_width.into()))
+        .with_height(Sizing::Rel(Abs::pt(geom.page_h as f64 / 20.0).into()))
+        .with_breakable(false)
+        .with_body(Some(BlockBody::Content(bg.clone())))
+        .pack();
     // Uncropped: this drawing is stretched to the full page below, so the
-    // render must keep its full extent (ink-cropping a corner watermark would
-    // blow it up to full-bleed).
-    let result = ctx.rasterize_uncropped(bg, styles, bg.span())?;
+    // render must keep its full extent. The fixed-size wrapper is load-bearing:
+    // it gives alignment and other page-relative background content the actual
+    // page coordinate space before the bitmap is stretched to that same size.
+    let result = ctx.rasterize_uncropped(&canvas, styles, bg.span());
     ctx.raster_width = saved_w;
+    let result = result?;
     let Some((rel, _size, _text)) = result else {
         return Ok(None);
     };
