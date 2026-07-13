@@ -232,6 +232,13 @@ fn write_para_aligned(
         w.attr("lvl", &bullet.lvl.to_string())
             .attr("marL", &bullet.mar_l_emu.to_string())
             .attr("indent", &bullet.indent_emu.to_string());
+    } else {
+        if let Some(margin) = para.margin_left_emu {
+            w.attr("marL", &margin.to_string());
+        }
+        if let Some(indent) = para.first_line_indent_emu {
+            w.attr("indent", &indent.to_string());
+        }
     }
     w.start_children();
     w.open("a:lnSpc").start_children();

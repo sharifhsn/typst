@@ -447,6 +447,7 @@ fn build_flow_box(group: &[usize], lines: &[LineSegment]) -> ClusteredText {
     let selected = group.iter().map(|&idx| lines[idx].clone()).collect::<Vec<_>>();
     let (left, right, top, bottom) = bounds(&selected);
     let leading = measured_leading(&selected);
+    let first_line_indent = measured_first_line_indent(&selected, left);
     let children = children_from_lines(&selected, right, false);
     let rtl = selected.iter().any(|line| line.rtl);
     let max_sz_100pt = selected.iter().map(|line| line.max_sz_100pt).max().unwrap_or(0);
@@ -468,6 +469,8 @@ fn build_flow_box(group: &[usize], lines: &[LineSegment]) -> ClusteredText {
             paras: vec![TextPara {
                 children,
                 rtl,
+                margin_left_emu: first_line_indent.map(|(margin, _)| margin),
+                first_line_indent_emu: first_line_indent.map(|(_, indent)| indent),
                 line_spacing_100pt: leading_100pt(leading),
                 bullet: None,
             }],
@@ -555,6 +558,8 @@ fn build_single_line_box(line: &LineSegment) -> ClusteredText {
             paras: vec![TextPara {
                 children: line.children.clone(),
                 rtl: line.rtl,
+                margin_left_emu: None,
+                first_line_indent_emu: None,
                 line_spacing_100pt: None,
                 bullet: None,
             }],
@@ -578,6 +583,8 @@ fn bullet_para(
     TextPara {
         children: children_from_lines(lines, box_right, true),
         rtl: lines.iter().any(|line| line.rtl),
+        margin_left_emu: None,
+        first_line_indent_emu: None,
         line_spacing_100pt: leading_100pt(leading),
         bullet: Some(ParaBullet {
             lvl,
@@ -648,6 +655,24 @@ fn measured_leading(lines: &[LineSegment]) -> Option<Abs> {
     } else {
         None
     }
+}
+
+/// Recovers a flowing paragraph's first-line indent from its laid-out line
+/// geometry. Flow grouping already requires every line after the first to
+/// share a body edge, while allowing the first line to differ only by a
+/// plausible paragraph indent. DrawingML needs both `marL` and `indent`
+/// because its built-in left margin is non-zero.
+fn measured_first_line_indent(
+    lines: &[LineSegment],
+    box_left: Abs,
+) -> Option<(i64, i64)> {
+    let body_left = lines.get(1)?.left;
+    let first_left = lines[0].left;
+    if same_left(first_left, body_left, lines[0].max_size) {
+        return None;
+    }
+
+    Some((emu(body_left - box_left), emu(first_left - body_left)))
 }
 
 /// The measured baseline-to-baseline pitch as an `a:spcPts` value (1/100 pt).

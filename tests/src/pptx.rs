@@ -740,6 +740,23 @@ fn wrapped_paragraph_merges_into_one_flowing_text_box() {
 }
 
 #[test]
+fn wrapped_paragraph_preserves_native_first_line_indent() {
+    let p = parts(
+        r#"#set page(width: 135pt, height: 140pt, margin: 20pt)
+#set text(size: 12pt)
+#set par(first-line-indent: (amount: 24pt, all: true))
+This paragraph wraps across several visual lines so its first-line indent remains editable."#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert_eq!(text_shape_count(slide), 1, "wrapped paragraph should be one box");
+    assert!(
+        slide.contains("<a:pPr algn=\"l\" marL=\"0\" indent=\"304800\">"),
+        "24pt first-line indent should remain a native DrawingML paragraph property: {slide}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn bullet_list_uses_native_buchar_without_literal_marker_text() {
     let p = parts(
         r#"#set page(width: 240pt, height: 140pt, margin: 0pt)

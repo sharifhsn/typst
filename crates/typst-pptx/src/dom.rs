@@ -126,6 +126,10 @@ pub struct CellBorders {
 pub struct TextPara {
     pub children: Vec<TextChild>,
     pub rtl: bool,
+    /// Paragraph left margin from the text box edge, in EMUs.
+    pub margin_left_emu: Option<i64>,
+    /// First-line offset relative to `margin_left_emu`, in EMUs.
+    pub first_line_indent_emu: Option<i64>,
     /// Absolute line pitch (baseline-to-baseline) in 1/100 pt (`a:spcPts`).
     /// A percentage (`a:spcPct`) would multiply the FONT's single spacing -
     /// which already includes its internal leading - inflating the measured
