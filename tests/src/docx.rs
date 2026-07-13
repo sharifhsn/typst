@@ -1735,7 +1735,7 @@ fn block_columns_emit_continuous_sections() {
     // surrounding column count.
     let p = parts(
         "Intro text.\n\
-         #columns(2, gutter: 12pt)[Column content starts here. #colbreak() \
+         #columns(2, gutter: 12pt)[Column content starts here. \
          Column content continues here.]\n\
          More text after.",
     );
@@ -1748,7 +1748,7 @@ fn block_columns_emit_continuous_sections() {
     assert!(doc.contains("Column content starts"), "column text is kept");
     assert!(doc.contains("More text after"), "post-column text is kept");
     assert!(!doc.contains("<w:drawing>"), "columns are not rasterized");
-    assert!(doc.contains("w:type=\"column\""), "explicit column breaks survive");
+    assert!(!doc.contains("<w:tbl>"), "automatic columns remain a native section");
 
     let intro = doc.find("Intro text").unwrap();
     let column = doc.find("Column content starts").unwrap();
@@ -1792,7 +1792,7 @@ fn block_columns_restore_page_level_column_count() {
     let p = parts(
         "#set page(columns: 2)\n\
          Before.\n\
-         #columns(3)[First. #colbreak() Second. #colbreak() Third.]\n\
+         #columns(3)[#lorem(120)]\n\
          After.",
     );
     let doc = &p["word/document.xml"];
@@ -2633,6 +2633,26 @@ fn colbreak_becomes_a_column_break() {
     assert!(
         p["word/document.xml"].contains("w:type=\"column\""),
         "a column break must be emitted"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn block_columns_with_manual_break_use_top_aligned_editable_cells() {
+    let p = parts(
+        r#"#set page(width: 240pt, height: 120pt, margin: 10pt)
+#columns(2, gutter: 20pt)[Left column.#colbreak()Right column.]"#,
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<w:tbl>"), "manual columns should stay editable");
+    assert!(doc.contains("<w:t xml:space=\"preserve\">Left column.</w:t>"));
+    assert!(doc.contains("<w:t xml:space=\"preserve\">Right column.</w:t>"));
+    assert_eq!(doc.matches("<w:tc>").count(), 3, "two columns plus a gutter cell");
+    assert_eq!(doc.matches("<w:vAlign w:val=\"top\"/>").count(), 3);
+    assert!(!doc.contains("w:type=\"column\""));
+    assert!(
+        !doc.contains("<w:cols w:num=\"2\""),
+        "manual block columns should not also install a native column section"
     );
     assert_all_wellformed(&p);
 }

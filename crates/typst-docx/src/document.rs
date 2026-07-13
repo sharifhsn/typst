@@ -1644,6 +1644,9 @@ fn push_column_sections(
         let Some(columns) = pairs[i].0.to_packed::<ColumnsElem>() else {
             continue;
         };
+        if crate::mappers::columns::uses_table(columns, pairs[i].1) {
+            continue;
+        }
 
         if segment_start < i {
             push_section_run(

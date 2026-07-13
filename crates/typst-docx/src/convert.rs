@@ -823,10 +823,13 @@ fn handle_block_inner(
         // rasterizing the whole block.
         out.extend(mappers::stack::stack(elem, styles, ctx)?);
     } else if let Some(elem) = child.to_packed::<typst_library::layout::ColumnsElem>() {
-        // Top-level `#columns(n)[..]` is wrapped in a continuous Word section by
-        // `resolve_sections`; nested columns still lower as ordinary editable
-        // blocks rather than rasterizing the body.
-        out.extend(ctx.blocks(&elem.body, styles)?);
+        if mappers::columns::uses_table(elem, styles) {
+            out.extend(mappers::columns::columns(elem, styles, ctx)?);
+        } else {
+            // Automatic block columns are wrapped in a continuous Word section by
+            // `resolve_sections`; nested columns still lower as editable blocks.
+            out.extend(ctx.blocks(&elem.body, styles)?);
+        }
     } else if let Some(elem) = child.to_packed::<typst_library::layout::LayoutElem>() {
         // `#layout(size => ..)` hands the closure the container size and uses the
         // result. Responsive CV/poster templates wrap their entries in it, so

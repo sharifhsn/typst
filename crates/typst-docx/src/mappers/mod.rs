@@ -2,6 +2,7 @@
 //! the DOCX IR. The foundation provides compiling stubs; mapper agents fill
 //! exactly one module each, keeping the public handler signatures identical.
 
+pub mod columns;
 pub mod footnote;
 pub mod heading;
 pub mod image;
