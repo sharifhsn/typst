@@ -4,7 +4,7 @@
 //! hidden table/grid cell-region tags emitted during layout, captures the frame
 //! items inside each cell, and rebuilds editable DrawingML table rows and cells.
 
-use typst_library::foundations::{Smart, StyleChain};
+use typst_library::foundations::{Resolve, Smart, StyleChain};
 use typst_library::introspection::{Location, Tag};
 use typst_library::layout::{
     Abs, Alignment, FrameItem, GridCell, GridCellRegion, GridElem, HAlignment, Point,
@@ -14,8 +14,8 @@ use typst_library::model::{TableCell as TypstTableCell, TableElem};
 use typst_library::visualize::{LineCap, Paint, Stroke};
 
 use crate::dom::{
-    CellBorders, CellHAlign, CellVAlign, FillSpec, SlideShape, StrokeSpec, TableBox,
-    TableCell, TableRow, TextPara,
+    CellBorders, CellHAlign, CellInsets, CellVAlign, FillSpec, SlideShape, StrokeSpec,
+    TableBox, TableCell, TableRow, TextPara,
 };
 use crate::slide::{
     HighlightCandidate, LinkRect, OrderedShape, Rect, Walker, attach_highlights,
@@ -43,6 +43,7 @@ pub(super) struct ActiveTableCell<'a> {
     borders: CellBorders,
     h_align: Option<CellHAlign>,
     v_align: Option<CellVAlign>,
+    insets: CellInsets,
     text: Vec<TextSource<'a>>,
     pub(super) math: Vec<InlineMathSource>,
     links: Vec<LinkRect>,
@@ -61,6 +62,7 @@ pub(super) struct CapturedTableCell {
     borders: CellBorders,
     h_align: Option<CellHAlign>,
     v_align: Option<CellVAlign>,
+    insets: CellInsets,
     paras: Vec<TextPara>,
 }
 
@@ -121,6 +123,12 @@ impl<'a, 'b> Walker<'a, 'b> {
         let fill = region_fill(self.ctx, &region.body, styles);
         let borders = region_borders(&region.body, styles);
         let (h_align, v_align) = region_alignment(&region.body, styles);
+        let insets = region_insets(
+            &region.body,
+            styles,
+            Size::new(region.width, region.height),
+            similarity.scale,
+        );
         self.active_table_cells.push(ActiveTableCell {
             loc: tag.location(),
             order,
@@ -134,6 +142,7 @@ impl<'a, 'b> Walker<'a, 'b> {
             borders,
             h_align,
             v_align,
+            insets,
             text: Vec::new(),
             math: Vec::new(),
             links: Vec::new(),
@@ -165,6 +174,7 @@ impl<'a, 'b> Walker<'a, 'b> {
             borders: active.borders,
             h_align: active.h_align,
             v_align: active.v_align,
+            insets: active.insets,
             paras,
         };
 
@@ -366,6 +376,7 @@ fn table_shape(order: usize, mut cells: Vec<CapturedTableCell>) -> Option<Ordere
                     borders: cell.borders.clone(),
                     h_align: cell.h_align,
                     v_align: cell.v_align,
+                    insets: cell.insets,
                     paras: cell.paras.clone(),
                 });
             } else if let Some(origin) = covering_cell(&cells, x, y) {
@@ -378,6 +389,7 @@ fn table_shape(order: usize, mut cells: Vec<CapturedTableCell>) -> Option<Ordere
                     borders: CellBorders::default(),
                     h_align: None,
                     v_align: None,
+                    insets: CellInsets::default(),
                     paras: Vec::new(),
                 });
             } else {
@@ -390,6 +402,7 @@ fn table_shape(order: usize, mut cells: Vec<CapturedTableCell>) -> Option<Ordere
                     borders: CellBorders::default(),
                     h_align: None,
                     v_align: None,
+                    insets: CellInsets::default(),
                     paras: Vec::new(),
                 });
             }
@@ -535,6 +548,38 @@ fn region_alignment(
         return (None, None);
     };
     alignment_parts(align)
+}
+
+fn region_insets(
+    body: &typst_library::foundations::Content,
+    styles: StyleChain,
+    size: Size,
+    scale: f64,
+) -> CellInsets {
+    let inset = if let Some(cell) = body.to_packed::<TypstTableCell>() {
+        cell.inset.get(styles)
+    } else if let Some(cell) = body.to_packed::<GridCell>() {
+        cell.inset.get(styles)
+    } else {
+        return CellInsets::default();
+    };
+    let Smart::Custom(inset) = inset else {
+        return CellInsets::default();
+    };
+
+    let resolve =
+        |value: Option<typst_library::layout::Rel<typst_library::layout::Length>>,
+         reference: Abs| {
+            value.map_or(0, |value| {
+                crate::text::emu(value.resolve(styles).relative_to(reference) * scale)
+            })
+        };
+    CellInsets {
+        left_emu: resolve(inset.left, size.x),
+        top_emu: resolve(inset.top, size.y),
+        right_emu: resolve(inset.right, size.x),
+        bottom_emu: resolve(inset.bottom, size.y),
+    }
 }
 
 fn alignment_parts(align: Alignment) -> (Option<CellHAlign>, Option<CellVAlign>) {

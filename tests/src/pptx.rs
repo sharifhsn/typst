@@ -372,6 +372,29 @@ fn table_cell_alignment_is_preserved() {
 }
 
 #[test]
+fn table_cell_insets_are_preserved() {
+    let p = parts(
+        r#"#set page(width: 360pt, height: 200pt)
+#table(
+  columns: 2,
+  inset: (left: 28pt, right: 14pt, top: 16pt, bottom: 8pt),
+  [left], [right],
+)"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert_eq!(
+        slide
+            .matches(
+                "<a:tcPr marL=\"355600\" marT=\"203200\" marR=\"177800\" marB=\"101600\""
+            )
+            .count(),
+        2,
+        "each native cell should keep its authored DrawingML table margins"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn gradient_page_fill_becomes_gradient_slide_background() {
     let p = parts(
         "#set page(fill: gradient.linear(rgb(\"#1A1A2E\"), rgb(\"#16213E\")))\nHello",

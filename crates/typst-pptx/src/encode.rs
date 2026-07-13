@@ -374,7 +374,11 @@ fn write_table_cell(w: &mut XmlWriter, cell: &TableCell, rels: &mut impl SlideRe
     }
     w.close();
 
-    w.open("a:tcPr");
+    w.open("a:tcPr")
+        .attr("marL", &cell.insets.left_emu.max(0).to_string())
+        .attr("marT", &cell.insets.top_emu.max(0).to_string())
+        .attr("marR", &cell.insets.right_emu.max(0).to_string())
+        .attr("marB", &cell.insets.bottom_emu.max(0).to_string());
     if let Some(align) = cell.v_align {
         w.attr(
             "anchor",

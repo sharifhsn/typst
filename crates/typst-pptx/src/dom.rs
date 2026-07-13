@@ -106,7 +106,17 @@ pub struct TableCell {
     pub borders: CellBorders,
     pub h_align: Option<CellHAlign>,
     pub v_align: Option<CellVAlign>,
+    pub insets: CellInsets,
     pub paras: Vec<TextPara>,
+}
+
+/// Editable DrawingML table-cell text insets.
+#[derive(Clone, Copy, Default)]
+pub struct CellInsets {
+    pub left_emu: i64,
+    pub top_emu: i64,
+    pub right_emu: i64,
+    pub bottom_emu: i64,
 }
 
 /// Horizontal alignment inherited by paragraphs in a table cell.
