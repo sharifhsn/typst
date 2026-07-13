@@ -959,6 +959,27 @@ fn nested_table_uses_its_parent_cell_width() {
 }
 
 #[test]
+fn table_cell_insets_become_native_cell_margins() {
+    let p = parts(
+        "#table(columns: 1, table.cell(inset: (left: 18pt, right: 12pt, \
+         top: 6pt, bottom: 3pt))[Cell])",
+    );
+    let doc = &p["word/document.xml"];
+    let margins = doc
+        .split("<w:tcMar>")
+        .nth(1)
+        .and_then(|xml| xml.split("</w:tcMar>").next())
+        .expect("cell margins");
+    for (side, twips) in [("top", 120), ("left", 360), ("bottom", 60), ("right", 240)] {
+        assert!(
+            margins.contains(&format!("<w:{side} w:w=\"{twips}\" w:type=\"dxa\"/>")),
+            "missing {side} margin"
+        );
+    }
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn stroke_none_table_has_no_cell_borders() {
     // `stroke: none` must turn borders OFF — every cell side becomes an explicit
     // `w:val="nil"` (not left to inherit the table's default border).

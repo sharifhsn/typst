@@ -260,6 +260,7 @@ fn cell(width: i32, blocks: Vec<Block>) -> Cell {
         v_merge: None,
         borders: CellBorders::default(),
         shd_fill: None,
+        margins: crate::dom::CellMargins::default(),
         valign: None,
         blocks,
     }

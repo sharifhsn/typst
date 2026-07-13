@@ -637,6 +637,19 @@ fn write_cell(
             .attr("w:fill", &format!("{r:02X}{g:02X}{b:02X}"))
             .empty();
     }
+    w.open("w:tcMar").start_children();
+    for (side, value) in [
+        ("w:top", cell.margins.top),
+        ("w:left", cell.margins.left),
+        ("w:bottom", cell.margins.bottom),
+        ("w:right", cell.margins.right),
+    ] {
+        w.open(side)
+            .attr("w:w", &value.max(0).to_string())
+            .attr("w:type", "dxa")
+            .empty();
+    }
+    w.close();
     if let Some(valign) = cell.valign {
         let v = match valign {
             VAlign::Top => "top",

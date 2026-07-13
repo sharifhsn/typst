@@ -785,8 +785,17 @@ pub struct Cell {
     pub v_merge: Option<VMerge>,
     pub borders: CellBorders,
     pub shd_fill: Option<[u8; 3]>,
+    pub margins: CellMargins,
     pub valign: Option<VAlign>,
     pub blocks: Vec<Block>,
+}
+
+#[derive(Copy, Clone, Default)]
+pub struct CellMargins {
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    pub left: i32,
 }
 
 #[derive(Copy, Clone)]

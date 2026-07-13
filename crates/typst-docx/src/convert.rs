@@ -1227,6 +1227,7 @@ fn handle_block_box(
                     v_merge: None,
                     borders: CellBorders::default(),
                     shd_fill: Some(crate::props::color_to_hex(color)),
+                    margins: crate::dom::CellMargins::default(),
                     valign: Some(VAlign::Top),
                     blocks: inner,
                 }],

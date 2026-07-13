@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use typst_library::diag::SourceResult;
-use typst_library::foundations::{Content, Packed, Smart, StyleChain};
+use typst_library::foundations::{Content, Packed, Resolve, Smart, StyleChain};
 use typst_library::layout::resolve::{Cell as ResolvedCell, CellGrid, Entry};
 use typst_library::layout::{Abs, Alignment, Sizing, VAlignment};
 use typst_library::layout::{GridCell, GridElem};
@@ -26,7 +26,7 @@ use typst_utils::Numeric;
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, Border, Cell, CellBorders, Jc, Para, ParaChild, ParaProps,
+    Block, Border, Cell, CellBorders, CellMargins, Jc, Para, ParaChild, ParaProps,
     ReviewCandidateKind, Row, RowHeight, Run, RunProps, Tbl, TblProps, VAlign, VMerge,
 };
 use crate::report::{DecisionReason, LossSet, Representation};
@@ -256,6 +256,9 @@ fn cellgrid(
     let mut rows = Vec::with_capacity(nrows);
     for y in 0..nrows {
         let mut cells = Vec::with_capacity(col_dxa.len());
+        let resolved_row_height = measured
+            .and_then(|geometry| geometry.row_heights.get(y).copied().flatten())
+            .or_else(|| row_height(grid, y));
 
         let mut x = 0;
         while x < ncols {
@@ -279,6 +282,7 @@ fn cellgrid(
                         (grid_end - grid_start) as u32,
                         v_merge,
                         Some(w_dxa),
+                        resolved_row_height.map(|height| height.val),
                     )?);
 
                     x = span_end;
@@ -347,9 +351,7 @@ fn cellgrid(
         rows.push(Row {
             header: is_header_row(y),
             cant_split: row_cant_split(grid, y),
-            height: measured
-                .and_then(|geometry| geometry.row_heights.get(y).cloned().flatten())
-                .or_else(|| row_height(grid, y)),
+            height: resolved_row_height,
             cells,
         });
 
@@ -377,6 +379,7 @@ fn build_cell(
     grid_span: u32,
     v_merge: Option<VMerge>,
     w_dxa: Option<i32>,
+    h_dxa: Option<i32>,
 ) -> SourceResult<Cell> {
     // Cell fill → `w:shd`.
     let shd_fill = cell.fill.as_ref().and_then(paint_to_rgb);
@@ -392,10 +395,17 @@ fn build_cell(
     // Alignment: the resolved cell folds its effective alignment back onto the
     // `TableCell` body, so read it from there.
     let (jc, valign) = cell_alignment(cell, styles);
+    let margins = cell_margins(cell, styles, w_dxa, h_dxa);
 
     // Cell body → blocks. The body is the packed `TableCell`; lower its inner
     // `body` content through the shared block pipeline.
-    let mut blocks = cell_blocks(ctx, cell, styles, jc, w_dxa)?;
+    let content_width = w_dxa.map(|width| {
+        width
+            .saturating_sub(margins.left)
+            .saturating_sub(margins.right)
+            .max(1)
+    });
+    let mut blocks = cell_blocks(ctx, cell, styles, jc, content_width)?;
 
     // §0/§2: every `w:tc` must contain ≥1 block and END in a `w:p`.
     ensure_ends_in_para(&mut blocks);
@@ -406,6 +416,7 @@ fn build_cell(
         v_merge,
         borders,
         shd_fill,
+        margins,
         valign,
         blocks,
     })
@@ -421,6 +432,7 @@ fn continuation_cell(grid_span: u32, w_dxa: Option<i32>, borders: CellBorders) -
         v_merge: Some(VMerge::Continue),
         borders,
         shd_fill: None,
+        margins: CellMargins::default(),
         valign: None,
         blocks: vec![empty_para_block()],
     }
@@ -433,6 +445,7 @@ fn spacer_cell(width_dxa: i32, grid_span: u32) -> Cell {
         v_merge: None,
         borders: CellBorders::default(),
         shd_fill: None,
+        margins: CellMargins::default(),
         valign: None,
         blocks: vec![empty_para_block()],
     }
@@ -527,6 +540,46 @@ fn cell_alignment(
         return (None, None);
     };
     align_to_docx(align)
+}
+
+/// Reads the resolved cell inset folded onto its packed table/grid cell and
+/// maps it to Word's per-cell margins (`w:tcMar`). Percentage components use
+/// the resolved cell width/row height as their axis reference; absolute insets
+/// (the common case) map exactly to twips.
+fn cell_margins(
+    cell: &ResolvedCell,
+    styles: StyleChain,
+    width_dxa: Option<i32>,
+    height_dxa: Option<i32>,
+) -> CellMargins {
+    let inset = if let Some(cell) = cell.body.to_packed::<TableCell>() {
+        cell.inset.get(styles)
+    } else if let Some(cell) = cell.body.to_packed::<GridCell>() {
+        cell.inset.get(styles)
+    } else {
+        return CellMargins::default();
+    };
+    let Smart::Custom(inset) = inset else {
+        return CellMargins::default();
+    };
+
+    let width = Abs::pt(width_dxa.unwrap_or(0).max(0) as f64 / 20.0);
+    let height = Abs::pt(height_dxa.unwrap_or(0).max(0) as f64 / 20.0);
+    let margin = |value: Option<
+        typst_library::layout::Rel<typst_library::layout::Length>,
+    >,
+                  reference: Abs| {
+        value.map_or(0, |value| {
+            crate::props::abs_to_twip(value.resolve(styles).relative_to(reference)).max(0)
+        })
+    };
+
+    CellMargins {
+        top: margin(inset.top, height),
+        right: margin(inset.right, width),
+        bottom: margin(inset.bottom, height),
+        left: margin(inset.left, width),
+    }
 }
 
 /// Maps a Typst [`Alignment`] to (`w:jc`, `w:vAlign`).
