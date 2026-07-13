@@ -5,8 +5,8 @@
 //!
 //! Strategy:
 //! - `LinkElem` with a URL destination → a `<w:hyperlink r:id>` (external
-//!   relationship via [`DocxCtx::add_external_rel`]) wrapping the body runs,
-//!   styled with the `Hyperlink` character style.
+//!   relationship via [`DocxCtx::add_external_rel`]) wrapping the body runs
+//!   while preserving Typst's authored run appearance.
 //! - `LinkElem` / `RefElem` to an in-document location → a `<w:hyperlink
 //!   w:anchor>` (for links) or a `REF`/`PAGEREF` complex field (for refs) that
 //!   targets the bookmark the heading/figure mapper registered via
@@ -27,9 +27,6 @@ use crate::dom::{
     Field, FieldCacheStatus, FieldDisplay, FieldMode, ParaChild, Run, RunProps,
 };
 use crate::report::{DecisionReason, LossSet, Representation};
-
-/// The `Hyperlink` character style name (defined in `styles.xml`).
-const HYPERLINK_STYLE: &str = "Hyperlink";
 
 /// Lowers a [`LinkElem`] into paragraph children.
 ///
@@ -56,25 +53,20 @@ pub fn link(
         }
     };
 
-    // Body runs are styled with the Hyperlink character style so links look
-    // like links (blue + underline come from the `Hyperlink` style itself).
-    let mut link_props = props.clone();
-    link_props.style = Some(HYPERLINK_STYLE.into());
-
     match dest {
         Destination::Url(url) => {
             // External hyperlink: allocate (or reuse) an External relationship
             // and reference it via `r:id`. The relationship carries
             // `TargetMode="External"` (handled by `add_external_rel`).
             let rel = ctx.add_external_rel(url.into_inner().as_str());
-            let runs = ctx.inline_runs(&elem.body, styles, link_props)?;
+            let runs = ctx.inline_runs(&elem.body, styles, props.clone())?;
             Ok(vec![ParaChild::Hyperlink { rel: Some(rel), anchor: None, runs }])
         }
         Destination::Location(loc) => {
             // Internal hyperlink to a bookmark — no relationship, just an
             // anchor naming the target bookmark.
             let (_id, name) = ctx.add_bookmark(loc);
-            let runs = ctx.inline_runs(&elem.body, styles, link_props)?;
+            let runs = ctx.inline_runs(&elem.body, styles, props.clone())?;
             Ok(vec![ParaChild::Hyperlink { rel: None, anchor: Some(name), runs }])
         }
         Destination::Position(_) => {

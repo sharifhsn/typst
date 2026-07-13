@@ -2177,40 +2177,26 @@ fn cross_reference_is_a_clickable_hyperlink() {
 }
 
 #[test]
-fn url_link_looks_like_a_link() {
-    // A `#link("url")[text]` must render as a real Word hyperlink: blue +
-    // underline. The `Hyperlink` character style supplies that, and the run must
-    // NOT carry an explicit black colour (which would override the style back to
-    // invisible body text — the bug this guards against).
+fn url_link_preserves_typst_appearance() {
+    // Typst links are interactive without acquiring browser-like styling. Keep
+    // the native Word hyperlink target while preserving the surrounding text's
+    // authored appearance.
     let p = parts("See #link(\"https://typst.app\")[the site] now.");
     let doc = &p["word/document.xml"];
-    let styles = &p["word/styles.xml"];
-    // The Hyperlink character style is defined with a colour + underline.
-    let hl = styles
-        .split("w:styleId=\"Hyperlink\"")
-        .nth(1)
-        .and_then(|s| s.split("</w:style>").next())
-        .expect("Hyperlink style");
-    assert!(hl.contains("<w:color"), "Hyperlink style sets a colour");
-    assert!(hl.contains("<w:u "), "Hyperlink style underlines");
-    // The link run uses the style and does NOT pin its own black colour.
     let link = doc
         .split("<w:hyperlink")
         .nth(1)
         .and_then(|s| s.split("</w:hyperlink>").next())
         .expect("a hyperlink");
-    assert!(link.contains("w:val=\"Hyperlink\""), "link run uses the Hyperlink style");
-    assert!(
-        !link.contains("<w:color w:val=\"000000\""),
-        "link run must not override the style with black"
-    );
+    assert!(!link.contains("w:val=\"Hyperlink\""));
+    assert!(!link.contains("<w:u "), "Typst did not author an underline");
     assert_all_wellformed(&p);
 }
 
 #[test]
-fn explicitly_colored_url_link_overrides_hyperlink_style() {
+fn explicitly_colored_url_link_preserves_typst_style() {
     let p = parts(
-        "#text(fill: red, weight: \"bold\")[#link(\"https://example.com\")[Styled link]]",
+        "Before #text(fill: red, weight: \"bold\")[#link(\"https://example.com\")[Styled link]] after.",
     );
     let doc = &p["word/document.xml"];
     let link = doc
@@ -2218,16 +2204,26 @@ fn explicitly_colored_url_link_overrides_hyperlink_style() {
         .nth(1)
         .and_then(|s| s.split("</w:hyperlink>").next())
         .expect("a hyperlink");
-    assert!(link.contains("w:val=\"Hyperlink\""), "link remains style-backed");
+    assert!(!link.contains("w:val=\"Hyperlink\""));
     assert!(link.contains("<w:b/>"), "explicit bold survives");
     assert!(
         link.contains("<w:color w:val=\"FF4136\"/>"),
-        "explicit Typst red must override the Hyperlink style even when hoisted: {link}"
+        "explicit Typst red must remain direct formatting: {link}"
     );
-    assert!(
-        link.contains("<w:u w:val=\"none\"/>"),
-        "explicit link appearance should cancel the style underline absent in Typst: {link}"
-    );
+    assert!(!link.contains("<w:u "), "Typst did not author an underline: {link}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn explicitly_underlined_url_link_keeps_its_underline() {
+    let p = parts("#underline[#link(\"https://example.com\")[Underlined link]]");
+    let doc = &p["word/document.xml"];
+    let link = doc
+        .split("<w:hyperlink")
+        .nth(1)
+        .and_then(|s| s.split("</w:hyperlink>").next())
+        .expect("a hyperlink");
+    assert!(link.contains("<w:u w:val=\"single\""));
     assert_all_wellformed(&p);
 }
 
