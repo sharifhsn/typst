@@ -90,6 +90,25 @@ fn parts(src: &str) -> HashMap<String, String> {
     map
 }
 
+/// Compiles `src` and decodes the first embedded PNG.
+fn first_png(src: &str) -> tiny_skia::Pixmap {
+    let world = TestWorld::new(src);
+    let doc = typst::compile::<DocxDocument>(&world)
+        .output
+        .expect("compilation failed");
+    let bytes = docx(&doc, &DocxOptions { pretty: false }).expect("docx export failed");
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    for i in 0..zip.len() {
+        let mut file = zip.by_index(i).unwrap();
+        if file.name().starts_with("word/media/") && file.name().ends_with(".png") {
+            let mut png = Vec::new();
+            file.read_to_end(&mut png).unwrap();
+            return tiny_skia::Pixmap::decode_png(&png).expect("embedded PNG decodes");
+        }
+    }
+    panic!("DOCX contains no PNG media part");
+}
+
 /// Parses every XML part with the namespace-aware parser, asserting that no
 /// part uses an undeclared namespace prefix.
 fn assert_all_wellformed(parts: &HashMap<String, String>) {
@@ -769,6 +788,26 @@ fn page_background_becomes_a_behind_text_header_image() {
     // The body text is unaffected.
     assert!(p["word/document.xml"].contains("Body text"));
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn page_background_preserves_its_blank_coordinate_space() {
+    // The background drawing is stretched to the full page. Its source bitmap
+    // must therefore keep the full page-sized layout frame: geometrically
+    // tightening this to the small corner square would stretch that square to
+    // full-bleed. Rendering is 2 px/pt, hence 400x300pt -> 800x600px.
+    let png = first_png(
+        "#set page(\
+           width: 400pt, height: 300pt, margin: 0pt,\
+           background: align(bottom + right, square(size: 20pt, fill: red)),\
+         )\nBody text.",
+    );
+    assert_eq!((png.width(), png.height()), (800, 600));
+    let mut ink = png.pixels().iter().enumerate().filter(|(_, pixel)| pixel.alpha() > 0);
+    let (first, _) = ink.next().expect("background has ink");
+    let last = ink.last().map_or(first, |(index, _)| index);
+    assert!(first / 800 > 550, "ink stays near the bottom of the page");
+    assert!(last % 800 > 750, "ink stays near the right edge of the page");
 }
 
 #[test]

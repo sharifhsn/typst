@@ -389,14 +389,37 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         {
             return Ok((tags, None));
         }
+        // Ordinary fallback images render only their ink. The uncropped page-
+        // background path must preserve the frame's blank coordinate space as
+        // well: the caller stretches this bitmap to the full page, so reducing
+        // a corner watermark to its ink would blow it up to full-bleed. Include
+        // out-of-frame ink in both cases so `#move`d content is never clipped.
+        let render_rect = if crop {
+            ink
+        } else {
+            let frame_rect = typst_library::layout::Rect::from_pos_size(
+                typst_library::layout::Point::zero(),
+                frame.size(),
+            );
+            typst_library::layout::Rect::new(
+                typst_library::layout::Point::new(
+                    ink.min.x.min(frame_rect.min.x),
+                    ink.min.y.min(frame_rect.min.y),
+                ),
+                typst_library::layout::Point::new(
+                    ink.max.x.max(frame_rect.max.x),
+                    ink.max.y.max(frame_rect.max.y),
+                ),
+            )
+        };
         // Floor degenerate axes (a hairline) to keep the pixmap constructible.
         let size = typst_library::layout::Size::new(
-            ink.size().x.max(Abs::pt(0.5)),
-            ink.size().y.max(Abs::pt(0.5)),
+            render_rect.size().x.max(Abs::pt(0.5)),
+            render_rect.size().y.max(Abs::pt(0.5)),
         );
         let mut canvas = Frame::hard(size);
         canvas.push_frame(
-            typst_library::layout::Point::new(-ink.min.x, -ink.min.y),
+            typst_library::layout::Point::new(-render_rect.min.x, -render_rect.min.y),
             frame,
         );
 
