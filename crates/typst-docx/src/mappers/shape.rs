@@ -72,7 +72,7 @@ use ecow::EcoString;
 /// a `#rect`/`#square` carrying content — to a Word *text box*: a `wps:wsp` shape
 /// whose `wps:txbx` holds the real, editable text, instead of rasterizing it to a
 /// flat image. Returns `None` when the container is not a text-box candidate (no
-/// visible frame, an unrepresentable gradient fill, a body with layout-only
+/// visible frame, an unrepresentable fill, a body with layout-only
 /// introspection, or a body that lays out to nothing), so the caller falls
 /// through to its normal rasterize/extract handling.
 ///
@@ -97,12 +97,11 @@ pub fn text_box(
         nonuniform_stroke: _,
     } = framed;
 
-    // A gradient/tiling fill has no solid-colour text-box form: keep rasterizing
-    // it so the visual survives.
-    let fill = match fill_paint {
-        Some(Paint::Solid(c)) => Some(ShapeFill::Solid(opaque(color_to_hex(&c)))),
-        Some(_) => return Ok(None),
-        None => None,
+    // Text boxes use the same DrawingML shape fill vocabulary as decorative
+    // shapes. Preserve native linear gradients and raster-backed tilings while
+    // declining only paints that the shared fill mapper cannot represent.
+    let Some(fill) = fill_color(ctx, &fill_paint) else {
+        return Ok(None);
     };
     // Need a visible frame: a fill or a (representable) stroke. A bare inline box
     // has neither and keeps its existing handling; a `#rect`/`#square` always has

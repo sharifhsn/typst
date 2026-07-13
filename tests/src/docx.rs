@@ -3326,6 +3326,21 @@ fn rect_with_text_becomes_a_text_box() {
 }
 
 #[test]
+fn gradient_rect_with_text_keeps_native_fill_and_editable_text() {
+    let p = parts(
+        "#rect(width: 4in, height: 1in, fill: gradient.linear(red, blue))\
+         [Gradient background]",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<wps:txbx"), "the text remains editable");
+    assert!(doc.contains("Gradient background"), "the text is preserved");
+    assert!(doc.contains("<a:gradFill"), "the rectangle keeps its gradient");
+    assert!(doc.contains("<a:lin "), "the gradient is native and linear");
+    assert!(!p.keys().any(|k| k.starts_with("word/media/")), "nothing is rasterized");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn block_level_callout_flows_as_a_shaded_paragraph() {
     // A block-level framed container with flowing content (a multi-paragraph
     // callout, a code listing) maps to shaded + bordered paragraphs that break

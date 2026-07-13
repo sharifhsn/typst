@@ -1026,7 +1026,7 @@ fn handle_block_inner(
         // A short, single-line standalone framed container → a Word text box (a
         // sized, framed box). Standalone text boxes render correctly (an *inline*
         // one does not — that case is handled by run shading in `handle_inline`).
-        // Not a text-box candidate (gradient fill, layout-bound body) → fall back
+        // Not a text-box candidate (unrepresentable fill, layout-bound body) → fall back
         // to the generic inline path so the content still survives.
         if let Some(run) = mappers::shape::text_box(child, styles, ctx)? {
             out.push(Block::Para(Para {
