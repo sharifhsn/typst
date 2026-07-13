@@ -2181,6 +2181,30 @@ fn url_link_looks_like_a_link() {
 }
 
 #[test]
+fn explicitly_colored_url_link_overrides_hyperlink_style() {
+    let p = parts(
+        "#text(fill: red, weight: \"bold\")[#link(\"https://example.com\")[Styled link]]",
+    );
+    let doc = &p["word/document.xml"];
+    let link = doc
+        .split("<w:hyperlink")
+        .nth(1)
+        .and_then(|s| s.split("</w:hyperlink>").next())
+        .expect("a hyperlink");
+    assert!(link.contains("w:val=\"Hyperlink\""), "link remains style-backed");
+    assert!(link.contains("<w:b/>"), "explicit bold survives");
+    assert!(
+        link.contains("<w:color w:val=\"FF4136\"/>"),
+        "explicit Typst red must override the Hyperlink style even when hoisted: {link}"
+    );
+    assert!(
+        link.contains("<w:u w:val=\"none\"/>"),
+        "explicit link appearance should cancel the style underline absent in Typst: {link}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn text_box_has_a_vml_fallback() {
     // A `wps:txbx` text box is a 2010 DrawingML feature; it is wrapped in
     // `mc:AlternateContent` with a legacy VML `v:textbox` fallback so consumers

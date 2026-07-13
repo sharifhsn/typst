@@ -375,6 +375,10 @@ pub struct RunProps {
     /// `<w:noProof/>` — disables spelling/grammar proofing for code/raw runs.
     pub no_proof: bool,
     pub color: Option<[u8; 3]>,
+    /// Keep an explicitly styled hyperlink colour as direct formatting even
+    /// when it matches a hoisted document/heading default. The Hyperlink
+    /// character style defines its own blue and would otherwise override it.
+    pub(crate) preserve_color: bool,
     /// Character spacing / tracking in signed twips (`<w:spacing w:val=…>` in
     /// `rPr`). `text(tracking:)`. Default none.
     pub tracking: Option<i32>,
@@ -425,6 +429,11 @@ impl Underline {
     /// A plain single underline with no colour of its own.
     pub fn single() -> Self {
         Self { val: "single", color: None }
+    }
+
+    /// Explicitly disables an underline inherited from a character style.
+    pub fn none() -> Self {
+        Self { val: "none", color: None }
     }
 }
 

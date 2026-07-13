@@ -1307,7 +1307,7 @@ fn strip_heading_run_props(props: &mut RunProps, style: &RunProps) {
     if props.size_half_pt == style.size_half_pt {
         props.size_half_pt = None;
     }
-    if props.color == style.color {
+    if !props.preserve_color && props.color == style.color {
         props.color = None;
     }
     if style.bold && props.bold == style.bold {
@@ -1325,7 +1325,7 @@ fn strip_text_defaults(props: &mut RunProps, defaults: &TextDefaults) {
     if props.size_half_pt == Some(defaults.size_half_pt) {
         props.size_half_pt = None;
     }
-    if props.color == defaults.color {
+    if !props.preserve_color && props.color == defaults.color {
         props.color = None;
     }
     if props.lang == defaults.lang {
@@ -1349,7 +1349,7 @@ fn strip_text_defaults_below_heading(
     {
         props.size_half_pt = None;
     }
-    if heading.color.is_none() && props.color == defaults.color {
+    if !props.preserve_color && heading.color.is_none() && props.color == defaults.color {
         props.color = None;
     }
     if heading.lang.is_none() && props.lang == defaults.lang {

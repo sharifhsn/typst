@@ -774,6 +774,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             styles.get_ref(TextElem::fill)
         {
             p.color = Some(props::color_to_hex(color));
+            if p.style.as_deref() == Some("Hyperlink") && styles.has(TextElem::fill) {
+                p.preserve_color = true;
+            }
         }
 
         // Font (first family). The most common one is later hoisted into
@@ -822,6 +825,13 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 }
                 _ => {}
             }
+        }
+        // A user-specified link colour supplies the link's visual treatment.
+        // Cancel the Hyperlink character style's inherited underline unless
+        // Typst itself added one above. Ordinary links keep the conventional
+        // style-provided blue underline.
+        if p.preserve_color && p.underline.is_none() {
+            p.underline = Some(Underline::none());
         }
 
         // Case and small capitals.
