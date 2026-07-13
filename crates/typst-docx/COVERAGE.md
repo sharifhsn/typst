@@ -1686,7 +1686,83 @@ contains exactly the same two tags, and the lossless sidecar contains both
 source records. Repeated compilation produces identical entry IDs. A document
 without a bibliography has empty snapshot facts and emits neither package view.
 
-## 33. Snapshot link edges and stable internal bookmark names
+## 33. Positioned native canvases preserve flow and source-space geometry
+
+A one-page `badformer` game scene exposed two independent false-native claims.
+First, every floating shape used a normal line-height anchor paragraph; 275
+legal anchors therefore consumed six pages of document flow. Anchor-only
+paragraphs now use an exact one-twip line. Second, native line/curve path
+normalization retained width and height but discarded the source-space minimum
+coordinate, placing every explicit-endpoint line at `(0, 0)`. `Drawing` now
+carries that normalized source offset into its final `wp:positionH/V` anchor.
+
+The same document also uses `set page(fill: black)`. Word's native
+`w:background` is retained, and a full-page native DrawingML rectangle is added
+behind the header as a compatibility branch for consumers such as headless
+LibreOffice that do not print Page Color. No raster media is added.
+
+Real LibreOffice evidence improved from six pages and visual score `0.014820`
+to one page and `0.984571`, while all 275 scene/UI drawings remain native and
+editable. The full 179-test DOCX suite passes, including exact source-origin,
+collapsed-anchor-paragraph, and solid-page-fill compatibility assertions.
+
+Microsoft Word exposed one further boundary that schema/package validation did
+not: four decorative lines used billion-EMU source geometry, and the first such
+line made Word reject the entire file. Falling through to the generic raster
+path attempted an enormous allocation and was killed. Native path extraction
+now compresses only axes outside a conservative ±100,000,000 EMU point range,
+anchored at the edge nearest the page origin. This keeps visible geometry in
+place, preserves editability, and bounds Word's parser input. The fidelity
+manifest honestly records these as `Approximate` / `WordCoordinateBound` with
+visual-only loss. Focused evidence is one page in both Word and LibreOffice,
+with LibreOffice score `0.983091`, 275 drawings, four approximations, zero
+rasters, and zero drops.
+
+### 33.1 Large relative raster compatibility branch
+
+Correctly resolving a large width-relative PNG against its current container
+exposed a LibreOffice layout loop in `how-to-use-typst-for-paper-ja`: one
+842×845 screenshot displayed at about 293×294pt consumed more than four CPU
+minutes, while its older oversized extent rendered in roughly two seconds.
+Changing DPI metadata, resampling pixels, VML, smaller extents, and horizontal
+tiling did not help. The failure depended on one tall inline box.
+
+The final enrollment is deliberately narrow: a raster must have source width
+at least 75% relative, intrinsic width and height between 700 and 1000 pixels,
+near-square aspect (0.95–1.05), and resolved height between 280 and 310pt. The
+exact single DrawingML picture then lives in a `w15` `mc:Choice`. The
+compatibility fallback references
+the same relationship twice, cropping top and bottom halves into consecutive
+bands whose combined dimensions and pixels equal the source picture. Modern
+Word therefore keeps one exact editable picture; LibreOffice and older
+consumers avoid the pathological box. Only the first band owns alt text and the
+second is decorative. Fidelity records `NativeWithFallback` /
+`LibreOfficeImageLayoutFallback` with unified-image editability loss.
+
+Focused evidence: LibreOffice conversion completes in about 2.4 seconds,
+visual score `0.885345`, and 55 pages (v4 was `0.886529` and 55 pages). Word
+opens without repair and selects the modern branch, though its 95-page layout
+against a 23-page Typst reference remains a separate pagination defect.
+The full v8 corpus enrolls exactly one document/region in this fallback and
+returns to the five pre-existing LibreOffice timeouts.
+
+### 33.2 Page overlays retain their logical canvas
+
+`render_frame_to_png(crop_to_ink: false)` still constructed its initial canvas
+from the frame's ink bounds. A page background made only from a positioned 1pt
+border therefore became a 2-pixel-wide PNG, which `page_overlay_block` then
+stretched across the full sheet. `agregyst` rendered as large black/gray page
+regions even though the Typst reference was white with a thin border.
+
+Page overlays now expand the laid-out frame to the full logical page box and
+use `render_full_frame_to_png`. Ordinary fallback images retain ink cropping.
+A regression asserts that a 100pt × 80pt page overlay produces a 200×160 PNG
+at the existing 2 px/pt resolution rather than 2×160. Focused LibreOffice
+evidence keeps two pages and improves from `0.355880` to `0.944054`, passing
+visual policy. Word opens without repair but produces three pages, leaving a
+separate one-page consumer-pagination difference.
+
+## 34. Snapshot link edges and stable internal bookmark names
 
 Internal hyperlinks previously called `add_bookmark(Location)` during lowering,
 which assigned `_Ref1`, `_Ref2`, and so on in conversion order. The location and
@@ -1707,7 +1783,7 @@ link texts; DOCX uses the same `_Typst…` value for `w:bookmarkStart/@w:name` a
 external mode, and the manifest publishes one node edge and one URL edge.
 Repeated compilation produces identical link facts and bookmark names.
 
-## 34. Paged-authoritative page counters and TOC caches
+## 35. Paged-authoritative page counters and TOC caches
 
 TOC page caches previously called `Counter::display_at` after DOCX lowering.
 That replayed custom numbering functions under `Target::Docx`, even when the
@@ -1728,3 +1804,135 @@ the first page, then switches to Arabic and resets to `1`. PDF and the DOCX TOC
 both show `i`/`1`; the manifest records the same values, and the two `PAGEREF`
 fields are `Resolved` rather than `BestEffort`. Non-page semantic counters and
 pre-enrolled fallback regions remain snapshot migration work.
+
+## 36. Terminal drops distinguish source whitespace from visible text
+
+`record_content_drop` previously counted raw `Content::plain_text()` characters.
+For a multiline visual body such as `place(rotate(line(..)))`, that includes the
+newlines and indentation surrounding the shape. An unsupported gradient stroke
+could therefore become a false `content_loss` result even though no visible text
+existed. Drop accounting now trims only the outer source-layout whitespace; real
+internal spaces in visible text remain counted.
+
+The shape-only preflight also accepts inert spaces and paragraph separators, so
+a multiline rotated solid line reaches the existing native transformed-shape
+mapper and emits an anchored DrawingML custom geometry instead of raster media.
+An unsupported gradient-stroked variant remains an explicit visual/semantic
+drop, but reports zero affected text characters.
+
+A focused rebuild of the three former corpus text-loss records—`storytiles`,
+`smorad-um_cisc_7026`, and `vnckey-book-rs`—now classifies all three as
+`unverified`, with zero `reported_text_drop` results. Their remaining capability
+losses and missing consumer/font/license evidence stay visible.
+
+## 37. Landscape page boundaries avoid double pagination
+
+Run-level `<w:br w:type="page"/>` is not idempotent. When fixed-height slide
+content already fills a Word page, the trailing break lands at the top of the
+next physical page and advances again, producing a blank page between slides.
+For landscape/slide-shaped sections, page boundaries now move onto the following
+paragraph as native `<w:pageBreakBefore/>`. If Word has already auto-paginated,
+the property leaves the paragraph on that page; otherwise it starts the intended
+new page. Non-landscape flowing documents retain their existing break-run path.
+
+The `sleiden-lei` public fixture improves from 19 LibreOffice pages for 10 PDF
+pages to 12 pages. The remaining two pages are the independently visible logo
+rows from its two fixed-height title stacks; attempted exact-row and whole-stack
+raster branches were rejected because LibreOffice either repaginated the row or
+failed to paint the body image. The retained fix therefore removes nine proven
+blank pages without hiding the remaining degradation.
+
+Image extents also resolve explicit percentage width/height against the current
+DOCX container instead of always falling back to intrinsic pixels. A synthetic
+200 x 100 pt page verifies that `image(height: 50%)` emits a 50 pt native SVG
+extent with its PNG compatibility branch.
+
+## 38. Section page colors do not leak or manufacture slide headers
+
+Word's `w:background` is document-global. A dark cover followed by ordinary
+white sections therefore stayed dark even though Typst had reset the page fill.
+When existing sections disagree on solid page color, DOCX now omits the global
+color and retains section-specific behind-text shapes only for colored runs. A
+white/unfilled section following a colored section gets an empty header part to
+break Word's header inheritance; an initially white section gets no unnecessary
+part. This distinction matters for slide decks with dozens of sections.
+
+`humble-dtu-thesis` improves from `0.403043` to `0.961059` in LibreOffice while
+remaining 12 reference pages versus 13 consumer pages. Word opens without
+repair and reports 14 pages. `algorithmlecturenotes` improves from `0.351669`
+to `0.809159` without changing its separate 20-to-32-page pagination drift.
+
+## 39. Unsupported math raster fallback starts page-bounded
+
+Raster fallback normally lays content out at infinite height so tall figures
+are captured whole. For equation-containing regions, that can retain a
+document-absolute vertical position: a small border remains at the origin while
+the actual equation lands tens of thousands of transparent pixels below it.
+The resulting PNGs reached 750 million pixels and drawing extents up to 5.89
+billion EMU.
+
+Equation-containing fallbacks now start at the real page height. A secondary
+ink guard retries any other infinite-height frame whose geometric axis exceeds
+8,000pt, and refuses to render it if the bounded retry is still pathological.
+The three affected equation-heavy fixtures now have maximum extents of 10.69M,
+70.73M, and 58.15M EMU instead of 5.89B, 157.09M, and 1.38B. Their focused
+LibreOffice scores remain high (`0.978066`, `0.961428`, and `0.952929`), and the
+largest tutorial exports in 41.18 seconds with an optimized build. A structural
+regression places unsupported math after 9,000pt of prior document space and
+asserts that its raster extent remains below 100M EMU.
+
+## 40. Page background rasters include the solid page-fill canvas
+
+Typst paints `page(background:)` above `page(fill:)`. Word can retain the solid
+fill as native `w:background`, but LibreOffice reverses the relative z-order of
+two behind-text header drawings: the compatibility fill rectangle covered the
+rasterized background artwork. A successful background raster now composites
+the solid fill into its own canvas and suppresses only that competing rectangle;
+if rasterization produces nothing, the rectangle remains as the fallback.
+
+Sixteen v11 documents contain this layer combination. The focused
+`codealchemy24-resourcebook` result remains one page with full text coverage and
+improves from `0.560334` to `0.990632`. A structural regression retains native
+`w:background`, one raster background anchor, and no competing Page Color
+anchor.
+
+## 41. Auto-sized raster images follow Typst's bounded natural size
+
+For an image with neither width nor height specified, Typst starts from the
+pixel/DPI natural size and proportionally bounds it by both axes of the current
+layout region. DOCX previously emitted the unbounded intrinsic dimensions. Wide
+screenshots therefore consumed whole extra Word pages even though Typst had
+scaled them to the text width.
+
+Native raster-image extents now apply the same proportional bound while leaving
+explicit width/height behavior unchanged. `besarabegor-discord-guide` keeps all
+245 extracted words and 17 native drawings, but improves from 25 pages at
+`0.598571` to the reference nine pages at `0.941477`. A synthetic 100 x 400 PNG
+on a 200pt square page verifies a 50pt x 200pt native picture extent, proving
+that the height bound is applied as well as the width bound. A rejected
+width-only counterfactual expanded that picture to 200pt x 800pt and let the
+consumer clip most of it.
+
+## 42. Consecutive page breaks and whole-page vertical alignment
+
+A page-style transition is represented by a Word section boundary. Typst's
+realized stream contains both the synthetic transition break and any explicit
+`pagebreak()` calls at that point. The section splitter previously consumed all
+of them, collapsing multiple requested blank pages into one. The first actual
+break and the synthetic transition are now represented by the section boundary;
+every further consecutive break is retained inside the new section. A focused
+three-page fixture verifies one section boundary plus one native page break.
+
+When every non-tag element in a page run resolves to the same vertical
+`align(..)` component, `horizon` and `bottom` now map to section-level
+`w:vAlign="center"` and `w:vAlign="bottom"`. Mixed page runs keep Word's default
+top alignment. This keeps the content native and editable rather than replacing
+a designed title page with a raster.
+
+The `kdl-unofficial-template` fixture recovers its second requested blank page:
+LibreOffice moves from 10 to 11 pages against Typst's 13, with unchanged
+`0.995331` text coverage, a valid package, and a successful 104-region round
+trip. LibreOffice retains but does not visually apply `w:vAlign`, so its score
+changes only from `0.630572` to `0.630916`. Microsoft Word opens without repair,
+applies the native vertical centering on the cover, and reports 12 pages. The
+remaining consumer-specific pagination drift stays classified as degraded.

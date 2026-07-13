@@ -1230,6 +1230,62 @@ fn svg_image_embeds_native_svg_with_png_fallback() {
 }
 
 #[test]
+fn relative_image_height_resolves_against_the_current_page_container() {
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40"><rect width="80" height="40" fill="#0b6"/></svg>"##;
+    let raw = package_bytes_with_files(
+        r#"#set page(width: 200pt, height: 100pt, margin: 0pt)
+#image("logo.svg", height: 50%)"#,
+        &[("logo.svg", SVG)],
+    );
+    let document = String::from_utf8(raw["word/document.xml"].clone()).unwrap();
+    assert!(document.contains("<wp:extent cx=\"1270000\" cy=\"635000\"/>"));
+}
+
+#[test]
+fn intrinsic_raster_image_size_is_bounded_by_the_page_region() {
+    use base64::Engine as _;
+    let png = base64::engine::general_purpose::STANDARD.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAGQAAAGQAQMAAABiWFesAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURf8AAP///0EdNBEAAAABYktHRAH/Ai3eAAAAB3RJTUUH6gcNBh0zf3DnMQAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyNi0wNy0xM1QwNjoyOTo1MSswMDowMHA2gI4AAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjYtMDctMTNUMDY6Mjk6NTErMDA6MDABazgyAAAAKHRFWHRkYXRlOnRpbWVzdGFtcAAyMDI2LTA3LTEzVDA2OjI5OjUxKzAwOjAwVn4Z7QAAABxJREFUWMPtwQENAAAAwqD3T20ON6AAAAAAAHg0FeAAAWZQEs0AAAAASUVORK5CYII=",
+    ).unwrap();
+    let raw = package_bytes_with_files(
+        r#"#set page(width: 200pt, height: 200pt, margin: 0pt)
+#image("large.png")"#,
+        &[("large.png", &png)],
+    );
+    let document = String::from_utf8(raw["word/document.xml"].clone()).unwrap();
+    assert!(
+        document.contains("<wp:extent cx=\"635000\" cy=\"2540000\"/>"),
+        "the intrinsic image is contained to the 200pt page region"
+    );
+}
+
+#[test]
+fn full_container_raster_keeps_exact_word_picture_and_tiled_fallback() {
+    use base64::Engine as _;
+    let png = base64::engine::general_purpose::STANDARD.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAyAAAAMgAQMAAADhvpQrAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURf8AAP///0EdNBEAAAABYktHRAH/Ai3eAAAAB3RJTUUH6gcNASYuJYtyVQAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyNi0wNy0xM1QwMTozODo0NiswMDowMCoEDDgAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjYtMDctMTNUMDE6Mzg6NDYrMDA6MDBbWbSEAAAAKHRFWHRkYXRlOnRpbWVzdGFtcAAyMDI2LTA3LTEzVDAxOjM4OjQ2KzAwOjAwDEyVWwAAAGVJREFUeNrtwTEBAAAAwqD1T20Gf6AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4DDuvAAF2A3fYAAAAAElFTkSuQmCC",
+    ).unwrap();
+    let source = r#"#set page(width: 300pt, height: 300pt, margin: 0pt)
+#image("image.png", width: 100%)"#;
+    let raw = package_bytes_with_files(source, &[("image.png", &png)]);
+    let document = String::from_utf8(raw["word/document.xml"].clone()).unwrap();
+    assert!(document.contains("Requires=\"w15\""));
+    assert_eq!(document.matches("<a:srcRect").count(), 2);
+    let compiled = compile_docx(source, &[("image.png", &png)]);
+    let decision = compiled
+        .fidelity_report()
+        .decisions()
+        .iter()
+        .find(|decision| {
+            decision.reason == DecisionReason::LibreOfficeImageLayoutFallback
+        })
+        .expect("full-container raster fallback is reported");
+    assert_eq!(decision.representation, Representation::NativeWithFallback);
+    assert!(decision.losses.editability);
+    assert!(!decision.losses.accessibility);
+}
+
+#[test]
 fn positional_link_reports_approximation_not_content_drop() {
     let src = "#link((page: 1, x: 10pt, y: 20pt))[Jump text]";
     let compiled = compile_docx(src, &[]);
@@ -1293,6 +1349,34 @@ fn placed_percentage_offset_resolves_against_the_column() {
         p["word/document.xml"].contains("<wp:posOffset>359982</wp:posOffset>"),
         "10% resolves against the twip-rounded 100mm text area"
     );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn positioned_drawings_use_collapsed_anchor_paragraphs() {
+    let p = parts(
+        "#for i in range(100) { place(top + left, dx: i * 1pt, line(length: 1pt)) }",
+    );
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<wp:anchor ").count(), 100);
+    assert_eq!(
+        document.matches("<w:spacing w:before=\"0\" w:after=\"0\" w:line=\"1\" w:lineRule=\"exact\"/>").count(),
+        100,
+        "every floating drawing anchor must consume only one twip of flow height"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn positioned_line_keeps_its_explicit_source_origin() {
+    let p = parts("#place(line(start: (10pt, 20pt), end: (30pt, 40pt), stroke: 1pt))");
+    let document = &p["word/document.xml"];
+    assert!(document.contains(
+        "<wp:positionH relativeFrom=\"column\"><wp:posOffset>127000</wp:posOffset>"
+    ));
+    assert!(document.contains(
+        "<wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>254000</wp:posOffset>"
+    ));
     assert_all_wellformed(&p);
 }
 
@@ -1808,6 +1892,26 @@ fn unsupported_math_child_rasterizes_the_whole_equation_atomically() {
     assert!(
         !document.contains("<m:oMath"),
         "no plausible-looking partial OMML subtree is emitted"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn unsupported_math_raster_is_bounded_to_the_page_not_document_position() {
+    let p = parts("#v(9000pt)\n$frac(1, #box[LateBoxedTerm]) + y$");
+    let doc = &p["word/document.xml"];
+    let extents = doc
+        .split("<wp:extent cx=\"")
+        .skip(1)
+        .filter_map(|part| {
+            let cy = part.split(" cy=\"").nth(1)?.split('"').next()?;
+            cy.parse::<i64>().ok()
+        })
+        .collect::<Vec<_>>();
+    assert!(!extents.is_empty(), "the unsupported equation rasterizes");
+    assert!(
+        extents.iter().all(|cy| *cy < 100_000_000),
+        "fallback extents stay page-bounded instead of inheriting a document Y position: {extents:?}"
     );
     assert_all_wellformed(&p);
 }
@@ -2568,6 +2672,45 @@ fn page_background_preserves_its_blank_coordinate_space() {
 }
 
 #[test]
+fn page_background_composites_the_page_fill_without_a_competing_shape() {
+    // Typst paints `background:` above `fill:`. LibreOffice reverses the z-order
+    // of two behind-text header drawings, so a separate fill rectangle would
+    // cover the rasterized background. The raster carries the fill canvas while
+    // Word retains its native document-level Page Color.
+    let p = parts(
+        "#set page(fill: white, background: box(width: 100%, height: 100%, fill: green))\nBody text.",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<w:background w:color=\"FFFFFF\"/>"));
+    let header = p
+        .iter()
+        .find(|(name, _)| name.starts_with("word/header") && name.ends_with(".xml"))
+        .map(|(_, xml)| xml)
+        .expect("page furniture header");
+    assert!(header.contains("Background"));
+    assert!(!header.contains("Page Color"));
+    assert_eq!(header.matches("<wp:anchor").count(), 1);
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn placed_page_background_preserves_the_full_raster_canvas() {
+    let raw = package_bytes_with_files(
+        "#set page(width: 100pt, height: 80pt, margin: 0pt, background: place(right, rect(width: 1pt, height: 100%, fill: black)))\nBody.",
+        &[],
+    );
+    let png = raw
+        .iter()
+        .find(|(name, _)| name.starts_with("word/media/") && name.ends_with(".png"))
+        .map(|(_, bytes)| bytes)
+        .expect("page background PNG");
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+    assert_eq!((width, height), (200, 160));
+}
+
+#[test]
 fn page_foreground_becomes_a_front_of_text_header_image() {
     // `set page(foreground: ..)` uses the same page-anchored header drawing
     // idiom as backgrounds, but in front of body text.
@@ -2634,12 +2777,22 @@ fn place_only_foreground_still_rasterizes() {
 #[test]
 fn solid_page_fill_becomes_a_native_page_color() {
     // `set page(fill: solid-color)` (Word's "Page Color") maps to the
-    // document-level `w:background` element — no image, no header part.
+    // document-level `w:background` element. A native DrawingML rectangle in
+    // the header is the compatibility branch for consumers that do not print
+    // Word's Page Color; it does not add raster media.
     let p = parts("#set page(fill: rgb(\"#f0e6d2\"))\nBody text.");
     assert!(
         p["word/document.xml"].contains("<w:background w:color=\"F0E6D2\"/>"),
         "solid page fill becomes a native w:background"
     );
+    let header = p
+        .iter()
+        .find(|(name, _)| name.starts_with("word/header") && name.ends_with(".xml"))
+        .map(|(_, xml)| xml)
+        .expect("solid page fill gets a consumer-compatible header shape");
+    assert!(header.contains("behindDoc=\"1\""));
+    assert!(header.contains("<a:srgbClr val=\"F0E6D2\""));
+    assert!(!p.keys().any(|name| name.starts_with("word/media/")));
     // A gradient page fill has no native `w:background` form and is left unset
     // (distinct from `background:`, which still rasterizes to a behindDoc image).
     let g = parts("#set page(fill: gradient.linear(red, blue))\nBody text.");
@@ -2647,6 +2800,50 @@ fn solid_page_fill_becomes_a_native_page_color() {
         !g["word/document.xml"].contains("<w:background"),
         "a gradient page fill is not forced into a flat w:background"
     );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn changing_page_fill_uses_section_scoped_background_shapes() {
+    let p = parts(
+        "#set page(fill: rgb(32, 32, 32), header: [cover])\nDark cover\n\
+         #pagebreak()\n#set page(fill: white, header: none)\nWhite body",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        !doc.contains("<w:background"),
+        "a varying page fill must not leak through document-global page color"
+    );
+    let headers = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("word/header") && name.ends_with(".xml"))
+        .map(|(_, xml)| xml.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        headers.len() >= 2,
+        "the coloured section and the white inheritance reset get header parts"
+    );
+    assert!(headers.iter().any(|xml| xml.contains("<a:srgbClr val=\"202020\"")));
+    assert!(
+        !headers.iter().any(|xml| xml.contains("<a:srgbClr val=\"FFFFFF\"")),
+        "the default white section needs no synthetic full-page shape"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn initially_white_section_does_not_get_an_empty_reset_header() {
+    let p = parts(
+        "#set page(fill: white, header: none)\nWhite first\n\
+         #pagebreak()\n#set page(fill: rgb(32, 32, 32), header: [later])\nDark later",
+    );
+    let headers = p
+        .iter()
+        .filter(|(name, _)| name.starts_with("word/header") && name.ends_with(".xml"))
+        .map(|(_, xml)| xml.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(headers.len(), 1, "the initial white section must not get a reset part");
+    assert!(headers[0].contains("<a:srgbClr val=\"202020\""));
     assert_all_wellformed(&p);
 }
 
@@ -3144,6 +3341,38 @@ fn block_level_callout_flows_as_a_shaded_paragraph() {
 }
 
 #[test]
+fn fixed_height_filled_block_uses_a_native_bounded_cell() {
+    let p = parts(
+        r#"#block(height: 300pt, fill: rgb(32, 32, 32), inset: 8pt)[
+#set text(fill: white)
+editable terminal text
+
+second command
+]"#,
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<w:tbl>"), "the bounded block becomes a native table");
+    assert!(doc.contains("w:hRule=\"atLeast\""), "height expands instead of clipping");
+    assert!(doc.contains("w:val=\"6000\""), "300pt is retained as 6000 twips");
+    assert!(doc.contains("w:fill=\"202020\""), "cell shading retains the fill");
+    assert!(doc.contains("editable terminal text") && doc.contains("second command"));
+    assert!(!p.keys().any(|k| k.starts_with("word/media/")), "nothing rasterizes");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn page_sized_filled_block_does_not_become_a_flowing_table() {
+    let p = parts(
+        "#set page(height: 500pt)\n#block(height: 450pt, fill: black)[slide canvas]",
+    );
+    assert!(
+        !p["word/document.xml"].contains("w:hRule=\"atLeast\""),
+        "a page-sized canvas must not be forced into a flowing fixed-height row"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn footnote_in_a_box_never_lands_in_a_text_box() {
     // Word forbids a footnote inside a text box (`wps:txbx`) — the file fails to
     // open. A footnote-bearing framed container must stay in the main story: an
@@ -3257,6 +3486,46 @@ fn pagebreak_to_parity_emits_odd_even_section_breaks() {
     );
     assert_all_wellformed(&odd);
     assert_all_wellformed(&even);
+}
+
+#[test]
+fn consecutive_pagebreaks_survive_a_geometry_section_boundary() {
+    let raw = parts(
+        r#"#set page(width: 200pt, height: 200pt, margin: 10pt)
+First
+#pagebreak()
+#pagebreak()
+#set page(margin: 20pt)
+Second"#,
+    );
+    let document = &raw["word/document.xml"];
+    assert_eq!(
+        document.matches("<w:br w:type=\"page\"/>").count(),
+        1,
+        "one break becomes the section boundary and the additional break remains"
+    );
+    assert_eq!(document.matches("<w:sectPr>").count(), 2);
+}
+
+#[test]
+fn whole_page_vertical_alignment_maps_to_section_vertical_alignment() {
+    let centered = parts(
+        r#"#set page(width: 200pt, height: 200pt, margin: 10pt)
+#align(center + horizon)[Centered]"#,
+    );
+    assert!(
+        centered["word/document.xml"].contains("<w:vAlign w:val=\"center\"/>"),
+        "horizon-aligned page content uses Word's native section centering"
+    );
+
+    let bottom = parts(
+        r#"#set page(width: 200pt, height: 200pt, margin: 10pt)
+#align(center + bottom)[Bottom]"#,
+    );
+    assert!(
+        bottom["word/document.xml"].contains("<w:vAlign w:val=\"bottom\"/>"),
+        "bottom-aligned page content uses Word's native section alignment"
+    );
 }
 
 #[test]
@@ -4515,6 +4784,66 @@ fn failed_placed_region_records_its_terminal_drop() {
     assert!(p["word/document.xml"].contains("After"));
     assert!(p["customXml/typstFidelity.xml"].contains("PositionedContentUnavailable"));
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn intentionally_hidden_placed_text_is_not_reported_as_dropped() {
+    let compiled = compile_docx(
+        "Before #place(box(width: 0pt, height: 0pt, hide[SECRET HEADING])) After",
+        &[],
+    );
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedContentUnavailable
+    }));
+
+    let p = parts("Before #place(hide[SECRET HEADING]) After");
+    assert!(p["word/document.xml"].contains("Before"));
+    assert!(p["word/document.xml"].contains("After"));
+    assert!(!p["word/document.xml"].contains("SECRET HEADING"));
+    assert!(!p["customXml/typstFidelity.xml"].contains("PositionedContentUnavailable"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn positioned_multiline_rotated_line_stays_a_native_drawing() {
+    let src = "#place(top + right)[\n  #rotate(-90deg)[\n    #line(length: 10cm, stroke: 2pt)\n  ]\n]";
+    let compiled = compile_docx(src, &[]);
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedContentUnavailable
+    }));
+
+    let p = parts(src);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("<wp:anchor"), "rotated line should stay positioned");
+    assert!(document.contains("<a:custGeom>"), "rotated line should remain native");
+    assert!(!document.contains("<a:blip"), "rotated line should not rasterize");
+    assert!(!p["customXml/typstFidelity.xml"].contains("PositionedContentUnavailable"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn slide_page_boundaries_use_idempotent_page_break_before() {
+    let p = parts(
+        "#set page(width: 160mm, height: 90mm, margin: 0pt)\nFirst\n#pagebreak()\nSecond",
+    );
+    let document = &p["word/document.xml"];
+    assert!(document.contains("<w:pageBreakBefore/>"));
+    assert!(!document.contains("<w:br w:type=\"page\"/>"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn decorative_positioned_drop_does_not_report_indentation_as_lost_text() {
+    let src = "#place(top + right)[\n  #rotate(-90deg)[\n    #line(length: 10cm, stroke: 2pt + gradient.linear(red, red.transparentize(100%)))\n  ]\n]";
+    let compiled = compile_docx(src, &[]);
+    let drops: Vec<_> = compiled
+        .fidelity_report()
+        .decisions()
+        .iter()
+        .filter(|decision| decision.representation == Representation::Drop)
+        .collect();
+    assert!(!drops.is_empty(), "unsupported visual still needs an explicit drop");
+    assert!(drops.iter().all(|decision| decision.affected_text_chars == 0));
 }
 
 #[test]

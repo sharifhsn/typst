@@ -13,7 +13,9 @@ use typst_export_common::raster;
 use typst_library::diag::{SourceDiagnostic, SourceResult};
 use typst_library::foundations::{Content, StyleChain};
 use typst_library::introspection::Tag;
-use typst_library::layout::{Abs, Frame, FrameItem};
+use typst_library::layout::{Abs, Frame, FrameItem, Point, Size};
+use typst_library::math::EquationElem;
+use typst_library::visualize::{Color, Geometry};
 use typst_syntax::Span;
 
 use crate::ctx::DocxCtx;
@@ -206,8 +208,15 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
         span: Span,
         height: Abs,
+        canvas_fill: Option<[u8; 3]>,
     ) -> SourceResult<Rasterized> {
-        let key = typst_utils::hash128(&(content, styles, height, self.available_width));
+        let key = typst_utils::hash128(&(
+            content,
+            styles,
+            height,
+            self.available_width,
+            canvas_fill,
+        ));
         if let Some(cached) = self.overlay_cache.get(&key) {
             let cached = Arc::clone(cached);
             self.deferred_tags.extend(cached.tags.iter().cloned());
@@ -227,9 +236,22 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
 
         let (frame, _) =
             self.layout_export_frame_in(content, styles, span, height, true)?;
-        let Some(frame) = frame else {
+        let Some(mut frame) = frame else {
             return Ok(None);
         };
+        // Page furniture can be made entirely from `place`, whose visual ink
+        // does not contribute to the measured frame. Preserve the full page
+        // canvas before rasterization; otherwise a 1pt border can become a
+        // 1pt PNG that is later stretched across the whole sheet.
+        frame.set_size(Size::new(self.available_width, height));
+        // A solid `page(fill:)` lies below `page(background:)` in Typst. Fold it
+        // into the raster canvas instead of emitting a second behind-text header
+        // drawing: LibreOffice reverses the relative z-order of those two
+        // drawings and otherwise hides the background artwork behind the fill.
+        if let Some([r, g, b]) = canvas_fill {
+            let fill = Geometry::Rect(frame.size()).filled(Color::from_u8(r, g, b, 255));
+            frame.prepend(Point::zero(), FrameItem::Shape(fill, Span::detached()));
+        }
         let mut tags = Vec::new();
         collect_frame_tags(&frame, &mut tags);
         self.deferred_tags.extend(tags.iter().cloned());
@@ -282,8 +304,15 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         }
 
         // Prefer an infinite-height frame so tall figures are captured whole.
+        // Equations are atomic page content; laying an unsupported equation out
+        // against infinity can retain its document-absolute Y position and
+        // manufacture a hundred-thousand-pixel transparent gap. Start equation
+        // fallbacks at the real page height instead, avoiding both the unsafe
+        // extent and a second expensive layout pass in equation-heavy books.
+        let initial_height =
+            if contains_equation(content) { self.raster_height } else { Abs::inf() };
         let (inf_frame, inf_failed) =
-            self.layout_export_frame(content, styles, span, Abs::inf())?;
+            self.layout_export_frame(content, styles, span, initial_height)?;
 
         // Harvest tags before checking size. An introspecting element can have a
         // temporarily degenerate frame during convergence, and dropping its tags
@@ -296,14 +325,22 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         // Page-relative content can collapse under infinite height. Retry it at
         // the real page height before giving up.
         let frame = match inf_frame {
-            Some(frame) if usable_size(frame.size()) => frame,
+            Some(frame)
+                if usable_size(frame.size()) && !pathological_raster_ink(&frame) =>
+            {
+                frame
+            }
             _ => match self.layout_export_frame(
                 content,
                 styles,
                 span,
                 self.raster_height,
             )? {
-                (Some(frame), _) if usable_size(frame.size()) => frame,
+                (Some(frame), _)
+                    if usable_size(frame.size()) && !pathological_raster_ink(&frame) =>
+                {
+                    frame
+                }
                 (_, retry_failed) => return Ok((tags, None, inf_failed || retry_failed)),
             },
         };
@@ -342,6 +379,32 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         let size = frame.size();
         Ok(usable_size(size).then_some(size))
     }
+}
+
+/// An infinite-height fallback can retain a page-absolute item position,
+/// leaving a tiny border at the origin and the real content thousands of
+/// points away. Rendering that frame allocates hundreds of millions of pixels
+/// and emits Word-fragile extents. Retry it against the real page instead.
+fn pathological_raster_ink(frame: &Frame) -> bool {
+    const MAX_AXIS_PT: f64 = 8_000.0;
+    let mut ink = None;
+    raster::frame_ink_rect(frame, typst_library::layout::Point::zero(), &mut ink);
+    ink.is_some_and(|rect| {
+        rect.size().x.to_pt() > MAX_AXIS_PT || rect.size().y.to_pt() > MAX_AXIS_PT
+    })
+}
+
+fn contains_equation(content: &Content) -> bool {
+    use std::ops::ControlFlow;
+    content
+        .traverse(&mut |element: Content| {
+            if element.is::<EquationElem>() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .is_break()
 }
 
 /// Whether a laid-out size is finite and strictly positive on both axes.

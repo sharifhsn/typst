@@ -52,7 +52,10 @@ pub(crate) struct WordPerson {
 
 /// Maps every bibliography entry to a `WordSource`, in the given order.
 pub(crate) fn map_entries(entries: &[(Label, Entry)]) -> Vec<WordSource> {
-    entries.iter().map(|(label, entry)| map_entry(*label, entry)).collect()
+    entries
+        .iter()
+        .map(|(label, entry)| map_entry(*label, entry))
+        .collect()
 }
 
 fn map_entry(label: Label, entry: &Entry) -> WordSource {
@@ -62,10 +65,14 @@ fn map_entry(label: Label, entry: &Entry) -> WordSource {
     let author = map_author(entry);
     let title = entry.title().map(|t| t.value.to_str().into());
     let year = entry.date().map(|d| eco_format!("{}", d.year));
-    let publisher =
-        entry.publisher().and_then(|p| p.name()).map(|n| n.value.to_str().into());
-    let city =
-        entry.publisher().and_then(|p| p.location()).map(|l| l.value.to_str().into());
+    let publisher = entry
+        .publisher()
+        .and_then(|p| p.name())
+        .map(|n| n.value.to_str().into());
+    let city = entry
+        .publisher()
+        .and_then(|p| p.location())
+        .map(|l| l.value.to_str().into());
     // Word's `JournalName` is only meaningful for periodical-shaped entries;
     // for everything else, a parent title (if any) is typically the
     // containing book/proceedings, not a journal.

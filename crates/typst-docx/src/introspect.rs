@@ -167,7 +167,11 @@ impl DocxIntrospector {
     /// exact resolvable location — used both when a furniture-page override
     /// is active and when falling back for a synthetic (unresolvable-in-`real`)
     /// end location that still has real-backed query results.
-    fn count_matching_up_to_page(&self, selector: &Selector, page: NonZeroUsize) -> usize {
+    fn count_matching_up_to_page(
+        &self,
+        selector: &Selector,
+        page: NonZeroUsize,
+    ) -> usize {
         self.query(selector)
             .iter()
             .filter(|elem| {
@@ -198,35 +202,23 @@ impl Introspector for DocxIntrospector {
         // `bibs_and_groups` snapshot keyed by locations no later `here()`
         // call can ever hit, hard-failing convergence with "citation/
         // bibliography could not be located" (confirmed on a real corpus
-        // doc). But other docs' two realize passes agree closely enough
-        // (partial location overlap) that the general "prefer real"
-        // behavior already resolves correctly — unconditionally switching
-        // to `self.elements` regresses those, since `self.elements` isn't
-        // reliably any more stable than `real` when they partially agree.
-        // So only override when the two sources are fully disjoint (a
-        // certain-failure signature under the general rule); otherwise fall
-        // through to the normal prefer-real path below.
+        // doc). Partial overlap is the remaining trap: choosing either whole
+        // result can omit a bibliography that exists only in the other
+        // realization. Merge both location universes, preferring the DOCX
+        // element at an identical location. `Works` keys prepared results by
+        // location, so every later `here()` can resolve against its own pass.
         if mentions_bibliography_or_cite_group(selector) {
-            let elements_result = self.elements.query(selector);
-            let real_result = self.real.as_ref().map(|real| real.query(selector));
-            let disjoint = !elements_result.is_empty()
-                && real_result
-                    .as_ref()
-                    .is_some_and(|real_result| {
-                        !real_result.is_empty()
-                            && elements_result
-                                .iter()
-                                .all(|e| !real_result.iter().any(|r| r.location() == e.location()))
-                    });
-            if disjoint {
-                return elements_result;
+            let mut result = self.elements.query(selector);
+            let mut locations: FxHashSet<Location> =
+                result.iter().filter_map(Content::location).collect();
+            if let Some(real) = &self.real {
+                for elem in real.query(selector) {
+                    if elem.location().is_none_or(|location| locations.insert(location)) {
+                        result.push(elem);
+                    }
+                }
             }
-            if let Some(real_result) = real_result
-                && !real_result.is_empty()
-            {
-                return real_result;
-            }
-            return elements_result;
+            return result;
         }
         if let Some(real) = &self.real {
             let result = real.query(selector);

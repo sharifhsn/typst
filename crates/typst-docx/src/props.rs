@@ -271,6 +271,7 @@ impl ParaProps {
     pub fn is_empty(&self) -> bool {
         self.style.is_none()
             && !self.keep_next
+            && !self.page_break_before
             && !self.keep_lines
             && self.num.is_none()
             && !self.suppress_line_numbers
@@ -300,11 +301,15 @@ impl ParaProps {
         if self.keep_next {
             w.leaf("w:keepNext");
         }
-        // 3. keepLines
+        // 3. pageBreakBefore
+        if self.page_break_before {
+            w.leaf("w:pageBreakBefore");
+        }
+        // 4. keepLines
         if self.keep_lines {
             w.leaf("w:keepLines");
         }
-        // 4. numPr
+        // 5. numPr
         if let Some((num_id, ilvl)) = self.num {
             w.open("w:numPr").start_children();
             w.open("w:ilvl").attr(xml::W_VAL, &ilvl.to_string()).empty();

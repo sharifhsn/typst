@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -765,6 +765,23 @@ fn build_review_state(
             kind: kind.to_owned(),
         });
     }
+
+    // A source island realized more than once cannot have a single unambiguous
+    // Word owner: returning either copy would target the same Typst byte range,
+    // and tagging both would create duplicate control ids. Keep only ranges
+    // with exactly one realized candidate, matching the public review contract.
+    let mut range_counts = HashMap::new();
+    for region in &enrolled {
+        *range_counts
+            .entry((region.file.clone(), region.start, region.end))
+            .or_insert(0usize) += 1;
+    }
+    enrolled.retain(|region| {
+        range_counts
+            .get(&(region.file.clone(), region.start, region.end))
+            .copied()
+            == Some(1)
+    });
 
     if enrolled.is_empty() {
         bail!(

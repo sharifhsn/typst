@@ -419,6 +419,23 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             .warn(warning!(span, "{what} was ignored during DOCX export"));
     }
 
+    pub(crate) fn record_span_decision(
+        &mut self,
+        what: &str,
+        span: Span,
+        representation: Representation,
+        reason: DecisionReason,
+        losses: LossSet,
+    ) {
+        self.fidelity_report.record_span(
+            ExportSource::new(what, span, None),
+            representation,
+            reason,
+            losses,
+            0,
+        );
+    }
+
     /// Emits a warning already represented by a structured suppressed
     /// diagnostic, without adding a second representation decision.
     pub(crate) fn warn_without_decision(&mut self, what: &str, span: Span) {
@@ -458,12 +475,18 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         reason: DecisionReason,
         message: &'static str,
     ) {
+        // Source formatting around a visual-only body (for example a multiline
+        // `place(rotate(line(..)))`) appears in `plain_text` as indentation and
+        // newlines. It is layout syntax, not visible document text. Retain
+        // internal spaces in real text, but do not turn an all-whitespace
+        // decorative fallback failure into a corpus `content_loss` result.
+        let text = content.plain_text();
         self.record_content_decision(
             content,
             Representation::Drop,
             reason,
             LossSet::DROP,
-            content.plain_text().chars().count(),
+            text.trim().chars().count(),
         );
         self.warn_message(message, content.span());
     }

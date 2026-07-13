@@ -87,6 +87,9 @@ pub enum DecisionReason {
     /// Non-native placed content was rasterized as one anchored region so its
     /// position and appearance survived atomically.
     PositionedContentRasterFallback,
+    /// Every geometric representation failed, so source plain text was kept
+    /// as editable document flow rather than dropped.
+    PositionedContentPlainTextFallback,
     /// Placed content produced neither editable flow nor an anchorable
     /// whole-region fallback.
     PositionedContentUnavailable,
@@ -106,6 +109,12 @@ pub enum DecisionReason {
     /// A table/grid had no resolved `CellGrid`, and both native lowering and
     /// whole-region fallback produced no representation.
     TableResolutionUnavailable,
+    /// Extreme source geometry was compressed into Word's reliable coordinate
+    /// range while remaining an editable native vector.
+    WordCoordinateBound,
+    /// Word keeps one exact image while older/alternate consumers receive two
+    /// cropped bands to avoid a pathological full-container image layout.
+    LibreOfficeImageLayoutFallback,
 }
 
 /// Independent dimensions in which a representation can lose information.
@@ -170,6 +179,17 @@ impl LossSet {
         semantic_structure: false,
         editability: false,
         dynamic_behavior: false,
+        accessibility: false,
+        portability: false,
+    };
+
+    /// Text survives and stays editable, but its native structure, position,
+    /// and dynamic behavior are unavailable.
+    pub const PLAIN_TEXT_FALLBACK: Self = Self {
+        visual_fidelity: true,
+        semantic_structure: true,
+        editability: false,
+        dynamic_behavior: true,
         accessibility: false,
         portability: false,
     };

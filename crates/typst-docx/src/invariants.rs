@@ -467,8 +467,10 @@ mod tests {
         let run = Run::Drawing(Drawing {
             rel: EcoString::new(),
             svg_rel: None,
+            compatibility_split_ids: None,
             w_emu: 1,
             h_emu: 1,
+            source_offset_emu: [0, 0],
             alt: Some("meaningful".into()),
             decorative: true,
             docpr_id: 9,
