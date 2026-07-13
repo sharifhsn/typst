@@ -13,6 +13,7 @@ use typst_library::routines::Pair;
 use crate::ctx::DocxCtx;
 use crate::dom::{Block, Para, ParaChild, ParaProps, Run, RunProps};
 use crate::mappers;
+use crate::report::DecisionReason;
 
 /// Lowers the top-level realized children into the document body blocks.
 pub fn run(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Vec<Block>> {
@@ -211,7 +212,7 @@ pub fn convert_children(
     // tab stop at the content width, so the tab pushes the following content to
     // the right margin (the "Left … Right" header idiom) instead of stopping at
     // the next default tab stop.
-    let content_twips = (ctx.raster_width.to_pt() * 20.0) as i32;
+    let content_twips = ctx.available_width_dxa();
     if content_twips > 0 {
         use crate::dom::{TabAlign, TabStop};
         for block in &mut blocks {
@@ -233,15 +234,26 @@ pub fn convert_children(
 /// Folds an accumulated `#v(..)` spacing into the `before` of the first
 /// paragraph produced at/after `from`. Returns the residual (0 if applied, or
 /// the unchanged amount if no paragraph was found to carry it).
-fn apply_pending_v(blocks: &mut [Block], from: usize, pending_v: i32) -> i32 {
+fn apply_pending_v(blocks: &mut Vec<Block>, from: usize, pending_v: i32) -> i32 {
     if pending_v == 0 {
         return 0;
     }
-    for block in &mut blocks[from..] {
-        if let Block::Para(para) = block {
-            let sp = para.props.spacing.get_or_insert_with(Default::default);
-            sp.before = Some(sp.before.unwrap_or(0) + pending_v);
-            return 0;
+    for index in from..blocks.len() {
+        match &mut blocks[index] {
+            Block::Tag(_) | Block::SectionBreak(_) => continue,
+            Block::Para(para) => {
+                let sp = para.props.spacing.get_or_insert_with(Default::default);
+                sp.before = Some(sp.before.unwrap_or(0) + pending_v);
+                return 0;
+            }
+            Block::FlowSpace { dxa } => {
+                *dxa += pending_v;
+                return 0;
+            }
+            Block::Table(_) | Block::Toc(_) => {
+                blocks.insert(index, Block::FlowSpace { dxa: pending_v });
+                return 0;
+            }
         }
     }
     pending_v
@@ -571,7 +583,8 @@ fn paragraph_sole_block_container<'a>(
     if block_borders(&stroke_sides, styles).is_some() {
         return None;
     }
-    (body_is_wrap_figure(&fbody) || body_is_frameless_flow_container(&fbody)).then_some(inner)
+    (body_is_wrap_figure(&fbody) || body_is_frameless_flow_container(&fbody))
+        .then_some(inner)
 }
 
 /// Whether an equation body carries a label *inside* it (a per-line label),
@@ -724,10 +737,10 @@ fn handle_block_inner(
         // Block equation.
         match mappers::math::equation(elem, styles, ctx)? {
             mappers::math::EquationOut::Block(blocks) => out.extend(blocks),
-            mappers::math::EquationOut::Inline(run) => {
+            mappers::math::EquationOut::Inline(runs) => {
                 out.push(Block::Para(Para {
                     props: Default::default(),
-                    content: vec![ParaChild::Run(run)],
+                    content: runs.into_iter().map(ParaChild::Run).collect(),
                 }));
             }
         }
@@ -975,6 +988,13 @@ fn handle_layout(
                 ctx,
             )?) {
                 out.push(para);
+            } else {
+                let source = elem.clone().pack();
+                ctx.record_content_drop(
+                    &source,
+                    DecisionReason::LayoutCallbackUnavailable,
+                    "layout callback and whole-region fallback produced no output",
+                );
             }
         }
     }

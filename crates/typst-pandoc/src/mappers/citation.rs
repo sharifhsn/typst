@@ -47,8 +47,8 @@
 //! `BibEntry` carrying its backlink as `id = ref-<hash>` so the cite Links
 //! resolve. `BIBLIOGRAPHY_RULE` is additionally tweaked for `Target::Pandoc` to
 //! always take the linear-block path (never the rasterizing grid) so numbered
-//! styles work too. A final global pass ([`crate::convert::run`]'s
-//! `prune_dangling_links`) demotes any internal link with no matching anchor to
+//! styles work too. The final normalization pass demotes any internal link with
+//! no matching anchor to
 //! bare text — the belt-and-suspenders guarantee that no cite ever dangles
 //! (notably the bib entry's `[1]`-marker back-link to the un-anchored cite site).
 //!

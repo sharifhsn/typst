@@ -5,7 +5,7 @@ use crate::diag::{At, Hint, SourceResult, bail};
 use crate::engine::Engine;
 use crate::foundations::{
     Cast, Content, Context, Func, IntoValue, Label, NativeElement, Packed, Repr, Smart,
-    StyleChain, Synthesize, cast, elem,
+    StyleChain, Synthesize, Target, TargetElem, cast, elem,
 };
 use crate::introspection::{
     Counter, CounterKey, Locatable, PageNumberingIntrospection,
@@ -13,7 +13,8 @@ use crate::introspection::{
 };
 use crate::math::EquationElem;
 use crate::model::{
-    BibliographyElem, CiteElem, DirectLinkElem, Figurable, FootnoteElem, Numbering,
+    BibliographyElem, CiteElem, DirectLinkElem, DirectLinkKind, Figurable, FootnoteElem,
+    Numbering,
 };
 use crate::text::TextElem;
 
@@ -350,14 +351,51 @@ fn realize_reference(
         eco_format!("{supplement} {numbering}",)
     };
 
-    let mut content = numbers;
-    if !supplement.is_empty() {
-        content = supplement + TextElem::packed("\u{a0}") + content;
+    // Splitting a page reference into a Typst-owned supplement link and a
+    // separate value link only benefits targets that re-own the page number
+    // (DOCX lowers the value to a live `PAGEREF` field while keeping the
+    // localized supplement stable). Every other target keeps the original
+    // single-link composition: the split would change paged output (two
+    // adjacent link annotations instead of one) for zero benefit there.
+    let split_page_value = styles.get(TargetElem::target) == Target::Docx;
+
+    match reference.form.get(styles) {
+        RefForm::Page if split_page_value => {
+            let value = DirectLinkElem::new(
+                loc,
+                numbers.spanned(span),
+                Some(alt),
+                DirectLinkKind::PageReference,
+            )
+            .pack()
+            .spanned(span);
+            if supplement.is_empty() {
+                Ok(value)
+            } else {
+                let prefix = DirectLinkElem::new(
+                    loc,
+                    (supplement + TextElem::packed("\u{a0}")).spanned(span),
+                    None,
+                    DirectLinkKind::PageReferenceSupplement,
+                )
+                .pack()
+                .spanned(span);
+                Ok(prefix + value)
+            }
+        }
+        form => {
+            let kind = match form {
+                RefForm::Normal => DirectLinkKind::Reference,
+                RefForm::Page => DirectLinkKind::PageReference,
+            };
+            let mut content = numbers;
+            if !supplement.is_empty() {
+                content = supplement + TextElem::packed("\u{a0}") + content;
+            }
+            content = content.spanned(span);
+            Ok(DirectLinkElem::new(loc, content, Some(alt), kind).pack().spanned(span))
+        }
     }
-
-    content = content.spanned(span);
-
-    Ok(DirectLinkElem::new(loc, content, Some(alt)).pack().spanned(span))
 }
 
 /// Turn a reference into a citation.

@@ -13,6 +13,7 @@ mod dom;
 mod encode;
 mod introspect;
 mod mappers;
+mod normalize;
 mod rules;
 
 pub use self::ctx::PandocCtx;

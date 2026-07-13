@@ -38,8 +38,8 @@ use crate::introspection::{
 use crate::layout::{BlockElem, Em, HElem, PadElem};
 use crate::loading::{DataSource, Load, LoadSource, Loaded, format_yaml_error};
 use crate::model::{
-    CitationForm, CiteElem, CiteGroup, Destination, DirectLinkElem, FootnoteElem,
-    HeadingElem, LinkElem, Url,
+    CitationForm, CiteElem, CiteGroup, Destination, DirectLinkElem, DirectLinkKind,
+    FootnoteElem, HeadingElem, LinkElem, Url,
 };
 use crate::routines::SpanMode;
 use crate::text::{Lang, LocalName, Region, SmallcapsElem, SubElem, SuperElem, TextElem};
@@ -1309,7 +1309,8 @@ fn show_bibliography(
             if let Some(location) = to_citations.get(item.key.as_str()) {
                 let alt = content.plain_text();
                 let body = content.spanned(ctx.span);
-                DirectLinkElem::new(*location, body, Some(alt)).pack()
+                DirectLinkElem::new(*location, body, Some(alt), DirectLinkKind::Other)
+                    .pack()
             } else {
                 content
             }
@@ -1555,7 +1556,9 @@ fn show_elem(
         && let Some(location) = (ctx.link)(i)
     {
         let alt = content.plain_text();
-        content = DirectLinkElem::new(location, content, Some(alt)).pack();
+        content =
+            DirectLinkElem::new(location, content, Some(alt), DirectLinkKind::Other)
+                .pack();
     }
 
     Ok(content)

@@ -5,9 +5,9 @@ use ecow::EcoString;
 use crate::color;
 use crate::media::MediaId;
 use crate::ns;
-use crate::render;
 use crate::units;
 use crate::xml::XmlWriter;
+use typst_export_common::raster;
 use typst_library::layout::{Abs, Frame, Point, Ratio, Size, Transform};
 use typst_library::visualize::{
     Color, Curve, CurveItem, FixedStroke, Geometry, Gradient, LineCap, Paint, Tiling,
@@ -173,7 +173,7 @@ pub fn render_tiling_tile(tiling: &Tiling) -> Option<RenderedTile> {
 
     let mut frame = Frame::hard(period);
     frame.push_frame(Point::zero(), tiling.frame().clone());
-    let raster = render::render_full_frame_to_png(frame, TILE_PIXEL_PER_PT)?;
+    let raster = raster::render_full_frame_to_png(frame, TILE_PIXEL_PER_PT)?;
 
     Some(RenderedTile {
         png: raster.png,

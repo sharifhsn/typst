@@ -1,10 +1,11 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use typst_export_common::raster as render;
+use typst_export_common::raster::RasterOptions;
 use typst_library::foundations::{Content, Smart};
 use typst_library::layout::{Abs, Frame, FrameItem, Point, Sides, Size};
 use typst_library::visualize::{Image, ImageKind};
 use typst_ooxml_core::media;
-use typst_ooxml_core::render::{self, RasterOptions};
 
 use crate::dom::{MediaId, SlideCtx};
 

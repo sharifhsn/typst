@@ -4,21 +4,57 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use typst_library::World;
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, NativeElement, Selector, StyleChain};
-use typst_library::introspection::{Introspector, Locator, PagedPosition, Tag};
+use typst_library::introspection::{Introspector, Location, Locator, PagedPosition, Tag};
+use typst_library::layout::Abs;
 use typst_library::model::{DocumentInfo, HeadingElem};
 use typst_library::routines::{Arenas, RealizationKind};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, DocxDocument, Field, HdrFtrPart, HdrFtrRef, HeadingStyle, HeadingStyleSample,
-    LineNumbering, Para, ParaChild, ParaProps, PgNumType, Run, RunProps, SectPr,
-    SectType, Spacing, TextDefaults, TocHeading,
+    Block, BookmarkTable, DocxDocument, Field, FieldCacheStatus as DomFieldCacheStatus,
+    FieldDisplay, FieldMode, Footnote, HdrFtrPart, HdrFtrRef, HeadingStyle,
+    HeadingStyleSample, LineNumbering, MediaPart, NumberingTable, Para, ParaChild,
+    ParaProps, PgNumType, Run, RunProps, SectPr, SectType, Spacing, TextDefaults,
+    TocFigure, TocHeading,
 };
 use crate::introspect::DocxIntrospector;
+use crate::package::Rels;
 use crate::props;
+use crate::report::{
+    DecisionReason, ExportSource, ExportStage, FidelityReport,
+    FieldCacheStatus as ReportFieldCacheStatus, FieldOwner, FieldVisibility, LossSet,
+    Representation, SuppressedKind,
+};
+
+/// The complete product of the lowering walk before document-wide postpasses.
+///
+/// Keeping this named avoids the previous nineteen-field tuple and gives new
+/// planning/reporting state an explicit home before it is frozen into
+/// [`DocxDocument`].
+struct LoweredDocx {
+    body: Vec<Block>,
+    sect: SectPr,
+    header_parts: Vec<HdrFtrPart>,
+    footer_parts: Vec<HdrFtrPart>,
+    footnotes: Vec<Footnote>,
+    numbering: NumberingTable,
+    media: Vec<MediaPart>,
+    doc_rels: Rels,
+    footnote_rels: Rels,
+    bookmarks: BookmarkTable,
+    max_heading_level: u8,
+    heading_style_samples: Vec<HeadingStyleSample>,
+    uses_math: bool,
+    deferred_tags: Vec<Tag>,
+    real_alias_locations: rustc_hash::FxHashSet<Location>,
+    toc_headings: Vec<TocHeading>,
+    toc_figures: Vec<TocFigure>,
+    fidelity_report: FidelityReport,
+}
 
 /// Produces a DOCX document (in-memory IR) from content.
 ///
@@ -30,7 +66,7 @@ pub fn docx_document(
     content: &Content,
     styles: StyleChain,
 ) -> SourceResult<DocxDocument> {
-    docx_document_impl(engine, content, styles, None, None)
+    docx_document_impl(engine, content, styles, None, None, None)
 }
 
 /// Produces a DOCX document backed by the fixed-point paged introspector.
@@ -59,6 +95,29 @@ pub fn docx_document_with_paged_introspector(
         styles,
         Some(paged_introspector),
         Some(paged_page_sizes),
+        None,
+    )
+}
+
+/// Produces a DOCX document backed by both paged introspection and an owned
+/// frame-geometry sidecar. The CLI uses this entry point so table/grid preflight
+/// can consume final physical cell sizes that are intentionally absent from the
+/// queryable introspector.
+pub fn docx_document_with_paged_geometry(
+    engine: &mut Engine,
+    content: &Content,
+    styles: StyleChain,
+    paged_introspector: Arc<typst_layout::PagedIntrospector>,
+    paged_page_sizes: Arc<Vec<typst_library::layout::Size>>,
+    paged_geometry: Arc<typst_export_common::paged::PagedGeometry>,
+) -> SourceResult<DocxDocument> {
+    docx_document_impl(
+        engine,
+        content,
+        styles,
+        Some(paged_introspector),
+        Some(paged_page_sizes),
+        Some(paged_geometry),
     )
 }
 
@@ -69,6 +128,7 @@ fn docx_document_impl(
     styles: StyleChain,
     paged_introspector: Option<Arc<typst_layout::PagedIntrospector>>,
     paged_page_sizes: Option<Arc<Vec<typst_library::layout::Size>>>,
+    paged_geometry: Option<Arc<typst_export_common::paged::PagedGeometry>>,
 ) -> SourceResult<DocxDocument> {
     // Mark the external styles as document-level "outside".
     let styles = styles.to_map().outside();
@@ -99,6 +159,14 @@ fn docx_document_impl(
     // body walk; header/footer *content* is lowered later on the same `ctx`.
     let real_ref = paged_introspector.as_deref();
     let page_sizes_ref = paged_page_sizes.as_deref().map(Vec::as_slice);
+    let export_snapshot = crate::snapshot::ExportSnapshot::build(
+        engine,
+        styles,
+        &pairs,
+        real_ref,
+        page_sizes_ref,
+        paged_geometry.as_deref(),
+    );
     let sections = resolve_sections(&pairs, styles, real_ref, page_sizes_ref);
     // The width fed to rasterized content comes from the first section.
     let first_geom = sections
@@ -129,12 +197,12 @@ fn docx_document_impl(
     };
 
     // Walk the native element tree into the typed IR.
-    let (
+    let LoweredDocx {
         mut body,
         sect,
-        header_parts,
-        footer_parts,
-        footnotes,
+        mut header_parts,
+        mut footer_parts,
+        mut footnotes,
         numbering,
         media,
         doc_rels,
@@ -142,13 +210,13 @@ fn docx_document_impl(
         bookmarks,
         max_heading_level,
         heading_style_samples,
-        uses_fields,
         uses_math,
         deferred_tags,
         real_alias_locations,
         toc_headings,
         toc_figures,
-    ) = {
+        mut fidelity_report,
+    } = {
         // Isolate the conversion walk's error sink. Lowering already-realized
         // content (figure/table/grid cells, …) can surface *delayed* errors for
         // values that only resolve during layout — e.g. a date `display(auto)`
@@ -159,7 +227,7 @@ fn docx_document_impl(
         // this walk's own delayed-error reporting is discarded. Warnings are
         // forwarded to the real sink.
         let mut conv_sink = typst_library::engine::Sink::new();
-        let converted = {
+        let mut converted = {
             use comemo::Track;
             let mut sub = typst_library::engine::Engine {
                 world: engine.world,
@@ -172,19 +240,11 @@ fn docx_document_impl(
                 route: typst_library::engine::Route::extend(engine.route.track()),
             };
             let mut ctx = DocxCtx::new(&mut sub, &mut locator);
-            // Give rasterized content the real page content width (page minus L/R
-            // margins, converted from twips → pt) so width-relative content does
-            // not blow up under an infinite region. Guard a degenerate width.
-            let content_twip =
-                first_geom.page_w - first_geom.margin_left - first_geom.margin_right;
-            if content_twip > 0 {
-                ctx.raster_width =
-                    typst_library::layout::Abs::pt(content_twip as f64 / 20.0);
+            ctx.set_snapshot_bookmarks(&export_snapshot);
+            if let Some(geometry) = &paged_geometry {
+                ctx.set_paged_geometry(Arc::clone(geometry));
             }
-            if first_geom.page_h > 0 {
-                ctx.raster_height =
-                    typst_library::layout::Abs::pt(first_geom.page_h as f64 / 20.0);
-            }
+            set_ctx_geometry(&mut ctx, &first_geom);
             // Record raw/code source ranges up front: inline raw is unwrapped to
             // styled `TextElem`s before the walker sees a `RawElem`, so runs are
             // tagged `w:noProof` by matching their source span, not the mono font.
@@ -198,7 +258,10 @@ fn docx_document_impl(
             let (body, sect, header_parts, footer_parts) = if sections.len() <= 1 {
                 ctx.line_numbering_active = first_geom.line_numbers.is_some();
                 let body = crate::convert::run(&mut ctx, &pairs)?;
-                let (sect, h, f) = build_section(&mut ctx, &first_geom, styles)?;
+                let full_width = ctx.page_content_width_dxa();
+                let (sect, h, f) = ctx.with_available_width(full_width, |ctx| {
+                    build_section(ctx, &first_geom, styles)
+                })?;
                 (body, sect, h, f)
             } else {
                 // Each section builds its OWN header/footer parts (a landscape
@@ -214,14 +277,44 @@ fn docx_document_impl(
                 let mut final_sect = None;
                 let last = sections.len() - 1;
                 for (idx, section) in sections.iter().enumerate() {
+                    set_ctx_geometry(&mut ctx, &section.geom);
                     ctx.line_numbering_active = section.geom.line_numbers.is_some();
                     let mut blocks =
                         crate::convert::run(&mut ctx, &pairs[section.range.clone()])?;
                     body.append(&mut blocks);
-                    let (mut s, mut h, mut f) =
-                        build_section(&mut ctx, &section.geom, styles).unwrap_or_else(
-                            |_| (sectpr_geometry(&section.geom), Vec::new(), Vec::new()),
-                        );
+                    let full_width = ctx.page_content_width_dxa();
+                    let (mut s, mut h, mut f) = match ctx
+                        .with_available_width(full_width, |ctx| {
+                            build_section(ctx, &section.geom, styles)
+                        }) {
+                        Ok(parts) => parts,
+                        Err(errors) => {
+                            let source =
+                                ecow::eco_format!("section {} properties", idx + 1);
+                            for diagnostic in errors {
+                                ctx.fidelity_report.suppress_span(
+                                    source.clone(),
+                                    typst_syntax::Span::detached(),
+                                    None,
+                                    ExportStage::SectionLowering,
+                                    SuppressedKind::Error,
+                                    diagnostic,
+                                );
+                            }
+                            ctx.fidelity_report.record_span(
+                                ExportSource::new(
+                                    source,
+                                    typst_syntax::Span::detached(),
+                                    None,
+                                ),
+                                Representation::Approximate,
+                                DecisionReason::SectionGeometryFallback,
+                                LossSet::SECTION_GEOMETRY_ONLY,
+                                0,
+                            );
+                            (sectpr_geometry(&section.geom), Vec::new(), Vec::new())
+                        }
+                    };
                     header_parts.append(&mut h);
                     footer_parts.append(&mut f);
                     // A section's `w:type` describes how *that* section itself
@@ -245,33 +338,43 @@ fn docx_document_impl(
                     footer_parts,
                 )
             };
-            (
+            LoweredDocx {
                 body,
                 sect,
                 header_parts,
                 footer_parts,
-                std::mem::take(&mut ctx.footnotes),
-                std::mem::take(&mut ctx.numbering),
-                std::mem::replace(
+                footnotes: std::mem::take(&mut ctx.footnotes),
+                numbering: std::mem::take(&mut ctx.numbering),
+                media: std::mem::replace(
                     &mut ctx.media,
                     typst_ooxml_core::media::MediaRegistry::new("word/media"),
                 )
                 .into_parts(),
-                std::mem::take(&mut ctx.doc_rels),
-                std::mem::take(&mut ctx.footnote_rels),
-                std::mem::take(&mut ctx.bookmarks),
-                ctx.max_heading_level,
-                std::mem::take(&mut ctx.heading_style_samples),
-                ctx.uses_fields,
-                ctx.uses_math,
-                std::mem::take(&mut ctx.deferred_tags),
-                std::mem::take(&mut ctx.real_alias_locations),
-                std::mem::take(&mut ctx.toc_headings),
-                std::mem::take(&mut ctx.toc_figures),
-            )
+                doc_rels: std::mem::take(&mut ctx.doc_rels),
+                footnote_rels: std::mem::take(&mut ctx.footnote_rels),
+                bookmarks: std::mem::take(&mut ctx.bookmarks),
+                max_heading_level: ctx.max_heading_level,
+                heading_style_samples: std::mem::take(&mut ctx.heading_style_samples),
+                uses_math: ctx.uses_math,
+                deferred_tags: std::mem::take(&mut ctx.deferred_tags),
+                real_alias_locations: std::mem::take(&mut ctx.real_alias_locations),
+                toc_headings: std::mem::take(&mut ctx.toc_headings),
+                toc_figures: std::mem::take(&mut ctx.toc_figures),
+                fidelity_report: std::mem::take(&mut ctx.fidelity_report),
+            }
         };
-        // Forward conversion warnings to the real sink (delayed errors stay
-        // isolated in `conv_sink` and are dropped).
+        // Forward warnings, but retain delayed errors in the fidelity report so
+        // best-effort conversion is observable rather than silent.
+        for diagnostic in conv_sink.delayed() {
+            converted.fidelity_report.suppress_span(
+                "document conversion",
+                typst_syntax::Span::detached(),
+                None,
+                ExportStage::DocumentConversion,
+                SuppressedKind::DelayedError,
+                diagnostic,
+            );
+        }
         for w in conv_sink.warnings() {
             engine.sink.warn(w);
         }
@@ -286,23 +389,13 @@ fn docx_document_impl(
     // Same call and reasoning as the Pandoc exporter's `.bib` sidecar: a pure
     // query of the (already-stabilized) shared introspector, so it cannot
     // perturb convergence. `None` when the document has no bibliography.
-    let bibliography = {
-        let introspector = engine.introspector.access(
-            "querying bibliography elements to synthesize a .bib sidecar is a pure query",
-        );
-        typst_library::model::BibliographyElem::biblatex(*introspector)
-    };
+    let bibliography = export_snapshot.bibliography_biblatex().map(str::to_owned);
 
-    // The same bibliography, mapped onto Word's native `b:Source` schema (see
-    // `crate::bibliography`) so References → Manage Sources shows real,
-    // correctly-typed sources. Same pure-query justification as above.
-    let word_sources = {
-        let introspector = engine.introspector.access(
-            "querying bibliography elements to populate the native Word sources part is a pure query",
-        );
-        let entries = typst_library::model::BibliographyElem::entries(*introspector);
-        crate::bibliography::map_entries(&entries)
-    };
+    // Map the same snapshot-owned entries onto Word's native `b:Source` schema
+    // so References → Manage Sources and the lossless sidecar cannot select
+    // different semantic source sets.
+    let word_sources =
+        crate::bibliography::map_entries(&export_snapshot.bibliography_source_entries());
 
     // Fallback heading list, for documents whose headings are show-ruled or
     // rasterized and so never reach the heading mapper (nothing recorded): query
@@ -329,6 +422,7 @@ fn docx_document_impl(
                 text.push_str(&h.body.plain_text());
                 (!text.is_empty()).then(|| TocHeading {
                     level,
+                    location: h.location(),
                     anchor: None,
                     text: text.into(),
                 })
@@ -341,11 +435,18 @@ fn docx_document_impl(
     // Now that every heading/figure's real bookmark is known, populate the
     // table(s) of contents and list(s) of figures in document order, across all
     // sections.
+    let mut toc_planning = crate::mappers::outline::TocPlanning {
+        engine,
+        styles,
+        fidelity_report: &mut fidelity_report,
+        snapshot: &export_snapshot,
+    };
     crate::mappers::outline::fill_tocs(
         &mut body,
         &toc_headings,
         &toc_fallback,
         &toc_figures,
+        &mut toc_planning,
     );
 
     // Synthetic page model: a flowing document has no real pages, but templates
@@ -416,6 +517,45 @@ fn docx_document_impl(
             matches!(block, Block::SectionBreak(sect) if section_uses_even_furniture(sect))
         });
 
+    // Repeated content (subslides, running heads) re-emits the same bookmark;
+    // keep only each part's first start/end pair so the finalized IR satisfies
+    // the uniqueness invariants (see `invariants::dedupe_repeated_bookmarks`).
+    crate::invariants::dedupe_repeated_bookmarks(
+        &mut body,
+        &mut header_parts,
+        &mut footer_parts,
+        &mut footnotes,
+    );
+
+    record_dynamic_field_inventory(
+        &mut fidelity_report,
+        export_snapshot.logical_id(),
+        &body,
+        &header_parts,
+        &footer_parts,
+        &footnotes,
+    );
+    record_font_inventory(
+        &mut fidelity_report,
+        export_snapshot.logical_id(),
+        engine.world.book(),
+        &text_defaults,
+        &heading_styles,
+        uses_math,
+        &body,
+        &header_parts,
+        &footer_parts,
+        &footnotes,
+    );
+    record_drawing_inventory(
+        &mut fidelity_report,
+        export_snapshot.logical_id(),
+        &body,
+        &header_parts,
+        &footer_parts,
+        &footnotes,
+    );
+
     Ok(DocxDocument {
         info,
         body,
@@ -428,7 +568,6 @@ fn docx_document_impl(
         max_heading_level,
         text_defaults,
         heading_styles,
-        uses_fields,
         uses_math,
         introspector: Arc::new(introspector),
         header_parts,
@@ -440,7 +579,377 @@ fn docx_document_impl(
         rtl_gutter,
         bibliography,
         word_sources,
+        fidelity_report,
+        export_snapshot,
     })
+}
+
+fn record_dynamic_field_inventory(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    body: &[Block],
+    headers: &[HdrFtrPart],
+    footers: &[HdrFtrPart],
+    footnotes: &[Footnote],
+) {
+    record_block_fields(report, snapshot_id, body);
+    for part in headers.iter().chain(footers) {
+        record_block_fields(report, snapshot_id, &part.blocks);
+    }
+    for footnote in footnotes {
+        record_block_fields(report, snapshot_id, &footnote.blocks);
+    }
+}
+
+fn record_block_fields(report: &mut FidelityReport, snapshot_id: u128, blocks: &[Block]) {
+    for block in blocks {
+        match block {
+            Block::Para(para) => record_para_fields(report, snapshot_id, para),
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        record_block_fields(report, snapshot_id, &cell.blocks);
+                    }
+                }
+            }
+            Block::Toc(toc) => {
+                report.record_dynamic_field(
+                    snapshot_id,
+                    &toc.instr,
+                    field_owner(toc.mode),
+                    FieldVisibility::Visible,
+                    ReportFieldCacheStatus::Resolved,
+                );
+                for entry in &toc.entries {
+                    record_para_fields(report, snapshot_id, entry);
+                }
+                for run in &toc.fallback {
+                    record_run_fields(report, snapshot_id, run);
+                }
+            }
+            Block::FlowSpace { .. } | Block::SectionBreak(_) | Block::Tag(_) => {}
+        }
+    }
+}
+
+fn record_para_fields(report: &mut FidelityReport, snapshot_id: u128, para: &Para) {
+    for child in &para.content {
+        match child {
+            ParaChild::Run(run) => record_run_fields(report, snapshot_id, run),
+            ParaChild::Hyperlink { runs, .. } => {
+                for run in runs {
+                    record_run_fields(report, snapshot_id, run);
+                }
+            }
+            ParaChild::OmmlPara(_)
+            | ParaChild::BookmarkStart { .. }
+            | ParaChild::BookmarkEnd { .. }
+            | ParaChild::Tag(_) => {}
+        }
+    }
+}
+
+fn record_run_fields(report: &mut FidelityReport, snapshot_id: u128, run: &Run) {
+    match run {
+        Run::Field(field) => {
+            report.record_dynamic_field(
+                snapshot_id,
+                &field.instr,
+                field_owner(field.mode),
+                match field.display {
+                    FieldDisplay::Visible => FieldVisibility::Visible,
+                    FieldDisplay::Hidden => FieldVisibility::Hidden,
+                },
+                match field.cache_status {
+                    DomFieldCacheStatus::Resolved => ReportFieldCacheStatus::Resolved,
+                    DomFieldCacheStatus::BestEffort => ReportFieldCacheStatus::BestEffort,
+                    DomFieldCacheStatus::ConsumerRequired => {
+                        ReportFieldCacheStatus::ConsumerRequired
+                    }
+                    DomFieldCacheStatus::Unavailable => {
+                        ReportFieldCacheStatus::Unavailable
+                    }
+                },
+            );
+            for result in &field.result {
+                record_run_fields(report, snapshot_id, result);
+            }
+        }
+        Run::Drawing(drawing) => {
+            if let Some(text_box) =
+                drawing.shape.as_ref().and_then(|shape| shape.txbx.as_ref())
+            {
+                record_block_fields(report, snapshot_id, &text_box.blocks);
+            }
+            if let Some(group) = &drawing.group {
+                for child in &group.children {
+                    if let Some(text_box) = &child.shape.txbx {
+                        record_block_fields(report, snapshot_id, &text_box.blocks);
+                    }
+                }
+            }
+        }
+        Run::Text { .. }
+        | Run::Break
+        | Run::PageBreak
+        | Run::ColumnBreak
+        | Run::Tab
+        | Run::FillTab
+        | Run::FootnoteRef { .. }
+        | Run::FootnoteRefMark
+        | Run::OmmlInline(_) => {}
+    }
+}
+
+fn field_owner(mode: FieldMode) -> FieldOwner {
+    match mode {
+        FieldMode::Static => FieldOwner::Typst,
+        FieldMode::Live => FieldOwner::Consumer,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_font_inventory(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    book: &typst_library::text::FontBook,
+    defaults: &TextDefaults,
+    heading_styles: &[HeadingStyle],
+    uses_math: bool,
+    body: &[Block],
+    headers: &[HdrFtrPart],
+    footers: &[HdrFtrPart],
+    footnotes: &[Footnote],
+) {
+    if let Some(font) = &defaults.font {
+        record_font(report, snapshot_id, book, font);
+    }
+    for style in heading_styles {
+        record_run_props_font(report, snapshot_id, book, &style.rpr);
+    }
+    if uses_math {
+        record_font(report, snapshot_id, book, "Cambria Math");
+    }
+    record_block_fonts(report, snapshot_id, book, body);
+    for part in headers.iter().chain(footers) {
+        record_block_fonts(report, snapshot_id, book, &part.blocks);
+    }
+    for footnote in footnotes {
+        record_block_fonts(report, snapshot_id, book, &footnote.blocks);
+    }
+}
+
+fn record_block_fonts(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    book: &typst_library::text::FontBook,
+    blocks: &[Block],
+) {
+    for block in blocks {
+        match block {
+            Block::Para(para) => record_para_fonts(report, snapshot_id, book, para),
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        record_block_fonts(report, snapshot_id, book, &cell.blocks);
+                    }
+                }
+            }
+            Block::Toc(toc) => {
+                for entry in &toc.entries {
+                    record_para_fonts(report, snapshot_id, book, entry);
+                }
+                for run in &toc.fallback {
+                    record_run_fonts(report, snapshot_id, book, run);
+                }
+            }
+            Block::FlowSpace { .. } | Block::SectionBreak(_) | Block::Tag(_) => {}
+        }
+    }
+}
+
+fn record_para_fonts(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    book: &typst_library::text::FontBook,
+    para: &Para,
+) {
+    for child in &para.content {
+        match child {
+            ParaChild::Run(run) => record_run_fonts(report, snapshot_id, book, run),
+            ParaChild::Hyperlink { runs, .. } => {
+                for run in runs {
+                    record_run_fonts(report, snapshot_id, book, run);
+                }
+            }
+            ParaChild::OmmlPara(_)
+            | ParaChild::BookmarkStart { .. }
+            | ParaChild::BookmarkEnd { .. }
+            | ParaChild::Tag(_) => {}
+        }
+    }
+}
+
+fn record_run_fonts(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    book: &typst_library::text::FontBook,
+    run: &Run,
+) {
+    match run {
+        Run::Text { props, .. } | Run::FootnoteRef { props, .. } => {
+            record_run_props_font(report, snapshot_id, book, props);
+        }
+        Run::Field(field) => {
+            for result in &field.result {
+                record_run_fonts(report, snapshot_id, book, result);
+            }
+        }
+        Run::Drawing(drawing) => {
+            if let Some(text_box) =
+                drawing.shape.as_ref().and_then(|shape| shape.txbx.as_ref())
+            {
+                record_block_fonts(report, snapshot_id, book, &text_box.blocks);
+            }
+            if let Some(group) = &drawing.group {
+                for child in &group.children {
+                    if let Some(text_box) = &child.shape.txbx {
+                        record_block_fonts(report, snapshot_id, book, &text_box.blocks);
+                    }
+                }
+            }
+        }
+        Run::Break
+        | Run::PageBreak
+        | Run::ColumnBreak
+        | Run::Tab
+        | Run::FillTab
+        | Run::FootnoteRefMark
+        | Run::OmmlInline(_) => {}
+    }
+}
+
+fn record_run_props_font(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    book: &typst_library::text::FontBook,
+    props: &RunProps,
+) {
+    if let Some(font) = &props.font {
+        record_font(report, snapshot_id, book, font);
+    }
+}
+
+fn record_font(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    book: &typst_library::text::FontBook,
+    family: &str,
+) {
+    report.record_font(snapshot_id, family, book.contains_family(&family.to_lowercase()));
+}
+
+fn record_drawing_inventory(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    body: &[Block],
+    headers: &[HdrFtrPart],
+    footers: &[HdrFtrPart],
+    footnotes: &[Footnote],
+) {
+    record_block_drawings(report, snapshot_id, body);
+    for part in headers.iter().chain(footers) {
+        record_block_drawings(report, snapshot_id, &part.blocks);
+    }
+    for footnote in footnotes {
+        record_block_drawings(report, snapshot_id, &footnote.blocks);
+    }
+}
+
+fn record_block_drawings(
+    report: &mut FidelityReport,
+    snapshot_id: u128,
+    blocks: &[Block],
+) {
+    for block in blocks {
+        match block {
+            Block::Para(para) => record_para_drawings(report, snapshot_id, para),
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        record_block_drawings(report, snapshot_id, &cell.blocks);
+                    }
+                }
+            }
+            Block::Toc(toc) => {
+                for entry in &toc.entries {
+                    record_para_drawings(report, snapshot_id, entry);
+                }
+                for run in &toc.fallback {
+                    record_run_drawings(report, snapshot_id, run);
+                }
+            }
+            Block::FlowSpace { .. } | Block::SectionBreak(_) | Block::Tag(_) => {}
+        }
+    }
+}
+
+fn record_para_drawings(report: &mut FidelityReport, snapshot_id: u128, para: &Para) {
+    for child in &para.content {
+        match child {
+            ParaChild::Run(run) => record_run_drawings(report, snapshot_id, run),
+            ParaChild::Hyperlink { runs, .. } => {
+                for run in runs {
+                    record_run_drawings(report, snapshot_id, run);
+                }
+            }
+            ParaChild::OmmlPara(_)
+            | ParaChild::BookmarkStart { .. }
+            | ParaChild::BookmarkEnd { .. }
+            | ParaChild::Tag(_) => {}
+        }
+    }
+}
+
+fn record_run_drawings(report: &mut FidelityReport, snapshot_id: u128, run: &Run) {
+    match run {
+        Run::Drawing(drawing) => {
+            report.record_drawing(
+                snapshot_id,
+                drawing.docpr_id,
+                &drawing.name,
+                drawing.alt.as_deref(),
+                drawing.decorative,
+                drawing.has_native_text(),
+            );
+            if let Some(text_box) =
+                drawing.shape.as_ref().and_then(|shape| shape.txbx.as_ref())
+            {
+                record_block_drawings(report, snapshot_id, &text_box.blocks);
+            }
+            if let Some(group) = &drawing.group {
+                for child in &group.children {
+                    if let Some(text_box) = &child.shape.txbx {
+                        record_block_drawings(report, snapshot_id, &text_box.blocks);
+                    }
+                }
+            }
+        }
+        Run::Field(field) => {
+            for result in &field.result {
+                record_run_drawings(report, snapshot_id, result);
+            }
+        }
+        Run::Text { .. }
+        | Run::Break
+        | Run::PageBreak
+        | Run::ColumnBreak
+        | Run::Tab
+        | Run::FillTab
+        | Run::FootnoteRef { .. }
+        | Run::FootnoteRefMark
+        | Run::OmmlInline(_) => {}
+    }
 }
 
 fn section_uses_even_furniture(sect: &SectPr) -> bool {
@@ -601,8 +1110,12 @@ fn apply_style_inheritance(
             && let Some(style) = heading_styles.iter().find(|style| style.level == level)
         {
             strip_heading_paragraph(para, style);
+            visit_para_run_props(para, &mut |props| {
+                strip_text_defaults_below_heading(props, defaults, &style.rpr)
+            });
+        } else {
+            visit_para_run_props(para, &mut |props| strip_text_defaults(props, defaults));
         }
-        visit_para_run_props(para, &mut |props| strip_text_defaults(props, defaults));
     }
 }
 
@@ -654,6 +1167,30 @@ fn strip_text_defaults(props: &mut RunProps, defaults: &TextDefaults) {
         props.color = None;
     }
     if props.lang == defaults.lang {
+        props.lang = None;
+    }
+}
+
+/// Strips Normal/docDefaults only where HeadingN does not define the same
+/// property. A surviving direct value is a deviation from HeadingN and must not
+/// disappear merely because it happens to equal Normal: doing so changes the
+/// effective value back to HeadingN's property in Word's inheritance cascade.
+fn strip_text_defaults_below_heading(
+    props: &mut RunProps,
+    defaults: &TextDefaults,
+    heading: &RunProps,
+) {
+    if heading.font.is_none() && props.font == defaults.font {
+        props.font = None;
+    }
+    if heading.size_half_pt.is_none() && props.size_half_pt == Some(defaults.size_half_pt)
+    {
+        props.size_half_pt = None;
+    }
+    if heading.color.is_none() && props.color == defaults.color {
+        props.color = None;
+    }
+    if heading.lang.is_none() && props.lang == defaults.lang {
         props.lang = None;
     }
 }
@@ -719,7 +1256,10 @@ fn collect_default_votes(blocks: &[Block], votes: &mut DefaultVotes) {
                     }
                 }
             }
-            Block::Toc(_) | Block::SectionBreak(_) | Block::Tag(_) => {}
+            Block::FlowSpace { .. }
+            | Block::Toc(_)
+            | Block::SectionBreak(_)
+            | Block::Tag(_) => {}
         }
     }
 }
@@ -808,6 +1348,28 @@ struct SectGeom {
     /// (`#set text(hyphenate: ..)`, `auto` following justification). Emitted
     /// document-wide as `w:autoHyphenation` (OOXML has no per-section form).
     hyphenate: bool,
+}
+
+/// Installs one section's geometry as the current lowering region. This must be
+/// updated before lowering each section: native tables/stacks and fallback
+/// layout now share this budget, so leaving the first section installed would
+/// size a landscape appendix against the front matter.
+fn set_ctx_geometry(ctx: &mut DocxCtx, geom: &SectGeom) {
+    let content_twip = geom.page_w - geom.margin_left - geom.margin_right;
+    if content_twip > 0 {
+        ctx.page_content_width = Abs::pt(content_twip as f64 / 20.0);
+        let columns = geom.columns.max(1) as i32;
+        let total_gutter = geom.col_space.max(0) * (columns - 1);
+        let column_twip = ((content_twip - total_gutter).max(columns)) / columns;
+        ctx.available_width = Abs::pt(column_twip as f64 / 20.0);
+    }
+    let content_height = geom.page_h - geom.margin_top - geom.margin_bottom;
+    if content_height > 0 {
+        ctx.available_height = Abs::pt(content_height as f64 / 20.0);
+    }
+    if geom.page_h > 0 {
+        ctx.raster_height = Abs::pt(geom.page_h as f64 / 20.0);
+    }
 }
 
 /// Splits the document into page-geometry sections, mirroring
@@ -1351,7 +1913,11 @@ fn build_section(
             &mut footer_parts,
             FurnitureSlot::Footer,
             geom,
-            FurnitureSource { content: Some(content), background: None, foreground: None },
+            FurnitureSource {
+                content: Some(content),
+                background: None,
+                foreground: None,
+            },
             styles,
         )?;
     }
@@ -1370,7 +1936,6 @@ fn build_section(
                 blocks: vec![para],
                 rels: crate::package::Rels::new(),
             });
-            ctx.mark_field();
         } else if !geom.number_in_header
             && geom.footer.is_none()
             && !geom.footer_suppressed
@@ -1386,7 +1951,6 @@ fn build_section(
                 blocks: vec![para],
                 rels: crate::package::Rels::new(),
             });
-            ctx.mark_field();
         }
     }
 
@@ -1412,6 +1976,20 @@ struct LoweredFurniture {
     emit_empty: bool,
 }
 
+struct FurnitureRefPlan {
+    kind: &'static str,
+    lowered: LoweredFurniture,
+}
+
+/// Whole-region representation selected before header/footer parts are
+/// serialized. Word can express one first-page value plus stable odd/even
+/// values. Anything more page-specific must be admitted as an approximation,
+/// never silently mislabeled as an exact parity split.
+enum FurniturePlan {
+    Exact { title_page: bool, refs: Vec<FurnitureRefPlan> },
+    Sampled { first: LoweredFurniture },
+}
+
 #[derive(Copy, Clone)]
 struct FurnitureSource<'a> {
     content: Option<&'a Content>,
@@ -1428,14 +2006,39 @@ fn build_furniture_refs(
     source: FurnitureSource<'_>,
     styles: StyleChain,
 ) -> SourceResult<()> {
+    match preflight_furniture(ctx, slot, geom, source, styles)? {
+        FurniturePlan::Exact { title_page, refs } => {
+            sect.title_pg |= title_page;
+            for planned in refs {
+                emit_furniture(ctx, sect, parts, slot, planned.kind, planned.lowered);
+            }
+        }
+        FurniturePlan::Sampled { first } => {
+            let affected_text_chars = blocks_text_chars(&first.blocks);
+            record_sampled_furniture(ctx, slot, source, affected_text_chars);
+            emit_furniture(ctx, sect, parts, slot, "default", first);
+        }
+    }
+    Ok(())
+}
+
+fn preflight_furniture(
+    ctx: &mut DocxCtx,
+    slot: FurnitureSlot,
+    geom: &SectGeom,
+    source: FurnitureSource<'_>,
+    styles: StyleChain,
+) -> SourceResult<FurniturePlan> {
     let context_sensitive = source.content.is_some_and(contains_context)
         || source.background.is_some_and(contains_context)
         || source.foreground.is_some_and(contains_context);
 
     let first = lower_furniture(ctx, slot, geom, source, styles, 1)?;
     if !context_sensitive {
-        emit_furniture(ctx, sect, parts, slot, "default", first);
-        return Ok(());
+        return Ok(FurniturePlan::Exact {
+            title_page: false,
+            refs: vec![FurnitureRefPlan { kind: "default", lowered: first }],
+        });
     }
 
     let even = lower_furniture(ctx, slot, geom, source, styles, 2)?;
@@ -1448,41 +2051,160 @@ fn build_furniture_refs(
     // changes on page 3 vs page 5 and must not be represented as one odd-page
     // default header that repeats page 3 forever.
     if even.signature != even_again.signature || odd.signature != odd_again.signature {
-        emit_furniture(ctx, sect, parts, slot, "default", first);
-        return Ok(());
+        return Ok(FurniturePlan::Sampled { first });
     }
 
     let needs_even = even.signature != odd.signature;
     let needs_first = first.signature != odd.signature;
 
     if !needs_even && !needs_first {
-        emit_furniture(ctx, sect, parts, slot, "default", first);
-        return Ok(());
+        return Ok(FurniturePlan::Exact {
+            title_page: false,
+            refs: vec![FurnitureRefPlan { kind: "default", lowered: first }],
+        });
     }
 
-    let mut first = Some(first);
-    let mut even = Some(even);
-    let mut odd = Some(odd);
-
-    if needs_first {
-        sect.title_pg = true;
-        emit_furniture(ctx, sect, parts, slot, "first", first.take().unwrap());
-    }
-
-    if needs_even {
-        emit_furniture(ctx, sect, parts, slot, "even", even.take().unwrap());
-    }
-
-    let default = if needs_first {
-        odd.take().unwrap()
-    } else if first.as_ref().unwrap().signature == odd.as_ref().unwrap().signature {
-        first.take().unwrap()
-    } else {
-        odd.take().unwrap()
+    let refs = match (needs_first, needs_even) {
+        (true, true) => vec![
+            FurnitureRefPlan { kind: "first", lowered: first },
+            FurnitureRefPlan { kind: "even", lowered: even },
+            FurnitureRefPlan { kind: "default", lowered: odd },
+        ],
+        (true, false) => vec![
+            FurnitureRefPlan { kind: "first", lowered: first },
+            FurnitureRefPlan { kind: "default", lowered: odd },
+        ],
+        (false, true) => vec![
+            FurnitureRefPlan { kind: "even", lowered: even },
+            FurnitureRefPlan { kind: "default", lowered: first },
+        ],
+        (false, false) => unreachable!(),
     };
-    emit_furniture(ctx, sect, parts, slot, "default", default);
+    Ok(FurniturePlan::Exact { title_page: needs_first, refs })
+}
 
-    Ok(())
+fn record_sampled_furniture(
+    ctx: &mut DocxCtx,
+    slot: FurnitureSlot,
+    source: FurnitureSource<'_>,
+    sampled_text_chars: usize,
+) {
+    let contextual = [source.content, source.background, source.foreground]
+        .into_iter()
+        .flatten()
+        .filter(|content| contains_context(content));
+    let mut warning_span = None;
+    let mut sampled_chars_unattributed = sampled_text_chars;
+    for content in contextual {
+        warning_span.get_or_insert(content.span());
+        let source_chars = content_text_chars(content);
+        let affected_text_chars = if source_chars == 0 {
+            std::mem::take(&mut sampled_chars_unattributed)
+        } else {
+            sampled_chars_unattributed =
+                sampled_chars_unattributed.saturating_sub(source_chars);
+            source_chars
+        };
+        ctx.record_content_decision(
+            content,
+            Representation::Approximate,
+            DecisionReason::PageFurnitureSampled,
+            LossSet::PAGE_FURNITURE_SAMPLED,
+            affected_text_chars,
+        );
+    }
+
+    if let Some(span) = warning_span {
+        let kind = if slot.is_header() { "header" } else { "footer" };
+        ctx.warn_message(
+            format!(
+                "page-varying {kind} cannot be represented by Word's first/even/default model; the page 1 value will repeat"
+            ),
+            span,
+        );
+    }
+}
+
+fn content_text_chars(content: &Content) -> usize {
+    use std::ops::ControlFlow;
+    use typst_library::text::TextElem;
+
+    let mut chars = 0;
+    let _ = content.traverse(&mut |element: Content| {
+        if let Some(text) = element.to_packed::<TextElem>() {
+            chars += text.text.chars().count();
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    chars
+}
+
+fn blocks_text_chars(blocks: &[Block]) -> usize {
+    blocks.iter().map(block_text_chars).sum()
+}
+
+fn block_text_chars(block: &Block) -> usize {
+    match block {
+        Block::Para(para) => para.content.iter().map(para_child_text_chars).sum(),
+        Block::Table(table) => table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .map(|cell| blocks_text_chars(&cell.blocks))
+            .sum(),
+        Block::Toc(toc) => {
+            let entries: usize = toc
+                .entries
+                .iter()
+                .flat_map(|para| &para.content)
+                .map(para_child_text_chars)
+                .sum();
+            entries + toc.fallback.iter().map(run_text_chars).sum::<usize>()
+        }
+        Block::FlowSpace { .. } | Block::SectionBreak(_) | Block::Tag(_) => 0,
+    }
+}
+
+fn para_child_text_chars(child: &ParaChild) -> usize {
+    match child {
+        ParaChild::Run(run) => run_text_chars(run),
+        ParaChild::Hyperlink { runs, .. } => runs.iter().map(run_text_chars).sum(),
+        ParaChild::OmmlPara(_)
+        | ParaChild::BookmarkStart { .. }
+        | ParaChild::BookmarkEnd { .. }
+        | ParaChild::Tag(_) => 0,
+    }
+}
+
+fn run_text_chars(run: &Run) -> usize {
+    match run {
+        Run::Text { text, .. } => text.chars().count(),
+        Run::Field(field) => field.result.iter().map(run_text_chars).sum(),
+        Run::Drawing(drawing) => {
+            let shape = drawing
+                .shape
+                .as_ref()
+                .and_then(|shape| shape.txbx.as_ref())
+                .map_or(0, |text_box| blocks_text_chars(&text_box.blocks));
+            let group = drawing.group.as_ref().map_or(0, |group| {
+                group
+                    .children
+                    .iter()
+                    .filter_map(|child| child.shape.txbx.as_ref())
+                    .map(|text_box| blocks_text_chars(&text_box.blocks))
+                    .sum()
+            });
+            shape + group
+        }
+        Run::Break
+        | Run::PageBreak
+        | Run::ColumnBreak
+        | Run::Tab
+        | Run::FillTab
+        | Run::FootnoteRef { .. }
+        | Run::FootnoteRefMark
+        | Run::OmmlInline(_) => 0,
+    }
 }
 
 fn lower_furniture(
@@ -1501,7 +2223,8 @@ fn lower_furniture(
 
         if slot.is_header()
             && let Some(bg) = source.background
-            && let Some(block) = page_overlay_block(ctx, bg, geom, styles, true, "Background")?
+            && let Some(block) =
+                page_overlay_block(ctx, bg, geom, styles, true, "Background")?
         {
             blocks.push(block);
         }
@@ -1527,7 +2250,8 @@ fn lower_furniture(
 
         if slot.is_header()
             && let Some(fg) = source.foreground
-            && let Some(block) = page_overlay_block(ctx, fg, geom, styles, false, "Foreground")?
+            && let Some(block) =
+                page_overlay_block(ctx, fg, geom, styles, false, "Foreground")?
         {
             blocks.push(block);
         }
@@ -1644,11 +2368,14 @@ fn sig_block(block: &Block, out: &mut String) {
             }
             out.push(')');
         }
+        Block::FlowSpace { dxa } => {
+            let _ = write!(out, "space({dxa})");
+        }
         Block::Toc(toc) => {
             let _ = write!(
                 out,
-                "toc(instr={},dirty={},depth={:?},cat={:?},tab={})",
-                toc.instr, toc.dirty, toc.depth, toc.caption_category, toc.tab_pos
+                "toc(instr={},mode={:?},depth={:?},cat={:?},tab={})",
+                toc.instr, toc.mode, toc.depth, toc.caption_category, toc.tab_pos
             );
             for entry in &toc.entries {
                 sig_para(entry, out);
@@ -1735,7 +2462,11 @@ fn sig_run(run: &Run, out: &mut String) {
             let _ = write!(out, "ommli({xml})");
         }
         Run::Field(field) => {
-            let _ = write!(out, "field({},dirty={}", field.instr, field.dirty);
+            let _ = write!(
+                out,
+                "field({},mode={:?},display={:?}",
+                field.instr, field.mode, field.display
+            );
             for run in &field.result {
                 sig_run(run, out);
             }
@@ -2057,8 +2788,8 @@ fn page_overlay_block(
     // EMU per twip = 914400 / 1440.
     const EMU_PER_TWIP: i64 = 635;
 
-    let saved_w = ctx.raster_width;
-    ctx.raster_width = Abs::pt(geom.page_w as f64 / 20.0);
+    let saved_w = ctx.available_width;
+    ctx.available_width = Abs::pt(geom.page_w as f64 / 20.0);
     // Rendered into a region *expanded* to the full page box (not shrink-fit
     // to the content's own measured size): a watermark/background is commonly
     // built purely from `place(..)`, which positions content absolutely
@@ -2069,9 +2800,9 @@ fn page_overlay_block(
     // never load-bearing — only the expanded render's pixels are.
     let page_h = Abs::pt(geom.page_h as f64 / 20.0);
     let result = ctx.rasterize_page_overlay(content, styles, content.span(), page_h);
-    ctx.raster_width = saved_w;
+    ctx.available_width = saved_w;
     let result = result?;
-    let Some((rel, _size, _text)) = result else {
+    let Some((rel, _size, text)) = result else {
         return Ok(None);
     };
 
@@ -2081,7 +2812,10 @@ fn page_overlay_block(
         svg_rel: None,
         w_emu: geom.page_w as i64 * EMU_PER_TWIP,
         h_emu: geom.page_h as i64 * EMU_PER_TWIP,
-        alt: None,
+        alt: (!behind)
+            .then(|| text.replace('\n', " ").into())
+            .filter(|text: &ecow::EcoString| !text.trim().is_empty()),
+        decorative: behind,
         docpr_id,
         name: ecow::eco_format!("{name} {docpr_id}"),
         anchor: Some(Anchor {
@@ -2179,7 +2913,9 @@ fn page_number_para(
         ParaChild::Run(Run::Field(Field {
             instr,
             result: vec![Run::Text { props: RunProps::default(), text: "1".into() }],
-            dirty: false,
+            mode: FieldMode::Live,
+            display: FieldDisplay::Visible,
+            cache_status: DomFieldCacheStatus::Resolved,
         }))
     };
     let literal = |text: ecow::EcoString| {
@@ -2240,7 +2976,7 @@ pub(crate) fn collect_tags(blocks: &[Block], out: &mut Vec<Tag>) {
                     }
                 }
             }
-            Block::SectionBreak(_) => {}
+            Block::FlowSpace { .. } | Block::SectionBreak(_) => {}
         }
     }
 }
@@ -2317,6 +3053,9 @@ fn collect_positioned_tags(
                         );
                     }
                 }
+                *y += 1;
+            }
+            Block::FlowSpace { .. } => {
                 *y += 1;
             }
             Block::Toc(toc) => {

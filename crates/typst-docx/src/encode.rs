@@ -1,15 +1,17 @@
 //! Serializes the typed DOCX IR into an OPC zip package.
 
 use ecow::EcoString;
-use typst_library::diag::SourceResult;
+use typst_library::diag::{SourceResult, bail};
 use typst_library::foundations::Smart;
 use typst_library::model::DocumentInfo;
 use typst_ooxml_core::{dml, ns};
+use typst_syntax::Span;
 
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, DocxDocument,
-    Drawing, Field, Footnote, GroupSpec, HdrFtrPart, Para, ParaChild, Row, Run, SectPr,
-    SectType, ShapeFill, ShapeGeom, ShapeSpec, Tbl, Toc, VAlign, VMerge,
+    Drawing, Field, FieldDisplay, FieldMode, Footnote, GroupSpec, HdrFtrPart, Para,
+    ParaChild, ParaProps, Row, Run, SectPr, SectType, ShapeFill, ShapeGeom, ShapeSpec,
+    Spacing, Tbl, Toc, VAlign, VMerge,
 };
 use crate::package::{DOCX_PACKAGE_OPTIONS, Package, RelMode, Rels};
 use crate::styles_part;
@@ -20,12 +22,26 @@ use crate::xml::{self, XmlWriter};
 pub struct DocxOptions {
     /// Whether to pretty-print the XML parts.
     pub pretty: bool,
+    /// Whether to embed the fidelity manifest in the package
+    /// (`customXml/typstFidelity.xml`, mirrored into a custom document
+    /// property so it survives a LibreOffice Writer save).
+    ///
+    /// Off by default: the manifest describes the EXPORT (including which
+    /// referenced fonts were available on the exporting machine and every
+    /// approximation/drop decision), roughly doubles that description by
+    /// mirroring it into `docProps/custom.xml`, and shows up in Word's own
+    /// document-properties UI — none of which belongs in a document handed to
+    /// a recipient unless the author asked for it. The report itself is
+    /// always computed and available on [`DocxDocument`] for tooling either
+    /// way.
+    pub embed_fidelity_manifest: bool,
 }
 
 // Relationship-type URIs.
 const REL_OFFICE_DOCUMENT: &str = ns::rel::OFFICE_DOCUMENT;
 const REL_CORE_PROPS: &str = ns::rel::CORE_PROPS;
 const REL_EXTENDED_PROPS: &str = ns::rel::EXTENDED_PROPS;
+const REL_CUSTOM_PROPERTIES: &str = ns::rel::CUSTOM_PROPERTIES;
 const REL_STYLES: &str = ns::rel::STYLES;
 const REL_NUMBERING: &str = ns::rel::NUMBERING;
 const REL_FOOTNOTES: &str = ns::rel::FOOTNOTES;
@@ -44,6 +60,7 @@ const CT_ENDNOTES: &str = ns::ct::WORD_ENDNOTES;
 const CT_SETTINGS: &str = ns::ct::WORD_SETTINGS;
 const CT_CORE: &str = ns::ct::CORE_PROPS;
 const CT_EXTENDED: &str = ns::ct::EXTENDED_PROPS;
+const CT_CUSTOM_PROPERTIES: &str = ns::ct::CUSTOM_PROPERTIES;
 const CT_HEADER: &str = ns::ct::WORD_HEADER;
 const CT_FOOTER: &str = ns::ct::WORD_FOOTER;
 const CT_THEME: &str = ns::ct::THEME;
@@ -59,6 +76,9 @@ fn push_font(fonts: &mut Vec<String>, font: &str) {
 /// Serializes a DOCX document into the OPC zip bytes.
 #[typst_macros::time(name = "docx encode")]
 pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<u8>> {
+    if let Err(err) = crate::invariants::validate(document) {
+        bail!(Span::detached(), "invalid finalized DOCX IR: {err}");
+    }
     let pretty = options.pretty;
     let mut package = Package::new(DOCX_PACKAGE_OPTIONS);
     let mut root_rels = Rels::new();
@@ -92,15 +112,10 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     doc_rels.add(REL_THEME, "theme/theme1.xml", RelMode::Internal);
 
     // -- word/fontTable.xml --
-    // The document font + the standard auxiliary fonts (bullet glyphs, math).
+    // Every font referenced by the finalized IR + standard auxiliary fonts.
     let mut fonts: Vec<String> = Vec::new();
-    if let Some(f) = &document.text_defaults.font {
-        push_font(&mut fonts, f);
-    }
-    for style in &document.heading_styles {
-        if let Some(f) = &style.rpr.font {
-            push_font(&mut fonts, f);
-        }
+    for font in document.fidelity_report().fonts() {
+        push_font(&mut fonts, &font.family);
     }
     for f in ["Symbol", "Courier New"] {
         push_font(&mut fonts, f);
@@ -139,7 +154,7 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     // A footnote body that holds an image / external link references it by r:id;
     // that id resolves against footnotes.xml's OWN rels part, not the document's.
     // Without this, Word refuses to open the file.
-    write_part_rels(&mut package, "word/footnotes.xml", &document.footnote_rels);
+    write_part_rels(&mut package, "word/footnotes.xml", &document.footnote_rels)?;
     package.add_xml("word/endnotes.xml", CT_ENDNOTES, build_endnotes(pretty));
     doc_rels.add(REL_ENDNOTES, "endnotes.xml", RelMode::Internal);
 
@@ -154,12 +169,12 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     for (i, part) in document.header_parts.iter().enumerate() {
         let xml = build_hdrftr(part, 0x1000_0000 + i as u32 * 0x0010_0000, pretty);
         package.add_xml(&format!("word/{}", part.part_name), CT_HEADER, xml);
-        write_part_rels(&mut package, &format!("word/{}", part.part_name), &part.rels);
+        write_part_rels(&mut package, &format!("word/{}", part.part_name), &part.rels)?;
     }
     for (i, part) in document.footer_parts.iter().enumerate() {
         let xml = build_hdrftr(part, 0x4000_0000 + i as u32 * 0x0010_0000, pretty);
         package.add_xml(&format!("word/{}", part.part_name), CT_FOOTER, xml);
-        write_part_rels(&mut package, &format!("word/{}", part.part_name), &part.rels);
+        write_part_rels(&mut package, &format!("word/{}", part.part_name), &part.rels)?;
     }
 
     // -- media parts --
@@ -214,8 +229,35 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
         );
         let mut item_rels = Rels::new();
         item_rels.add(ns::rel::CUSTOM_XML_PROPS, "itemProps1.xml", RelMode::Internal);
-        write_part_rels(&mut package, "customXml/item1.xml", &item_rels);
+        write_part_rels(&mut package, "customXml/item1.xml", &item_rels)?;
         doc_rels.add(ns::rel::CUSTOM_XML, "../customXml/item1.xml", RelMode::Internal);
+    }
+
+    // -- customXml/typstFidelity.xml (opt-in) --------------------------------
+    // Versioned, machine-readable export evidence. The canonical customXml
+    // part is ideal for tooling, but Writer drops arbitrary customXml on save;
+    // docProps/custom.xml below redundantly carries the exact payload through
+    // that round trip. See `DocxOptions::embed_fidelity_manifest` for why this
+    // is off by default; the report always stays queryable on `DocxDocument`.
+    if options.embed_fidelity_manifest {
+        let fidelity_manifest = document.fidelity_manifest_xml();
+        package.add_xml(
+            crate::manifest::PART_NAME,
+            "application/xml",
+            fidelity_manifest.clone(),
+        );
+        doc_rels.add(
+            crate::manifest::REL_TYPE,
+            "../customXml/typstFidelity.xml",
+            RelMode::Internal,
+        );
+        // `docProps/custom.xml` exists solely to mirror the manifest, so the
+        // whole part (and its root relationship below) is skipped with it.
+        package.add_xml(
+            "docProps/custom.xml",
+            CT_CUSTOM_PROPERTIES,
+            build_custom_properties(&fidelity_manifest, pretty),
+        );
     }
 
     // -- word/document.xml --
@@ -223,11 +265,7 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     package.add_xml("word/document.xml", CT_DOCUMENT, document_xml);
 
     // -- word/_rels/document.xml.rels --
-    package.add_xml(
-        "word/_rels/document.xml.rels",
-        "application/vnd.openxmlformats-package.relationships+xml",
-        doc_rels.to_xml(),
-    );
+    write_part_rels(&mut package, "word/document.xml", &doc_rels)?;
 
     // -- docProps/core.xml + app.xml --
     package.add_xml("docProps/core.xml", CT_CORE, build_core(&document.info, pretty));
@@ -237,8 +275,18 @@ pub fn docx(document: &DocxDocument, options: &DocxOptions) -> SourceResult<Vec<
     root_rels.add(REL_OFFICE_DOCUMENT, "word/document.xml", RelMode::Internal);
     root_rels.add(REL_CORE_PROPS, "docProps/core.xml", RelMode::Internal);
     root_rels.add(REL_EXTENDED_PROPS, "docProps/app.xml", RelMode::Internal);
+    if options.embed_fidelity_manifest {
+        root_rels.add(REL_CUSTOM_PROPERTIES, "docProps/custom.xml", RelMode::Internal);
+    }
 
-    Ok(package.finish(&root_rels))
+    if let Err(err) = crate::schema::validate_package(&package) {
+        bail!(Span::detached(), "invalid finalized DOCX XML sequence: {err}");
+    }
+
+    match package.finish(&root_rels) {
+        Ok(bytes) => Ok(bytes),
+        Err(err) => bail!(Span::detached(), "failed to finalize DOCX package: {err}"),
+    }
 }
 
 /// Clones the conversion-time `doc_rels` so `encode` can append the static
@@ -331,6 +379,25 @@ fn write_block(w: &mut XmlWriter, block: &Block) -> bool {
             // paragraph" so the body terminator inserts one if this is the last
             // block.
             false
+        }
+        Block::FlowSpace { dxa } => {
+            write_para(
+                w,
+                &Para {
+                    props: ParaProps {
+                        spacing: Some(Spacing {
+                            before: Some(0),
+                            after: Some(0),
+                            line: Some((*dxa).max(1)),
+                            line_rule_auto: false,
+                            line_rule_at_least: false,
+                        }),
+                        ..ParaProps::default()
+                    },
+                    content: Vec::new(),
+                },
+            );
+            true
         }
         Block::Toc(toc) => {
             write_toc(w, toc);
@@ -654,13 +721,7 @@ fn write_inline_envelope(w: &mut XmlWriter, d: &Drawing) {
         .attr("r", "0")
         .attr("b", "0")
         .empty();
-    w.open("wp:docPr")
-        .attr("id", &d.docpr_id.to_string())
-        .attr("name", &d.name);
-    if let Some(alt) = &d.alt {
-        w.attr("descr", alt);
-    }
-    w.empty();
+    write_drawing_doc_properties(w, d);
     w.open("wp:cNvGraphicFramePr").start_children();
     w.open("a:graphicFrameLocks")
         .attr("xmlns:a", ns::A)
@@ -709,13 +770,7 @@ fn write_anchor_envelope(w: &mut XmlWriter, d: &Drawing, a: &Anchor) {
         }
         AnchorWrap::None => w.leaf("wp:wrapNone"),
     }
-    w.open("wp:docPr")
-        .attr("id", &d.docpr_id.to_string())
-        .attr("name", &d.name);
-    if let Some(alt) = &d.alt {
-        w.attr("descr", alt);
-    }
-    w.empty();
+    write_drawing_doc_properties(w, d);
     w.open("wp:cNvGraphicFramePr").start_children();
     w.open("a:graphicFrameLocks")
         .attr("xmlns:a", ns::A)
@@ -724,6 +779,34 @@ fn write_anchor_envelope(w: &mut XmlWriter, d: &Drawing, a: &Anchor) {
     w.close(); // wp:cNvGraphicFramePr
     write_pic_payload(w, d);
     w.close(); // wp:anchor
+}
+
+/// Emits the drawing's document-level non-visual properties and accessibility
+/// intent. Office's decorative flag is an extension child of `wp:docPr`, not an
+/// attribute on the picture payload.
+fn write_drawing_doc_properties(w: &mut XmlWriter, d: &Drawing) {
+    w.open("wp:docPr")
+        .attr("id", &d.docpr_id.to_string())
+        .attr("name", &d.name);
+    if let Some(alt) = &d.alt {
+        w.attr("descr", alt);
+    }
+    if !d.decorative {
+        w.empty();
+        return;
+    }
+    w.start_children();
+    w.open("a:extLst").attr("xmlns:a", ns::A).start_children();
+    w.open("a:ext")
+        .attr("uri", "{C183D7F6-B498-43B3-948B-1728B52AA6E4}")
+        .start_children();
+    w.open("adec:decorative")
+        .attr("xmlns:adec", ns::ADEC)
+        .attr("val", "1")
+        .empty();
+    w.close(); // a:ext
+    w.close(); // a:extLst
+    w.close(); // wp:docPr
 }
 
 /// Emits one `<wp:positionH>` / `<wp:positionV>` carrying exactly one of
@@ -910,8 +993,12 @@ fn write_wsp(
             w.close(); // wps:txbx
             // Reproduce the box inset as the text-frame insets, and auto-fit the
             // frame to the text so Word can re-flow it when edited.
+            let wrap = match tb.wrap {
+                crate::dom::TextBoxWrap::Square => "square",
+                crate::dom::TextBoxWrap::None => "none",
+            };
             w.open("wps:bodyPr")
-                .attr("wrap", "square")
+                .attr("wrap", wrap)
                 .attr("lIns", &tb.ins[0].to_string())
                 .attr("tIns", &tb.ins[1].to_string())
                 .attr("rIns", &tb.ins[2].to_string())
@@ -1013,30 +1100,74 @@ fn write_run(w: &mut XmlWriter, run: &Run) {
 }
 
 fn write_field(w: &mut XmlWriter, field: &Field) {
-    // begin
+    write_field_begin(w, &field.instr, field.mode, field.display);
+    // cached result
+    if field.display == FieldDisplay::Hidden {
+        debug_assert!(field.result.is_empty(), "hidden fields have no visible cache");
+        write_hidden_field_run(w, None);
+    } else {
+        for run in &field.result {
+            write_run(w, run);
+        }
+    }
+    write_field_end(w, field.display);
+}
+
+fn write_field_run_start(w: &mut XmlWriter, display: FieldDisplay) {
     w.open(xml::W_R).start_children();
+    if display == FieldDisplay::Hidden {
+        w.open(xml::W_RPR).start_children();
+        w.leaf("w:vanish");
+        w.close();
+    }
+}
+
+fn write_hidden_field_run(w: &mut XmlWriter, instr: Option<&str>) {
+    write_field_run_start(w, FieldDisplay::Hidden);
+    if let Some(instr) = instr {
+        w.open("w:instrText").attr("xml:space", "preserve").start_children();
+        w.text(instr);
+        w.close();
+    } else {
+        // Give consumers a result run whose character formatting they can
+        // retain when recalculating the field. A zero-width space avoids an
+        // empty run being discarded during import before recalculation.
+        w.open(xml::W_T).attr("xml:space", "preserve").start_children();
+        w.text("\u{200b}");
+        w.close();
+    }
+    w.close();
+}
+
+fn write_field_begin(
+    w: &mut XmlWriter,
+    instr: &str,
+    mode: FieldMode,
+    display: FieldDisplay,
+) {
+    write_field_run_start(w, display);
     let fld = w.open("w:fldChar").attr("w:fldCharType", "begin");
-    if field.dirty {
-        fld.attr("w:dirty", "true");
+    if mode.locked() {
+        fld.attr("w:fldLock", "true");
     }
     w.empty();
     w.close();
-    // instrText
-    w.open(xml::W_R).start_children();
-    w.open("w:instrText").attr("xml:space", "preserve").start_children();
-    w.text(&field.instr);
-    w.close();
-    w.close();
-    // separate
-    w.open(xml::W_R).start_children();
+    if display == FieldDisplay::Hidden {
+        write_hidden_field_run(w, Some(instr));
+    } else {
+        w.open(xml::W_R).start_children();
+        w.open("w:instrText").attr("xml:space", "preserve").start_children();
+        w.text(instr);
+        w.close();
+        w.close();
+    }
+    write_field_run_start(w, display);
     w.open("w:fldChar").attr("w:fldCharType", "separate").empty();
     w.close();
-    // cached result
-    for run in &field.result {
-        write_run(w, run);
-    }
-    // end
-    w.open(xml::W_R).start_children();
+}
+
+fn write_field_end(w: &mut XmlWriter, display: FieldDisplay) {
+    write_field_run_start(w, display);
     w.open("w:fldChar").attr("w:fldCharType", "end").empty();
     w.close();
 }
@@ -1075,26 +1206,7 @@ fn write_toc(w: &mut XmlWriter, toc: &Toc) {
 fn write_toc_body(w: &mut XmlWriter, toc: &Toc) {
     // Emits the field `begin` + instruction + `separate` run sequence.
     let write_begin = |w: &mut XmlWriter| {
-        w.open(xml::W_R).start_children();
-        let fld = w.open("w:fldChar").attr("w:fldCharType", "begin");
-        if toc.dirty {
-            fld.attr("w:dirty", "true");
-        }
-        w.empty();
-        w.close();
-        w.open(xml::W_R).start_children();
-        w.open("w:instrText").attr("xml:space", "preserve").start_children();
-        w.text(&toc.instr);
-        w.close();
-        w.close();
-        w.open(xml::W_R).start_children();
-        w.open("w:fldChar").attr("w:fldCharType", "separate").empty();
-        w.close();
-    };
-    let write_end = |w: &mut XmlWriter| {
-        w.open(xml::W_R).start_children();
-        w.open("w:fldChar").attr("w:fldCharType", "end").empty();
-        w.close();
+        write_field_begin(w, &toc.instr, toc.mode, FieldDisplay::Visible);
     };
 
     if toc.entries.is_empty() {
@@ -1103,7 +1215,7 @@ fn write_toc_body(w: &mut XmlWriter, toc: &Toc) {
         for run in &toc.fallback {
             write_run(w, run);
         }
-        write_end(w);
+        write_field_end(w, FieldDisplay::Visible);
         w.close();
         return;
     }
@@ -1119,7 +1231,7 @@ fn write_toc_body(w: &mut XmlWriter, toc: &Toc) {
             write_para_child(w, child);
         }
         if i == last {
-            write_end(w);
+            write_field_end(w, FieldDisplay::Visible);
         }
         w.close(); // w:p
     }
@@ -1208,17 +1320,15 @@ fn write_sectpr(w: &mut XmlWriter, sect: &SectPr) {
 /// naming convention, so no explicit reference is needed. An `r:id` in the
 /// part's own content resolves against THIS rels part, not
 /// `word/_rels/document.xml.rels`.
-fn write_part_rels(package: &mut Package, part_path: &str, rels: &Rels) {
-    if rels.is_empty() {
-        return;
+fn write_part_rels(
+    package: &mut Package,
+    part_path: &str,
+    rels: &Rels,
+) -> SourceResult<()> {
+    match package.add_relationships(part_path, rels) {
+        Ok(()) => Ok(()),
+        Err(err) => bail!(Span::detached(), "failed to register relationships: {err}"),
     }
-    let (dir, file) =
-        part_path.rsplit_once('/').expect("part_path must include a directory");
-    package.add_xml(
-        &format!("{dir}/_rels/{file}.rels"),
-        "application/vnd.openxmlformats-package.relationships+xml",
-        rels.to_xml(),
-    );
 }
 
 /// Serializes a header (`w:hdr`) or footer (`w:ftr`) part. Never emits an empty
@@ -1285,9 +1395,6 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
     w.open("w:characterSpacingControl")
         .attr(xml::W_VAL, "doNotCompress")
         .empty();
-    if document.uses_fields {
-        w.open("w:updateFields").attr(xml::W_VAL, "true").empty();
-    }
     // Header drawing-canvas defaults (the header sibling of shapeDefaults).
     w.raw(
         "<w:hdrShapeDefaults><o:shapedefaults v:ext=\"edit\" spidmax=\"1026\"/>\
@@ -1348,7 +1455,7 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
     w.close(); // mathPr
     // Spell-check language for the theme fonts.
     let lang = document.text_defaults.lang.as_deref().unwrap_or("en-US");
-    w.open("w:themeFontLang").attr(xml::W_VAL, lang).empty();
+    crate::props::write_language(&mut w, "w:themeFontLang", lang);
     // Map the colour-scheme slots to the theme (what Word writes for a doc using
     // the Office theme).
     w.open("w:clrSchemeMapping")
@@ -1550,7 +1657,10 @@ fn build_typst_bibliography(bib: &str, pretty: bool) -> String {
 /// `b:Source` per entry. `SelectedStyle`/`StyleName` mirror what Word itself
 /// always emits (a citation style for Source Manager's own UI, independent
 /// of Typst's realized in-body citation formatting).
-fn build_word_sources(sources: &[crate::bibliography::WordSource], pretty: bool) -> String {
+fn build_word_sources(
+    sources: &[crate::bibliography::WordSource],
+    pretty: bool,
+) -> String {
     let mut w = XmlWriter::new(pretty);
     w.open("b:Sources")
         .attr("xmlns:b", ns::B)
@@ -1656,6 +1766,29 @@ fn build_item_props(guid: &str, pretty: bool) -> String {
 // ---------------------------------------------------------------------------
 // docProps
 // ---------------------------------------------------------------------------
+
+/// Redundant standards-based carrier for the fidelity payload.
+///
+/// LibreOffice Writer drops arbitrary `customXml` parts on save, but preserves
+/// custom document properties. Keeping the canonical XML part and duplicating
+/// its exact text here lets tools recover the evidence after either Word or
+/// Writer round trips without placing hidden content in the document body.
+fn build_custom_properties(fidelity_manifest: &str, pretty: bool) -> String {
+    let mut w = XmlWriter::new(pretty);
+    w.open("Properties")
+        .attr("xmlns", ns::CUSTOM_PROPERTIES)
+        .attr("xmlns:vt", ns::DOC_PROPS_VTYPES)
+        .start_children();
+    w.open("property")
+        .attr("fmtid", "{D5CDD505-2E9C-101B-9397-08002B2CF9AE}")
+        .attr("pid", "2")
+        .attr("name", "TypstFidelityManifestV1")
+        .start_children();
+    w.elem_text("vt:lpwstr", fidelity_manifest);
+    w.close();
+    w.close();
+    w.finish()
+}
 
 fn build_core(info: &DocumentInfo, pretty: bool) -> String {
     let mut w = XmlWriter::new(pretty);

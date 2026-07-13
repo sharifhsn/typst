@@ -14,7 +14,9 @@ use crate::introspection::{
     Count, Counter, CounterUpdate, Locatable, Location, QueryLabelIntrospection, Tagged,
 };
 use crate::layout::{Em, Length, Ratio};
-use crate::model::{DirectLinkElem, Numbering, NumberingPattern, ParElem};
+use crate::model::{
+    DirectLinkElem, DirectLinkKind, Numbering, NumberingPattern, ParElem,
+};
 use crate::text::{LocalName, SuperElem, TextElem, TextSize};
 use crate::visualize::{LineElem, Stroke};
 
@@ -149,7 +151,9 @@ impl Packed<FootnoteElem> {
         let num = counter.display_at(engine, loc, styles, numbering, span)?;
         let alt = FootnoteElem::alt_text(styles, &num.plain_text());
         let dest = loc.variant(1);
-        Ok(DirectLinkElem::new(dest, num, Some(alt)).pack().spanned(span))
+        Ok(DirectLinkElem::new(dest, num, Some(alt), DirectLinkKind::Other)
+            .pack()
+            .spanned(span))
     }
 
     /// Returns the location of the definition of this footnote.
@@ -313,7 +317,9 @@ impl Packed<FootnoteEntry> {
 
         let num = counter.display_at(engine, dest, styles, numbering, span)?;
         let alt = num.plain_text();
-        let link = DirectLinkElem::new(dest, num, Some(alt)).pack().spanned(span);
+        let link = DirectLinkElem::new(dest, num, Some(alt), DirectLinkKind::Other)
+            .pack()
+            .spanned(span);
         let sup = SuperElem::new(link).pack().spanned(span);
         let body = self.note.body_content().unwrap().clone();
 

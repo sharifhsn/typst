@@ -9,9 +9,10 @@ works very differently. Word documents reflow, so DOCX export walks Typst's
 *realized element tree* and rebuilds semantic structure (headings, lists,
 tables). Slides do **not** reflow — a slide is a fixed canvas — so PPTX export
 consumes the already **laid-out** `PagedDocument` and places every element at
-its exact position, the same input the PNG and SVG renderers use. There are no
-show rules, no convergence passes, and no engine: positions are exact by
-construction.
+its Typst-computed position, the same input the PNG and SVG renderers use.
+Geometry is therefore direct rather than reconstructed, while editable text can
+still reflow when PowerPoint or Impress substitutes fonts or applies different
+text-box metrics.
 
 > **Experimental preview.** Like Typst's own HTML export, this is not part of
 > upstream Typst and is not endorsed by the Typst maintainers. Please report
@@ -46,26 +47,37 @@ an error.
   becomes the slide's `p:bg`.
 - **Images** — PNG/JPEG/GIF embedded verbatim; media is de-duplicated across
   slides by content hash.
-- **Groups** — rotated/scaled/nested composites map to `p:grpSp` group shapes.
+- **SVG images** — embedded as native SVG with a PNG compatibility fallback.
+- **Tables** — eligible laid-out tables become editable DrawingML tables; table
+  styling and transformed-table fallback are still incomplete.
+- **Math** — eligible equations are emitted as OMML inside an Office
+  compatibility wrapper, with a plain DrawingML text fallback.
+- **Presentation UX** — notes, slide numbers, and inferred title/body
+  placeholders are preserved when the source exposes enough structure.
 
 ## What falls back to a picture
 
 Anything with no clean PowerPoint equivalent is rasterized to a positioned image
-so the visual is preserved exactly: SVG/PDF images, CeTZ/fletcher diagrams,
-math, radial/conic gradients, and opaque layout callbacks (`#block` bodies whose
-content can only be produced by re-running layout). The rest of the slide stays
-native and editable.
+so the visual is preserved: PDF images, CeTZ/fletcher diagrams, complex clips or
+skewed groups, radial/conic gradients, and opaque layout callbacks (`#block`
+bodies whose content can only be produced by re-running layout). The rest of the
+slide stays native and editable.
 
 ## Known limitations
 
-- **Math** renders as a rasterized image, not native PowerPoint equations (OOXML
-  math — OMML — is a Word format; PowerPoint uses it only in a limited way).
+- **Math compatibility varies by consumer.** PowerPoint can use the OMML choice;
+  older Office versions and LibreOffice may display the simpler DrawingML
+  fallback instead, which is not visually equivalent for complex equations.
+- **Native tables are conservative and incomplete.** Transformed or partially
+  captured tables can still require a whole-table picture fallback; cell-level
+  fills, strokes, gutters, math, and inset geometry need broader coverage.
 - **Rotated live text** (`#rotate(90deg)[…]`) may be offset from Typst; the text
   stays editable but its box position is approximate.
 - **Hyperlinks on a shape or image** (rather than on text) are dropped; the shape
   still renders.
-- **Mixed page sizes** in one document are all scaled to the first page's size
-  (PowerPoint has a single global slide size); the CLI warns when this happens.
+- **Mixed page sizes** cannot be represented directly because PowerPoint has one
+  global slide size. The CLI warns, but off-size pages are not yet transformed
+  into the first page's coordinate system and may crop or leave extra space.
 - **Gradient/tiling *text* fills** are approximated with a representative solid
   color (a run can carry only one color), so the text stays visible.
 
@@ -78,9 +90,10 @@ regression test guards each). Output is byte-for-byte reproducible under
 `SOURCE_DATE_EPOCH`.
 
 Fidelity is measured by rendering both the gold PDF and the exported `.pptx`
-(via LibreOffice) to images and scoring their similarity. Across 112 real
-presentation templates the mean score is **0.995** (median 0.996), with no
-export failures.
+(via LibreOffice) to images and scoring their similarity. In the 2026-07-03
+112-template snapshot, the mean score was **0.995** (median 0.996), with no
+export failures. These are historical regression measurements, not a guarantee
+for every Office version, installed-font set, or later exporter revision.
 
 Nativeness is audited separately (a pixel diff can't tell live text from a
 screenshot): comparing live `<a:t>` words against the PDF's text layer, the
@@ -95,3 +108,7 @@ characters affected.
 Integration tests live in [`../../tests/src/pptx.rs`](../../tests/src/pptx.rs), and
 a measured head-to-head against typ2pptx and touying-exporter is in the repo-level
 [`COMPARISON.md`](../../COMPARISON.md).
+
+The current pipeline, fidelity model, verified failure modes, and proposed
+preflight architecture are documented in
+[`../../docs/dev/office-export-architecture.md`](../../docs/dev/office-export-architecture.md).

@@ -7,6 +7,7 @@ pub const CONTENT_TYPES: &str =
 
 pub const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 pub const A14: &str = "http://schemas.microsoft.com/office/drawing/2010/main";
+pub const ADEC: &str = "http://schemas.microsoft.com/office/drawing/2017/decorative";
 pub const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
 pub const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 pub const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -35,11 +36,14 @@ pub const EXTENDED_PROPS: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties";
 pub const DOC_PROPS_VTYPES: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes";
+pub const CUSTOM_PROPERTIES: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/custom-properties";
 
 pub mod rel {
     pub const OFFICE_DOCUMENT: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
     pub const CORE_PROPS: &str = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
     pub const EXTENDED_PROPS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties";
+    pub const CUSTOM_PROPERTIES: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties";
     pub const STYLES: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles";
     pub const NUMBERING: &str =
@@ -91,6 +95,8 @@ pub mod ct {
         "application/vnd.openxmlformats-package.core-properties+xml";
     pub const EXTENDED_PROPS: &str =
         "application/vnd.openxmlformats-officedocument.extended-properties+xml";
+    pub const CUSTOM_PROPERTIES: &str =
+        "application/vnd.openxmlformats-officedocument.custom-properties+xml";
     pub const THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml";
 
     pub const WORD_DOCUMENT: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";

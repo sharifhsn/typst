@@ -3139,6 +3139,7 @@ dependencies = [
  "typst-dev-assets",
  "typst-docx",
  "typst-eval",
+ "typst-export-common",
  "typst-html",
  "typst-kit",
  "typst-layout",
@@ -3205,8 +3206,10 @@ dependencies = [
  "ecow",
  "flate2",
  "hayagriva",
+ "roxmltree 0.21.1",
  "rustc-hash",
  "time",
+ "typst-export-common",
  "typst-layout",
  "typst-library",
  "typst-macros",
@@ -3235,6 +3238,17 @@ dependencies = [
  "typst-timing",
  "typst-utils",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "typst-export-common"
+version = "0.15.0"
+dependencies = [
+ "tiny-skia",
+ "typst-layout",
+ "typst-library",
+ "typst-render",
+ "typst-utils",
 ]
 
 [[package]]
@@ -3444,11 +3458,11 @@ name = "typst-ooxml-core"
 version = "0.15.0"
 dependencies = [
  "ecow",
+ "roxmltree 0.21.1",
  "rustc-hash",
- "tiny-skia",
+ "typst-export-common",
  "typst-layout",
  "typst-library",
- "typst-render",
  "typst-utils",
  "zip",
 ]
@@ -3462,10 +3476,10 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
+ "typst-export-common",
  "typst-layout",
  "typst-library",
  "typst-macros",
- "typst-render",
  "typst-syntax",
  "typst-timing",
  "typst-utils",
@@ -3506,6 +3520,7 @@ dependencies = [
  "ecow",
  "rustc-hash",
  "time",
+ "typst-export-common",
  "typst-layout",
  "typst-library",
  "typst-ooxml-core",
@@ -3628,6 +3643,7 @@ dependencies = [
  "typst-dev-assets",
  "typst-docx",
  "typst-eval",
+ "typst-export-common",
  "typst-html",
  "typst-kit",
  "typst-layout",

@@ -396,17 +396,23 @@ fn compile_and_export(
                             .map(|page| page.frame.size())
                             .collect::<Vec<_>>(),
                     );
+                    let paged_geometry = Arc::new(
+                        typst_export_common::paged::PagedGeometry::from_document(
+                            &paged_document,
+                        ),
+                    );
                     let Warned { output, warnings: docx_warnings } =
                         typst::compile_with::<DocxDocument, _>(
                             world,
                             Some(seed.as_ref()),
                             move |engine, content, styles| {
-                                typst_docx::docx_document_with_paged_introspector(
+                                typst_docx::docx_document_with_paged_geometry(
                                     engine,
                                     content,
                                     styles,
                                     Arc::clone(&primary),
                                     Arc::clone(&page_sizes),
+                                    Arc::clone(&paged_geometry),
                                 )
                             },
                         );
@@ -469,8 +475,8 @@ fn target_mismatch_warning(
 }
 
 /// PPTX has a single global slide size, so a deck whose exported pages differ
-/// in size will have its off-size slides scaled to the first page's dimensions.
-/// Warn when that happens; `None` for any other format or a uniform deck.
+/// in size cannot be represented without an explicit per-page transform. Warn
+/// when that happens; `None` for any other format or a uniform deck.
 fn mixed_page_size_warning(
     document: &PagedDocument,
     config: &CompileConfig,
@@ -498,13 +504,18 @@ fn mixed_page_size_warning(
             Span::detached(),
             "the presentation mixes pages of different sizes",
         )
-        .with_hint("every slide is sized to the first page; off-size slides are scaled")
+        .with_hint(
+            "every slide uses the first page's canvas; off-size content may crop or leave extra space",
+        )
     })
 }
 
 /// Export to DOCX.
 fn export_docx(document: &DocxDocument, config: &CompileConfig) -> SourceResult<()> {
-    let options = DocxOptions { pretty: config.pretty };
+    // The embedded fidelity manifest stays off until a CLI flag exposes it;
+    // the report remains queryable on the in-memory document either way.
+    let options =
+        DocxOptions { pretty: config.pretty, embed_fidelity_manifest: false };
     let bytes = typst_docx::docx(document, &options)?;
     config
         .output

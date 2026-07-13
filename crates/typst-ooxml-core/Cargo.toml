@@ -14,10 +14,10 @@ keywords = { workspace = true }
 [dependencies]
 ecow = { workspace = true }
 rustc-hash = { workspace = true }
-tiny-skia = { workspace = true }
+roxmltree = { workspace = true }
+typst-export-common = { workspace = true }
 typst-layout = { workspace = true }
 typst-library = { workspace = true }
-typst-render = { workspace = true }
 typst-utils = { workspace = true }
 zip = { workspace = true }
 

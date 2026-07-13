@@ -1,23 +1,21 @@
 use ecow::EcoString;
 use rustc_hash::FxHashMap;
 use typst_layout::{Page, PagedDocument};
-use typst_library::foundations::{NativeElement, Smart, StyleChain};
+use typst_library::foundations::{NativeElement, StyleChain};
 use typst_library::introspection::{CounterDisplayElem, Introspector, Location, Tag};
 use typst_library::layout::{
-    Abs, ColumnRegion, Frame, FrameItem, GridCell, GridCellRegion, GridElem, Point,
-    Sides, Size, Transform,
+    Abs, ColumnRegion, Frame, FrameItem, Point, Size, Transform,
 };
 use typst_library::math::EquationElem;
-use typst_library::model::{
-    Destination, Numbering, TableCell as TypstTableCell, TableElem,
-};
-use typst_library::visualize::{LineCap, Paint, Shape, Stroke};
+use typst_library::model::{Destination, Numbering};
+use typst_library::visualize::{Paint, Shape};
 use typst_ooxml_core::dml;
 
 use crate::dom::{
-    CellBorders, FillSpec, MathBox, PicGeom, SlideCtx, SlideIr, SlideShape, StrokeSpec,
-    TableBox, TableCell, TableRow, TextBox, TextColumns, TextPara, TextWrap,
+    FillSpec, MathBox, PicGeom, SlideCtx, SlideIr, SlideShape, TextBox, TextColumns,
+    TextPara, TextWrap,
 };
+use crate::table::{ActiveTable, ActiveTableCell, CapturedTableCell};
 use crate::text::{InlineMathSource, LinkTarget, TextSource};
 
 /// Convert all pages into slide IR.
@@ -55,11 +53,11 @@ fn slide(
     }
 }
 
-struct Walker<'a, 'b> {
+pub(super) struct Walker<'a, 'b> {
     document: &'a PagedDocument,
-    ctx: &'b mut SlideCtx,
+    pub(super) ctx: &'b mut SlideCtx,
     next_order: usize,
-    shapes: Vec<OrderedShape>,
+    pub(super) shapes: Vec<OrderedShape>,
     text: Vec<TextSource<'a>>,
     inline_math: Vec<InlineMathSource>,
     links: Vec<LinkRect>,
@@ -68,20 +66,22 @@ struct Walker<'a, 'b> {
     slide_number_fallback: Option<EcoString>,
     active_math: Vec<ActiveMath>,
     active_slide_numbers: Vec<ActiveSlideNumber>,
-    active_tables: Vec<ActiveTable>,
-    loose_table_cells: Vec<CapturedTableCell>,
-    active_table_cells: Vec<ActiveTableCell<'a>>,
+    // Native table capture is implemented in `table`; the walker owns the
+    // stacks so traversal order and nested frame recursion stay centralized.
+    pub(super) active_tables: Vec<ActiveTable>,
+    pub(super) loose_table_cells: Vec<CapturedTableCell>,
+    pub(super) active_table_cells: Vec<ActiveTableCell<'a>>,
     active_columns: Vec<ActiveColumnRegion<'a>>,
 }
 
-struct OrderedShape {
-    order: usize,
-    shape: SlideShape,
+pub(super) struct OrderedShape {
+    pub(super) order: usize,
+    pub(super) shape: SlideShape,
 }
 
-struct LinkRect {
-    rect: Rect,
-    target: LinkTarget,
+pub(super) struct LinkRect {
+    pub(super) rect: Rect,
+    pub(super) target: LinkTarget,
 }
 
 struct MathSource {
@@ -107,27 +107,6 @@ struct ActiveSlideNumber {
     bounds: Option<Rect>,
 }
 
-struct ActiveTable {
-    loc: Location,
-    order: usize,
-    cells: Vec<CapturedTableCell>,
-}
-
-struct ActiveTableCell<'a> {
-    loc: Location,
-    order: usize,
-    table: bool,
-    x: usize,
-    y: usize,
-    colspan: usize,
-    rowspan: usize,
-    rect: Rect,
-    fill: Option<FillSpec>,
-    borders: CellBorders,
-    text: Vec<TextSource<'a>>,
-    links: Vec<LinkRect>,
-}
-
 struct ActiveColumnRegion<'a> {
     loc: Location,
     order: usize,
@@ -138,29 +117,16 @@ struct ActiveColumnRegion<'a> {
     links: Vec<LinkRect>,
 }
 
-struct CapturedTableCell {
-    order: usize,
-    table: bool,
-    x: usize,
-    y: usize,
-    colspan: usize,
-    rowspan: usize,
-    rect: Rect,
-    fill: Option<FillSpec>,
-    borders: CellBorders,
-    paras: Vec<TextPara>,
+#[derive(Copy, Clone)]
+pub(super) struct Rect {
+    pub(super) min: Point,
+    pub(super) max: Point,
 }
 
 #[derive(Copy, Clone)]
-struct Rect {
-    min: Point,
-    max: Point,
-}
-
-#[derive(Copy, Clone)]
-struct Similarity {
-    rot_60k: i32,
-    scale: f64,
+pub(super) struct Similarity {
+    pub(super) rot_60k: i32,
+    pub(super) scale: f64,
 }
 
 impl<'a, 'b> Walker<'a, 'b> {
@@ -190,7 +156,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         }
     }
 
-    fn walk_frame(&mut self, frame: &'a Frame, transform: Transform) {
+    pub(super) fn walk_frame(&mut self, frame: &'a Frame, transform: Transform) {
         for (pos, item) in frame.items() {
             let order = self.reserve_order();
             let item_transform = transform.pre_concat(Transform::translate(pos.x, pos.y));
@@ -429,108 +395,6 @@ impl<'a, 'b> Walker<'a, 'b> {
         });
     }
 
-    fn start_table(&mut self, tag: &Tag, order: usize) -> bool {
-        let Tag::Start(elem, ..) = tag else {
-            return false;
-        };
-        if elem.to_packed::<TableElem>().is_none()
-            && elem.to_packed::<GridElem>().is_none()
-        {
-            return false;
-        }
-
-        self.active_tables.push(ActiveTable {
-            loc: tag.location(),
-            order,
-            cells: Vec::new(),
-        });
-        true
-    }
-
-    fn end_table(&mut self, loc: Location) -> bool {
-        let Some(index) = self.active_tables.iter().rposition(|active| active.loc == loc)
-        else {
-            return false;
-        };
-        let active = self.active_tables.remove(index);
-        if let Some(shape) = table_shape(active.order, active.cells) {
-            self.shapes.push(shape);
-        }
-        true
-    }
-
-    fn start_table_cell(
-        &mut self,
-        tag: &Tag,
-        order: usize,
-        item_transform: Transform,
-    ) -> bool {
-        let Tag::Start(elem, ..) = tag else {
-            return false;
-        };
-        let Some(region) = elem.to_packed::<GridCellRegion>() else {
-            return false;
-        };
-        let Some(similarity) = classify_similarity(item_transform) else {
-            return true;
-        };
-        if similarity.rot_60k != 0 {
-            return true;
-        }
-
-        let origin = Point::zero().transform(item_transform);
-        let size =
-            Size::new(region.width * similarity.scale, region.height * similarity.scale);
-        let styles = StyleChain::default();
-        let fill = region_fill(self.ctx, &region.body, styles);
-        let borders = region_borders(&region.body, styles);
-        self.active_table_cells.push(ActiveTableCell {
-            loc: tag.location(),
-            order,
-            table: region.body.is::<TypstTableCell>(),
-            x: region.x,
-            y: region.y,
-            colspan: region.colspan.get(),
-            rowspan: region.rowspan.get(),
-            rect: Rect { min: origin, max: origin + size.to_point() },
-            fill,
-            borders,
-            text: Vec::new(),
-            links: Vec::new(),
-        });
-        true
-    }
-
-    fn end_table_cell(&mut self, loc: Location) -> bool {
-        let Some(index) =
-            self.active_table_cells.iter().rposition(|active| active.loc == loc)
-        else {
-            return false;
-        };
-        let mut active = self.active_table_cells.remove(index);
-        attach_links(&mut active.text, &active.links);
-        let paras = table_cell_paras(active.text);
-        let cell = CapturedTableCell {
-            order: active.order,
-            table: active.table,
-            x: active.x,
-            y: active.y,
-            colspan: active.colspan,
-            rowspan: active.rowspan,
-            rect: active.rect,
-            fill: active.fill,
-            borders: active.borders,
-            paras,
-        };
-
-        if let Some(table) = self.active_tables.last_mut() {
-            table.cells.push(cell);
-        } else {
-            self.loose_table_cells.push(cell);
-        }
-        true
-    }
-
     fn start_column_region(
         &mut self,
         tag: &Tag,
@@ -617,117 +481,6 @@ impl<'a, 'b> Walker<'a, 'b> {
                 true
             }
             _ => false,
-        }
-    }
-
-    fn capture_table_item(
-        &mut self,
-        order: usize,
-        item: &'a FrameItem,
-        item_transform: Transform,
-    ) -> bool {
-        if self.active_table_cells.is_empty() {
-            return false;
-        }
-
-        match item {
-            FrameItem::Group(group) => {
-                let group_transform = item_transform.pre_concat(group.transform);
-                let clip_ok = match &group.clip {
-                    None => true,
-                    Some(clip) => crate::image::clip_is_noop(clip, &group.frame),
-                };
-                if clip_ok && classify_similarity(group_transform).is_some() {
-                    self.walk_frame(&group.frame, group_transform);
-                } else if let Some(clip) = &group.clip
-                    && let Some(geom) =
-                        crate::shape::clip_to_pic_geom(clip, group.frame.size())
-                    && self.try_emit_clipped_image(
-                        order,
-                        &group.frame,
-                        group_transform,
-                        geom,
-                    )
-                {
-                } else {
-                    debug_raster(
-                        "table-cell-group",
-                        if group.clip.is_some() { "clip" } else { "transform" },
-                        frame_text_chars(&group.frame),
-                    );
-                    self.raster_item(
-                        order,
-                        FrameItem::Group(group.clone()),
-                        item_transform,
-                        None,
-                    );
-                }
-            }
-            FrameItem::Text(text) => {
-                if let Some(similarity) = classify_similarity(item_transform) {
-                    let baseline = Point::zero().transform(item_transform);
-                    self.active_table_cells.last_mut().unwrap().text.push(TextSource {
-                        order,
-                        baseline,
-                        item: text,
-                        rot_60k: similarity.rot_60k,
-                        scale: similarity.scale,
-                        link: None,
-                        slide_number: false,
-                    });
-                } else {
-                    debug_raster(
-                        "table-cell-text",
-                        "transform",
-                        text.text.chars().count(),
-                    );
-                    self.raster_item(
-                        order,
-                        FrameItem::Text(text.clone()),
-                        item_transform,
-                        Some(text.text.clone()),
-                    );
-                }
-            }
-            FrameItem::Link(dest, size) => {
-                if let Some(target) = self.destination(dest) {
-                    self.active_table_cells.last_mut().unwrap().links.push(LinkRect {
-                        rect: transformed_rect(item_transform, *size),
-                        target,
-                    });
-                }
-            }
-            FrameItem::Shape(shape, span) => {
-                match crate::shape::shape_to_geom(self.ctx, shape, item_transform, 0) {
-                    Some(geom) => self
-                        .shapes
-                        .push(OrderedShape { order, shape: SlideShape::Geom(geom) }),
-                    None => {
-                        debug_raster("table-cell-shape", "unmappable", 0);
-                        self.raster_item(
-                            order,
-                            FrameItem::Shape(shape.clone(), *span),
-                            item_transform,
-                            None,
-                        )
-                    }
-                }
-            }
-            FrameItem::Image(image, size, span) => {
-                self.emit_image(order, image, *size, *span, item_transform);
-            }
-            FrameItem::Tag(_) => {}
-        }
-
-        true
-    }
-
-    fn emit_loose_tables(&mut self) {
-        let cells = std::mem::take(&mut self.loose_table_cells);
-        for (order, cells) in split_table_groups(cells) {
-            if let Some(shape) = table_shape(order, cells) {
-                self.shapes.push(shape);
-            }
         }
     }
 
@@ -855,7 +608,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         }
     }
 
-    fn emit_image(
+    pub(super) fn emit_image(
         &mut self,
         order: usize,
         image: &typst_library::visualize::Image,
@@ -893,7 +646,7 @@ impl<'a, 'b> Walker<'a, 'b> {
     /// Renders one frame item through its full accumulated transform and
     /// places the picture where the ink lands — the render-what-you-see
     /// fallback for anything without a native PPTX form.
-    fn raster_item(
+    pub(super) fn raster_item(
         &mut self,
         order: usize,
         item: FrameItem,
@@ -911,7 +664,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         }
     }
 
-    fn try_emit_clipped_image(
+    pub(super) fn try_emit_clipped_image(
         &mut self,
         order: usize,
         frame: &'a Frame,
@@ -997,7 +750,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         });
     }
 
-    fn destination(&self, dest: &Destination) -> Option<LinkTarget> {
+    pub(super) fn destination(&self, dest: &Destination) -> Option<LinkTarget> {
         match dest {
             Destination::Url(url) => Some(LinkTarget::Url(EcoString::from(url.as_str()))),
             Destination::Position(pos) => self.slide_target(pos.page.get()),
@@ -1120,20 +873,6 @@ fn equation_sources(document: &PagedDocument) -> FxHashMap<Location, MathSource>
         .collect()
 }
 
-fn table_cell_paras(text: Vec<TextSource<'_>>) -> Vec<TextPara> {
-    // Cell-local inline-math detection isn't wired up yet (equations inside
-    // a table cell aren't captured by the cell walker); this keeps native
-    // tables compiling and correct for the common text-only case rather than
-    // blocking on that follow-up.
-    crate::text::cluster_text(text, Vec::new())
-        .into_iter()
-        .flat_map(|cluster| match cluster.shape {
-            SlideShape::TextBox(text) => text.paras,
-            _ => Vec::new(),
-        })
-        .collect()
-}
-
 fn column_shape(active: ActiveColumnRegion<'_>) -> Option<OrderedShape> {
     if active.count <= 1 {
         return None;
@@ -1212,257 +951,6 @@ fn column_region_paras(
     paras
 }
 
-fn split_table_groups(
-    mut cells: Vec<CapturedTableCell>,
-) -> Vec<(usize, Vec<CapturedTableCell>)> {
-    cells.sort_by_key(|cell| cell.order);
-    let mut groups: Vec<(usize, Vec<CapturedTableCell>)> = Vec::new();
-    for cell in cells {
-        let starts_new = cell.x == 0
-            && cell.y == 0
-            && groups.last().is_some_and(|(_, group)| !group.is_empty());
-        if starts_new || groups.is_empty() {
-            groups.push((cell.order, Vec::new()));
-        }
-        groups.last_mut().unwrap().1.push(cell);
-    }
-    groups
-}
-
-fn table_shape(order: usize, mut cells: Vec<CapturedTableCell>) -> Option<OrderedShape> {
-    if cells.is_empty() {
-        return None;
-    }
-    cells.sort_by_key(|cell| (cell.y, cell.x, cell.order));
-    let _has_semantic_table_cells = cells.iter().any(|cell| cell.table);
-
-    let cols = cells.iter().map(|cell| cell.x + cell.colspan).max()?;
-    let rows = cells.iter().map(|cell| cell.y + cell.rowspan).max()?;
-    if cols == 0 || rows == 0 {
-        return None;
-    }
-
-    let mut min = Point::splat(Abs::inf());
-    let mut max = Point::splat(-Abs::inf());
-    for cell in &cells {
-        min = min.min(cell.rect.min);
-        max = max.max(cell.rect.max);
-    }
-    let total =
-        Size::new((max.x - min.x).max(Abs::pt(0.1)), (max.y - min.y).max(Abs::pt(0.1)));
-    let col_widths = track_widths(&cells, cols, true, total.x);
-    let row_heights = track_widths(&cells, rows, false, total.y);
-
-    let mut table_rows = Vec::with_capacity(rows);
-    for (y, row_height) in row_heights.iter().enumerate().take(rows) {
-        let mut row_cells = Vec::with_capacity(cols);
-        for x in 0..cols {
-            if let Some(cell) = cells.iter().find(|cell| cell.x == x && cell.y == y) {
-                row_cells.push(TableCell {
-                    grid_span: cell.colspan.max(1),
-                    row_span: cell.rowspan.max(1),
-                    h_merge: false,
-                    v_merge: false,
-                    fill: cell.fill.clone(),
-                    borders: cell.borders.clone(),
-                    paras: cell.paras.clone(),
-                });
-            } else if let Some(origin) = covering_cell(&cells, x, y) {
-                row_cells.push(TableCell {
-                    grid_span: 1,
-                    row_span: 1,
-                    h_merge: x > origin.x,
-                    v_merge: y > origin.y,
-                    fill: None,
-                    borders: CellBorders::default(),
-                    paras: Vec::new(),
-                });
-            } else {
-                row_cells.push(TableCell {
-                    grid_span: 1,
-                    row_span: 1,
-                    h_merge: false,
-                    v_merge: false,
-                    fill: None,
-                    borders: CellBorders::default(),
-                    paras: Vec::new(),
-                });
-            }
-        }
-        table_rows.push(TableRow {
-            h_emu: crate::text::extent_emu(*row_height),
-            cells: row_cells,
-        });
-    }
-
-    Some(OrderedShape {
-        order,
-        shape: SlideShape::TableBox(TableBox {
-            x_emu: crate::text::emu(min.x),
-            y_emu: crate::text::emu(min.y),
-            w_emu: crate::text::extent_emu(total.x),
-            h_emu: crate::text::extent_emu(total.y),
-            cols: col_widths.into_iter().map(crate::text::extent_emu).collect(),
-            rows: table_rows,
-        }),
-    })
-}
-
-fn covering_cell(
-    cells: &[CapturedTableCell],
-    x: usize,
-    y: usize,
-) -> Option<&CapturedTableCell> {
-    cells.iter().find(|cell| {
-        cell.x <= x
-            && x < cell.x + cell.colspan
-            && cell.y <= y
-            && y < cell.y + cell.rowspan
-    })
-}
-
-fn track_widths(
-    cells: &[CapturedTableCell],
-    count: usize,
-    columns: bool,
-    total: Abs,
-) -> Vec<Abs> {
-    let mut tracks = vec![None; count];
-    for cell in cells {
-        let (index, span, size) = if columns {
-            (cell.x, cell.colspan, cell.rect.size().x)
-        } else {
-            (cell.y, cell.rowspan, cell.rect.size().y)
-        };
-        if span == 1
-            && index < count
-            && tracks[index].is_none_or(|current| size > current)
-        {
-            tracks[index] = Some(size);
-        }
-    }
-
-    for cell in cells {
-        let (index, span, size) = if columns {
-            (cell.x, cell.colspan, cell.rect.size().x)
-        } else {
-            (cell.y, cell.rowspan, cell.rect.size().y)
-        };
-        if span <= 1 || index + span > count {
-            continue;
-        }
-        let mut known = Abs::zero();
-        let mut missing = Vec::new();
-        for offset in 0..span {
-            match tracks[index + offset] {
-                Some(width) => known += width,
-                None => missing.push(index + offset),
-            }
-        }
-        if !missing.is_empty() {
-            let share = (size - known).max(Abs::pt(1.0)) / missing.len() as f64;
-            for index in missing {
-                tracks[index] = Some(share);
-            }
-        }
-    }
-
-    let known: Abs = tracks.iter().filter_map(|width| *width).sum();
-    let missing = tracks.iter().filter(|width| width.is_none()).count();
-    let fallback = if missing == 0 {
-        Abs::pt(1.0)
-    } else {
-        (total - known).max(Abs::pt(missing as f64)) / missing as f64
-    };
-    tracks
-        .into_iter()
-        .map(|width| width.unwrap_or(fallback).max(Abs::pt(0.1)))
-        .collect()
-}
-
-fn region_fill(
-    ctx: &mut SlideCtx,
-    body: &typst_library::foundations::Content,
-    styles: StyleChain,
-) -> Option<FillSpec> {
-    let fill = body
-        .to_packed::<TypstTableCell>()
-        .and_then(|cell| smart_fill(cell.fill.get_cloned(styles)))
-        .or_else(|| {
-            body.to_packed::<GridCell>()
-                .and_then(|cell| smart_fill(cell.fill.get_cloned(styles)))
-        })?;
-    crate::shape::resolved_fill(ctx, &Some(fill)).flatten()
-}
-
-fn smart_fill(fill: Smart<Option<Paint>>) -> Option<Paint> {
-    match fill {
-        Smart::Custom(fill) => fill,
-        Smart::Auto => None,
-    }
-}
-
-fn region_borders(
-    body: &typst_library::foundations::Content,
-    styles: StyleChain,
-) -> CellBorders {
-    if let Some(cell) = body.to_packed::<TypstTableCell>() {
-        return borders_from_sides(cell.stroke.resolve(styles));
-    }
-    if let Some(cell) = body.to_packed::<GridCell>() {
-        return borders_from_sides(cell.stroke.resolve(styles));
-    }
-    CellBorders::default()
-}
-
-fn borders_from_sides(
-    sides: Sides<Option<Option<std::sync::Arc<Stroke<Abs>>>>>,
-) -> CellBorders {
-    CellBorders {
-        left: sides
-            .left
-            .as_ref()
-            .and_then(|side| side.as_deref())
-            .and_then(stroke_spec),
-        right: sides
-            .right
-            .as_ref()
-            .and_then(|side| side.as_deref())
-            .and_then(stroke_spec),
-        top: sides
-            .top
-            .as_ref()
-            .and_then(|side| side.as_deref())
-            .and_then(stroke_spec),
-        bottom: sides
-            .bottom
-            .as_ref()
-            .and_then(|side| side.as_deref())
-            .and_then(stroke_spec),
-    }
-}
-
-fn stroke_spec(stroke: &Stroke<Abs>) -> Option<StrokeSpec> {
-    let fixed = stroke.clone().unwrap_or_default();
-    let Paint::Solid(color) = fixed.paint else {
-        return None;
-    };
-    Some(StrokeSpec {
-        color: crate::shape::srgb_bytes(&color),
-        w_emu: crate::text::extent_emu(fixed.thickness),
-        cap: line_cap(fixed.cap),
-        dash: None,
-    })
-}
-
-fn line_cap(cap: LineCap) -> &'static str {
-    match cap {
-        LineCap::Butt => "flat",
-        LineCap::Round => "rnd",
-        LineCap::Square => "sq",
-    }
-}
-
 /// The `a:srcRect` crop `[l, t, r, b]` (1/1000 %) that reveals `frame` out of an
 /// image placed at `pos` with `size`, or `None` if the image does not fully
 /// cover the frame (a gap would expose background the clip can't represent).
@@ -1507,7 +995,7 @@ fn near_abs(a: Abs, b: Abs) -> bool {
     (a - b).abs().to_pt() <= 0.01
 }
 
-fn attach_links(text: &mut [TextSource<'_>], links: &[LinkRect]) {
+pub(super) fn attach_links(text: &mut [TextSource<'_>], links: &[LinkRect]) {
     for source in text {
         let rect = text_rect(source.item, source.baseline, source.scale);
         source.link = links
@@ -1517,7 +1005,7 @@ fn attach_links(text: &mut [TextSource<'_>], links: &[LinkRect]) {
     }
 }
 
-fn classify_similarity(transform: Transform) -> Option<Similarity> {
+pub(super) fn classify_similarity(transform: Transform) -> Option<Similarity> {
     let sx = transform.sx.get();
     let ky = transform.ky.get();
     let kx = transform.kx.get();
@@ -1575,7 +1063,7 @@ fn text_item_rect(text: &typst_library::text::TextItem, transform: Transform) ->
     transformed_corners(transform, min, max)
 }
 
-fn transformed_rect(transform: Transform, size: Size) -> Rect {
+pub(super) fn transformed_rect(transform: Transform, size: Size) -> Rect {
     transformed_corners(transform, Point::zero(), size.to_point())
 }
 
@@ -1616,7 +1104,7 @@ impl Rect {
         }
     }
 
-    fn size(self) -> Size {
+    pub(super) fn size(self) -> Size {
         Size::new(
             (self.max.x - self.min.x).max(Abs::pt(0.1)),
             (self.max.y - self.min.y).max(Abs::pt(0.1)),
@@ -1636,14 +1124,14 @@ impl Rect {
 /// (mirrors `DOCX_DEBUG_RASTER`). `text_chars` counts the live text characters
 /// swallowed by the raster; a nonzero count on a group is the signal that
 /// editable text was lost to a picture.
-fn debug_raster(kind: &str, reason: &str, text_chars: usize) {
+pub(super) fn debug_raster(kind: &str, reason: &str, text_chars: usize) {
     if std::env::var_os("PPTX_DEBUG_RASTER").is_some() {
         eprintln!("RASTERIZE kind={kind} reason={reason} text_chars={text_chars}");
     }
 }
 
 /// Total text characters in a frame tree (for the raster audit).
-fn frame_text_chars(frame: &Frame) -> usize {
+pub(super) fn frame_text_chars(frame: &Frame) -> usize {
     let mut n = 0;
     for (_, item) in frame.items() {
         match item {

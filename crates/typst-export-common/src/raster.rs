@@ -1,4 +1,4 @@
-//! Raster fallback primitives shared by Office exporters.
+//! Raster fallback primitives shared by exporters.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

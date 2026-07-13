@@ -13,6 +13,7 @@ keywords = { workspace = true }
 readme = { workspace = true }
 
 [dependencies]
+typst-export-common = { workspace = true }
 typst-library = { workspace = true }
 typst-layout = { workspace = true }
 typst-macros = { workspace = true }
@@ -25,6 +26,7 @@ comemo = { workspace = true }
 ecow = { workspace = true }
 hayagriva = { workspace = true }
 rustc-hash = { workspace = true }
+roxmltree = { workspace = true }
 unicode-math-class = { workspace = true }
 zip = { workspace = true }
 flate2 = { workspace = true }

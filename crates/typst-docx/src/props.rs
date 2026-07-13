@@ -27,6 +27,27 @@ pub fn abs_to_twip(abs: Abs) -> i32 {
     units::abs_to_twip(abs)
 }
 
+/// Writes a Word language element with the script-specific slot Word uses for
+/// proofing and font selection.
+///
+/// `w:val` is the Latin/default slot. Word does not infer `w:eastAsia` or
+/// `w:bidi` reliably from it, so CJK and RTL languages must also populate their
+/// dedicated slot. The RTL set mirrors `typst_library::text::Lang::dir`.
+pub(crate) fn write_language(w: &mut XmlWriter, element: &'static str, lang: &str) {
+    let primary = lang.split('-').next().unwrap_or(lang).to_ascii_lowercase();
+    w.open(element).attr(xml::W_VAL, lang);
+    if matches!(primary.as_str(), "ja" | "ko" | "zh") {
+        w.attr("w:eastAsia", lang);
+    }
+    if matches!(
+        primary.as_str(),
+        "ar" | "dv" | "fa" | "he" | "ks" | "pa" | "ps" | "sd" | "ug" | "ur" | "yi"
+    ) {
+        w.attr("w:bidi", lang);
+    }
+    w.empty();
+}
+
 /// An absolute length → EMU (914400 per inch = 12700 per point), the DrawingML unit.
 pub fn abs_to_emu(abs: Abs) -> i64 {
     units::abs_to_emu(abs)
@@ -234,7 +255,7 @@ impl RunProps {
         }
         // 19. lang
         if let Some(lang) = &self.lang {
-            w.open(xml::W_LANG).attr(xml::W_VAL, lang).empty();
+            write_language(w, xml::W_LANG, lang);
         }
 
         w.close();

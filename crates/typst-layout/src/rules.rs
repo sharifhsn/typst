@@ -322,7 +322,12 @@ const LINK_RULE: ShowFn<LinkElem> = |elem, engine, styles| {
 
 const DIRECT_LINK_RULE: ShowFn<DirectLinkElem> = |elem, _, _| {
     let dest = Destination::Location(elem.loc);
-    Ok(elem.body.clone().linked(dest, elem.alt.clone()))
+    Ok(elem
+        .body
+        .clone()
+        .linked(dest, elem.alt.clone())
+        .set(LinkElem::direct_kind, Some(elem.kind))
+        .set(LinkElem::direct_span, Some(elem.span())))
 };
 
 const DIVIDER_RULE: ShowFn<DividerElem> =

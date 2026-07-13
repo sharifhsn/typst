@@ -11,19 +11,38 @@ mod ctx;
 mod document;
 mod dom;
 mod encode;
+mod fallback;
 mod introspect;
+mod invariants;
+mod manifest;
 mod mappers;
 mod package;
 mod parts;
 mod props;
+mod report;
 mod rules;
+mod schema;
+mod snapshot;
 mod styles_part;
 mod xml;
 
 pub use self::ctx::DocxCtx;
-pub use self::document::{docx_document, docx_document_with_paged_introspector};
+pub use self::document::{
+    docx_document, docx_document_with_paged_geometry,
+    docx_document_with_paged_introspector,
+};
 pub use self::dom::DocxDocument;
 pub use self::encode::{DocxOptions, docx};
 pub use self::introspect::DocxIntrospector;
 pub use self::mappers::math::equation_omml_fragment;
+pub use self::report::{
+    DecisionReason, DrawingAccessibilityFact, DynamicFieldFact, ExportDecision,
+    ExportSource, ExportStage, FidelityReport, FieldCacheStatus, FieldOwner,
+    FieldVisibility, FontFact, LossSet, Representation, RepresentationCounts,
+    SuppressedDiagnostic, SuppressedKind,
+};
 pub use self::rules::register;
+pub use self::snapshot::{
+    ExportSnapshot, SnapshotBibliographyEntry, SnapshotLink, SnapshotLinkTarget,
+    SnapshotNode, SnapshotPage, SnapshotPageCounter, SnapshotPosition,
+};

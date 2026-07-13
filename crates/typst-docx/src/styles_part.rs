@@ -44,7 +44,7 @@ pub fn build(
         w.open("w:color").attr(xml::W_VAL, &props::hex(c)).empty();
     }
     if let Some(lang) = &defaults.lang {
-        w.open("w:lang").attr(xml::W_VAL, lang).empty();
+        props::write_language(&mut w, "w:lang", lang);
     }
     w.close(); // rPr
     w.close(); // rPrDefault

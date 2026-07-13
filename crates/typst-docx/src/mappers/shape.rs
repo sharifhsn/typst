@@ -19,7 +19,7 @@ use typst_ooxml_core::dml::{self, TileImage};
 use crate::ctx::DocxCtx;
 use crate::dom::{
     Drawing, GroupChild, GroupSpec, Run, ShapeFill, ShapeGeom, ShapeSpec, ShapeStroke,
-    TextBox,
+    TextBox, TextBoxWrap,
 };
 use crate::props::{abs_to_emu, color_to_hex};
 
@@ -37,7 +37,8 @@ pub fn shape(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
-    let reference = typst_library::layout::Size::new(ctx.raster_width, ctx.raster_height);
+    let reference =
+        typst_library::layout::Size::new(ctx.available_width, ctx.raster_height);
     let Some((w, h, spec)) = build(ctx, child, styles, reference) else {
         return Ok(None);
     };
@@ -53,6 +54,7 @@ pub fn shape(
         w_emu,
         h_emu,
         alt: None,
+        decorative: true,
         docpr_id,
         name,
         anchor: None,
@@ -83,7 +85,14 @@ pub fn text_box(
     let Some(framed) = framed_container(child, styles) else {
         return Ok(None);
     };
-    let Framed { body, fill_paint, stroke, rounded, inset, nonuniform_stroke: _ } = framed;
+    let Framed {
+        body,
+        fill_paint,
+        stroke,
+        rounded,
+        inset,
+        nonuniform_stroke: _,
+    } = framed;
 
     // A gradient/tiling fill has no solid-colour text-box form: keep rasterizing
     // it so the visual survives.
@@ -144,6 +153,7 @@ pub fn text_box(
         w_emu,
         h_emu,
         alt: None,
+        decorative: false,
         docpr_id,
         name,
         anchor: None,
@@ -151,7 +161,57 @@ pub fn text_box(
             geom,
             fill,
             stroke,
-            txbx: Some(TextBox { ins, blocks }),
+            txbx: Some(TextBox { ins, blocks, wrap: TextBoxWrap::Square }),
+        }),
+        group: None,
+    })))
+}
+
+/// Maps plain, text-box-safe placed content to an unframed Word text box. This
+/// is separate from [`text_box`]: `#place[..]` contributes position but no
+/// visible frame, so the shape deliberately has neither fill nor stroke.
+pub fn unframed_text_box(
+    body: &Content,
+    styles: StyleChain,
+    wrap: TextBoxWrap,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Option<Run>> {
+    if !crate::convert::body_extractable(body) || crate::convert::body_has_footnote(body)
+    {
+        return Ok(None);
+    }
+
+    let Some(size) = ctx.measure(body, styles, body.span())? else {
+        return Ok(None);
+    };
+    let (w_emu, h_emu) = (abs_to_emu(size.x), abs_to_emu(size.y));
+    if w_emu <= 0 || h_emu <= 0 {
+        return Ok(None);
+    }
+
+    let blocks = ctx.blocks(body, styles)?;
+    if blocks.is_empty() {
+        return Ok(None);
+    }
+    crate::document::collect_tags(&blocks, &mut ctx.deferred_tags);
+
+    let docpr_id = ctx.next_drawing_id();
+    let name = ecow::eco_format!("Placed Text Box {docpr_id}");
+    Ok(Some(Run::Drawing(Drawing {
+        rel: EcoString::new(),
+        svg_rel: None,
+        w_emu,
+        h_emu,
+        alt: None,
+        decorative: false,
+        docpr_id,
+        name,
+        anchor: None,
+        shape: Some(ShapeSpec {
+            geom: ShapeGeom::Rect,
+            fill: None,
+            stroke: None,
+            txbx: Some(TextBox { ins: [0; 4], blocks, wrap }),
         }),
         group: None,
     })))
@@ -599,11 +659,10 @@ pub fn move_(
     // aren't registered, so the body's shapes would be dropped by flow
     // collection ("was ignored during paged export") and the frame would come
     // back empty.
-    let size = Size::new(ctx.raster_width, ctx.raster_height);
+    let size = Size::new(ctx.available_width, ctx.raster_height);
     let height = ctx.raster_height;
-    let Some(mut frame) =
-        ctx.layout_export_frame(&elem.body, styles, elem.span(), height)?
-    else {
+    let (frame, _) = ctx.layout_export_frame(&elem.body, styles, elem.span(), height)?;
+    let Some(mut frame) = frame else {
         return Ok(None);
     };
     // Mirrors `typst_layout::layout_move` exactly (dx/dy resolved against the
@@ -632,8 +691,8 @@ pub fn transformed(
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
     let height = ctx.raster_height;
-    let Some(frame) = ctx.layout_export_frame(child, styles, child.span(), height)?
-    else {
+    let (frame, _) = ctx.layout_export_frame(child, styles, child.span(), height)?;
+    let Some(frame) = frame else {
         return Ok(None);
     };
     let run = build_shapes_drawing(ctx, &frame)?;
@@ -670,7 +729,7 @@ pub fn move_text(
     // Mirrors `move_`'s own dx/dy resolution (against the raster region size)
     // so a percentage `dx`/`dy` — rare, but the field type (`Rel<Length>`)
     // permits it — resolves consistently between the two paths.
-    let size = Size::new(ctx.raster_width, ctx.raster_height);
+    let size = Size::new(ctx.available_width, ctx.raster_height);
     let delta = Axes::new(elem.dx.resolve(styles), elem.dy.resolve(styles))
         .zip_map(size, Rel::relative_to);
     if delta.x != Abs::zero() {
@@ -742,8 +801,10 @@ fn layout_shape_frame(
     ) -> SourceResult<typst_library::layout::Frame>,
 ) -> SourceResult<typst_library::layout::Frame> {
     use typst_library::layout::{Axes, Region, Size};
-    let region =
-        Region::new(Size::new(ctx.raster_width, ctx.raster_height), Axes::splat(false));
+    let region = Region::new(
+        Size::new(ctx.available_width, ctx.raster_height),
+        Axes::splat(false),
+    );
     let locator = ctx.next_locator(span);
     layout(ctx.engine(), locator, region)
 }
@@ -862,6 +923,7 @@ fn build_shapes_drawing(
             w_emu,
             h_emu,
             alt: None,
+            decorative: true,
             docpr_id,
             name,
             anchor: None,
@@ -929,6 +991,7 @@ fn build_shapes_drawing(
         w_emu: group_w_emu,
         h_emu: group_h_emu,
         alt: None,
+        decorative: true,
         docpr_id,
         name,
         anchor: None,

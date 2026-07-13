@@ -199,6 +199,17 @@ pub struct LinkElem {
     #[internal]
     #[ghost]
     pub current: Option<Destination>,
+
+    /// Semantic origin of an internal direct link while it is being realized.
+    /// Exporters use this alongside `current` to preserve page-reference intent.
+    #[internal]
+    #[ghost]
+    pub direct_kind: Option<DirectLinkKind>,
+
+    /// Source identity shared by every realized child of one direct link.
+    #[internal]
+    #[ghost]
+    pub direct_span: Option<Span>,
 }
 
 impl LinkElem {
@@ -439,6 +450,20 @@ cast! {
 /// carefully and in a way where we provide a good way to keep styling only URL
 /// links, which is a bit too complicated to achieve right now for such a basic
 /// requirement.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum DirectLinkKind {
+    /// A generic internal link (footnote back-reference, bibliography link, …).
+    Other,
+    /// A semantic reference whose displayed text was computed by Typst.
+    Reference,
+    /// A page reference whose displayed value belongs to the target layout.
+    PageReference,
+    /// The Typst-owned supplement preceding a page reference value. This is a
+    /// separate semantic segment so target exporters can keep localized text
+    /// such as "page" stable while allowing the numeric value to update.
+    PageReferenceSupplement,
+}
+
 #[elem(Construct)]
 pub struct DirectLinkElem {
     #[required]
@@ -450,6 +475,12 @@ pub struct DirectLinkElem {
     #[required]
     #[internal]
     pub alt: Option<EcoString>,
+    /// Why this internal link was created. Target exporters need this after
+    /// realization to distinguish Typst-owned reference text from a page value
+    /// that the target layout engine should recompute.
+    #[required]
+    #[internal]
+    pub kind: DirectLinkKind,
 }
 
 impl Construct for DirectLinkElem {

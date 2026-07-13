@@ -18,7 +18,10 @@ use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
 use typst::utils::{LazyHash, PicoStr};
 use typst::{Library, LibraryExt, World};
-use typst_docx::{DocxDocument, DocxOptions, docx};
+use typst_docx::{
+    DecisionReason, DocxDocument, DocxOptions, ExportStage, Representation,
+    SuppressedKind, docx,
+};
 use typst_layout::PagedDocument;
 
 /// A minimal world: the embedded Typst fonts and a single detached source.
@@ -100,6 +103,18 @@ fn parts(src: &str) -> HashMap<String, String> {
     parts_with_files(src, &[])
 }
 
+/// Like [`parts`], but with the (default-off) embedded fidelity manifest
+/// enabled — for the tests that assert the manifest parts themselves.
+fn parts_with_manifest(src: &str) -> HashMap<String, String> {
+    let doc = compile_docx(src, &[]);
+    let options = DocxOptions { embed_fidelity_manifest: true, ..Default::default() };
+    let bytes = docx(&doc, &options).expect("docx export failed");
+    zip_parts(bytes)
+        .into_iter()
+        .filter_map(|(name, bytes)| String::from_utf8(bytes).ok().map(|s| (name, s)))
+        .collect()
+}
+
 fn parts_with_files(src: &str, files: &[(&str, &[u8])]) -> HashMap<String, String> {
     package_bytes_with_files(src, files)
         .into_iter()
@@ -112,8 +127,15 @@ fn package_bytes_with_files(
     files: &[(&str, &[u8])],
 ) -> HashMap<String, Vec<u8>> {
     let doc = compile_docx(src, files);
-    let bytes = docx(&doc, &DocxOptions { pretty: false }).expect("docx export failed");
+    package_bytes(&doc)
+}
 
+fn package_bytes(doc: &DocxDocument) -> HashMap<String, Vec<u8>> {
+    let bytes = docx(doc, &DocxOptions::default()).expect("docx export failed");
+    zip_parts(bytes)
+}
+
+fn zip_parts(bytes: Vec<u8>) -> HashMap<String, Vec<u8>> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     let mut map = HashMap::new();
     for i in 0..zip.len() {
@@ -137,6 +159,28 @@ fn first_png(src: &str) -> tiny_skia::Pixmap {
     tiny_skia::Pixmap::decode_png(png).expect("embedded PNG decodes")
 }
 
+fn text_parts(doc: &DocxDocument) -> HashMap<String, String> {
+    package_bytes(doc)
+        .into_iter()
+        .filter_map(|(name, bytes)| {
+            String::from_utf8(bytes).ok().map(|text| (name, text))
+        })
+        .collect()
+}
+
+/// Like [`text_parts`], but with the (default-off) embedded fidelity manifest
+/// enabled — for the tests that assert the manifest parts themselves.
+fn text_parts_with_manifest(doc: &DocxDocument) -> HashMap<String, String> {
+    let options = DocxOptions { embed_fidelity_manifest: true, ..Default::default() };
+    let bytes = docx(doc, &options).expect("docx export failed");
+    zip_parts(bytes)
+        .into_iter()
+        .filter_map(|(name, bytes)| {
+            String::from_utf8(bytes).ok().map(|text| (name, text))
+        })
+        .collect()
+}
+
 fn compile_docx(src: &str, files: &[(&str, &[u8])]) -> DocxDocument {
     let world = TestWorld::with_files(src, files);
     compile_docx_with_world(&world)
@@ -148,24 +192,41 @@ fn compile_docx_with_world(world: &TestWorld) -> DocxDocument {
         .expect("paged compilation failed");
     let primary = Arc::clone(paged.introspector());
     let seed = Arc::clone(&primary);
-    let page_sizes = Arc::new(
-        paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>(),
-    );
+    let page_sizes =
+        Arc::new(paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>());
+    let paged_geometry =
+        Arc::new(typst_export_common::paged::PagedGeometry::from_document(&paged));
     typst::compile_with::<DocxDocument, _>(
         world,
         Some(seed.as_ref()),
         move |engine, content, styles| {
-            typst_docx::docx_document_with_paged_introspector(
+            typst_docx::docx_document_with_paged_geometry(
                 engine,
                 content,
                 styles,
                 Arc::clone(&primary),
                 Arc::clone(&page_sizes),
+                Arc::clone(&paged_geometry),
             )
         },
     )
     .output
     .expect("docx compilation failed")
+}
+
+/// Returns the opening `w:fldChar` tag for the complex field whose instruction
+/// contains `needle`.
+fn field_begin_tag<'a>(document_xml: &'a str, needle: &str) -> &'a str {
+    let instruction = document_xml
+        .find(needle)
+        .unwrap_or_else(|| panic!("missing field instruction {needle:?}"));
+    let begin = document_xml[..instruction]
+        .rfind("<w:fldChar")
+        .expect("field instruction has no opening fldChar");
+    let end = begin
+        + document_xml[begin..].find('>').expect("unterminated opening fldChar")
+        + 1;
+    &document_xml[begin..end]
 }
 
 fn compile_paged_and_docx(src: &str) -> (PagedDocument, DocxDocument) {
@@ -175,19 +236,21 @@ fn compile_paged_and_docx(src: &str) -> (PagedDocument, DocxDocument) {
         .expect("paged compilation failed");
     let primary = Arc::clone(paged.introspector());
     let seed = Arc::clone(&primary);
-    let page_sizes = Arc::new(
-        paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>(),
-    );
+    let page_sizes =
+        Arc::new(paged.pages().iter().map(|page| page.frame.size()).collect::<Vec<_>>());
+    let paged_geometry =
+        Arc::new(typst_export_common::paged::PagedGeometry::from_document(&paged));
     let doc = typst::compile_with::<DocxDocument, _>(
         &world,
         Some(seed.as_ref()),
         move |engine, content, styles| {
-            typst_docx::docx_document_with_paged_introspector(
+            typst_docx::docx_document_with_paged_geometry(
                 engine,
                 content,
                 styles,
                 Arc::clone(&primary),
                 Arc::clone(&page_sizes),
+                Arc::clone(&paged_geometry),
             )
         },
     )
@@ -221,6 +284,57 @@ fn visible_text(xml: &str) -> String {
                     )
         })
         .filter_map(|node| node.text())
+        .collect()
+}
+
+fn element_fragments<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
+    let open = format!("<w:{tag}");
+    let close = format!("</w:{tag}>");
+    let find_open = |haystack: &str, from: usize| {
+        haystack[from..].match_indices(&open).find_map(|(relative, _)| {
+            let at = from + relative;
+            let delimiter = haystack.as_bytes().get(at + open.len()).copied()?;
+            matches!(delimiter, b'>' | b' ' | b'\t' | b'\r' | b'\n' | b'/').then_some(at)
+        })
+    };
+    let mut fragments = Vec::new();
+    let mut search = 0usize;
+    while let Some(start) = find_open(xml, search) {
+        let from_start = &xml[start..];
+        let mut cursor = open.len();
+        let mut depth = 1usize;
+        while depth > 0 {
+            let next_open = find_open(from_start, cursor);
+            let next_close = from_start[cursor..].find(&close).map(|at| cursor + at);
+            match (next_open, next_close) {
+                (Some(open_at), Some(close_at)) if open_at < close_at => {
+                    depth += 1;
+                    cursor = open_at + open.len();
+                }
+                (_, Some(close_at)) => {
+                    depth -= 1;
+                    cursor = close_at + close.len();
+                }
+                _ => panic!("unterminated w:{tag}"),
+            }
+        }
+        let end = cursor;
+        fragments.push(&from_start[..end]);
+        search = start + open.len();
+    }
+    fragments
+}
+
+fn grid_widths(table_xml: &str) -> Vec<i32> {
+    let grid_end = table_xml.find("</w:tblGrid>").expect("table has tblGrid");
+    table_xml[..grid_end]
+        .match_indices("<w:gridCol w:w=\"")
+        .map(|(index, marker)| {
+            let rest = &table_xml[index + marker.len()..];
+            rest[..rest.find('"').expect("gridCol width closes")]
+                .parse()
+                .expect("gridCol width is decimal")
+        })
         .collect()
 }
 
@@ -345,6 +459,155 @@ fn package_is_wellformed_and_minimal() {
 }
 
 #[test]
+fn docx_export_is_byte_deterministic() {
+    let document = compile_docx(
+        "= Stable package\n\n#link(\"https://example.com\")[external link]",
+        &[],
+    );
+    let options = DocxOptions::default();
+    let first = docx(&document, &options).expect("first DOCX export failed");
+    let second = docx(&document, &options).expect("second DOCX export failed");
+    assert_eq!(first, second, "the complete OPC zip must be byte deterministic");
+}
+
+#[test]
+fn export_snapshot_stabilizes_semantic_ids_and_paged_positions() {
+    let src = "= First heading\n\nBody.\n#pagebreak()\n= Second heading\n\nMore body.";
+    let first = compile_docx(src, &[]);
+    let second = compile_docx(src, &[]);
+    let snapshot = first.export_snapshot();
+
+    assert_eq!(snapshot.pages().len(), 2, "the converged paged oracle is retained");
+    assert_eq!(snapshot.logical_id(), second.export_snapshot().logical_id());
+    assert_eq!(
+        snapshot
+            .nodes()
+            .iter()
+            .map(|node| node.source.logical_id)
+            .collect::<Vec<_>>(),
+        second
+            .export_snapshot()
+            .nodes()
+            .iter()
+            .map(|node| node.source.logical_id)
+            .collect::<Vec<_>>(),
+        "semantic IDs must survive independent DOCX compilations"
+    );
+
+    let heading_pages = snapshot
+        .nodes()
+        .iter()
+        .filter(|node| node.source.element == "heading")
+        .flat_map(|node| node.paged_positions.iter().map(|position| position.page))
+        .collect::<Vec<_>>();
+    assert!(heading_pages.contains(&1), "the first heading keeps paged geometry");
+    assert!(heading_pages.contains(&2), "the second heading keeps paged geometry");
+}
+
+#[test]
+fn fidelity_manifest_is_persisted_and_related() {
+    let p = parts_with_manifest("#place(top + left, table(columns: 1, [$x + 1$]))");
+    let manifest = &p["customXml/typstFidelity.xml"];
+    assert!(manifest.contains("version=\"1\""));
+    assert!(manifest.contains("<typst:pages>"));
+    assert!(manifest.contains("<typst:nodes>"));
+    assert!(manifest.contains("<typst:decisions>"));
+    assert!(manifest.contains("reason=\"PositionedContentFlowFallback\""));
+    assert!(manifest.contains("affectedTextChars="));
+    assert!(manifest.contains("affectedSemanticNodes=\"1\""));
+
+    let rels = &p["word/_rels/document.xml.rels"];
+    assert!(rels.contains("../customXml/typstFidelity.xml"));
+    assert!(rels.contains("relationships/fidelity"));
+
+    let custom = &p["docProps/custom.xml"];
+    let custom_doc = roxmltree::Document::parse(custom).unwrap();
+    let property = custom_doc
+        .descendants()
+        .find(|node| {
+            node.is_element()
+                && node.tag_name().name() == "property"
+                && node.attribute("name") == Some("TypstFidelityManifestV1")
+        })
+        .expect("fidelity custom property");
+    let payload = property
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "lpwstr")
+        .and_then(|node| node.text());
+    assert_eq!(payload, Some(manifest.as_str()));
+    let root_rels = &p["_rels/.rels"];
+    assert!(root_rels.contains("docProps/custom.xml"));
+    assert!(root_rels.contains("relationships/custom-properties"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn table_preflight_reports_native_and_approximate_geometry() {
+    let native =
+        compile_docx("#table(columns: (40pt, 40pt), [Native left], [Native right])", &[]);
+    assert!(native.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::NativeTable
+            && decision.representation == Representation::Native
+            && decision.affected_semantic_nodes == 1
+    }));
+
+    let approximate_src = "#table(columns: (1fr, 2fr), fill: gradient.linear(red, blue), [Gradient], [Tracks])";
+    let approximate = compile_docx(approximate_src, &[]);
+    let decision = approximate
+        .fidelity_report()
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::TableGeometryApproximation)
+        .expect("unsupported paint/flexible tracks must be reported before lowering");
+    assert_eq!(decision.representation, Representation::Approximate);
+    assert!(decision.losses.visual_fidelity);
+    assert!(decision.affected_text_chars > 0);
+    assert_eq!(decision.affected_semantic_nodes, 1);
+
+    let p = parts(approximate_src);
+    assert!(
+        p["word/document.xml"].contains("<w:shd "),
+        "a gradient cell keeps a representative solid tone instead of losing its fill"
+    );
+}
+
+#[test]
+fn flexible_table_uses_converged_paged_cell_geometry() {
+    let src = "#set page(width: 140mm, height: 90mm, margin: 10mm)\n#table(columns: (1fr, 2fr), [One], [Two])";
+    let compiled = compile_docx(src, &[]);
+    let table = compiled
+        .export_snapshot()
+        .tables()
+        .first()
+        .expect("paged frame scanner must enroll the table");
+    let left = table
+        .cells
+        .iter()
+        .find(|cell| cell.x == 0 && cell.y == 0)
+        .expect("left measured cell");
+    let right = table
+        .cells
+        .iter()
+        .find(|cell| cell.x == 1 && cell.y == 0)
+        .expect("right measured cell");
+    assert!((right.width_pt / left.width_pt - 2.0).abs() < 0.01);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::NativeTable
+            && decision.representation == Representation::Native
+    }));
+
+    let p = parts_with_manifest(src);
+    let widths = grid_widths(&element_fragments(&p["word/document.xml"], "tbl")[0]);
+    assert_eq!(widths.len(), 2);
+    assert!((widths[1] as f64 / widths[0] as f64 - 2.0).abs() < 0.01);
+    let manifest = &p["customXml/typstFidelity.xml"];
+    assert!(manifest.contains("<typst:tables>"));
+    assert!(manifest.contains("measuredTables=\"1\""));
+    assert!(manifest.contains("widthPt="));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn heading_maps_to_heading_style() {
     let p = parts("= Introduction\n\nBody text.");
     let doc = &p["word/document.xml"];
@@ -445,6 +708,172 @@ fn highlight_arbitrary_color_keeps_exact_shading() {
 fn table_maps_to_wtbl() {
     let p = parts("#table(columns: 2, [a], [b], [c], [d])");
     assert!(p["word/document.xml"].contains("<w:tbl>"), "table should emit <w:tbl>");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn fixed_vertical_space_between_tables_is_an_explicit_flow_block() {
+    let p = parts(
+        "#table(columns: 1, [Before])\n\
+         #v(10pt)\n\
+         #table(columns: 1, [After])",
+    );
+    let doc = &p["word/document.xml"];
+    let tables = element_fragments(doc, "tbl");
+    assert_eq!(tables.len(), 2);
+    let first_start = doc.find(tables[0]).expect("first table");
+    let first_end = first_start + tables[0].len();
+    let second_start = doc[first_end..]
+        .find(tables[1])
+        .map(|relative| first_end + relative)
+        .expect("second table");
+    let between = &doc[first_end..second_start];
+    assert!(
+        between.contains(
+            "<w:spacing w:before=\"0\" w:after=\"0\" w:line=\"200\" w:lineRule=\"exact\"/>"
+        ),
+        "10pt survives without borrowing a table-cell paragraph: {between}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn flexible_table_columns_use_the_active_section_width() {
+    // 120mm page - 10mm margins on both sides = 100mm = ~5669 twips. The old
+    // mapper hard-coded 9360 twips (US Letter's default text area).
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #table(columns: (1fr, 1fr), [Left], [Right])",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 2);
+    assert!((widths.iter().sum::<i32>() - 5669).abs() <= 2, "{widths:?}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn each_section_installs_its_own_table_width_budget() {
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #table(columns: (1fr, 1fr), [Narrow], [A])\n\n\
+         #set page(width: 200mm, height: 100mm, margin: 20mm)\n\
+         #table(columns: (1fr, 1fr), [Wide], [B])",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    assert_eq!(tables.len(), 2);
+    let narrow: i32 = grid_widths(tables[0]).iter().sum();
+    let wide: i32 = grid_widths(tables[1]).iter().sum();
+    assert!((narrow - 5669).abs() <= 2, "narrow={narrow}");
+    assert!((wide - 9071).abs() <= 2, "wide={wide}");
+    assert!(wide > narrow + 3000);
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn grid_column_and_row_gutters_become_real_spacer_tracks() {
+    let p = parts(
+        "#grid(\n\
+           columns: (1fr, 1fr),\n\
+           column-gutter: 12pt,\n\
+           row-gutter: 8pt,\n\
+           [A], [B], [C], [D],\n\
+         )",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 3, "content, gutter, content: {widths:?}");
+    assert_eq!(widths[1], 240, "12pt column gutter in twips");
+    assert_eq!(tables[0].matches("<w:tr>").count(), 3, "row spacer is physical");
+    assert!(
+        tables[0].contains("<w:trHeight w:val=\"160\" w:hRule=\"exact\"/>"),
+        "8pt row gutter is an exact spacer row"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn row_only_gutter_does_not_create_phantom_columns() {
+    let p = parts(
+        "#grid(\n\
+           columns: (1fr, 1fr),\n\
+           row-gutter: 8pt,\n\
+           [A], [B], [C], [D],\n\
+         )",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 2, "row normalization must not leak a zero column");
+    assert_eq!(tables[0].matches("<w:tr>").count(), 3, "two rows plus gutter");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn column_only_gutter_does_not_create_phantom_rows() {
+    let p = parts(
+        "#grid(\n\
+           columns: (1fr, 1fr),\n\
+           column-gutter: 12pt,\n\
+           [A], [B], [C], [D],\n\
+         )",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 3, "content, gutter, content");
+    assert_eq!(tables[0].matches("<w:tr>").count(), 2, "no zero-height row");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn colspan_includes_internal_gutter_tracks() {
+    let p = parts(
+        "#grid(\n\
+           columns: (1fr, 1fr, 1fr),\n\
+           column-gutter: 10pt,\n\
+           grid.cell(colspan: 2)[Wide], [Tail],\n\
+         )",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 5, "three content + two gutter tracks");
+    assert!(
+        tables[0].contains("<w:gridSpan w:val=\"3\"/>"),
+        "two source columns span content + gutter + content"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn nested_table_uses_its_parent_cell_width() {
+    let src = "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #table(\n\
+           columns: (1fr, 1fr),\n\
+           [#table(columns: (1fr, 1fr), [A], [B])],\n\
+           [Outer],\n\
+         )";
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    assert_eq!(tables.len(), 2, "outer and nested tables");
+    let outer: i32 = grid_widths(tables[0]).iter().sum();
+    let inner: i32 = grid_widths(tables[1]).iter().sum();
+    let measured = compiled.export_snapshot().tables();
+    assert_eq!(measured.len(), 2, "outer and nested paged table regions");
+    let outer_measured = measured[0]
+        .cells
+        .iter()
+        .filter(|cell| cell.y == 0)
+        .map(|cell| cell.width_pt)
+        .sum::<f64>();
+    let inner_measured = measured[1]
+        .cells
+        .iter()
+        .filter(|cell| cell.y == 0)
+        .map(|cell| cell.width_pt)
+        .sum::<f64>();
+    assert!((outer as f64 - outer_measured * 20.0).abs() <= 2.0);
+    assert!((inner as f64 - inner_measured * 20.0).abs() <= 2.0);
+    assert!(inner < outer / 2, "parent cell insets narrow the nested table");
     assert_all_wellformed(&p);
 }
 
@@ -606,6 +1035,20 @@ fn rasterized_content_keeps_its_text_as_hidden_runs() {
     // The image also gets the recovered text as accessibility alt text.
     assert!(doc.contains("descr=\"HiddenSkewWord\""), "the drawing carries alt text");
     assert_all_wellformed(&p);
+
+    let compiled = compile_docx("#skew(ax: 20deg)[HiddenSkewWord]", &[]);
+    let report = compiled.fidelity_report();
+    assert_eq!(report.counts().raster, 1);
+    let decision = report
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::RasterFallback)
+        .expect("the whole-region raster fallback is reported");
+    assert_eq!(decision.representation, Representation::Raster);
+    assert_eq!(decision.source.element.as_str(), "skew");
+    assert!(decision.losses.semantic_structure);
+    assert!(decision.losses.editability);
+    assert!(decision.affected_text_chars >= "HiddenSkewWord".len());
 }
 
 #[test]
@@ -634,6 +1077,31 @@ fn svg_image_embeds_native_svg_with_png_fallback() {
         "xmlns:asvg=\"http://schemas.microsoft.com/office/drawing/2016/SVG/main\""
     ));
     assert!(doc.contains("descr=\"Brand mark\""));
+
+    let described = compile_docx_with_world(&TestWorld::with_files(
+        r#"#image("logo.svg", width: 40pt, alt: "Brand mark")"#,
+        &[("logo.svg", SVG)],
+    ));
+    let fact = described
+        .fidelity_report()
+        .drawings()
+        .iter()
+        .find(|fact| fact.alternative_text.as_deref() == Some("Brand mark"))
+        .expect("described SVG drawing fact");
+    assert!(!fact.decorative && !fact.unlabeled());
+
+    let unlabeled = compile_docx_with_world(&TestWorld::with_files(
+        r#"#image("logo.svg", width: 40pt)"#,
+        &[("logo.svg", SVG)],
+    ));
+    assert!(
+        unlabeled
+            .fidelity_report()
+            .drawings()
+            .iter()
+            .any(|fact| fact.unlabeled()),
+        "a non-decorative image with no alt text is explicitly inventoried"
+    );
 
     let png_rel = doc
         .split("<a:blip r:embed=\"")
@@ -664,6 +1132,153 @@ fn svg_image_embeds_native_svg_with_png_fallback() {
             .contains("<Default Extension=\"svg\" ContentType=\"image/svg+xml\"/>"),
         "package declares the SVG media content type"
     );
+    assert_all_wellformed(&p);
+
+    let compiled = compile_docx(
+        r#"#image("logo.svg", width: 40pt, alt: "Brand mark")"#,
+        &[("logo.svg", SVG)],
+    );
+    let report = compiled.fidelity_report();
+    assert_eq!(report.counts().native_with_fallback, 1);
+    assert_eq!(report.counts().raster, 0, "the PNG is a compatibility branch");
+    let decision = report
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::SvgWithPngFallback)
+        .expect("SVG compatibility fallback is reported");
+    assert_eq!(decision.representation, Representation::NativeWithFallback);
+    assert_eq!(decision.source.element.as_str(), "image");
+}
+
+#[test]
+fn positional_link_reports_approximation_not_content_drop() {
+    let src = "#link((page: 1, x: 10pt, y: 20pt))[Jump text]";
+    let compiled = compile_docx(src, &[]);
+    let report = compiled.fidelity_report();
+    assert_eq!(report.counts().approximate, 1);
+    assert_eq!(report.counts().drop, 0);
+    let decision = report
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::PositionalLinkTarget)
+        .expect("lost positional target is reported");
+    assert_eq!(decision.representation, Representation::Approximate);
+    assert!(decision.losses.dynamic_behavior);
+
+    let p = parts(src);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("Jump text"), "the link body remains visible");
+    assert!(!document.contains("<w:hyperlink"), "the unsupported target is absent");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn placed_text_is_an_editable_anchored_text_box() {
+    let src = "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+               #place(top + left, dx: 10pt, dy: 20pt)[Placed live text]";
+    let p = parts(src);
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<wp:anchor"), "placed text is floating");
+    assert!(doc.contains("<wps:txbx>"), "the text remains editable");
+    assert!(doc.contains("<wps:bodyPr wrap=\"none\""));
+    assert!(doc.contains("Placed live text"));
+    assert!(
+        doc.contains(
+            "<wp:positionH relativeFrom=\"column\"><wp:posOffset>127000</wp:posOffset>"
+        ),
+        "10pt dx is relative to the current column"
+    );
+    assert!(
+        doc.contains(
+            "<wp:positionV relativeFrom=\"margin\"><wp:posOffset>254000</wp:posOffset>"
+        ),
+        "20pt dy combines with top alignment"
+    );
+    assert!(!doc.contains("<a:blip"), "plain placed text is not rasterized");
+
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedTextBox
+            && decision.representation == Representation::Native
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn placed_percentage_offset_resolves_against_the_column() {
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #place(top + left, dx: 10%)[Ten percent]",
+    );
+    assert!(
+        p["word/document.xml"].contains("<wp:posOffset>359982</wp:posOffset>"),
+        "10% resolves against the twip-rounded 100mm text area"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn placed_text_without_vertical_alignment_stays_paragraph_relative() {
+    let p = parts("Before.\n#place(left, dy: 10pt)[Beside flow]\nAfter.");
+    assert!(
+        p["word/document.xml"].contains(
+            "<wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>127000</wp:posOffset>"
+        ),
+        "missing vertical alignment means current flow position, not page top"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn floating_placed_text_keeps_clearance_and_wrap_policy() {
+    let p = parts("#place(top + center, float: true, clearance: 6pt)[Floating text]");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("distT=\"76200\" distB=\"76200\""));
+    assert!(doc.contains("<wp:wrapTopAndBottom/>"));
+    assert!(doc.contains("<wp:align>center</wp:align>"));
+    assert!(doc.contains("<wps:txbx>"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn placed_simple_table_is_an_editable_anchored_text_box() {
+    let src = "#place(top + left, dx: 8pt, dy: 12pt, \
+               table(columns: 2, [Left cell], [Right cell]))";
+    let p = parts(src);
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<wp:anchor"));
+    assert!(doc.contains("<wps:txbx>"));
+    assert!(doc.contains("<wps:bodyPr wrap=\"square\""));
+    assert!(doc.contains("<w:tbl>"), "the table stays native inside the box");
+    assert!(doc.contains("Left cell") && doc.contains("Right cell"));
+    assert!(!doc.contains("<a:blip"), "the table is not flattened to pixels");
+
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedTextBox
+            && decision.representation == Representation::Native
+    }));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedContentFlowFallback
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn rich_placed_content_flow_fallback_is_reported() {
+    // Math inside a table is deliberately not admitted to the placed-table
+    // text-box plan until that consumer combination is validated atomically.
+    let src = "#place(top + left, table(columns: 1, [$x + 1$]))";
+    let p = parts(src);
+    assert!(p["word/document.xml"].contains("<w:tbl>"));
+    assert!(p["word/document.xml"].contains("<m:oMath"));
+
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedContentFlowFallback
+            && decision.representation == Representation::Approximate
+            && decision.losses.visual_fidelity
+    }));
     assert_all_wellformed(&p);
 }
 
@@ -700,6 +1315,10 @@ fn vertical_stack_lowers_to_sequential_paragraphs() {
     assert!(doc.contains("First entry"), "stack child text is kept");
     assert!(doc.contains("Second entry"), "all stack children are kept");
     assert!(!doc.contains("<w:drawing>"), "a text stack is not rasterized");
+    assert!(
+        doc.contains("w:line=\"120\" w:lineRule=\"exact\""),
+        "the stack's 6pt default spacing is explicit"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -712,6 +1331,51 @@ fn horizontal_stack_lowers_to_a_table_row() {
     assert!(doc.contains("<w:tbl>"), "a horizontal stack becomes a table");
     assert!(doc.contains("Left col") && doc.contains("Right col"), "both columns kept");
     assert!(!doc.contains("<w:drawing>"), "not rasterized");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn horizontal_stack_uses_the_active_section_width() {
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #stack(dir: ltr, [Left], [Right])",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let width: i32 = grid_widths(tables[0]).iter().sum();
+    assert!((width - 5669).abs() <= 2, "stack width={width}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn horizontal_stack_fixed_spacing_is_a_physical_track() {
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #stack(dir: ltr, spacing: 12pt, [Left], [Right])",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 3, "body, fixed gap, body");
+    assert_eq!(widths[1], 240, "12pt spacing in twips");
+    assert!((widths.iter().sum::<i32>() - 5669).abs() <= 2, "{widths:?}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn horizontal_stack_fractional_spacing_is_retained_and_reported() {
+    let src = "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+               #stack(dir: ltr, [Left], 1fr, [Right])";
+    let p = parts(src);
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 3, "fractional spacing is a real middle track");
+    assert!((widths.iter().sum::<i32>() - 5669).abs() <= 2, "{widths:?}");
+
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::FlexibleStackSpacing
+            && decision.representation == Representation::Approximate
+            && decision.losses.visual_fidelity
+    }));
     assert_all_wellformed(&p);
 }
 
@@ -785,9 +1449,8 @@ fn frameless_box_wrapping_columns_flows_instead_of_rasterizing() {
     // A box with a fill/stroke around the SAME body is intentionally NOT
     // widened by this change (only the frameless case is validated safe here)
     // — it keeps its pre-existing rasterize behavior, preserving the visual.
-    let framed = parts(
-        "#box(inset: 1cm, fill: yellow)[#columns(2, [Framed section text.])]",
-    );
+    let framed =
+        parts("#box(inset: 1cm, fill: yellow)[#columns(2, [Framed section text.])]");
     let doc = &framed["word/document.xml"];
     assert!(doc.contains("<w:drawing>"), "a filled box still rasterizes its visual");
     assert_all_wellformed(&framed);
@@ -820,9 +1483,7 @@ fn box_with_bottom_only_stroke_keeps_a_bottom_only_border() {
     // Mid-sentence (genuinely inline, not a paragraph's sole content), the same
     // partial stroke still can't be a run-level border — it now rasterizes
     // (preserves the visual) instead of silently becoming a full box.
-    let inline = parts(
-        "before #box(stroke: (bottom: 0.5pt + black))[mid] after",
-    );
+    let inline = parts("before #box(stroke: (bottom: 0.5pt + black))[mid] after");
     let doc = &inline["word/document.xml"];
     assert!(doc.contains("before"), "surrounding text is preserved");
     assert!(doc.contains("after"), "surrounding text is preserved");
@@ -1033,6 +1694,46 @@ fn math_maps_to_omml() {
 }
 
 #[test]
+fn equation_number_tab_uses_the_active_section_width() {
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #set math.equation(numbering: \"(1)\")\n\
+         $ x = 1 $",
+    );
+    assert!(
+        p["word/document.xml"].contains("<w:tab w:val=\"end\" w:pos=\"5669\"/>"),
+        "equation number aligns to the active text edge"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn unsupported_math_child_rasterizes_the_whole_equation_atomically() {
+    let src = "$frac(1, #box[BoxedTerm]) + y$";
+    let compiled = compile_docx(src, &[]);
+    let report = compiled.fidelity_report();
+    let decision = report
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::UnsupportedMathRasterFallback)
+        .expect("unsupported math triggers a whole-equation decision");
+    assert_eq!(decision.representation, Representation::Raster);
+    assert_eq!(decision.source.element.as_str(), "equation");
+    assert_eq!(report.counts().drop, 0, "no descendant is silently dropped");
+
+    let p = parts(src);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("<a:blip"), "the whole equation is a picture");
+    assert!(document.contains("<w:vanish/>"), "searchable fallback text remains");
+    assert!(document.contains("BoxedTerm"), "the previously lost child survives");
+    assert!(
+        !document.contains("<m:oMath"),
+        "no plausible-looking partial OMML subtree is emitted"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn nary_operator_nests_its_operand() {
     // The integrand must sit inside the n-ary's `m:e`, not after an empty one
     // (an empty `<m:e/>` renders as a spurious box).
@@ -1163,6 +1864,18 @@ fn heading_outline_is_a_toc_content_control() {
         "with the Table of Contents docPart gallery"
     );
     assert!(doc.contains("<w:sdtContent>"), "and its entries live in sdtContent");
+    let begin = field_begin_tag(doc, " TOC ");
+    assert!(!begin.contains("w:dirty"), "opening must stay modal-free: {begin}");
+    assert!(!begin.contains("w:fldLock"), "native TOC remains editable: {begin}");
+    assert!(
+        !p["word/settings.xml"].contains("w:updateFields"),
+        "opening the document must not trigger Word's modal global-update workflow"
+    );
+    let page_ref = doc.find(" PAGEREF ").expect("TOC page field");
+    assert!(
+        doc[page_ref..].contains(">1</w:t>"),
+        "the TOC page number is useful before any optional field refresh"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -1572,6 +2285,37 @@ fn heading_style_owns_matching_run_formatting() {
 }
 
 #[test]
+fn heading_deviation_equal_to_normal_remains_direct() {
+    let p = parts(
+        "#set text(font: \"Liberation Serif\", size: 11pt, fill: rgb(\"AA0000\"))\n\
+         #show heading.where(level: 1): set text(font: \"Liberation Sans\", size: 20pt, fill: rgb(\"224466\"))\n\
+         = Styled #text(font: \"Liberation Serif\", size: 11pt, fill: rgb(\"AA0000\"))[Normal-looking]",
+    );
+    let styles = &p["word/styles.xml"];
+    let doc = &p["word/document.xml"];
+
+    let heading_style = style_fragment(styles, "Heading1");
+    assert!(heading_style.contains("liberation sans"));
+    assert!(heading_style.contains("w:val=\"40\""));
+    assert!(heading_style.contains("w:val=\"224466\""));
+
+    let deviation = run_fragment_containing(doc, "Normal-looking");
+    assert!(
+        deviation.contains("liberation serif"),
+        "font equal to Normal must still override Heading1: {deviation}"
+    );
+    assert!(
+        deviation.contains("w:val=\"22\""),
+        "size equal to Normal must still override Heading1: {deviation}"
+    );
+    assert!(
+        deviation.contains("w:val=\"AA0000\""),
+        "color equal to Normal must still override Heading1: {deviation}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn deviating_heading_run_keeps_only_the_deviation() {
     let p = parts(
         "#show heading.where(level: 1): set text(fill: rgb(\"224466\"))\n\
@@ -1618,6 +2362,27 @@ fn page_level_columns_stay_a_single_section() {
         "page-level columns are already native section columns"
     );
     assert!(doc.contains("<w:cols w:num=\"2\""));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn table_inside_page_columns_uses_the_column_width() {
+    let src = "#set page(\n\
+           width: 120mm, height: 100mm, margin: 10mm,\n\
+           columns: 2,\n\
+         )\n\
+         #table(columns: (1fr, 1fr), [A], [B])";
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let width: i32 = grid_widths(tables[0]).iter().sum();
+    let measured = compiled.export_snapshot().tables()[0]
+        .cells
+        .iter()
+        .filter(|cell| cell.y == 0)
+        .map(|cell| cell.width_pt)
+        .sum::<f64>();
+    assert!((width as f64 - measured * 20.0).abs() <= 2.0, "width={width}");
     assert_all_wellformed(&p);
 }
 
@@ -1697,6 +2462,7 @@ fn page_background_becomes_a_behind_text_header_image() {
     assert!(header.contains("behindDoc=\"1\""), "background sits behind the text");
     assert!(header.contains("relativeFrom=\"page\""), "positioned against the page");
     assert!(header.contains("<a:blip"), "the background is an embedded image");
+    assert!(header.contains("<adec:decorative"), "background is marked decorative");
     // The body text is unaffected.
     assert!(p["word/document.xml"].contains("Body text"));
     assert_all_wellformed(&p);
@@ -1739,6 +2505,11 @@ fn page_foreground_becomes_a_front_of_text_header_image() {
     assert!(header.contains("behindDoc=\"0\""), "foreground sits in front of text");
     assert!(header.contains("relativeFrom=\"page\""), "positioned against the page");
     assert!(header.contains("<a:blip"), "the foreground is an embedded image");
+    assert!(header.contains("descr=\"DRAFT\""), "recovered foreground text is alt text");
+    assert!(
+        !header.contains("<adec:decorative"),
+        "meaningful foreground is not decorative"
+    );
     assert!(p["word/document.xml"].contains("Body text"), "body text remains in flow");
     assert_all_wellformed(&p);
 }
@@ -1915,6 +2686,36 @@ fn labeled_targets_get_bookmarks_so_refs_resolve() {
 }
 
 #[test]
+fn snapshot_link_edges_drive_stable_internal_bookmark_names() {
+    let src = "= Target <target>\n\n#link(<target>)[internal] and #link(\"https://example.com\")[external]";
+    let first = compile_docx(src, &[]);
+    let second = compile_docx(src, &[]);
+    assert_eq!(first.export_snapshot().links(), second.export_snapshot().links());
+    let links = first.export_snapshot().links();
+    let target_id = links
+        .iter()
+        .find_map(|link| match link.target {
+            typst_docx::SnapshotLinkTarget::Node(target) => Some(target),
+            _ => None,
+        })
+        .expect("internal link has a stable target node");
+    assert!(links.iter().any(|link| matches!(
+        &link.target,
+        typst_docx::SnapshotLinkTarget::Url(url) if url == "https://example.com"
+    )));
+
+    let p = parts_with_manifest(src);
+    let doc = &p["word/document.xml"];
+    let name = format!("_Typst{target_id:032x}");
+    assert!(doc.contains(&format!("w:name=\"{name}\"")));
+    assert!(doc.contains(&format!("w:anchor=\"{name}\"")));
+    let manifest = &p["customXml/typstFidelity.xml"];
+    assert!(manifest.contains("target=\"node\""));
+    assert!(manifest.contains("target=\"url\" url=\"https://example.com\""));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn aligned_equation_keeps_its_alignment() {
     // `a + b &= c \ x &= y` must vertically align the `=` columns. `m:eqArr`
     // cannot express per-column alignment, so the converter emits a matrix whose
@@ -2003,6 +2804,16 @@ fn outline_falls_back_to_introspected_headings() {
     assert!(doc.contains("Alpha"), "the heading title appears in the TOC");
     // No bookmark to target, so no PAGEREF and nothing to dangle.
     assert!(!doc.contains("PAGEREF"), "fallback entries carry no PAGEREF");
+    let begin = field_begin_tag(doc, " TOC ");
+    assert!(
+        begin.contains("w:fldLock=\"true\""),
+        "Word cannot reconstruct fallback entries: {begin}"
+    );
+    assert!(!begin.contains("w:dirty"));
+    assert!(
+        !p["word/settings.xml"].contains("w:updateFields"),
+        "a locked fallback TOC must not request global recalculation"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -2142,6 +2953,22 @@ fn decorative_shape_becomes_a_vector_drawing() {
     assert!(doc.contains("prst=\"rect\""), "with rectangle preset geometry");
     assert!(!doc.contains("a:blip"), "and is not an embedded raster image");
     assert!(doc.contains("a:solidFill"), "the solid fill is carried");
+    assert!(doc.contains("<adec:decorative"), "bodyless art is explicitly decorative");
+    let compiled = compile_docx(
+        "#rect(width: 2cm, height: 1cm, fill: blue, stroke: 1pt + red)",
+        &[],
+    );
+    let fact = compiled
+        .fidelity_report()
+        .drawings()
+        .iter()
+        .find(|fact| fact.decorative)
+        .expect("decorative drawing fact");
+    assert!(!fact.unlabeled());
+    let manifest = compiled.fidelity_manifest_xml();
+    assert!(manifest.contains("drawings=\"1\""));
+    assert!(manifest.contains("unlabeledDrawings=\"0\""));
+    assert!(manifest.contains("decorative=\"true\""));
     assert_all_wellformed(&p);
 }
 
@@ -2182,6 +3009,16 @@ fn rect_with_text_becomes_a_text_box() {
     assert!(doc.contains("wps:txbx"), "a rect with text is a text box");
     assert!(doc.contains("A boxed callout note"), "its text is real and editable");
     assert!(!p.keys().any(|k| k.starts_with("word/media/")), "and nothing is rasterized");
+    assert!(!doc.contains("<adec:decorative"), "text-bearing shape is not decorative");
+    let compiled =
+        compile_docx("#rect(fill: aqua, inset: 6pt)[A boxed callout note.]", &[]);
+    let fact = compiled
+        .fidelity_report()
+        .drawings()
+        .iter()
+        .find(|fact| fact.native_text)
+        .expect("native text-box drawing fact");
+    assert!(!fact.decorative && !fact.unlabeled());
     assert_all_wellformed(&p);
 }
 
@@ -2439,6 +3276,250 @@ fn figure_emits_seq_field() {
 }
 
 #[test]
+fn typst_owned_reference_text_stays_static_beside_a_live_toc() {
+    // A native TOC remains manually updateable. The normal reference in the
+    // same document nevertheless stays Typst-owned: Word's REF evaluator would
+    // return bookmarked figure content instead of the supplement + number.
+    let src = "#outline()\n\n= Heading\n\n\
+               #figure(rect(width: 20pt, height: 20pt), caption: [A box]) <f>\n\n\
+               See #ref(<f>).";
+    let p = parts(src);
+    assert!(!p["word/settings.xml"].contains("w:updateFields"));
+    let doc = &p["word/document.xml"];
+    assert!(!doc.contains(" REF "), "normal refs must not become Word REF fields");
+    let para = doc.split("<w:p>").find(|p| p.contains("See")).expect("ref para");
+    assert!(para.contains("<w:hyperlink"), "the static result stays navigable");
+    assert!(visible_text(doc).contains("Figure\u{a0}1"));
+
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::TypstOwnedReferenceText
+            && decision.representation == Representation::Approximate
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn page_reference_remains_live_and_unlocked() {
+    let src = "#set page(numbering: \"1\")\n\
+         #figure(rect(width: 20pt, height: 20pt), caption: [A box]) <f>\n\n\
+         See #ref(<f>, form: \"page\").";
+    let p = parts(src);
+    let begin = field_begin_tag(&p["word/document.xml"], " PAGEREF ");
+    assert!(!begin.contains("w:fldLock"), "PAGEREF belongs to Word: {begin}");
+    assert_eq!(
+        p["word/document.xml"].matches(" PAGEREF ").count(),
+        1,
+        "one semantic page reference must emit one complex field"
+    );
+    assert!(
+        visible_text(&p["word/document.xml"]).contains("See page\u{a0}1."),
+        "the localized Typst supplement must remain visible outside PAGEREF"
+    );
+    let para = p["word/document.xml"]
+        .split("<w:p>")
+        .find(|para| para.contains(" PAGEREF "))
+        .expect("page-reference paragraph");
+    assert!(
+        para.find("page").unwrap() < para.find(" PAGEREF ").unwrap(),
+        "the supplement must precede, not live inside, the updateable field"
+    );
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::NativePageReference
+            && decision.representation == Representation::Native
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn custom_page_reference_supplement_stays_outside_the_live_field() {
+    let p = parts(
+        "#set page(numbering: \"i\")\n\
+         = Target <t>\n\n\
+         See #ref(<t>, form: \"page\", supplement: [sheet]).",
+    );
+    let doc = &p["word/document.xml"];
+    assert_eq!(doc.matches(" PAGEREF ").count(), 1);
+    assert!(visible_text(doc).contains("See sheet\u{a0}i."));
+    let para = doc
+        .split("<w:p>")
+        .find(|para| para.contains(" PAGEREF "))
+        .expect("custom page-reference paragraph");
+    assert!(para.find("sheet").unwrap() < para.find(" PAGEREF ").unwrap());
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn fidelity_report_enrolls_dynamic_field_ownership() {
+    let src = "#set page(numbering: \"1\")\n#outline()\n\n= Intro\n\n#figure(rect(width: 20pt, height: 20pt), caption: [A box]) <f>\n\nSee page #ref(<f>, form: \"page\").";
+    let compiled = compile_docx(src, &[]);
+    let fields = compiled.fidelity_report().dynamic_fields();
+
+    for kind in ["TOC", "PAGEREF", "SEQ", "PAGE"] {
+        assert!(
+            fields.iter().any(|field| {
+                field.kind == kind && field.owner == typst_docx::FieldOwner::Consumer
+            }),
+            "{kind} must be inventoried as consumer-owned"
+        );
+    }
+    assert!(fields.iter().all(|field| field.occurrences > 0));
+
+    let p = parts_with_manifest(src);
+    let manifest = &p["customXml/typstFidelity.xml"];
+    assert!(manifest.contains("<typst:dynamicFields>"));
+    assert!(manifest.contains("kind=\"TOC\""));
+    assert!(manifest.contains("kind=\"PAGEREF\""));
+    assert!(manifest.contains("owner=\"Consumer\""));
+    assert!(manifest.contains("cache=\"Resolved\""));
+    assert!(manifest.contains("dynamicFields="));
+}
+
+#[test]
+fn fidelity_report_enrolls_referenced_fonts() {
+    let src = "#set text(font: \"Libertinus Serif\")\nBody and #text(font: \"DejaVu Sans Mono\")[code].";
+    let compiled = compile_docx(src, &[]);
+    let fonts = compiled.fidelity_report().fonts();
+
+    for family in ["libertinus serif", "dejavu sans mono"] {
+        assert!(
+            fonts.iter().any(|font| {
+                font.family == family
+                    && font.available_at_export
+                    && !font.embedded
+                    && font.occurrences > 0
+            }),
+            "{family} must be inventoried as an available, non-embedded font: {fonts:?}"
+        );
+    }
+
+    let p = parts_with_manifest(src);
+    let manifest = &p["customXml/typstFidelity.xml"];
+    assert!(manifest.contains("<typst:fonts>"));
+    assert!(manifest.contains("family=\"dejavu sans mono\""));
+    assert!(manifest.contains("embedded=\"false\""));
+    assert!(manifest.contains("referencedFonts="));
+    assert!(p["word/fontTable.xml"].contains("w:name=\"dejavu sans mono\""));
+}
+
+#[test]
+fn fidelity_report_marks_missing_fonts_as_consumer_dependent() {
+    let family = "definitely missing typst font";
+    let src = "#set text(font: \"Definitely Missing Typst Font\")\nPortable reference.";
+    let compiled = compile_docx(src, &[]);
+    let fact = compiled
+        .fidelity_report()
+        .fonts()
+        .iter()
+        .find(|font| font.family == family)
+        .unwrap_or_else(|| {
+            panic!("missing font fact: {:?}", compiled.fidelity_report().fonts())
+        });
+    assert!(!fact.available_at_export, "missing family must be explicit: {fact:?}");
+    assert!(!fact.embedded, "missing family has no embedded program: {fact:?}");
+
+    let p = text_parts_with_manifest(&compiled);
+    let manifest = &p["customXml/typstFidelity.xml"];
+    assert!(manifest.contains("missingFonts=\"1\""), "{manifest}");
+    assert!(
+        manifest.contains(
+            "family=\"definitely missing typst font\" availableAtExport=\"false\" embedded=\"false\""
+        ),
+        "{manifest}"
+    );
+    assert!(
+        p["word/fontTable.xml"].contains("w:name=\"definitely missing typst font\""),
+        "the portable Word reference remains declared"
+    );
+}
+
+#[test]
+fn cjk_and_rtl_languages_use_word_script_slots() {
+    let p = parts(
+        "#set text(lang: \"en\")\n\
+         A long English baseline keeps the document default language stable.\n\
+         #text(lang: \"ja\")[日本語]\n\
+         \n\
+         #set text(lang: \"ar\", dir: rtl)\n\
+         مرحبا",
+    );
+    let doc = &p["word/document.xml"];
+
+    let japanese = run_fragment_containing(doc, "日本語");
+    assert!(
+        japanese.contains("<w:lang w:val=\"ja\" w:eastAsia=\"ja\"/>"),
+        "Japanese uses Word's East Asian proofing/font slot: {japanese}"
+    );
+
+    let arabic = run_fragment_containing(doc, "مرحبا");
+    assert!(arabic.contains("<w:rtl/>"), "Arabic run is RTL: {arabic}");
+    assert!(arabic.contains("<w:cs/>"), "Arabic run uses complex-script props: {arabic}");
+    assert!(
+        arabic.contains("<w:lang w:val=\"ar\" w:bidi=\"ar\"/>"),
+        "Arabic uses Word's bidi proofing/font slot: {arabic}"
+    );
+    let arabic_para = para_fragment_containing(doc, "مرحبا");
+    assert!(arabic_para.contains("<w:bidi/>"), "Arabic paragraph is bidi: {arabic_para}");
+    assert!(
+        arabic_para.contains("<w:jc w:val=\"start\"/>"),
+        "RTL logical-start alignment is explicit: {arabic_para}"
+    );
+    assert_all_wellformed(&p);
+
+    let japanese_default = parts("#set text(lang: \"ja\")\n日本語の本文");
+    assert!(
+        japanese_default["word/styles.xml"]
+            .contains("<w:lang w:val=\"ja\" w:eastAsia=\"ja\"/>"),
+        "docDefaults uses the East Asian language slot"
+    );
+    assert!(
+        japanese_default["word/settings.xml"]
+            .contains("<w:themeFontLang w:val=\"ja\" w:eastAsia=\"ja\"/>"),
+        "theme font language uses the East Asian slot"
+    );
+}
+
+#[test]
+fn equivalent_roman_figure_numbering_stays_live() {
+    let p = parts(
+        "#set figure(numbering: \"i\")\n\
+         #figure(rect(width: 20pt, height: 20pt), caption: [Roman])",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("SEQ Figure \\* roman"));
+    let begin = field_begin_tag(doc, "SEQ Figure");
+    assert!(!begin.contains("w:fldLock"), "equivalent SEQ stays live: {begin}");
+    assert!(
+        !p["word/settings.xml"].contains("w:updateFields"),
+        "a live sequence alone does not require global recalculation"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn non_equivalent_figure_numbering_keeps_typst_text_and_hidden_counter() {
+    let src = "#set figure(numbering: \"(i)\")\n\
+               #figure(rect(width: 20pt, height: 20pt), caption: [Decorated])";
+    let p = parts(src);
+    let doc = &p["word/document.xml"];
+    assert!(visible_text(doc).contains("(i)"), "Typst's decorated number survives");
+    assert!(doc.contains("SEQ Figure \\h"), "a hidden counter keeps Word in sync");
+    assert!(!doc.contains("SEQ Figure \\* ARABIC"), "Word must not coerce it");
+    assert!(
+        doc.matches("<w:vanish/>").count() >= 5,
+        "every structural/result run of the hidden field stays hidden in LibreOffice"
+    );
+
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::TypstOwnedFigureNumber
+            && decision.representation == Representation::Approximate
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn image_in_header_declares_drawing_namespaces() {
     // An image in a header part used to leave `wp:`/`a:`/`pic:` undeclared on
     // the header root, making Word/LibreOffice refuse to open the document.
@@ -2563,10 +3644,13 @@ fn auto_page_height_uses_the_true_paged_size_not_a4() {
     assert!(real_h_twips > 16838 * 2, "test doc must need much more than A4 height");
 
     let bytes =
-        docx(&docx_doc, &DocxOptions { pretty: false }).expect("docx export failed");
+        docx(&docx_doc, &DocxOptions::default()).expect("docx export failed");
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     let mut xml = String::new();
-    zip.by_name("word/document.xml").unwrap().read_to_string(&mut xml).unwrap();
+    zip.by_name("word/document.xml")
+        .unwrap()
+        .read_to_string(&mut xml)
+        .unwrap();
 
     let caps = regex_pgsz(&xml).expect("a w:pgSz element exists");
     assert_eq!(
@@ -2753,6 +3837,22 @@ fn per_page_literal_header_does_not_fake_an_odd_even_split() {
         1,
         "non-parity-stable furniture stays a single sampled header"
     );
+
+    let compiled = compile_docx(
+        "#set page(header: context [HEAD-#here().page()-END])\n\
+         One.\n#pagebreak()\nTwo.\n#pagebreak()\nThree.\n#pagebreak()\nFour.\n#pagebreak()\nFive.",
+        &[],
+    );
+    let decision = compiled
+        .fidelity_report()
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::PageFurnitureSampled)
+        .expect("page-specific furniture must be reported, not silently frozen");
+    assert_eq!(decision.representation, Representation::Approximate);
+    assert!(decision.losses.visual_fidelity);
+    assert!(decision.losses.dynamic_behavior);
+    assert!(decision.affected_text_chars > 0);
     assert_all_wellformed(&p);
 }
 
@@ -2804,7 +3904,46 @@ fn bibliography_gets_a_biblatex_sidecar_part() {
 }
 
 #[test]
+fn export_snapshot_owns_both_bibliography_package_views() {
+    let src =
+        "First @beta and then @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")";
+    let files = &[("refs.bib", REFS_BIB)];
+    let first = compile_docx(src, files);
+    let second = compile_docx(src, files);
+    let first_entries = first.export_snapshot().bibliography_entries();
+    let second_entries = second.export_snapshot().bibliography_entries();
+    assert_eq!(
+        first_entries
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"]
+    );
+    assert_eq!(
+        first_entries.iter().map(|entry| entry.logical_id).collect::<Vec<_>>(),
+        second_entries
+            .iter()
+            .map(|entry| entry.logical_id)
+            .collect::<Vec<_>>()
+    );
+    assert!(first.export_snapshot().bibliography_biblatex().is_some());
+
+    let p = text_parts_with_manifest(&first);
+    assert_eq!(p["customXml/item1.xml"].matches("<b:Source>").count(), 2);
+    assert!(p["word/typstBibliography.xml"].contains("Alpha Source"));
+    let manifest = &p["customXml/typstFidelity.xml"];
+    for entry in first_entries {
+        assert!(manifest.contains(&format!("id=\"{:032x}\"", entry.logical_id)));
+        assert!(manifest.contains(&format!("key=\"{}\"", entry.key)));
+    }
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn no_bibliography_means_no_sidecar_part() {
+    let compiled = compile_docx("Just some plain text, no citations at all.", &[]);
+    assert!(compiled.export_snapshot().bibliography_entries().is_empty());
+    assert!(compiled.export_snapshot().bibliography_biblatex().is_none());
     let p = parts("Just some plain text, no citations at all.");
     assert!(
         !p.contains_key("word/typstBibliography.xml"),
@@ -2846,7 +3985,10 @@ fn bibliography_gets_a_native_word_sources_part() {
     assert!(item1.contains("<b:Last>Baker</b:Last>"));
     assert!(item1.contains("<b:First>Bob</b:First>"));
     // Two distinct, deterministic GUIDs (repeat exports must be byte-identical).
-    let guids: Vec<&str> = item1.match_indices("<b:Guid>").map(|(i, _)| &item1[i..i + 46]).collect();
+    let guids: Vec<&str> = item1
+        .match_indices("<b:Guid>")
+        .map(|(i, _)| &item1[i..i + 46])
+        .collect();
     assert_eq!(guids.len(), 2);
     assert_ne!(guids[0], guids[1], "each source gets its own GUID");
 
@@ -2889,7 +4031,9 @@ fn no_bibliography_means_no_native_word_sources_part() {
     assert!(!p.contains_key("customXml/item1.xml"));
     assert!(!p.contains_key("customXml/itemProps1.xml"));
     assert!(!p.contains_key("customXml/_rels/item1.xml.rels"));
-    assert!(!p["word/_rels/document.xml.rels"].contains("customXml"));
+    let rels = &p["word/_rels/document.xml.rels"];
+    assert!(!rels.contains("Target=\"../customXml/item1.xml\""));
+    assert!(!rels.contains("relationships/customXml\""));
     assert_all_wellformed(&p);
 }
 
@@ -2904,7 +4048,11 @@ fn native_word_sources_excludes_uncited_library_entries() {
         &[("refs.bib", REFS_BIB_WITH_UNCITED)],
     );
     let item1 = &p["customXml/item1.xml"];
-    assert_eq!(item1.matches("<b:Source>").count(), 1, "only the cited entry is included");
+    assert_eq!(
+        item1.matches("<b:Source>").count(),
+        1,
+        "only the cited entry is included"
+    );
     assert!(item1.contains("<b:Tag>alpha</b:Tag>"));
     assert!(!item1.contains("<b:Tag>beta</b:Tag>"), "beta was never cited");
     assert!(!item1.contains("<b:Tag>gamma</b:Tag>"), "gamma was never cited");
@@ -2960,6 +4108,28 @@ fn page_refs_follow_real_numbering_across_sections() {
     assert!(text.contains("FRONT-page i"), "front matter keeps roman numbering: {text}");
     assert!(text.contains("MAIN-page 1"), "main matter resets to arabic 1: {text}");
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn snapshot_page_counters_preserve_patterns_and_resets() {
+    let src = "#set page(numbering: \"i\")\n= Front <front>\n#pagebreak()\n\
+               #set page(numbering: \"1\")\n#counter(page).update(1)\n= Main <main>";
+    let compiled = compile_docx(src, &[]);
+    let displays = compiled
+        .export_snapshot()
+        .nodes()
+        .iter()
+        .flat_map(|node| node.page_counters.iter())
+        .map(|counter| counter.display.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(displays.contains("i"), "front-matter counter is captured: {displays:?}");
+    assert!(
+        displays.contains("1"),
+        "reset main-matter counter is captured: {displays:?}"
+    );
+    let manifest = compiled.fidelity_manifest_xml();
+    assert!(manifest.contains("key=\"page\" page=\"1\" display=\"i\""));
+    assert!(manifest.contains("key=\"page\" page=\"2\" display=\"1\""));
 }
 
 #[test]
@@ -3062,14 +4232,223 @@ fn failing_figure_numbering_closure_does_not_abort_the_export() {
     // A user numbering closure that errors (e.g. reads introspection state that
     // only exists in a paged model) must not abort the export: the caption's
     // cached number is best-effort — the SEQ field is the live truth in Word.
-    let p = parts(
-        "#set figure(numbering: _ => if target() == \"docx\" { (1,).at(9) } else { \"1\" })\n\
-         #figure(rect(), caption: [Survives])",
+    let src = "#set figure(numbering: _ => if target() == \"docx\" { (1,).at(9) } else { \"1\" })\n\
+               #figure(rect(), caption: [Survives])";
+    let compiled = compile_docx(src, &[]);
+    assert!(
+        compiled
+            .fidelity_report()
+            .suppressed_diagnostics()
+            .iter()
+            .any(|entry| {
+                entry.stage == ExportStage::FieldPlanning
+                    && entry.kind == SuppressedKind::Error
+            }),
+        "the failed cache evaluation must remain attributable"
     );
+    assert!(
+        compiled.fidelity_report().decisions().iter().any(|decision| {
+            decision.reason == DecisionReason::FieldCacheUnavailable
+                && decision.representation == Representation::Approximate
+        }),
+        "the consumer-computed fallback must be an explicit representation decision"
+    );
+    assert!(
+        compiled.fidelity_report().dynamic_fields().iter().any(|field| {
+            field.kind == "SEQ"
+                && field.cache_status == typst_docx::FieldCacheStatus::Unavailable
+        }),
+        "the finalized field inventory must distinguish a failed cache"
+    );
+    let p = parts(src);
     let doc = &p["word/document.xml"];
     assert!(doc.contains("Survives"), "the caption text is kept");
     assert!(doc.contains(" SEQ "), "the live SEQ field is still emitted");
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn toc_page_cache_uses_the_paged_snapshot_not_the_docx_target() {
+    // This numbering function deliberately fails under Target::Docx. The PDF
+    // already resolved the authoritative page value under Target::Paged, so
+    // the TOC cache must consume that snapshot fact instead of replaying the
+    // closure in the incompatible target universe.
+    let src = "#set page(numbering: (..nums) => if target() == \"docx\" { nums.pos().at(9) } else { \"1\" })\n\
+               #outline()\n\n= Entry";
+    let compiled = compile_docx(src, &[]);
+    let report = compiled.fidelity_report();
+    assert!(
+        !report
+            .suppressed_diagnostics()
+            .iter()
+            .any(|entry| { entry.stage == ExportStage::FieldPlanning })
+    );
+    assert!(
+        !report
+            .decisions()
+            .iter()
+            .any(|decision| { decision.reason == DecisionReason::FieldCacheUnavailable })
+    );
+    assert!(report.dynamic_fields().iter().any(|field| {
+        field.kind == "PAGEREF"
+            && field.cache_status == typst_docx::FieldCacheStatus::Resolved
+    }));
+
+    let p = parts_with_manifest(src);
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("Entry"), "the TOC entry stays visible");
+    assert!(doc.contains(" PAGEREF "), "Word can refresh the live page field");
+    assert!(
+        p["customXml/typstFidelity.xml"]
+            .contains("<typst:counter key=\"page\" page=\"1\" display=\"1\"/>"),
+        "the embedded snapshot must preserve the paged counter value"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn failing_standalone_caption_uses_an_attributed_whole_region_fallback() {
+    // A custom figure show rule can emit `it.caption` outside the figure. Its
+    // DOCX-target numbering closure used to fail realization and silently
+    // return an empty block list, deleting the complete caption.
+    let src = "#set figure(numbering: _ => if target() == \"docx\" { (1,).at(9) } else { \"1\" })\n\
+               #show figure: it => [#it.body #it.caption]\n\
+               #figure(rect(width: 20pt, height: 10pt), caption: [Caption survives])";
+    let compiled = compile_docx(src, &[]);
+    assert!(
+        compiled
+            .fidelity_report()
+            .suppressed_diagnostics()
+            .iter()
+            .any(|entry| {
+                entry.stage == ExportStage::CapabilityPlanning
+                    && entry.kind == SuppressedKind::Error
+            }),
+        "the failed native caption plan must retain its diagnostic"
+    );
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::StandaloneCaptionTextFallback
+            && decision.representation == Representation::Approximate
+            && decision.affected_text_chars > 0
+    }));
+
+    let p = parts(src);
+    let doc = &p["word/document.xml"];
+    assert!(
+        visible_text(doc).contains("Caption survives"),
+        "the recovered caption must remain visible and searchable"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn suppressed_layout_callback_error_is_retained_in_fidelity_report() {
+    let src = "#layout(size => if target() == \"docx\" { (1,).at(9) } else { [Paged fallback] })";
+    let compiled = compile_docx(src, &[]);
+    let suppressed = compiled.fidelity_report().suppressed_diagnostics();
+    assert!(
+        suppressed.iter().any(|entry| {
+            entry.stage == ExportStage::LayoutCallback
+                && entry.kind == SuppressedKind::Error
+        }),
+        "the standalone callback failure remains inspectable: {suppressed:?}"
+    );
+
+    let p = parts(src);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("Paged fallback"), "the paged fallback survives");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn failed_layout_callback_and_fallback_record_an_explicit_drop() {
+    // The PDF callback sees the 60 mm content region and succeeds. DOCX's
+    // standalone callback and whole-page fallback both see 80 mm and reject
+    // it; this used to delete the visible region while reporting zero drops.
+    let src = "#set page(width: 120mm, height: 80mm, margin: 10mm)\n\
+               #layout(size => if size.height > 70mm { panic(\"synthetic region rejected\") } else { [VISIBLE LAYOUT BODY] })\n\
+               After";
+    let compiled = compile_docx(src, &[]);
+    let report = compiled.fidelity_report();
+    assert!(report.suppressed_diagnostics().iter().any(|entry| {
+        entry.stage == ExportStage::LayoutCallback && entry.kind == SuppressedKind::Error
+    }));
+    assert!(report.suppressed_diagnostics().iter().any(|entry| {
+        entry.stage == ExportStage::FallbackLayout && entry.kind == SuppressedKind::Error
+    }));
+    assert!(report.decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::LayoutCallbackUnavailable
+            && decision.representation == Representation::Drop
+    }));
+
+    let p = parts(src);
+    assert!(p["word/document.xml"].contains("After"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn failed_placed_region_records_its_terminal_drop() {
+    let src = "#set page(width: 120mm, height: 80mm, margin: 10mm)\n\
+               #place(top, layout(size => if size.height > 70mm { panic(\"placed region rejected\") } else { [VISIBLE PLACED BODY] }))\n\
+               After";
+    let compiled = compile_docx(src, &[]);
+    let report = compiled.fidelity_report();
+    assert!(
+        report.decisions().iter().any(|decision| {
+            decision.reason == DecisionReason::PositionedContentUnavailable
+                && decision.representation == Representation::Drop
+        }),
+        "decisions: {:?}",
+        report.decisions()
+    );
+    assert!(!report.decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedContentFlowFallback
+    }));
+    assert!(
+        report
+            .suppressed_diagnostics()
+            .iter()
+            .any(|entry| entry.stage == ExportStage::FallbackLayout)
+    );
+
+    let p = parts_with_manifest(src);
+    assert!(p["word/document.xml"].contains("After"));
+    assert!(p["customXml/typstFidelity.xml"].contains("PositionedContentUnavailable"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn failed_inline_placed_fallback_distinguishes_failure_from_empty_scaffolding() {
+    let src = "#set page(width: 120mm, height: 80mm, margin: 10mm)\n\
+               Before #box(place(top, layout(size => if size.height > 70mm { panic(\"inline placed region rejected\") } else { [VISIBLE INLINE BODY] }))) After";
+    let compiled = compile_docx(src, &[]);
+    let report = compiled.fidelity_report();
+    assert!(report.decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::InlinePositionedContentUnavailable
+            && decision.representation == Representation::Drop
+    }));
+    assert!(report.suppressed_diagnostics().iter().any(|entry| {
+        entry.stage == ExportStage::FallbackLayout && entry.kind == SuppressedKind::Error
+    }));
+
+    let p = parts_with_manifest(src);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("Before"));
+    assert!(document.contains("After"));
+    assert!(
+        p["customXml/typstFidelity.xml"].contains("InlinePositionedContentUnavailable")
+    );
+    assert_all_wellformed(&p);
+
+    let scaffolding = compile_docx(
+        "#let s = state(\"inline-scaffold\", none)\n\
+         Before #box(place(layout(size => s.update(size.width)))) After\n\
+         #context s.get()",
+        &[],
+    );
+    assert!(!scaffolding.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::InlinePositionedContentUnavailable
+    }));
 }
 
 #[test]

@@ -202,14 +202,15 @@ various editor extensions.
 This fork adds a native Word exporter (`crates/typst-docx`). It walks Typst's
 realized element tree under a dedicated `Docx` target and emits idiomatic Office
 Open XML that opens cleanly in **Microsoft Word** and **LibreOffice** — using
-Word's built-in styles, so the Navigation pane, Styles gallery, and "update
-field" all work.
+Word's built-in styles, so the Navigation pane and Styles gallery work. Some
+cross-references and numbering are emitted as live Word fields; updating fields
+can change results when Word's semantics differ from Typst's.
 
 Because there are no pre-built binaries for the fork yet, build it from source
 (requires a [Rust][rust] toolchain):
 
 ```sh
-git clone -b docx-export https://github.com/sharifhsn/typst
+git clone -b office-pandoc https://github.com/sharifhsn/typst
 cd typst
 cargo build --release
 # the binary is at target/release/typst
@@ -232,20 +233,23 @@ sections, headers/footers, and PNG/JPEG images embedded verbatim. Decorative
 vector shapes (`#rect`, `#line`, `#curve`, `#polygon`, gradients) map to native
 DrawingML.
 
-**What falls back to an embedded image:** graphics with no OOXML equivalent —
-SVG/PDF images, CeTZ/fletcher diagrams, transforms (`#rotate`/`#scale`/`#skew`),
-and radial/conic gradients. The visual is preserved exactly, and the text inside
-is still recovered as hidden, searchable runs.
+**What falls back to an embedded image:** graphics with no safe Word equivalent —
+PDF/WebP images, CeTZ/fletcher diagrams, many transforms, and radial/conic
+gradients. SVG images carry a native SVG part plus a PNG compatibility fallback.
+Rasterized regions keep recovered hidden text where possible.
 
-**Known limitations:** page-number cross-references resolve against a synthetic
-page model (counting explicit page breaks) and are approximate where text
-auto-flows, and a handful of templates (<1%) that assume a fixed paged layout
-fail to export (they compile to PDF fine) — the error points at the template
-code.
+**Known limitations:** Word reflows native paragraphs and tables with its own
+fonts and layout engine, so editability and pixel identity sometimes conflict.
+Placed text, complex tables, page-varying furniture, and custom live numbering
+remain fidelity-sensitive. Equations are now planned atomically: if one child
+cannot be represented safely in OMML, the whole equation uses a rendered image
+plus searchable text instead of emitting plausible-looking partial math.
 The full per-feature support matrix and the rationale behind every mapping live
 in [`crates/typst-docx/README.md`](crates/typst-docx/README.md) and
 [`crates/typst-docx/COVERAGE.md`](crates/typst-docx/COVERAGE.md); a measured
 comparison against typ2docx and pandoc is in [`COMPARISON.md`](COMPARISON.md).
+The cross-target design, current architectural risks, and validation model are
+in [`docs/dev/office-export-architecture.md`](docs/dev/office-export-architecture.md).
 
 Output is byte-for-byte reproducible under `SOURCE_DATE_EPOCH`. This is preview
 software: please report anything that opens wrong or looks off.
@@ -253,9 +257,10 @@ software: please report anything that opens wrong or looks off.
 ## PowerPoint export (this fork)
 The same fork also exports **PowerPoint** presentations (`crates/typst-pptx`) —
 **one Typst page per editable slide**. Where the Word exporter reflows semantic
-structure, the PowerPoint exporter takes the already laid-out page and places
-each element at its exact position (it's a sibling of the PNG/SVG renderers), so
-what you see in the PDF is what lands on the slide.
+structure, the PowerPoint exporter takes the already laid-out page as its
+geometric source (it's a sibling of the PNG/SVG renderers). Native shapes and
+pictures preserve those coordinates; editable text is reconstructed into
+DrawingML text boxes and can reflow under PowerPoint/Impress font substitution.
 
 ```sh
 target/release/typst compile deck.typ deck.pptx
@@ -267,22 +272,44 @@ It's built for **slide-shaped documents** — decks made with
 any `#set page` in a 16:9 / 16:10 / 4:3 ratio. (Export a page-shaped document to
 `.pptx` and the CLI nudges you toward `.docx`, and the reverse.)
 
-**What maps natively:** live editable text runs (font, size, weight, color,
-spacing, RTL), external and same-deck slide-jump links, native vector shapes
-(`#rect`/`#circle`/`#line`/`#curve`/`#polygon`) with solid, gradient, and
-translucent fills plus stroke dash/cap, solid- or gradient-color slide
-backgrounds, PNG/JPEG images (de-duplicated across slides), and rotated/nested
-group shapes. Anything without a clean equivalent — math, SVG/PDF art, CeTZ
-diagrams, radial gradients — is rasterized to a positioned picture so the visual
-is exact.
+**What maps natively:** live editable text runs, links, straight connectors,
+vector shapes with solid/gradient/translucent or tiled fills, slide backgrounds,
+PNG/JPEG images, SVG with a PNG fallback, DrawingML tables, native OMML math,
+slide-number/title/body placeholders, and Touying/pdfpc speaker notes. Complex
+clips, skew/non-uniform transforms, PDF art, CeTZ diagrams, and radial/conic
+gradients can still fall back to positioned pictures.
 
-**Fidelity:** across 112 real presentation templates, PPTX-vs-PDF visual
-similarity averages **0.995** (median 0.996) with no export failures, and every
-package opens without repair in Microsoft PowerPoint and LibreOffice Impress.
+PowerPoint has one global slide size. Mixed-size Typst pages currently produce a
+warning but are not yet transformed to that canvas; off-size content can crop or
+leave unused space.
+
+**Dated fidelity snapshot:** in the 2026-07-03 comparison, across 112 real
+presentation templates, PPTX-vs-PDF visual similarity averaged **0.995**
+(median 0.996) with no export failures. That run predates native tables, OMML,
+SVG fallback, placeholders, and notes and is not a measurement of the current
+feature set.
 The per-feature notes and honest limitations are in
 [`crates/typst-pptx/README.md`](crates/typst-pptx/README.md), and a measured
 head-to-head against the existing conversion tools (typ2pptx, typ2docx,
 touying-exporter, pandoc) is in [`COMPARISON.md`](COMPARISON.md).
+
+## Pandoc export (this fork)
+
+The fork also exports a typed Pandoc JSON AST. Unlike Pandoc's syntax-only Typst
+reader, this path evaluates packages and Typst code before lowering the realized
+document.
+
+```sh
+target/release/typst compile document.typ document.pandoc
+target/release/typst compile --format pandoc document.typ
+```
+
+Headings, paragraphs, lists, tables, links, footnotes, code, figures, math, and
+citations map to native Pandoc nodes. A document bibliography also produces a
+BibLaTeX sidecar so `pandoc --citeproc` can re-resolve structured citations.
+Visual-only content uses self-contained image fallbacks. See
+[`crates/typst-pandoc/README.md`](crates/typst-pandoc/README.md) for current
+limitations.
 
 ## Community
 The main places where the community gathers are our [Forum][forum] and our
