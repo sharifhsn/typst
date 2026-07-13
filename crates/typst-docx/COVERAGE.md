@@ -2010,3 +2010,23 @@ margin to Typst's horizontal center and centers the footer within a few pixels.
 Their remaining vertical offsets (about 21 rendered pixels in opposite
 directions) are tracked separately as header/footer band-metric drift. All 206
 DOCX integration tests pass and the exporter remains clippy-clean.
+
+## 47. Single-line page furniture uses Word's content-start band distance
+
+Typst defines `header-ascent`/`footer-descent` against a marginal layout region:
+headers are bottom-aligned within the top band and footers are top-aligned
+within the bottom band. Word's `w:header`/`w:footer` instead measure from the
+page edge to the start of the content. Emitting Typst's band boundary directly
+therefore shifted both simple lines inward by one line height. For furniture
+that lowers to exactly one native paragraph with no forced break, drawing,
+math, or field, the exporter now subtracts the largest explicit run size from
+the band boundary. Tags, bookmarks, hyperlinks, and semantic strong/emphasis
+runs remain eligible; complex and multiline furniture keeps the conservative
+boundary.
+
+A focused regression maps a default 11pt line in a 0.5in margin from the
+504-twip Typst boundary to a 284-twip Word content-start distance. In the
+mixed-font fixture, LibreOffice moves the rich centered header from y≈57 to
+y≈35 against Typst y≈36, and the footer from y≈684 to y≈706 against Typst
+y≈705, without clipping or moving the body/table. A two-line fixture remains at
+504 twips. All 207 DOCX integration tests pass and clippy remains clean.

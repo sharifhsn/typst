@@ -2469,6 +2469,23 @@ fn explicit_header_and_footer_alignment_reaches_paragraphs() {
 }
 
 #[test]
+fn single_line_furniture_band_uses_content_start_distance() {
+    let p = parts(
+        "#set page(margin: 0.5in, header: [Header *bold* _italic_], \
+                   footer: [Footer])\nBody.",
+    );
+    let document = &p["word/document.xml"];
+    assert!(
+        document.contains("w:header=\"284\""),
+        "70% margin band boundary minus one 11pt line"
+    );
+    assert!(
+        document.contains("w:footer=\"284\""),
+        "footer uses the same edge-to-content-start translation"
+    );
+}
+
+#[test]
 fn multi_slot_page_numbering_emits_page_of_numpages() {
     // `numbering: "1 of 1"` is the "page X of Y" idiom: the first counting slot
     // is the current page (a `PAGE` field), the second the document total (a

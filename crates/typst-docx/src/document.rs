@@ -2303,17 +2303,90 @@ fn build_furniture_refs(
     match preflight_furniture(ctx, slot, geom, source, styles)? {
         FurniturePlan::Exact { title_page, refs } => {
             sect.title_pg |= title_page;
+            if let Some(height) = uniform_single_line_furniture_height(&refs) {
+                adjust_furniture_band(sect, slot, height);
+            }
             for planned in refs {
                 emit_furniture(ctx, sect, parts, slot, planned.kind, planned.lowered);
             }
         }
         FurniturePlan::Sampled { first } => {
+            if let Some(height) = single_line_furniture_height(&first.blocks) {
+                adjust_furniture_band(sect, slot, height);
+            }
             let affected_text_chars = blocks_text_chars(&first.blocks);
             record_sampled_furniture(ctx, slot, source, affected_text_chars);
             emit_furniture(ctx, sect, parts, slot, "default", first);
         }
     }
     Ok(())
+}
+
+/// Typst places a simple header at the bottom of its marginal band and a
+/// simple footer at the top of its band. Word's `w:header`/`w:footer` measure
+/// from the page edge to the start of the content instead. For a single native
+/// line, translate between those origins by subtracting the authored line
+/// height from the band boundary. Complex/multiline furniture retains the
+/// conservative boundary because its laid-out extent is not represented here.
+fn adjust_furniture_band(sect: &mut SectPr, slot: FurnitureSlot, height: i32) {
+    let (band, margin) = if slot.is_header() {
+        (&mut sect.header, sect.margin_top)
+    } else {
+        (&mut sect.footer, sect.margin_bottom)
+    };
+    *band = band.saturating_sub(height).clamp(1, margin.saturating_sub(1).max(1));
+}
+
+fn uniform_single_line_furniture_height(refs: &[FurnitureRefPlan]) -> Option<i32> {
+    let mut heights = refs
+        .iter()
+        .map(|planned| single_line_furniture_height(&planned.lowered.blocks));
+    let first = heights.next()??;
+    heights.all(|height| height == Some(first)).then_some(first)
+}
+
+fn single_line_furniture_height(blocks: &[Block]) -> Option<i32> {
+    let mut serialized = blocks.iter().filter(|block| !matches!(block, Block::Tag(_)));
+    let Block::Para(para) = serialized.next()? else { return None };
+    if serialized.next().is_some() {
+        return None;
+    }
+
+    let mut max_half_points = 0;
+    for child in &para.content {
+        match child {
+            ParaChild::Run(run) => {
+                accumulate_single_line_run_size(run, &mut max_half_points)?;
+            }
+            ParaChild::Hyperlink { runs, .. } => {
+                for run in runs {
+                    accumulate_single_line_run_size(run, &mut max_half_points)?;
+                }
+            }
+            ParaChild::BookmarkStart { .. }
+            | ParaChild::BookmarkEnd { .. }
+            | ParaChild::Tag(_) => {}
+            ParaChild::OmmlPara(_) => return None,
+        }
+    }
+    (max_half_points > 0).then_some(max_half_points as i32 * 10)
+}
+
+fn accumulate_single_line_run_size(run: &Run, maximum: &mut u32) -> Option<()> {
+    match run {
+        Run::Text { props, .. } | Run::FootnoteRef { props, .. } => {
+            *maximum = (*maximum).max(props.size_half_pt.unwrap_or(0));
+        }
+        Run::Tab | Run::FillTab => {}
+        Run::Break
+        | Run::PageBreak
+        | Run::ColumnBreak
+        | Run::FootnoteRefMark
+        | Run::Drawing(_)
+        | Run::OmmlInline(_)
+        | Run::Field(_) => return None,
+    }
+    Some(())
 }
 
 fn preflight_furniture(
