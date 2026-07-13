@@ -435,6 +435,10 @@ pub struct ParaProps {
     pub(crate) review_origin: Option<ReviewOrigin>,
     pub style: Option<EcoString>,
     pub keep_next: bool,
+    /// `<w:pageBreakBefore/>`: ensure this paragraph starts on a new page.
+    /// Unlike a trailing break run, this is idempotent when preceding fixed-height
+    /// content has already filled the page (important for slide-shaped pages).
+    pub page_break_before: bool,
     /// `<w:keepLines/>` (keep all lines on one page). Default false.
     pub keep_lines: bool,
     pub num: Option<(u32, u8)>,
@@ -610,8 +614,14 @@ pub struct Drawing {
     /// Optional native SVG relationship referenced from `<asvg:svgBlip>`.
     /// When present, `rel` remains the required raster fallback.
     pub svg_rel: Option<EcoString>,
+    /// Optional pair of document-property IDs for a Word-2013 choice whose
+    /// compatibility fallback tiles one full-container raster into two bands.
+    pub compatibility_split_ids: Option<[u32; 2]>,
     pub w_emu: i64,
     pub h_emu: i64,
+    /// Source-space origin normalized out of a native shape path. Applied to
+    /// its eventual floating anchor so explicit line/curve coordinates survive.
+    pub source_offset_emu: [i64; 2],
     pub alt: Option<EcoString>,
     /// Office 2019+ accessibility intent. Decorative drawings are deliberately
     /// skipped by assistive technology and therefore must not also carry alt
@@ -785,7 +795,7 @@ pub enum VMerge {
     Continue,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub enum VAlign {
     Top,
     Center,
@@ -833,6 +843,9 @@ pub struct SectPr {
     pub pg_num: Option<PgNumType>,
     /// `w:type` (only for non-final sections / `pagebreak(to:)`); None = default `nextPage`.
     pub sect_type: Option<SectType>,
+    /// Vertical alignment of the section body (`w:vAlign`). None is Word's
+    /// default top alignment.
+    pub vertical_align: Option<VAlign>,
     /// Header references (r:id + type). Emitted BEFORE pgSz.
     pub headers: Vec<HdrFtrRef>,
     /// Footer references (r:id + type). Emitted after headers, BEFORE pgSz.
@@ -915,6 +928,7 @@ impl Default for SectPr {
             line_numbers: None,
             pg_num: None,
             sect_type: None,
+            vertical_align: None,
             headers: Vec::new(),
             footers: Vec::new(),
             title_pg: false,

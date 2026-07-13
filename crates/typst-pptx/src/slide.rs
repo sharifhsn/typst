@@ -896,7 +896,10 @@ fn column_shape(active: ActiveColumnRegion<'_>) -> Option<OrderedShape> {
             h_emu: crate::text::extent_emu(size.y),
             rot_60k: 0,
             wrap: TextWrap::Square,
-            columns: Some(TextColumns { count, gutter_emu: crate::text::extent_emu(gutter) }),
+            columns: Some(TextColumns {
+                count,
+                gutter_emu: crate::text::extent_emu(gutter),
+            }),
             placeholder: None,
             paras,
         }),
@@ -934,7 +937,8 @@ fn column_region_paras(
     // Order columns by reading order (the minimum walk-order of their
     // contents), not raw bucket index, so this stays correct for RTL columns.
     let mut order: Vec<usize> = (0..count).collect();
-    order.sort_by_key(|&i| buckets[i].iter().map(|s| s.order).min().unwrap_or(usize::MAX));
+    order
+        .sort_by_key(|&i| buckets[i].iter().map(|s| s.order).min().unwrap_or(usize::MAX));
 
     let mut paras = Vec::new();
     for i in order {

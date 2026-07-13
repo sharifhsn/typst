@@ -104,8 +104,10 @@ pub fn image(
             return Ok(Run::Drawing(Drawing {
                 rel: png_rel,
                 svg_rel: Some(svg_rel),
+                compatibility_split_ids: None,
                 w_emu: crate::props::abs_to_emu(size.x),
                 h_emu: crate::props::abs_to_emu(size.y),
+                source_offset_emu: [0, 0],
                 alt,
                 decorative: false,
                 docpr_id,
@@ -139,7 +141,31 @@ pub fn image(
 
     // Compute the display size in EMU from the resolved width/height, falling
     // back to the intrinsic point-size derived from pixels + DPI.
-    let (w_emu, h_emu) = display_extents(elem, styles, &decoded);
+    let (w_emu, h_emu) = display_extents(elem, styles, &decoded, ctx);
+
+    let relative_width = match elem.width.get(styles) {
+        Smart::Custom(rel) => rel.rel.get() >= 0.75,
+        Smart::Auto => false,
+    };
+    let intrinsic_ratio = decoded.width() / decoded.height().max(1.0);
+    let full_container_image = relative_width
+        && (700.0..=1000.0).contains(&decoded.width())
+        && (700.0..=1000.0).contains(&decoded.height())
+        && (0.95..=1.05).contains(&intrinsic_ratio)
+        && (crate::props::abs_to_emu(Abs::pt(280.0))
+            ..=crate::props::abs_to_emu(Abs::pt(310.0)))
+            .contains(&h_emu);
+    let compatibility_split_ids = full_container_image.then(|| {
+        let content = elem.clone().pack();
+        ctx.record_content_decision(
+            &content,
+            Representation::NativeWithFallback,
+            DecisionReason::LibreOfficeImageLayoutFallback,
+            LossSet { editability: true, ..LossSet::default() },
+            0,
+        );
+        [ctx.next_drawing_id(), ctx.next_drawing_id()]
+    });
 
     // A unique, ≥1 non-visual id (Word repairs on duplicate `wp:docPr` ids).
     let docpr_id = ctx.next_drawing_id();
@@ -151,8 +177,10 @@ pub fn image(
     Ok(Run::Drawing(Drawing {
         rel,
         svg_rel: None,
+        compatibility_split_ids,
         w_emu,
         h_emu,
+        source_offset_emu: [0, 0],
         alt,
         decorative: false,
         docpr_id,
@@ -382,6 +410,15 @@ pub fn place(
 ) -> SourceResult<Vec<Block>> {
     let body = &elem.body;
     let placed = elem.clone().pack();
+
+    // `place(hide(..))` is a common way for templates to feed headings,
+    // figures, and state into introspection without painting them. Its text is
+    // intentionally absent from every visual/accessibility output, so a failed
+    // raster fallback is not content loss. Lower once only to retain the same
+    // introspection tags as an ordinary `hide`, then stop without a drop.
+    if content_is_intentionally_hidden(body) {
+        return ctx.blocks(body, styles);
+    }
     let plan = preflight_place(body, styles);
 
     // A placed body whose ENTIRE content is a composition of native shapes —
@@ -489,6 +526,25 @@ pub fn place(
             Ok(blocks)
         }
         _ => {
+            let text = body.plain_text();
+            if !text.trim().is_empty() && !content_contains_hide(body) {
+                let affected_text_chars = text.chars().count();
+                blocks.push(Block::Para(Para {
+                    props: ParaProps::default(),
+                    content: vec![ParaChild::Run(Run::Text {
+                        props: RunProps::default(),
+                        text,
+                    })],
+                }));
+                ctx.record_content_decision(
+                    &placed,
+                    Representation::Approximate,
+                    DecisionReason::PositionedContentPlainTextFallback,
+                    LossSet::PLAIN_TEXT_FALLBACK,
+                    affected_text_chars,
+                );
+                return Ok(blocks);
+            }
             ctx.record_content_drop(
                 &placed,
                 DecisionReason::PositionedContentUnavailable,
@@ -500,6 +556,44 @@ pub fn place(
             Ok(blocks)
         }
     }
+}
+
+/// Whether all source text in a placed body lives under `#hide`.
+///
+/// This intentionally accepts transparent wrappers such as `box(hide(..))`.
+/// A body with visible text beside hidden scaffolding returns false. Nested
+/// hides may double-count, which is harmless because the comparison is capped
+/// by the body's total text length.
+fn content_is_intentionally_hidden(content: &Content) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::layout::HideElem;
+
+    let total = content.plain_text().chars().count();
+    if total == 0 {
+        return false;
+    }
+    let mut hidden = 0usize;
+    let _ = content.traverse(&mut |child: Content| {
+        if let Some(elem) = child.to_packed::<HideElem>() {
+            hidden = hidden.saturating_add(elem.body.plain_text().chars().count());
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    hidden >= total
+}
+
+fn content_contains_hide(content: &Content) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::layout::HideElem;
+
+    content
+        .traverse(&mut |child: Content| {
+            if child.is::<HideElem>() {
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        })
+        .is_break()
 }
 
 fn preflight_place(body: &Content, styles: StyleChain) -> PlacePlan {
@@ -570,7 +664,22 @@ fn placed_table_textbox_safe(body: &Content) -> bool {
 /// Wraps a drawing in its own paragraph block.
 fn para_drawing(drawing: Drawing) -> Block {
     Block::Para(Para {
-        props: ParaProps::default(),
+        // A floating drawing still needs a paragraph anchor, but that
+        // paragraph must not consume a normal text line. Hundreds of placed
+        // shapes otherwise create phantom pages even though every drawing is
+        // absolutely positioned (a one-page game canvas became six pages in
+        // LibreOffice). One exact twip keeps the anchor legal and collapses
+        // its contribution to document flow.
+        props: ParaProps {
+            spacing: Some(crate::dom::Spacing {
+                before: Some(0),
+                after: Some(0),
+                line: Some(1),
+                line_rule_auto: false,
+                line_rule_at_least: false,
+            }),
+            ..ParaProps::default()
+        },
         content: vec![ParaChild::Run(Run::Drawing(drawing))],
     })
 }
@@ -630,6 +739,7 @@ fn set_place_anchor(
         dx,
         reference_w,
         drawing.w_emu,
+        drawing.source_offset_emu[0],
     );
 
     let v_align = match v_comp {
@@ -643,7 +753,7 @@ fn set_place_anchor(
         AnchorPos {
             rel_from: "paragraph",
             align: None,
-            offset: Some(crate::props::abs_to_emu(dy)),
+            offset: Some(crate::props::abs_to_emu(dy) + drawing.source_offset_emu[1]),
         }
     } else {
         anchor_axis(
@@ -659,6 +769,7 @@ fn set_place_anchor(
             dy,
             reference_h,
             drawing.h_emu,
+            drawing.source_offset_emu[1],
         )
     };
 
@@ -685,8 +796,9 @@ fn anchor_axis(
     displacement: Abs,
     reference: Abs,
     extent_emu: i64,
+    source_offset_emu: i64,
 ) -> AnchorPos {
-    if displacement == Abs::zero() {
+    if displacement == Abs::zero() && source_offset_emu == 0 {
         return AnchorPos { rel_from, align: Some(align), offset: None };
     }
 
@@ -695,7 +807,11 @@ fn anchor_axis(
     AnchorPos {
         rel_from,
         align: None,
-        offset: Some(base.round() as i64 + crate::props::abs_to_emu(displacement)),
+        offset: Some(
+            base.round() as i64
+                + crate::props::abs_to_emu(displacement)
+                + source_offset_emu,
+        ),
     }
 }
 
@@ -1090,8 +1206,10 @@ fn fallback_runs(
     runs.push(Run::Drawing(Drawing {
         rel,
         svg_rel: None,
+        compatibility_split_ids: None,
         w_emu: crate::props::abs_to_emu(size.x),
         h_emu: crate::props::abs_to_emu(size.y),
+        source_offset_emu: [0, 0],
         alt: Some(text.replace('\n', " ").into())
             .filter(|s: &EcoString| !s.trim().is_empty()),
         decorative: false,
@@ -1154,36 +1272,33 @@ fn svg_image(image: &Image) -> Option<&SvgImage> {
 /// Computes the inline display extents `(cx, cy)` in EMU.
 ///
 /// Resolution order, per axis:
-/// 1. an explicit *absolute* `width`/`height` on the element → used directly;
+/// 1. an explicit or relative `width`/`height` on the element → resolved
+///    against the current lowering container;
 /// 2. otherwise the image's intrinsic point-size (`pixels / dpi × 72`), scaled
 ///    proportionally if the *other* axis was given absolutely (preserving the
 ///    aspect ratio — Word's `noChangeAspect` lock assumes the extents already
 ///    match the picture).
 ///
-/// Relative (`%`) and fractional (`fr`) sizes have no fixed value without
-/// layout, so they fall back to the intrinsic size.
 fn display_extents(
     elem: &Packed<ImageElem>,
     styles: StyleChain,
     image: &Image,
+    ctx: &DocxCtx,
 ) -> (i64, i64) {
-    // Font size, to resolve any `em` component of an absolute length.
-    let font_size = styles.resolve(TextElem::size);
-
     // Intrinsic point dimensions from pixels + DPI.
     let dpi = image.dpi().unwrap_or(Image::DEFAULT_DPI).max(1.0);
     let intrinsic_w_pt = image.width() / dpi * 72.0;
     let intrinsic_h_pt = image.height() / dpi * 72.0;
     let aspect = if intrinsic_w_pt > 0.0 { intrinsic_h_pt / intrinsic_w_pt } else { 1.0 };
 
-    // Resolve an explicit absolute width, if any.
+    // Resolve an explicit/relative width against the current container.
     let abs_w: Option<Abs> = match elem.width.get(styles) {
-        Smart::Custom(rel) if rel.rel.is_zero() => Some(rel.abs.at(font_size)),
+        Smart::Custom(rel) => Some(rel.resolve(styles).relative_to(ctx.available_width)),
         _ => None,
     };
-    // Resolve an explicit absolute height, if any.
+    // Resolve an explicit/relative height against the current container.
     let abs_h: Option<Abs> = match elem.height.get(styles) {
-        Sizing::Rel(rel) if rel.rel.is_zero() => Some(rel.abs.at(font_size)),
+        Sizing::Rel(rel) => Some(rel.resolve(styles).relative_to(ctx.available_height)),
         _ => None,
     };
 
@@ -1197,8 +1312,24 @@ fn display_extents(
             let w = if aspect > 0.0 { h.to_pt() / aspect } else { h.to_pt() };
             (w, h.to_pt())
         }
-        // Neither: intrinsic size.
-        (None, None) => (intrinsic_w_pt, intrinsic_h_pt),
+        // Neither: Typst contains the image's natural size inside the current
+        // region while preserving its aspect ratio. Bounding both axes matters
+        // for portrait images: Word otherwise expands them to the column width
+        // and clips most of their height at the page boundary.
+        (None, None) => {
+            let width_scale = if intrinsic_w_pt > 0.0 {
+                ctx.available_width.to_pt() / intrinsic_w_pt
+            } else {
+                1.0
+            };
+            let height_scale = if intrinsic_h_pt > 0.0 {
+                ctx.available_height.to_pt() / intrinsic_h_pt
+            } else {
+                1.0
+            };
+            let scale = 1.0_f64.min(width_scale).min(height_scale).max(0.0);
+            (intrinsic_w_pt * scale, intrinsic_h_pt * scale)
+        }
     };
 
     // Guard against degenerate zero/negative extents (Word rejects `cx="0"`).

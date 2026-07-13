@@ -11,7 +11,10 @@ use typst_library::model::{
 use typst_library::routines::Pair;
 
 use crate::ctx::DocxCtx;
-use crate::dom::{Block, Para, ParaChild, ParaProps, ReviewCandidateKind, Run, RunProps};
+use crate::dom::{
+    Block, Cell, CellBorders, Para, ParaChild, ParaProps, ReviewCandidateKind, Row,
+    RowHeight, Run, RunProps, Spacing, Tbl, TblProps, VAlign,
+};
 use crate::mappers;
 use crate::report::DecisionReason;
 
@@ -225,6 +228,16 @@ pub fn convert_children(
         }
     }
 
+    // A run-level page break emitted after fixed-height, page-filling content
+    // lands on the next physical page and advances once more, producing a blank
+    // page between every slide. On landscape/slide-shaped pages, move each
+    // boundary onto the following paragraph as Word's semantic
+    // `<w:pageBreakBefore/>`. The property is idempotent if auto-pagination has
+    // already placed that paragraph at the top of a new page.
+    if ctx.page_content_width > ctx.raster_height {
+        move_page_breaks_before_following_blocks(&mut blocks);
+    }
+
     // A paragraph using a fractional `#h(1fr)` (a fill-tab) gets a right-aligned
     // tab stop at the content width, so the tab pushes the following content to
     // the right margin (the "Left … Right" header idiom) instead of stopping at
@@ -246,6 +259,52 @@ pub fn convert_children(
         }
     }
     Ok(blocks)
+}
+
+fn move_page_breaks_before_following_blocks(blocks: &mut Vec<Block>) {
+    let mut out = Vec::with_capacity(blocks.len());
+    let mut pending = false;
+    for mut block in std::mem::take(blocks) {
+        let is_break = matches!(
+            &block,
+            Block::Para(para)
+                if !para.content.is_empty()
+                    && para.content.iter().all(|child| {
+                        matches!(child, ParaChild::Run(Run::PageBreak))
+                    })
+        );
+        if is_break {
+            pending = true;
+            continue;
+        }
+        if pending {
+            if matches!(block, Block::Tag(_)) {
+                out.push(block);
+                continue;
+            }
+            if let Block::Para(para) = &mut block {
+                para.props.page_break_before = true;
+            } else {
+                out.push(Block::Para(Para {
+                    props: ParaProps {
+                        page_break_before: true,
+                        spacing: Some(Spacing {
+                            before: Some(0),
+                            after: Some(0),
+                            line: Some(1),
+                            line_rule_auto: false,
+                            line_rule_at_least: false,
+                        }),
+                        ..Default::default()
+                    },
+                    content: Vec::new(),
+                }));
+            }
+            pending = false;
+        }
+        out.push(block);
+    }
+    *blocks = out;
 }
 
 /// Folds an accumulated `#v(..)` spacing into the `before` of the first
@@ -1120,6 +1179,60 @@ fn handle_block_box(
     // Recurse into the body to obtain its paragraphs.
     let mut inner = ctx.blocks(content, styles)?;
 
+    // A fixed-height filled block is a bounded visual region (terminal panes,
+    // cards, dashboards), not merely a sequence of shaded paragraphs. Word
+    // paragraph shading cannot retain the requested empty height; a one-cell
+    // table can, while keeping every child paragraph/table native and editable.
+    // Use `atLeast`, not `exact`, so font substitution never clips the content.
+    let fixed_height = match elem.height.get(styles) {
+        typst_library::layout::Sizing::Rel(rel) => {
+            Some(rel.resolve(styles).relative_to(ctx.available_height))
+        }
+        _ => None,
+    };
+    if let (Some(Paint::Solid(color)), Some(height)) = (&fill, fixed_height)
+        && height.to_pt().is_finite()
+        && height.to_pt() > 0.0
+        // This native cell is for bounded panels such as terminal/code panes.
+        // Page-sized slide/canvas blocks rely on fixed placement; turning them
+        // into flowing tables can multiply one slide into many Word pages.
+        && height.to_pt() <= ctx.available_height.to_pt() * 0.6
+    {
+        if !matches!(inner.last(), Some(Block::Para(_))) {
+            inner.push(Block::Para(Para {
+                props: ParaProps::default(),
+                content: Vec::new(),
+            }));
+        }
+        let width = match elem.width.get(styles) {
+            typst_library::foundations::Smart::Custom(rel) => {
+                rel.resolve(styles).relative_to(ctx.available_width)
+            }
+            _ => ctx.available_width,
+        };
+        let width_dxa = crate::props::abs_to_twip(width).max(1);
+        let height_dxa = crate::props::abs_to_twip(height).max(1);
+        out.push(Block::Table(Tbl {
+            props: TblProps { width_dxa: Some(width_dxa), style: None },
+            grid: vec![width_dxa],
+            rows: vec![Row {
+                header: false,
+                cant_split: true,
+                height: Some(RowHeight { val: height_dxa, exact: false }),
+                cells: vec![Cell {
+                    w_dxa: Some(width_dxa),
+                    grid_span: 1,
+                    v_merge: None,
+                    borders: CellBorders::default(),
+                    shd_fill: Some(crate::props::color_to_hex(color)),
+                    valign: Some(VAlign::Top),
+                    blocks: inner,
+                }],
+            }],
+        }));
+        return Ok(());
+    }
+
     // Resolve the box decorations once. A gradient fill is approximated by its
     // first stop's colour (the dominant tone for most gradient backgrounds); a
     // tiling has no single-colour analogue, so it drops to no shade — the text
@@ -1313,13 +1426,14 @@ pub(crate) fn body_shape_only(
         AlignElem, BoxElem, MoveElem, PadElem, PlaceElem, RotateElem, ScaleElem,
         StackElem,
     };
+    use typst_library::text::SpaceElem;
     use typst_library::visualize::{
         CircleElem, CurveElem, EllipseElem, LineElem, PolygonElem, RectElem, SquareElem,
     };
 
     let mut saw_shape = false;
     let result = body.traverse(&mut |e: Content| {
-        if e.is::<TagElem>() {
+        if e.is::<TagElem>() || e.is::<SpaceElem>() || e.is::<ParbreakElem>() {
             return ControlFlow::Continue(());
         }
 

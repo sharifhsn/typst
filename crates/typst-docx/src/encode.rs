@@ -456,6 +456,12 @@ fn write_block(
             // also performs the page transition.
             open_para(w);
             w.open(xml::W_PPR).start_children();
+            w.open("w:spacing")
+                .attr("w:before", "0")
+                .attr("w:after", "0")
+                .attr("w:line", "1")
+                .attr("w:lineRule", "exact")
+                .empty();
             write_sectpr(w, sect);
             w.close(); // pPr
             w.close(); // p
@@ -676,6 +682,40 @@ fn write_border_side(w: &mut XmlWriter, name: &'static str, border: &Option<Bord
 /// (`<wp:anchor>`) DrawingML picture, sharing the same `a:graphic`/`pic:pic`
 /// payload.
 fn write_drawing(w: &mut XmlWriter, d: &Drawing) {
+    if let Some(ids) = d.compatibility_split_ids
+        && d.anchor.is_none()
+        && d.shape.is_none()
+        && d.group.is_none()
+    {
+        w.open(xml::W_R).start_children();
+        w.open("mc:AlternateContent")
+            .attr("xmlns:w15", "http://schemas.microsoft.com/office/word/2012/wordml")
+            .start_children();
+        w.open("mc:Choice").attr("Requires", "w15").start_children();
+        w.open("w:drawing").start_children();
+        write_inline_envelope(w, d);
+        w.close(); // w:drawing
+        w.close(); // mc:Choice
+        w.open("mc:Fallback").start_children();
+        let top_height = d.h_emu / 2;
+        write_inline_picture_tile(w, d, d.w_emu, top_height, ids[0], 0, 50_000, true);
+        w.leaf("w:br");
+        write_inline_picture_tile(
+            w,
+            d,
+            d.w_emu,
+            d.h_emu - top_height,
+            ids[1],
+            50_000,
+            0,
+            false,
+        );
+        w.close(); // mc:Fallback
+        w.close(); // mc:AlternateContent
+        w.close(); // w:r
+        return;
+    }
+
     // A text box (`wps:txbx`) is a 2010 DrawingML feature. Wrap it in
     // `mc:AlternateContent`: the modern `wps` drawing in `mc:Choice Requires="wps"`,
     // and a legacy VML `v:textbox` in `mc:Fallback` so a consumer that does not
@@ -710,6 +750,110 @@ fn write_drawing(w: &mut XmlWriter, d: &Drawing) {
     }
     w.close(); // w:drawing
     w.close(); // w:r
+}
+
+/// Emits one vertically cropped half of an inline raster picture. This is used
+/// only inside a compatibility fallback; modern Word keeps the exact single
+/// picture from the matching `mc:Choice`.
+fn write_inline_picture_tile(
+    w: &mut XmlWriter,
+    d: &Drawing,
+    width: i64,
+    height: i64,
+    docpr_id: u32,
+    crop_top: i32,
+    crop_bottom: i32,
+    include_alt: bool,
+) {
+    let name = format!("{} compatibility tile", d.name);
+    w.open("w:drawing").start_children();
+    w.open("wp:inline")
+        .attr("distT", "0")
+        .attr("distB", "0")
+        .attr("distL", "0")
+        .attr("distR", "0")
+        .start_children();
+    w.open("wp:extent")
+        .attr("cx", &width.to_string())
+        .attr("cy", &height.to_string())
+        .empty();
+    w.open("wp:effectExtent")
+        .attr("l", "0")
+        .attr("t", "0")
+        .attr("r", "0")
+        .attr("b", "0")
+        .empty();
+    w.open("wp:docPr")
+        .attr("id", &docpr_id.to_string())
+        .attr("name", &name);
+    if include_alt {
+        if let Some(alt) = &d.alt {
+            w.attr("descr", alt);
+        }
+        w.empty();
+    } else {
+        w.start_children();
+        w.open("a:extLst").attr("xmlns:a", ns::A).start_children();
+        w.open("a:ext")
+            .attr("uri", "{C183D7F6-B498-43B3-948B-1728B52AA6E4}")
+            .start_children();
+        w.open("adec:decorative")
+            .attr("xmlns:adec", ns::ADEC)
+            .attr("val", "1")
+            .empty();
+        w.close(); // a:ext
+        w.close(); // a:extLst
+        w.close(); // wp:docPr
+    }
+    w.open("wp:cNvGraphicFramePr").start_children();
+    w.open("a:graphicFrameLocks")
+        .attr("xmlns:a", ns::A)
+        .attr("noChangeAspect", "1")
+        .empty();
+    w.close(); // wp:cNvGraphicFramePr
+
+    w.open("a:graphic").attr("xmlns:a", ns::A).start_children();
+    w.open("a:graphicData").attr("uri", ns::PIC).start_children();
+    w.open("pic:pic").attr("xmlns:pic", ns::PIC).start_children();
+    w.open("pic:nvPicPr").start_children();
+    w.open("pic:cNvPr")
+        .attr("id", &docpr_id.to_string())
+        .attr("name", &name);
+    if include_alt {
+        if let Some(alt) = &d.alt {
+            w.attr("descr", alt);
+        }
+    }
+    w.empty();
+    w.open("pic:cNvPicPr").empty();
+    w.close(); // pic:nvPicPr
+    w.open("pic:blipFill").start_children();
+    dml::write_blip(w, &d.rel, None);
+    w.open("a:srcRect")
+        .attr("t", &crop_top.to_string())
+        .attr("b", &crop_bottom.to_string())
+        .empty();
+    w.open("a:stretch").start_children();
+    w.open("a:fillRect").empty();
+    w.close(); // a:stretch
+    w.close(); // pic:blipFill
+    w.open("pic:spPr").start_children();
+    w.open("a:xfrm").start_children();
+    w.open("a:off").attr("x", "0").attr("y", "0").empty();
+    w.open("a:ext")
+        .attr("cx", &width.to_string())
+        .attr("cy", &height.to_string())
+        .empty();
+    w.close(); // a:xfrm
+    w.open("a:prstGeom").attr("prst", "rect").start_children();
+    w.open("a:avLst").empty();
+    w.close(); // a:prstGeom
+    w.close(); // pic:spPr
+    w.close(); // pic:pic
+    w.close(); // a:graphicData
+    w.close(); // a:graphic
+    w.close(); // wp:inline
+    w.close(); // w:drawing
 }
 
 /// Emits the legacy VML fallback (`<w:pict><v:rect><v:textbox>…`) for a text box,
@@ -1412,6 +1556,14 @@ fn write_sectpr(w: &mut XmlWriter, sect: &SectPr) {
             .empty();
     } else {
         w.open("w:cols").attr("w:space", &sect.col_space.to_string()).empty();
+    }
+    if let Some(align) = sect.vertical_align {
+        let value = match align {
+            VAlign::Top => "top",
+            VAlign::Center => "center",
+            VAlign::Bottom => "bottom",
+        };
+        w.open("w:vAlign").attr("w:val", value).empty();
     }
     if sect.title_pg {
         w.leaf("w:titlePg");

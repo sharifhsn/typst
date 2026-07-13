@@ -19,7 +19,7 @@ use crate::dom::{
     FieldDisplay, FieldMode, Footnote, HdrFtrPart, HdrFtrRef, HeadingStyle,
     HeadingStyleSample, LineNumbering, MediaPart, NumberingTable, Para, ParaChild,
     ParaProps, PgNumType, ReviewCandidate, ReviewCandidateKind, ReviewOrigin, Run,
-    RunProps, SectPr, SectType, Spacing, TextDefaults, TocFigure, TocHeading,
+    RunProps, SectPr, SectType, Spacing, TextDefaults, TocFigure, TocHeading, VAlign,
 };
 use crate::introspect::DocxIntrospector;
 use crate::package::Rels;
@@ -167,7 +167,39 @@ fn docx_document_impl(
         page_sizes_ref,
         paged_geometry.as_deref(),
     );
-    let sections = resolve_sections(&pairs, styles, real_ref, page_sizes_ref);
+    let mut sections = resolve_sections(&pairs, styles, real_ref, page_sizes_ref);
+    let section_backgrounds_vary = sections.first().is_some_and(|first| {
+        sections
+            .iter()
+            .skip(1)
+            .any(|section| section.geom.background_color != first.geom.background_color)
+    });
+    // `w:background` is document-global. When sections disagree, omit it;
+    // explicitly coloured sections already carry a compatibility shape, while
+    // an unfilled section naturally uses Word's white page. Manufacturing a
+    // white full-page header shape for every section makes slide decks reflow.
+    if section_backgrounds_vary {
+        let mut preceding_colored_section = false;
+        for section in &mut sections {
+            let default_white = section.geom.background_color.is_none()
+                || section.geom.background_color == Some([255, 255, 255]);
+            if default_white {
+                section.geom.background_color = None;
+                // A missing header inherits the preceding section's header in
+                // Word. Emit an empty part to stop a dark background shape
+                // carrying into this white section, without adding another
+                // full-page anchor.
+                if preceding_colored_section
+                    && section.geom.header.is_none()
+                    && section.geom.background.is_none()
+                    && section.geom.foreground.is_none()
+                {
+                    section.geom.header = Some(Content::empty());
+                }
+            }
+            preceding_colored_section = !default_white;
+        }
+    }
     // The width fed to rasterized content comes from the first section.
     let first_geom = sections
         .first()
@@ -279,8 +311,17 @@ fn docx_document_impl(
                 for (idx, section) in sections.iter().enumerate() {
                     set_ctx_geometry(&mut ctx, &section.geom);
                     ctx.line_numbering_active = section.geom.line_numbers.is_some();
-                    let mut blocks =
-                        crate::convert::run(&mut ctx, &pairs[section.range.clone()])?;
+                    let mut blocks = Vec::new();
+                    for _ in 0..section.leading_pagebreaks {
+                        blocks.push(Block::Para(Para {
+                            props: ParaProps::default(),
+                            content: vec![ParaChild::Run(Run::PageBreak)],
+                        }));
+                    }
+                    blocks.extend(crate::convert::run(
+                        &mut ctx,
+                        &pairs[section.range.clone()],
+                    )?);
                     body.append(&mut blocks);
                     let full_width = ctx.page_content_width_dxa();
                     let (mut s, mut h, mut f) = match ctx
@@ -570,7 +611,9 @@ fn docx_document_impl(
         introspector: Arc::new(introspector),
         header_parts,
         footer_parts,
-        background_color: first_geom.background_color,
+        background_color: (!section_backgrounds_vary)
+            .then_some(first_geom.background_color)
+            .flatten(),
         hyphenate: first_geom.hyphenate,
         even_and_odd_headers,
         mirror_margins,
@@ -1427,6 +1470,9 @@ struct SectGeom {
     mirror_margins: bool,
     /// Whether this section needs Word's right-side gutter setting.
     rtl_gutter: bool,
+    /// Whole-page vertical alignment when the page run has one common resolved
+    /// `align(..)` style.
+    vertical_align: Option<VAlign>,
     /// Section-level line numbering derived from `par.line(numbering:)`.
     line_numbers: Option<LineNumbering>,
     /// `set page(numbering:)`, if any (drives `pgNumType` + the PAGE field).
@@ -1491,6 +1537,10 @@ struct SectionRun {
     geom: SectGeom,
     range: std::ops::Range<usize>,
     break_after: Option<SectType>,
+    /// Page breaks beyond the one consumed by the preceding section boundary.
+    /// These must render inside this section so consecutive explicit breaks do
+    /// not collapse multiple requested blank pages into one.
+    leading_pagebreaks: usize,
 }
 
 fn resolve_sections(
@@ -1509,6 +1559,7 @@ fn resolve_sections(
         // section-initial chain. Boundary pagebreaks carry pre-rule styles, so
         // they must NOT be folded.
         let mut forced_break = None;
+        let break_start = i;
         while i < pairs.len() {
             if let Some(pb) = pairs[i].0.to_packed::<PagebreakElem>() {
                 if !pb.boundary.get(pairs[i].1) {
@@ -1523,6 +1574,7 @@ fn resolve_sections(
                 break;
             }
         }
+        let skipped_breaks = i - break_start;
         if let Some(sect_type) = forced_break
             && let Some(previous) = sections.last_mut()
         {
@@ -1537,6 +1589,7 @@ fn resolve_sections(
             i += 1;
         }
         let group = &pairs[start..i];
+        let previous_sections = sections.len();
         if group.iter().any(|(child, _)| child.is::<ColumnsElem>()) {
             push_column_sections(
                 &mut sections,
@@ -1552,6 +1605,13 @@ fn resolve_sections(
             // the pagebreaks between them then fall inside the merged range
             // (→ `<w:br>`).
             push_section_run(&mut sections, geom, start..i, None, false);
+        }
+        if previous_sections > 0 && sections.len() > previous_sections {
+            // A page-style transition contributes one synthetic pagebreak, and
+            // the new Word section itself replaces the first actual break. Any
+            // further consecutive breaks are real blank pages in the new run.
+            sections[previous_sections].leading_pagebreaks =
+                skipped_breaks.saturating_sub(2);
         }
     }
     sections
@@ -1620,7 +1680,7 @@ fn push_section_run(
         return;
     }
 
-    sections.push(SectionRun { geom, range, break_after });
+    sections.push(SectionRun { geom, range, break_after, leading_pagebreaks: 0 });
 }
 
 fn close_previous_section_at(
@@ -1661,9 +1721,10 @@ fn columns_section_geometry(
 /// or `set page(numbering: ..)` change — the section carrying the new
 /// furniture would never be emitted. Content fields are compared by hash.
 ///
-/// `background_color` and `hyphenate` are deliberately NOT compared: both are
-/// emitted document-wide (`w:background` / `w:autoHyphenation` have no
-/// per-section form), so splitting on them could not express the change.
+/// `background_color`, `vertical_align`, and `hyphenate` are deliberately NOT
+/// compared. They are represented when another property already creates a
+/// genuine Word section; making every Typst page (especially every slide) a
+/// section can amplify ordinary reflow into dozens of extra pages.
 fn same_section(a: &SectGeom, b: &SectGeom) -> bool {
     use typst_utils::hash128;
     a.page_w == b.page_w
@@ -1704,8 +1765,8 @@ fn run_geometry(
 ) -> SectGeom {
     use typst_library::foundations::{Resolve, Smart, Styles};
     use typst_library::layout::{
-        Abs, Binding, Dir, Em, FixAlignment, FixedAlignment, Length, OuterVAlignment,
-        PageElem, Paper, Rel, Sides, Size,
+        Abs, AlignElem, Binding, Dir, Em, FixAlignment, FixedAlignment, Length,
+        OuterVAlignment, PageElem, Paper, Rel, Sides, Size,
     };
     use typst_library::model::{LineNumberingScope, ParLine};
     use typst_library::text::TextElem;
@@ -1806,6 +1867,19 @@ fn run_geometry(
         (props::abs_to_twip(sides.left), props::abs_to_twip(sides.right), 0)
     };
     let rtl_gutter = mirror_margins && binding == Binding::Right && gutter > 0;
+    let mut body_alignments = group
+        .iter()
+        .filter(|(child, _)| !child.is::<typst_library::introspection::TagElem>())
+        .map(|(_, pair_styles)| pair_styles.resolve(AlignElem::alignment).y);
+    let vertical_align = body_alignments.next().and_then(|first| {
+        body_alignments
+            .all(|alignment| alignment == first)
+            .then(|| match first {
+                FixedAlignment::Center => Some(VAlign::Center),
+                FixedAlignment::End => Some(VAlign::Bottom),
+                FixedAlignment::Start => None,
+            })?
+    });
 
     let line_numbers = sc.get_ref(ParLine::numbering).as_ref().map(|_| {
         let distance = match sc.get(ParLine::number_clearance) {
@@ -1887,6 +1961,7 @@ fn run_geometry(
         col_space,
         mirror_margins,
         rtl_gutter,
+        vertical_align,
         line_numbers,
         numbering,
         number_in_header,
@@ -1969,6 +2044,7 @@ fn sectpr_geometry(geom: &SectGeom) -> SectPr {
         line_numbers: geom.line_numbers.clone(),
         pg_num: None,
         sect_type: None,
+        vertical_align: geom.vertical_align,
         headers: Vec::new(),
         footers: Vec::new(),
         title_pg: false,
@@ -1998,7 +2074,11 @@ fn build_section(
     // `behindDoc="0"`, so it overlays the body text. These drawings and the
     // explicit header share ONE part so their image relationships live in a
     // single `headerN.xml.rels` (no rId collision).
-    if geom.header.is_some() || geom.background.is_some() || geom.foreground.is_some() {
+    if geom.header.is_some()
+        || geom.background.is_some()
+        || geom.background_color.is_some()
+        || geom.foreground.is_some()
+    {
         build_furniture_refs(
             ctx,
             &mut sect,
@@ -2330,12 +2410,24 @@ fn lower_furniture(
         ctx.part_rels = Some(crate::package::Rels::new());
         let mut blocks = Vec::new();
 
+        let mut has_background_overlay = false;
         if slot.is_header()
             && let Some(bg) = source.background
             && let Some(block) =
                 page_overlay_block(ctx, bg, geom, styles, true, "Background")?
         {
             blocks.push(block);
+            has_background_overlay = true;
+        }
+
+        // A successful background raster already includes the solid page fill.
+        // Keeping a separate compatibility rectangle makes LibreOffice paint it
+        // over the raster because it reverses the two drawings' z-order.
+        if slot.is_header()
+            && !has_background_overlay
+            && let Some(color) = geom.background_color
+        {
+            blocks.push(solid_page_fill_block(ctx, color, geom));
         }
 
         if let Some(content) = source.content {
@@ -2589,9 +2681,10 @@ fn sig_para_props(props: &ParaProps, out: &mut String) {
 
     let _ = write!(
         out,
-        "style={:?};keep_next={};keep_lines={};num={:?};bidi={};jc={};outline={:?};shd={:?};",
+        "style={:?};keep_next={};page_break_before={};keep_lines={};num={:?};bidi={};jc={};outline={:?};shd={:?};",
         props.style,
         props.keep_next,
+        props.page_break_before,
         props.keep_lines,
         props.num,
         props.bidi,
@@ -2908,7 +3001,9 @@ fn page_overlay_block(
     // the full page below regardless, so the content's own measured size was
     // never load-bearing — only the expanded render's pixels are.
     let page_h = Abs::pt(geom.page_h as f64 / 20.0);
-    let result = ctx.rasterize_page_overlay(content, styles, content.span(), page_h)?;
+    let canvas_fill = behind.then_some(geom.background_color).flatten();
+    let result =
+        ctx.rasterize_page_overlay(content, styles, content.span(), page_h, canvas_fill)?;
     ctx.available_width = saved_w;
     let Some((rel, _size, text)) = result else {
         return Ok(None);
@@ -2918,8 +3013,10 @@ fn page_overlay_block(
     let drawing = Drawing {
         rel,
         svg_rel: None,
+        compatibility_split_ids: None,
         w_emu: geom.page_w as i64 * EMU_PER_TWIP,
         h_emu: geom.page_h as i64 * EMU_PER_TWIP,
+        source_offset_emu: [0, 0],
         alt: (!behind)
             .then(|| text.replace('\n', " ").into())
             .filter(|text: &ecow::EcoString| !text.trim().is_empty()),
@@ -2941,6 +3038,55 @@ fn page_overlay_block(
         props: crate::dom::ParaProps::default(),
         content: vec![ParaChild::Run(Run::Drawing(drawing))],
     })))
+}
+
+/// Adds a native full-page DrawingML rectangle behind the document as a
+/// compatibility companion to `w:background`. Word keeps its native Page Color
+/// semantics, while consumers such as headless LibreOffice—which omit
+/// `w:background` when exporting PDF—still paint the sheet correctly.
+fn solid_page_fill_block(
+    ctx: &mut DocxCtx,
+    color: [u8; 3],
+    geom: &SectGeom,
+) -> crate::dom::Block {
+    use crate::dom::{
+        Anchor, AnchorPos, AnchorWrap, Block, Drawing, Para, ParaChild, Run, ShapeFill,
+        ShapeGeom, ShapeSpec,
+    };
+
+    const EMU_PER_TWIP: i64 = 635;
+    let docpr_id = ctx.next_drawing_id();
+    let drawing = Drawing {
+        rel: ecow::EcoString::new(),
+        svg_rel: None,
+        compatibility_split_ids: None,
+        w_emu: geom.page_w as i64 * EMU_PER_TWIP,
+        h_emu: geom.page_h as i64 * EMU_PER_TWIP,
+        source_offset_emu: [0, 0],
+        alt: None,
+        decorative: true,
+        docpr_id,
+        name: ecow::eco_format!("Page Color {docpr_id}"),
+        anchor: Some(Anchor {
+            z: ctx.next_z(),
+            pos_h: AnchorPos { rel_from: "page", align: None, offset: Some(0) },
+            pos_v: AnchorPos { rel_from: "page", align: None, offset: Some(0) },
+            wrap: AnchorWrap::None,
+            dist: [0, 0, 0, 0],
+            behind: true,
+        }),
+        shape: Some(ShapeSpec {
+            geom: ShapeGeom::Rect,
+            fill: Some(ShapeFill::Solid([color[0], color[1], color[2], 255])),
+            stroke: None,
+            txbx: None,
+        }),
+        group: None,
+    };
+    Block::Para(Para {
+        props: crate::dom::ParaProps::default(),
+        content: vec![ParaChild::Run(Run::Drawing(drawing))],
+    })
 }
 
 /// Classifies a page-numbering pattern's first counting symbol into a Word

@@ -22,6 +22,7 @@ use crate::dom::{
     TextBox, TextBoxWrap,
 };
 use crate::props::{abs_to_emu, color_to_hex};
+use crate::report::{DecisionReason, LossSet, Representation};
 
 fn opaque(rgb: [u8; 3]) -> [u8; 4] {
     [rgb[0], rgb[1], rgb[2], 255]
@@ -51,8 +52,10 @@ pub fn shape(
     Ok(Some(Run::Drawing(Drawing {
         rel: EcoString::new(),
         svg_rel: None,
+        compatibility_split_ids: None,
         w_emu,
         h_emu,
+        source_offset_emu: [0, 0],
         alt: None,
         decorative: true,
         docpr_id,
@@ -150,8 +153,10 @@ pub fn text_box(
     Ok(Some(Run::Drawing(Drawing {
         rel: EcoString::new(),
         svg_rel: None,
+        compatibility_split_ids: None,
         w_emu,
         h_emu,
+        source_offset_emu: [0, 0],
         alt: None,
         decorative: false,
         docpr_id,
@@ -200,8 +205,10 @@ pub fn unframed_text_box(
     Ok(Some(Run::Drawing(Drawing {
         rel: EcoString::new(),
         svg_rel: None,
+        compatibility_split_ids: None,
         w_emu,
         h_emu,
+        source_offset_emu: [0, 0],
         alt: None,
         decorative: false,
         docpr_id,
@@ -618,7 +625,7 @@ pub fn curve(
     let frame = layout_shape_frame(ctx, elem.span(), |engine, locator, region| {
         typst_layout::layout_curve(elem, engine, locator, styles, region)
     })?;
-    build_shapes_drawing(ctx, &frame)
+    build_shapes_drawing(ctx, &frame, elem.span())
 }
 
 /// Maps a diagonal or explicit-endpoint `#line` to a native open `a:custGeom`
@@ -633,7 +640,7 @@ pub fn line(
     let frame = layout_shape_frame(ctx, elem.span(), |engine, locator, region| {
         typst_layout::layout_line(elem, engine, locator, styles, region)
     })?;
-    build_shapes_drawing(ctx, &frame)
+    build_shapes_drawing(ctx, &frame, elem.span())
 }
 
 /// Maps `#move(dx:, dy:)[body]` to one or more native shapes when its ENTIRE
@@ -671,7 +678,7 @@ pub fn move_(
         .zip_map(size, Rel::relative_to);
     frame.translate_visual(delta.to_point());
 
-    build_shapes_drawing(ctx, &frame)
+    build_shapes_drawing(ctx, &frame, elem.span())
 }
 
 /// Maps a bare (not `#move`-wrapped) `#rotate(..)[body]`/`#scale(..)[body]`
@@ -695,7 +702,7 @@ pub fn transformed(
     let Some(frame) = frame else {
         return Ok(None);
     };
-    let run = build_shapes_drawing(ctx, &frame)?;
+    let run = build_shapes_drawing(ctx, &frame, child.span())?;
     if run.is_some() {
         ctx.defer_frame_tags(&frame);
     }
@@ -820,6 +827,67 @@ struct ExtractedShape {
     stroke: Option<ShapeStroke>,
 }
 
+/// Word's DrawingML reader rejects otherwise schema-valid coordinates outside
+/// its signed 32-bit implementation range.
+// The schema permits larger values, but current desktop Word rejects documents
+// containing custom geometries in the billion-EMU range. 100 million EMU is
+// still over 7,800pt—far beyond a page—while leaving ample parser headroom.
+const WORD_SAFE_POINT_MAX: i64 = 100_000_000;
+const WORD_SAFE_POINT_MIN: i64 = -100_000_000;
+// A normalized extent can span from the negative point bound to the positive
+// point bound even though every source point itself stays inside ±100M.
+const WORD_SAFE_COORDINATE_MAX: i64 = 200_000_000;
+const WORD_SAFE_COORDINATE_MIN: i64 = -100_000_000;
+
+fn word_safe_coordinates(values: impl IntoIterator<Item = i64>) -> bool {
+    values.into_iter().all(|value| {
+        (WORD_SAFE_COORDINATE_MIN..=WORD_SAFE_COORDINATE_MAX).contains(&value)
+    })
+}
+
+/// Compresses only a pathological, out-of-range axis toward the edge farther
+/// from the page origin. The near edge stays fixed, so the page-visible part
+/// of an enormous line/curve remains in place while Word receives coordinates
+/// it can parse. This also avoids attempting an unbounded raster fallback.
+fn fit_raw_to_word_coordinates(raw: Vec<dml::RawSeg>) -> (Vec<dml::RawSeg>, bool) {
+    use typst_library::layout::{Abs, Point};
+
+    let (min_x, min_y, max_x, max_y) = dml::raw_bounds(&raw);
+    let limit_min = WORD_SAFE_POINT_MIN as f64 / 12700.0;
+    let limit_max = WORD_SAFE_POINT_MAX as f64 / 12700.0;
+    let axis = |value: Abs, min: Abs, max: Abs| {
+        let (value, min, max) = (value.to_pt(), min.to_pt(), max.to_pt());
+        if min >= limit_min && max <= limit_max {
+            return Abs::pt(value);
+        }
+
+        let preserve_min = min.abs() <= max.abs();
+        let pivot = if preserve_min { min } else { max };
+        let span = (max - min).max(f64::EPSILON);
+        let available = if preserve_min { limit_max - pivot } else { pivot - limit_min };
+        let scale = (available / span).clamp(0.0, 1.0);
+        Abs::pt(pivot + (value - pivot) * scale)
+    };
+    let point = |p: Point| Point::new(axis(p.x, min_x, max_x), axis(p.y, min_y, max_y));
+
+    let changed = min_x.to_pt() < limit_min
+        || min_y.to_pt() < limit_min
+        || max_x.to_pt() > limit_max
+        || max_y.to_pt() > limit_max;
+    let fitted = raw
+        .into_iter()
+        .map(|segment| match segment {
+            dml::RawSeg::Move(p) => dml::RawSeg::Move(point(p)),
+            dml::RawSeg::Line(p) => dml::RawSeg::Line(point(p)),
+            dml::RawSeg::Cubic(c1, c2, end) => {
+                dml::RawSeg::Cubic(point(c1), point(c2), point(end))
+            }
+            dml::RawSeg::Close => dml::RawSeg::Close,
+        })
+        .collect();
+    (fitted, changed)
+}
+
 /// Walks every item in `frame`, extracting each native-representable shape —
 /// or bailing (`None`) the moment it finds anything that isn't one (text, an
 /// image, an unrepresentable fill/stroke, or a transform that isn't a
@@ -898,6 +966,7 @@ fn collect_shapes(
 fn build_shapes_drawing(
     ctx: &mut DocxCtx,
     frame: &typst_library::layout::Frame,
+    span: typst_syntax::Span,
 ) -> SourceResult<Option<Run>> {
     let Some(shapes) = extract_shapes(ctx, frame) else { return Ok(None) };
     if shapes.is_empty() {
@@ -906,22 +975,47 @@ fn build_shapes_drawing(
 
     if shapes.len() == 1 {
         let ExtractedShape { raw, fill, stroke } = shapes.into_iter().next().unwrap();
+        let (raw, fitted) = fit_raw_to_word_coordinates(raw);
         let Some(normalized) = dml::normalize_segments(raw) else {
             return Ok(None);
         };
-        let (segments, w, h) = (normalized.segments, normalized.w, normalized.h);
+        let (segments, min_x, min_y, w, h) = (
+            normalized.segments,
+            normalized.min_x,
+            normalized.min_y,
+            normalized.w,
+            normalized.h,
+        );
         // A perfectly horizontal/vertical line is legitimately degenerate on
         // one axis; floor it to 1 EMU (imperceptible) rather than the 0 Word
         // handles poorly for a drawing extent. `normalize_segments` already
         // bailed when BOTH axes are degenerate (nothing to draw).
         let (w_emu, h_emu) = (abs_to_emu(w).max(1), abs_to_emu(h).max(1));
+        let source_offset_emu = [abs_to_emu(min_x), abs_to_emu(min_y)];
+        debug_assert!(word_safe_coordinates([
+            w_emu,
+            h_emu,
+            source_offset_emu[0],
+            source_offset_emu[1],
+        ]));
         let docpr_id = ctx.next_drawing_id();
+        if fitted {
+            ctx.record_span_decision(
+                "Word-bounded vector geometry",
+                span,
+                Representation::Approximate,
+                DecisionReason::WordCoordinateBound,
+                LossSet::VISUAL_ONLY,
+            );
+        }
         let name = ecow::eco_format!("Shape {docpr_id}");
         return Ok(Some(Run::Drawing(Drawing {
             rel: EcoString::new(),
             svg_rel: None,
+            compatibility_split_ids: None,
             w_emu,
             h_emu,
+            source_offset_emu,
             alt: None,
             decorative: true,
             docpr_id,
@@ -940,6 +1034,15 @@ fn build_shapes_drawing(
     // Several shapes: position each relative to the GROUP's own shared origin
     // (the union of every shape's own bounds), so their relative layout — not
     // just each one's own local geometry — is preserved.
+    let mut fitted = false;
+    let shapes: Vec<_> = shapes
+        .into_iter()
+        .map(|shape| {
+            let (raw, changed) = fit_raw_to_word_coordinates(shape.raw);
+            fitted |= changed;
+            ExtractedShape { raw, ..shape }
+        })
+        .collect();
     let bounds: Vec<_> = shapes.iter().map(|s| dml::raw_bounds(&s.raw)).collect();
     let (mut group_min_x, mut group_min_y, mut group_max_x, mut group_max_y) = bounds[0];
     for &(x0, y0, x1, y1) in &bounds[1..] {
@@ -957,17 +1060,32 @@ fn build_shapes_drawing(
     }
     let (group_w_emu, group_h_emu) =
         (abs_to_emu(group_w).max(1), abs_to_emu(group_h).max(1));
+    let group_source_offset_emu = [abs_to_emu(group_min_x), abs_to_emu(group_min_y)];
+    if !word_safe_coordinates([
+        group_w_emu,
+        group_h_emu,
+        group_source_offset_emu[0],
+        group_source_offset_emu[1],
+    ]) {
+        return Ok(None);
+    }
 
     let mut children = Vec::with_capacity(shapes.len());
     for (shape, (min_x, min_y, _, _)) in shapes.into_iter().zip(bounds) {
         let ExtractedShape { raw, fill, stroke } = shape;
         let Some(normalized) = dml::normalize_segments(raw) else { continue };
         let (segments, w, h) = (normalized.segments, normalized.w, normalized.h);
+        let (x_emu, y_emu) =
+            (abs_to_emu(min_x - group_min_x), abs_to_emu(min_y - group_min_y));
+        let (w_emu, h_emu) = (abs_to_emu(w).max(1), abs_to_emu(h).max(1));
+        if !word_safe_coordinates([x_emu, y_emu, w_emu, h_emu]) {
+            return Ok(None);
+        }
         children.push(GroupChild {
-            x_emu: abs_to_emu(min_x - group_min_x),
-            y_emu: abs_to_emu(min_y - group_min_y),
-            w_emu: abs_to_emu(w).max(1),
-            h_emu: abs_to_emu(h).max(1),
+            x_emu,
+            y_emu,
+            w_emu,
+            h_emu,
             shape: ShapeSpec {
                 geom: ShapeGeom::Path(segments),
                 fill,
@@ -984,12 +1102,23 @@ fn build_shapes_drawing(
     }
 
     let docpr_id = ctx.next_drawing_id();
+    if fitted {
+        ctx.record_span_decision(
+            "Word-bounded vector group geometry",
+            span,
+            Representation::Approximate,
+            DecisionReason::WordCoordinateBound,
+            LossSet::VISUAL_ONLY,
+        );
+    }
     let name = ecow::eco_format!("Group {docpr_id}");
     Ok(Some(Run::Drawing(Drawing {
         rel: EcoString::new(),
         svg_rel: None,
+        compatibility_split_ids: None,
         w_emu: group_w_emu,
         h_emu: group_h_emu,
+        source_offset_emu: group_source_offset_emu,
         alt: None,
         decorative: true,
         docpr_id,
@@ -1032,5 +1161,17 @@ fn resolved_stroke(
             }
             _ => None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::word_safe_coordinates;
+
+    #[test]
+    fn word_safe_coordinates_reject_word_fragile_extremes() {
+        assert!(word_safe_coordinates([0, 1, 200_000_000, -100_000_000]));
+        assert!(!word_safe_coordinates([200_000_001]));
+        assert!(!word_safe_coordinates([-100_000_001]));
     }
 }

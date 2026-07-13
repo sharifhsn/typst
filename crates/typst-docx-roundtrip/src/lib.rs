@@ -18,7 +18,7 @@ const DOCUMENT_XML: &str = "word/document.xml";
 const COMMENTS_XML: &str = "word/comments.xml";
 const TAG_PREFIX: &str = "typst:v1:";
 const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_XML_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_XML_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EXPANDED_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_ENTRIES: usize = 4096;
 

@@ -18,6 +18,7 @@ import json
 import os
 import platform
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -62,24 +63,44 @@ def run_command(command: list[str], *, cwd: Path | None = None, timeout: int = 1
     started = datetime.now(timezone.utc)
     env = dict(os.environ, SOURCE_DATE_EPOCH="0")
     try:
-        result = subprocess.run(
-            command, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
         )
+        stdout, stderr = process.communicate(timeout=timeout)
         return {
             "command": command,
-            "exit_code": result.returncode,
-            "stdout": result.stdout[-4000:],
-            "stderr": result.stderr[-4000:],
+            "exit_code": process.returncode,
+            "stdout": stdout[-4000:],
+            "stderr": stderr[-4000:],
             "started_at": started.isoformat(),
         }
-    except subprocess.TimeoutExpired as error:
+    except subprocess.TimeoutExpired:
+        # `soffice` is commonly a shell wrapper that spawns the real office
+        # process. Killing only the wrapper leaks a CPU-bound child and leaves
+        # its temporary profile locked, so terminate the whole process group.
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = process.communicate()
         return {
             "command": command,
             "exit_code": None,
-            "stdout": (error.stdout or "")[-4000:],
-            "stderr": (error.stderr or "")[-4000:],
+            "stdout": stdout[-4000:],
+            "stderr": stderr[-4000:],
             "started_at": started.isoformat(),
             "timeout": timeout,
+        }
+    except OSError as error:
+        return {
+            "command": command,
+            "exit_code": 127,
+            "stdout": "",
+            "stderr": str(error),
+            "started_at": started.isoformat(),
         }
 
 
@@ -125,15 +146,21 @@ def package_check(docx_path: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
 
 def editability_metrics(parts: dict[str, bytes]) -> dict[str, int]:
     document = parts.get("word/document.xml", b"").decode("utf-8", "replace")
+    footnotes = parts.get("word/footnotes.xml", b"").decode("utf-8", "replace")
+    endnotes = parts.get("word/endnotes.xml", b"").decode("utf-8", "replace")
     return {
         "paragraphs": len(re.findall(r"<w:p(?: |>)", document)),
         "heading_styles": len(re.findall(r'w:pStyle w:val="Heading[1-9]"', document)),
+        "lists": len(re.findall(r"<w:numPr(?: |>)", document)),
         "tables": len(re.findall(r"<w:tbl(?: |>)", document)),
         "table_headers": len(re.findall(r"<w:tblHeader(?: |/|>)", document)),
         "omml_math": len(re.findall(r"<m:oMath(?: |>)", document)),
         "hyperlinks": len(re.findall(r"<w:hyperlink(?: |>)", document)),
+        "footnotes": len(re.findall(r'<w:footnote w:id="(?:[0-9]|[1-9][0-9]+)"', footnotes)),
+        "endnotes": len(re.findall(r'<w:endnote w:id="(?:[0-9]|[1-9][0-9]+)"', endnotes)),
         "drawings": len(re.findall(r"<w:drawing(?: |>)", document)),
         "alt_descriptions": len(re.findall(r"\bdescr=", document)),
+        "content_controls": len(re.findall(r"<w:sdt(?: |>)", document)),
         "hidden_runs": len(re.findall(r"<w:vanish(?: |/|>)", document)),
     }
 
@@ -162,11 +189,19 @@ def pdf_text(pdf_path: Path) -> tuple[str | None, str | None]:
 def page_count(pdf_path: Path, directory: Path, prefix: str) -> tuple[list[Path], str | None]:
     if not shutil.which("pdftoppm"):
         return [], "pdftoppm unavailable"
+    for stale in directory.glob(f"{prefix}-*.png"):
+        stale.unlink(missing_ok=True)
     result = run_command(
         ["pdftoppm", "-png", "-gray", "-r", "60", str(pdf_path), str(directory / prefix)],
         timeout=180,
     )
     pages = sorted(directory.glob(f"{prefix}-*.png"))
+    if result.get("timeout"):
+        return (
+            [],
+            f"pdftoppm timed out after {result['timeout']}s while rendering "
+            f"{pdf_path.name}",
+        )
     if result["exit_code"] != 0 or not pages:
         return [], result["stderr"] or "pdftoppm failed"
     return pages, None
@@ -176,7 +211,11 @@ def visual_check(pdf_path: Path, docx_path: Path, directory: Path) -> dict[str, 
     soffice = shutil.which("soffice")
     if not soffice:
         return {"status": "unavailable", "reason": "soffice unavailable"}
+    rendered = directory / f"{docx_path.stem}.pdf"
+    rendered.unlink(missing_ok=True)
     profile = Path(tempfile.mkdtemp(prefix="typst-docx-validator-lo-"))
+    conversion_dir = Path(tempfile.mkdtemp(prefix="typst-docx-validator-out-"))
+    converted = conversion_dir / f"{docx_path.stem}.pdf"
     try:
         conversion = run_command(
             [
@@ -186,21 +225,39 @@ def visual_check(pdf_path: Path, docx_path: Path, directory: Path) -> dict[str, 
                 "--convert-to",
                 "pdf",
                 "--outdir",
-                str(directory),
+                str(conversion_dir),
                 str(docx_path),
             ],
             timeout=180,
         )
+        if conversion["exit_code"] == 0 and converted.is_file():
+            shutil.move(converted, rendered)
     finally:
         shutil.rmtree(profile, ignore_errors=True)
-    rendered = directory / f"{docx_path.stem}.pdf"
+        shutil.rmtree(conversion_dir, ignore_errors=True)
+    if conversion.get("timeout"):
+        return {
+            "status": "failed",
+            "reason": f"LibreOffice conversion timed out after {conversion['timeout']}s",
+            "consumer_timeout": conversion["timeout"],
+        }
     if conversion["exit_code"] != 0 or not rendered.exists():
         return {"status": "failed", "reason": conversion["stderr"] or "LibreOffice produced no PDF"}
 
     gold_pages, gold_error = page_count(pdf_path, directory, "gold-page")
     docx_pages, docx_error = page_count(rendered, directory, "docx-page")
-    if gold_error or docx_error:
-        return {"status": "unavailable", "reason": gold_error or docx_error}
+    if gold_error:
+        return {
+            "status": "unavailable",
+            "stage": "reference_pdf_rasterization",
+            "reason": gold_error,
+        }
+    if docx_error:
+        return {
+            "status": "unavailable",
+            "stage": "consumer_pdf_rasterization",
+            "reason": docx_error,
+        }
 
     from PIL import Image, ImageChops, ImageOps
 
@@ -341,7 +398,12 @@ def validate_fixture(
             visual["ok"] = False
             failures.append("visual")
         else:
-            visual["ok"] = True
+            # A requested gate without evidence is not a pass. Keep this
+            # distinct from a fidelity failure so corpus reports can classify
+            # the document as unverified instead of degraded.
+            visual["ok"] = False
+            visual["unverified"] = True
+            failures.append("visual-unverified")
         result["gates"]["visual"] = visual
 
     allowed: list[dict[str, Any]] = []
@@ -354,7 +416,12 @@ def validate_fixture(
             unresolved.append(failure)
     result["allowed_failures"] = allowed
     result["failures"] = unresolved
-    result["status"] = "failed" if unresolved else ("passed_with_allowances" if allowed else "passed")
+    if any(failure.endswith("-unverified") for failure in unresolved):
+        result["status"] = "unverified"
+    else:
+        result["status"] = (
+            "failed" if unresolved else ("passed_with_allowances" if allowed else "passed")
+        )
     return result
 
 
@@ -418,6 +485,7 @@ def main() -> int:
         for fixture in manifest["fixtures"]
     ]
     failed = [result["id"] for result in results if result["status"] == "failed"]
+    unverified = [result["id"] for result in results if result["status"] == "unverified"]
     report = {
         "schema_version": 1,
         "metadata_file": "metadata.json",
@@ -426,6 +494,7 @@ def main() -> int:
         "summary": {
             "total": len(results),
             "failed": len(failed),
+            "unverified": len(unverified),
             "passed": sum(result["status"] == "passed" for result in results),
             "passed_with_allowances": sum(
                 result["status"] == "passed_with_allowances" for result in results
@@ -434,7 +503,7 @@ def main() -> int:
     }
     (args.out / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report["summary"], sort_keys=True))
-    return 1 if failed or allowlist_errors else 0
+    return 1 if failed or unverified or allowlist_errors else 0
 
 
 if __name__ == "__main__":
