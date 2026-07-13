@@ -1677,7 +1677,26 @@ fn resolve_sections(
             }
         }
         let skipped_breaks = i - break_start;
-        if let Some(sect_type) = forced_break
+        // `#columns(..)` ends with an empty restore-to-base section. If an
+        // explicit page break follows immediately, that break becomes the
+        // leading child of the restore section and `convert_children` correctly
+        // discards it as section-initial setup. Carry the page transition on
+        // the section boundary instead: the column section ends with
+        // `nextPage` (or the requested parity), and only further consecutive
+        // breaks remain as real blank pages in the restored section.
+        let restored_after_columns = skipped_breaks > 0
+            && sections.len() >= 2
+            && sections.last().is_some_and(|section| section.range.is_empty())
+            && matches!(
+                sections[sections.len() - 2].break_after,
+                Some(SectType::Continuous)
+            );
+        if restored_after_columns {
+            let last = sections.len() - 1;
+            sections[last - 1].break_after =
+                Some(forced_break.unwrap_or(SectType::NextPage));
+            sections[last].leading_pagebreaks = skipped_breaks.saturating_sub(1);
+        } else if let Some(sect_type) = forced_break
             && let Some(previous) = sections.last_mut()
         {
             previous.break_after = Some(sect_type);

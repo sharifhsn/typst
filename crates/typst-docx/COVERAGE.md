@@ -2071,3 +2071,23 @@ the image and caption at the same x center (about 450 rendered pixels), with the
 caption baseline within one pixel of Typst. The image geometry and linked
 `See Figure 1.` reference remain unchanged. All 208 DOCX integration tests pass
 and clippy remains clean.
+
+## 50. A page break immediately after block columns becomes the restore-section break
+
+Native `#columns(..)` uses a continuous multi-column section followed by an
+empty restore-to-page-columns section. An explicit `#pagebreak()` immediately
+after the columns therefore became the leading child of that empty section;
+the ordinary converter correctly drops section-leading page setup, but in this
+case that also erased the authored break. Section resolution now recognizes
+that exact boundary and changes the transition out of the column section from
+`continuous` to `nextPage` (or the requested odd/even parity). Additional
+consecutive breaks remain explicit page breaks inside the restored section, so
+blank-page intent is preserved.
+
+The package regression verifies a two-column `w:sectPr`, a following
+single-column section with `w:type="nextPage"`, and one surviving `w:br` when
+two consecutive breaks are authored. In the 2026-07-13 fixture, LibreOffice
+now produces the same two pages as Typst: the short first-page paragraph wraps
+to four lines at the same half-page column width, and the following heading
+starts at the top of page two. All 209 DOCX integration tests pass and clippy
+remains clean.

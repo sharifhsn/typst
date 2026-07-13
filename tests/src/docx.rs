@@ -1806,6 +1806,40 @@ fn block_columns_emit_continuous_sections() {
 }
 
 #[test]
+fn pagebreak_after_block_columns_starts_the_restored_section_on_a_new_page() {
+    let p = parts(
+        "= Columns\n\n#columns(2)[Left column text. #lorem(40)]\n\
+         #pagebreak()\n= After break\n\nText after page break.",
+    );
+    let doc = &p["word/document.xml"];
+    let sects = sect_pr_chunks(doc);
+    assert_eq!(sects.len(), 3, "columns still create before/block/after sections");
+    assert!(sects[1].contains("<w:cols w:num=\"2\""));
+    assert!(
+        sects[2].contains("<w:type w:val=\"nextPage\"/>"),
+        "the restored single-column section must consume the explicit page break"
+    );
+    assert!(doc.contains("After break"));
+    assert_all_wellformed(&p);
+
+    let doubled =
+        parts("#columns(2)[Column text.]\n#pagebreak()\n#pagebreak()\n= Third page");
+    let doubled_doc = &doubled["word/document.xml"];
+    assert!(
+        sect_pr_chunks(doubled_doc)
+            .iter()
+            .any(|sect| sect.contains("<w:type w:val=\"nextPage\"/>")),
+        "the first break is carried by the restored section boundary"
+    );
+    assert_eq!(
+        doubled_doc.matches("<w:br w:type=\"page\"/>").count(),
+        1,
+        "the second consecutive break remains as one explicit blank page"
+    );
+    assert_all_wellformed(&doubled);
+}
+
+#[test]
 fn block_columns_restore_page_level_column_count() {
     let p = parts(
         "#set page(columns: 2)\n\
