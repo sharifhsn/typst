@@ -386,8 +386,16 @@ fn can_follow_flow(
         return false;
     }
 
+    let same_body_edge = same_left(candidate.left, body_left, candidate.max_size);
+    let first_line_indent = group.len() == 1
+        && plausible_first_line_indent(group[0].left, candidate.left, candidate.max_size);
+    if !same_body_edge && !first_line_indent {
+        return false;
+    }
+
     let gap = candidate.baseline_y - prev.baseline_y;
-    if !normal_leading(gap, prev.max_size.max(candidate.max_size)) {
+    let size = prev.max_size.max(candidate.max_size);
+    if !normal_leading(gap, size) && !plausible_wide_leading_wrap(prev, gap, size) {
         return false;
     }
     if let Some(leading) = leading
@@ -396,12 +404,7 @@ fn can_follow_flow(
         return false;
     }
 
-    if same_left(candidate.left, body_left, candidate.max_size) {
-        return true;
-    }
-
-    group.len() == 1
-        && plausible_first_line_indent(group[0].left, candidate.left, candidate.max_size)
+    true
 }
 
 fn can_follow_bullet(
@@ -700,6 +703,15 @@ fn same_line_class(a: &LineSegment, b: &LineSegment) -> bool {
 
 fn normal_leading(gap: Abs, size: Abs) -> bool {
     gap >= size * 0.65 && gap <= size * 1.8
+}
+
+/// Allows a clearly wrapped line to retain unusually wide custom leading.
+/// The ordinary 1.8em ceiling intentionally keeps neighboring paragraphs
+/// separate. Beyond it, require both a large pitch (the measured 2em-leading
+/// case is a 3em baseline pitch) and a line long enough to have plausibly
+/// wrapped, rather than merging arbitrary vertically aligned labels.
+fn plausible_wide_leading_wrap(prev: &LineSegment, gap: Abs, size: Abs) -> bool {
+    gap >= size * 2.5 && gap <= size * 6.0 && prev.right - prev.left >= size * 8.0
 }
 
 fn same_leading(a: Abs, b: Abs, size: Abs) -> bool {

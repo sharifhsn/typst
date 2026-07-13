@@ -757,6 +757,29 @@ This paragraph wraps across several visual lines so its first-line indent remain
 }
 
 #[test]
+fn wrapped_paragraph_preserves_wide_native_line_spacing() {
+    let p = parts(
+        r#"#set page(width: 200pt, height: 180pt, margin: 20pt)
+#set text(size: 12pt)
+#set par(leading: 2em)
+First paragraph line one wraps with enough words to force a second line.
+
+Second paragraph remains separate."#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(
+        slide.contains("<a:spcPts val=\"3190\"/>"),
+        "measured 31.9pt baseline pitch should remain native absolute line spacing: {slide}"
+    );
+    assert_eq!(
+        drawingml_paragraph_count(slide),
+        2,
+        "wide leading must not merge the following source paragraph"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn bullet_list_uses_native_buchar_without_literal_marker_text() {
     let p = parts(
         r#"#set page(width: 240pt, height: 140pt, margin: 0pt)
