@@ -89,7 +89,27 @@ pub struct TableCell {
     pub v_merge: bool,
     pub fill: Option<FillSpec>,
     pub borders: CellBorders,
+    pub h_align: Option<CellHAlign>,
+    pub v_align: Option<CellVAlign>,
     pub paras: Vec<TextPara>,
+}
+
+/// Horizontal alignment inherited by paragraphs in a table cell.
+#[derive(Clone, Copy)]
+pub enum CellHAlign {
+    Start,
+    Left,
+    Center,
+    Right,
+    End,
+}
+
+/// Vertical alignment of text within a table cell.
+#[derive(Clone, Copy)]
+pub enum CellVAlign {
+    Top,
+    Center,
+    Bottom,
 }
 
 /// Per-edge table-cell borders.

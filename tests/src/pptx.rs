@@ -308,6 +308,26 @@ fn table_colspan_and_rowspan_emit_merge_attrs() {
 }
 
 #[test]
+fn table_cell_alignment_is_preserved() {
+    let p = parts(
+        r#"#set page(width: 360pt, height: 200pt)
+#table(
+  columns: 3,
+  align: (left + top, center + horizon, right + bottom),
+  [left], [center], [right],
+)"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("algn=\"l\""), "left cell paragraph alignment");
+    assert!(slide.contains("algn=\"ctr\""), "center cell paragraph alignment");
+    assert!(slide.contains("algn=\"r\""), "right cell paragraph alignment");
+    assert!(slide.contains("anchor=\"t\""), "top cell vertical alignment");
+    assert!(slide.contains("anchor=\"ctr\""), "center cell vertical alignment");
+    assert!(slide.contains("anchor=\"b\""), "bottom cell vertical alignment");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn gradient_page_fill_becomes_gradient_slide_background() {
     let p = parts(
         "#set page(fill: gradient.linear(rgb(\"#1A1A2E\"), rgb(\"#16213E\")))\nHello",

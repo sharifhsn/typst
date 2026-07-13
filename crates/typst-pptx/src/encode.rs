@@ -2,10 +2,10 @@ use ecow::EcoString;
 use typst_ooxml_core::{dml, ns};
 
 use crate::dom::{
-    BulletKind, FillSpec, GeomKind, GeomShape, GroupShape, InlineMath, MathBox, MediaId,
-    PathGeom, Pic, PicGeom, Placeholder, RunLink, SlideIr, SlideShape, StrokeSpec,
-    TableBox, TableCell, TextBox, TextChild, TextColumns, TextField, TextPara, TextRun,
-    TextWrap,
+    BulletKind, CellHAlign, CellVAlign, FillSpec, GeomKind, GeomShape, GroupShape,
+    InlineMath, MathBox, MediaId, PathGeom, Pic, PicGeom, Placeholder, RunLink, SlideIr,
+    SlideShape, StrokeSpec, TableBox, TableCell, TextBox, TextChild, TextColumns,
+    TextField, TextPara, TextRun, TextWrap,
 };
 use crate::xml::{self, XmlWriter};
 
@@ -188,8 +188,43 @@ fn write_body_pr(w: &mut XmlWriter, wrap: TextWrap, columns: Option<&TextColumns
 }
 
 fn write_para(w: &mut XmlWriter, para: &TextPara, rels: &mut impl SlideRelSink) {
+    write_para_aligned(w, para, None, rels);
+}
+
+fn write_para_aligned(
+    w: &mut XmlWriter,
+    para: &TextPara,
+    align: Option<CellHAlign>,
+    rels: &mut impl SlideRelSink,
+) {
     w.open("a:p").start_children();
-    w.open("a:pPr").attr("algn", if para.rtl { "r" } else { "l" });
+    let align = match align {
+        Some(CellHAlign::Start) => {
+            if para.rtl {
+                "r"
+            } else {
+                "l"
+            }
+        }
+        Some(CellHAlign::Left) => "l",
+        Some(CellHAlign::Center) => "ctr",
+        Some(CellHAlign::Right) => "r",
+        Some(CellHAlign::End) => {
+            if para.rtl {
+                "l"
+            } else {
+                "r"
+            }
+        }
+        None => {
+            if para.rtl {
+                "r"
+            } else {
+                "l"
+            }
+        }
+    };
+    w.open("a:pPr").attr("algn", align);
     if para.rtl {
         w.attr("rtl", "1");
     }
@@ -326,12 +361,23 @@ fn write_table_cell(w: &mut XmlWriter, cell: &TableCell, rels: &mut impl SlideRe
         w.leaf("a:p");
     } else {
         for para in &cell.paras {
-            write_para(w, para, rels);
+            write_para_aligned(w, para, cell.h_align, rels);
         }
     }
     w.close();
 
-    w.open("a:tcPr").start_children();
+    w.open("a:tcPr");
+    if let Some(align) = cell.v_align {
+        w.attr(
+            "anchor",
+            match align {
+                CellVAlign::Top => "t",
+                CellVAlign::Center => "ctr",
+                CellVAlign::Bottom => "b",
+            },
+        );
+    }
+    w.start_children();
     dml::write_fill_with_tile_resolver(w, cell.fill.as_ref(), "0", |media| {
         rels.image_rid(media)
     });

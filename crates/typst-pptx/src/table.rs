@@ -7,14 +7,15 @@
 use typst_library::foundations::{Smart, StyleChain};
 use typst_library::introspection::{Location, Tag};
 use typst_library::layout::{
-    Abs, FrameItem, GridCell, GridCellRegion, GridElem, Point, Sides, Size, Transform,
+    Abs, Alignment, FrameItem, GridCell, GridCellRegion, GridElem, HAlignment, Point,
+    Sides, Size, Transform, VAlignment,
 };
 use typst_library::model::{TableCell as TypstTableCell, TableElem};
 use typst_library::visualize::{LineCap, Paint, Stroke};
 
 use crate::dom::{
-    CellBorders, FillSpec, SlideShape, StrokeSpec, TableBox, TableCell, TableRow,
-    TextPara,
+    CellBorders, CellHAlign, CellVAlign, FillSpec, SlideShape, StrokeSpec, TableBox,
+    TableCell, TableRow, TextPara,
 };
 use crate::slide::{
     LinkRect, OrderedShape, Rect, Walker, attach_links, classify_similarity,
@@ -39,6 +40,8 @@ pub(super) struct ActiveTableCell<'a> {
     rect: Rect,
     fill: Option<FillSpec>,
     borders: CellBorders,
+    h_align: Option<CellHAlign>,
+    v_align: Option<CellVAlign>,
     text: Vec<TextSource<'a>>,
     links: Vec<LinkRect>,
 }
@@ -53,6 +56,8 @@ pub(super) struct CapturedTableCell {
     rect: Rect,
     fill: Option<FillSpec>,
     borders: CellBorders,
+    h_align: Option<CellHAlign>,
+    v_align: Option<CellVAlign>,
     paras: Vec<TextPara>,
 }
 
@@ -112,6 +117,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         let styles = StyleChain::default();
         let fill = region_fill(self.ctx, &region.body, styles);
         let borders = region_borders(&region.body, styles);
+        let (h_align, v_align) = region_alignment(&region.body, styles);
         self.active_table_cells.push(ActiveTableCell {
             loc: tag.location(),
             order,
@@ -123,6 +129,8 @@ impl<'a, 'b> Walker<'a, 'b> {
             rect: Rect { min: origin, max: origin + size.to_point() },
             fill,
             borders,
+            h_align,
+            v_align,
             text: Vec::new(),
             links: Vec::new(),
         });
@@ -148,6 +156,8 @@ impl<'a, 'b> Walker<'a, 'b> {
             rect: active.rect,
             fill: active.fill,
             borders: active.borders,
+            h_align: active.h_align,
+            v_align: active.v_align,
             paras,
         };
 
@@ -338,6 +348,8 @@ fn table_shape(order: usize, mut cells: Vec<CapturedTableCell>) -> Option<Ordere
                     v_merge: false,
                     fill: cell.fill.clone(),
                     borders: cell.borders.clone(),
+                    h_align: cell.h_align,
+                    v_align: cell.v_align,
                     paras: cell.paras.clone(),
                 });
             } else if let Some(origin) = covering_cell(&cells, x, y) {
@@ -348,6 +360,8 @@ fn table_shape(order: usize, mut cells: Vec<CapturedTableCell>) -> Option<Ordere
                     v_merge: y > origin.y,
                     fill: None,
                     borders: CellBorders::default(),
+                    h_align: None,
+                    v_align: None,
                     paras: Vec::new(),
                 });
             } else {
@@ -358,6 +372,8 @@ fn table_shape(order: usize, mut cells: Vec<CapturedTableCell>) -> Option<Ordere
                     v_merge: false,
                     fill: None,
                     borders: CellBorders::default(),
+                    h_align: None,
+                    v_align: None,
                     paras: Vec::new(),
                 });
             }
@@ -486,6 +502,39 @@ fn region_borders(
         return borders_from_sides(cell.stroke.resolve(styles));
     }
     CellBorders::default()
+}
+
+fn region_alignment(
+    body: &typst_library::foundations::Content,
+    styles: StyleChain,
+) -> (Option<CellHAlign>, Option<CellVAlign>) {
+    let align = if let Some(cell) = body.to_packed::<TypstTableCell>() {
+        cell.align.get(styles)
+    } else if let Some(cell) = body.to_packed::<GridCell>() {
+        cell.align.get(styles)
+    } else {
+        return (None, None);
+    };
+    let Smart::Custom(align) = align else {
+        return (None, None);
+    };
+    alignment_parts(align)
+}
+
+fn alignment_parts(align: Alignment) -> (Option<CellHAlign>, Option<CellVAlign>) {
+    let horizontal = align.x().map(|align| match align {
+        HAlignment::Start => CellHAlign::Start,
+        HAlignment::Left => CellHAlign::Left,
+        HAlignment::Center => CellHAlign::Center,
+        HAlignment::Right => CellHAlign::Right,
+        HAlignment::End => CellHAlign::End,
+    });
+    let vertical = align.y().map(|align| match align {
+        VAlignment::Top => CellVAlign::Top,
+        VAlignment::Horizon => CellVAlign::Center,
+        VAlignment::Bottom => CellVAlign::Bottom,
+    });
+    (horizontal, vertical)
 }
 
 fn borders_from_sides(
