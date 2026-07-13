@@ -870,7 +870,7 @@ fn straight_line_exports_as_loose_connector() {
 #line(
   start: (0pt, 0pt),
   end: (100pt, 50pt),
-  stroke: (paint: red, thickness: 2pt, cap: "round", dash: "dashed"),
+  stroke: (paint: red, thickness: 3pt, cap: "round", dash: "dashed"),
 )"#,
     );
     let slide = &p["ppt/slides/slide1.xml"];
@@ -918,12 +918,17 @@ fn straight_line_exports_as_loose_connector() {
         .descendants()
         .find(|node| node.tag_name().name() == "ln")
         .expect("connector should have stroke");
-    assert_eq!(stroke.attribute("w"), Some("25400"));
+    assert_eq!(stroke.attribute("w"), Some("38100"));
     assert_eq!(stroke.attribute("cap"), Some("rnd"));
     assert!(
         stroke.descendants().any(|node| node.tag_name().name() == "prstDash"
-            && node.attribute("val") == Some("dash")),
+            && node.attribute("val") == Some("sysDash")),
         "connector should preserve dash preset"
+    );
+    assert!(
+        !stroke.descendants().any(|node| node.tag_name().name() == "prstDash"
+            && node.attribute("val") == Some("sysDot")),
+        "equal dashed segments must not degrade to round dots"
     );
     assert_all_wellformed(&p);
 }

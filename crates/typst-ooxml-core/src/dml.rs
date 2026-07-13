@@ -245,6 +245,25 @@ pub fn prst_dash(array: &[Abs], thickness: Abs) -> &'static str {
         return "solid";
     }
 
+    // A compound pattern has alternating dash and dot components. Typst's
+    // named dash-dotted presets always resolve to four or more entries; keep
+    // that semantic shape even when a thick stroke makes every on-segment no
+    // longer than the line width.
+    if array.len() >= 4 {
+        return "dashDot";
+    }
+
+    // Typst's `dashed` preset is an equal on/off pair (3pt, 3pt). At a 3pt
+    // stroke width the old line-width-only heuristic called that a dot and
+    // emitted `sysDot`, producing widely spaced round dots. An equal pair is
+    // a short system dash; unequal short pairs remain the closest dot preset.
+    if let [on, off] = array {
+        let tolerance = (thickness * 0.15).max(Abs::pt(0.05));
+        if (*on - *off).abs() <= tolerance {
+            return "sysDash";
+        }
+    }
+
     let (mut has_dot, mut has_dash) = (false, false);
     for on in array.iter().step_by(2) {
         if *on <= thickness * 1.2 {
@@ -717,6 +736,20 @@ pub fn write_srgb(w: &mut XmlWriter, rgba: [u8; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preset_dash_distinguishes_equal_dashes_from_dots() {
+        assert_eq!(prst_dash(&[Abs::pt(3.0), Abs::pt(3.0)], Abs::pt(3.0)), "sysDash");
+        assert_eq!(prst_dash(&[Abs::pt(3.0), Abs::pt(2.0)], Abs::pt(3.0)), "sysDot");
+        assert_eq!(
+            prst_dash(
+                &[Abs::pt(3.0), Abs::pt(2.0), Abs::pt(3.0), Abs::pt(2.0)],
+                Abs::pt(3.0),
+            ),
+            "dashDot"
+        );
+        assert_eq!(prst_dash(&[Abs::pt(6.0), Abs::pt(3.0)], Abs::pt(3.0)), "dash");
+    }
 
     // `gradient_fill` never produces `FillSpec::RadialGradient` (see its doc
     // comment — the mapping is visually wrong on non-square shapes), but the
