@@ -475,6 +475,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         if (!weak || !self.items.is_empty())
             && (!self.regions.backlog.is_empty() || self.regions.last.is_some())
         {
+            self.composer.work.manual_column_break = true;
             self.composer.work.advance();
             return Err(Stop::Finish(true));
         }

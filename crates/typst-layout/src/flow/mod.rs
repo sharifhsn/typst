@@ -313,6 +313,9 @@ struct Work<'a, 'b> {
     footnote_spill: Option<std::vec::IntoIter<Frame>>,
     /// Queued tags that will be attached to the next frame.
     tags: EcoVec<&'a Tag>,
+    /// Whether the most recently completed region ended at an explicit
+    /// `#colbreak()` rather than through automatic overflow.
+    manual_column_break: bool,
     /// Identifies floats and footnotes that can be skipped if visited because
     /// they were already handled and incorporated as column or page level
     /// insertions.
@@ -329,6 +332,7 @@ impl<'a, 'b> Work<'a, 'b> {
             footnotes: EcoVec::new(),
             footnote_spill: None,
             tags: EcoVec::new(),
+            manual_column_break: false,
             skips: Rc::new(FxHashSet::default()),
         }
     }

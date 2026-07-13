@@ -1187,6 +1187,27 @@ fn explicit_columns_emit_single_multicolumn_text_box() {
 }
 
 #[test]
+fn explicit_colbreak_uses_independent_editable_column_boxes() {
+    let p = parts(
+        r#"#set page(width: 240pt, height: 120pt, margin: 10pt)
+#columns(2, gutter: 20pt)[Left column.#colbreak()Right column.]"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<a:t>Left column.</a:t>"));
+    assert!(slide.contains("<a:t>Right column.</a:t>"));
+    assert_eq!(
+        slide.matches("txBox=\"1\"").count(),
+        2,
+        "a manual break needs independently editable physical columns"
+    );
+    assert!(
+        !slide.contains("numCol=\"2\""),
+        "DrawingML native columns only support automatic overflow"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn explicit_columns_preserve_reading_order_across_wrapped_lines() {
     // Regression test: each column here wraps across multiple lines whose
     // baselines land at nearly the same height as the other columns' lines.

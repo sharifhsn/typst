@@ -61,6 +61,7 @@ fn tag_column_region(
     mut frame: Frame,
     count: usize,
     gutter: Abs,
+    manual_break: bool,
     span: Span,
     locator: Locator,
     engine: &mut Engine,
@@ -68,9 +69,14 @@ fn tag_column_region(
     let Some(count) = NonZeroUsize::new(count) else {
         return frame;
     };
-    let mut region =
-        Packed::new(ColumnRegion::new(count, gutter, frame.width(), frame.height()))
-            .spanned(span);
+    let mut region = Packed::new(ColumnRegion::new(
+        count,
+        gutter,
+        frame.width(),
+        frame.height(),
+        manual_break,
+    ))
+    .spanned(span);
     let key = typst_utils::hash128(&region);
     let loc = locator.split().next_location(engine, key, span);
     region.set_location(loc);
@@ -164,6 +170,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
 
         let mut output = Frame::hard(size);
         let mut offset = Abs::zero();
+        let mut manual_break = false;
         let region_locator = locator.relayout();
         let mut locator = locator.split();
 
@@ -171,6 +178,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         for i in 0..self.config.columns.count {
             self.column = i;
             let frame = self.column(locator.next(&()), inner)?;
+            manual_break |= std::mem::take(&mut self.work.manual_column_break);
 
             if !regions.expand.y {
                 output.size_mut().y.set_max(frame.height());
@@ -201,6 +209,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
                 output,
                 self.config.columns.count,
                 self.config.columns.gutter,
+                manual_break,
                 span,
                 region_locator,
                 self.engine,

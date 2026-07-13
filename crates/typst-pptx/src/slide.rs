@@ -125,6 +125,7 @@ struct ActiveColumnRegion<'a> {
     rect: Rect,
     count: usize,
     gutter: Abs,
+    manual_break: bool,
     text: Vec<TextSource<'a>>,
     math: Vec<InlineMathSource>,
     links: Vec<LinkRect>,
@@ -454,6 +455,7 @@ impl<'a, 'b> Walker<'a, 'b> {
             rect: Rect { min: origin, max: origin + size.to_point() },
             count: region.count.get(),
             gutter: region.gutter * similarity.scale,
+            manual_break: region.manual_break,
             text: Vec::new(),
             math: Vec::new(),
             links: Vec::new(),
@@ -472,9 +474,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         attach_highlights(&mut active.text, &mut self.shapes, &active.highlights);
         self.link_overlays
             .extend(text_link_overlays(&active.text, &active.links));
-        if let Some(shape) = column_shape(active) {
-            self.shapes.push(shape);
-        }
+        self.shapes.extend(column_shapes(active));
         true
     }
 
@@ -914,57 +914,85 @@ fn equation_sources(document: &PagedDocument) -> FxHashMap<Location, MathSource>
         .collect()
 }
 
-fn column_shape(active: ActiveColumnRegion<'_>) -> Option<OrderedShape> {
+fn column_shapes(active: ActiveColumnRegion<'_>) -> Vec<OrderedShape> {
     if active.count <= 1 {
-        return None;
+        return Vec::new();
     }
 
     let rect = active.rect;
     let count = active.count;
     let gutter = active.gutter;
-    let paras = column_region_paras(active.text, active.math, rect, count, gutter);
-    if paras.is_empty() {
-        return None;
+    let manual_break = active.manual_break;
+    let buckets = column_region_buckets(active.text, active.math, rect, count, gutter);
+    if buckets.is_empty() {
+        return Vec::new();
     }
 
     let size = rect.size();
-    Some(OrderedShape {
-        order: active.order,
-        shape: SlideShape::TextBox(TextBox {
-            x_emu: crate::text::emu(rect.min.x),
-            y_emu: crate::text::emu(rect.min.y),
-            w_emu: crate::text::extent_emu(size.x),
-            h_emu: crate::text::extent_emu(size.y),
-            rot_60k: 0,
-            wrap: TextWrap::Square,
-            columns: Some(TextColumns {
-                count,
-                gutter_emu: crate::text::extent_emu(gutter),
+    if !manual_break {
+        let paras = buckets.into_iter().flat_map(|bucket| bucket.paras).collect();
+        return vec![OrderedShape {
+            order: active.order,
+            shape: SlideShape::TextBox(TextBox {
+                x_emu: crate::text::emu(rect.min.x),
+                y_emu: crate::text::emu(rect.min.y),
+                w_emu: crate::text::extent_emu(size.x),
+                h_emu: crate::text::extent_emu(size.y),
+                rot_60k: 0,
+                wrap: TextWrap::Square,
+                columns: Some(TextColumns {
+                    count,
+                    gutter_emu: crate::text::extent_emu(gutter),
+                }),
+                placeholder: None,
+                paras,
             }),
-            placeholder: None,
-            paras,
-        }),
-    })
+        }];
+    }
+
+    let total_gutter = gutter * (count.saturating_sub(1) as f64);
+    let col_width = ((size.x - total_gutter) / count as f64).max(Abs::pt(1.0));
+    let stride = col_width + gutter;
+    buckets
+        .into_iter()
+        .map(|bucket| {
+            let x = rect.min.x + stride * bucket.index as f64;
+            OrderedShape {
+                order: bucket.order,
+                shape: SlideShape::TextBox(TextBox {
+                    x_emu: crate::text::emu(x),
+                    y_emu: crate::text::emu(rect.min.y),
+                    w_emu: crate::text::extent_emu(col_width),
+                    h_emu: crate::text::extent_emu(size.y),
+                    rot_60k: 0,
+                    wrap: TextWrap::Square,
+                    columns: None,
+                    placeholder: None,
+                    paras: bucket.paras,
+                }),
+            }
+        })
+        .collect()
 }
 
-/// Reassemble a multi-column region's paragraphs in true reading order.
+struct ColumnBucket {
+    index: usize,
+    order: usize,
+    paras: Vec<TextPara>,
+}
+
+/// Reassemble each physical column independently in true reading order.
 ///
-/// The general-purpose [`crate::text::cluster_text`] reconstructs a flow from
-/// wrapped line segments by sorting on vertical position, which is right for
-/// a single flowing box but wrong here: applied directly across a whole
-/// columns region, same-height lines from *different* physical columns look
-/// like one reading row and get interleaved. Bucket items by physical column
-/// first, using the region's known geometry (not by trusting frame-walk
-/// order, which is column-major only incidentally), cluster each column's
-/// items on their own — exactly the single-flow case `cluster_text` is
-/// designed for — then concatenate the columns in reading order.
-fn column_region_paras(
+/// Automatic overflow can concatenate these buckets into one native multi-column
+/// text box. Explicit `#colbreak()` regions retain the buckets as independent
+/// editable text boxes because DrawingML has no manual column-break primitive.
+fn column_region_buckets(
     text: Vec<TextSource<'_>>,
     math: Vec<InlineMathSource>,
     rect: Rect,
     count: usize,
     gutter: Abs,
-) -> Vec<TextPara> {
+) -> Vec<ColumnBucket> {
     let total_gutter = gutter * (count.saturating_sub(1) as f64);
     let col_width = ((rect.size().x - total_gutter) / count as f64).max(Abs::pt(1.0));
     let stride = col_width + gutter;
@@ -994,20 +1022,30 @@ fn column_region_paras(
             .unwrap_or(usize::MAX)
     });
 
-    let mut paras = Vec::new();
+    let mut buckets = Vec::new();
     for i in order {
         let text = std::mem::take(&mut text_buckets[i]);
         let math = std::mem::take(&mut math_buckets[i]);
         if text.is_empty() && math.is_empty() {
             continue;
         }
+        let order = text
+            .iter()
+            .map(|source| source.order)
+            .chain(math.iter().map(|source| source.order))
+            .min()
+            .unwrap_or(usize::MAX);
+        let mut paras = Vec::new();
         for cluster in crate::text::cluster_text(text, math) {
             if let SlideShape::TextBox(text) = cluster.shape {
                 paras.extend(text.paras);
             }
         }
+        if !paras.is_empty() {
+            buckets.push(ColumnBucket { index: i, order, paras });
+        }
     }
-    paras
+    buckets
 }
 
 /// The `a:srcRect` crop `[l, t, r, b]` (1/1000 %) that reveals `frame` out of an

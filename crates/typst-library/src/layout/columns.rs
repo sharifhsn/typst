@@ -102,6 +102,14 @@ pub struct ColumnRegion {
     #[required]
     #[internal]
     pub height: Abs,
+
+    /// Whether an explicit `colbreak` advanced this region.
+    ///
+    /// Post-layout consumers can use this to preserve the authored break when
+    /// their native multi-column text model only supports automatic overflow.
+    #[required]
+    #[internal]
+    pub manual_break: bool,
 }
 
 impl Construct for ColumnRegion {
