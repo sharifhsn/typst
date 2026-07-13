@@ -248,6 +248,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                 }
                 FrameItem::Text(text) => {
                     if let Some(similarity) = classify_similarity(item_transform) {
+                        self.ctx.add_font(text.font.font());
                         let baseline = Point::zero().transform(item_transform);
                         let index = self.text.len();
                         self.text.push(TextSource {
@@ -500,6 +501,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                 let Some(similarity) = classify_similarity(item_transform) else {
                     return false;
                 };
+                self.ctx.add_font(text.font.font());
                 let baseline = Point::zero().transform(item_transform);
                 self.active_columns.last_mut().unwrap().text.push(TextSource {
                     order,

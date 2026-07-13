@@ -173,6 +173,50 @@ fn required_parts_are_present_and_wellformed() {
 }
 
 #[test]
+fn editable_text_embeds_license_permitted_fonts() {
+    let binary = binary_parts("Hello, portable presentation.");
+    let p = text_parts_from_binary(&binary);
+    let presentation = &p["ppt/presentation.xml"];
+    let rels = &p["ppt/_rels/presentation.xml.rels"];
+    let content_types = &p["[Content_Types].xml"];
+
+    assert!(presentation.contains("embedTrueTypeFonts=\"1\""));
+    assert!(presentation.contains("<p:embeddedFontLst>"));
+    assert!(presentation.contains("<p:font typeface=\"Libertinus Serif\""));
+    assert!(presentation.contains("<p:regular r:id=\""));
+    assert!(rels.contains(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font"
+    ));
+    assert!(rels.contains("Target=\"fonts/font1.fntdata\""));
+    assert!(
+        content_types
+            .contains("Extension=\"fntdata\" ContentType=\"application/x-fontdata\"")
+    );
+
+    let fonts = binary
+        .iter()
+        .filter(|(name, _)| name.starts_with("ppt/fonts/") && name.ends_with(".fntdata"))
+        .collect::<Vec<_>>();
+    assert!(!fonts.is_empty(), "expected at least one embedded font part");
+    for (name, data) in fonts {
+        let eot_size = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let font_size = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+        let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
+        let eot_magic = u16::from_le_bytes(data[34..36].try_into().unwrap());
+        assert_eq!(eot_size, data.len(), "{name} EOT size must cover the part");
+        assert_eq!(version, 0x0001_0000, "{name} must use EOT 1.0");
+        assert_eq!(eot_magic, 0x504C, "{name} must carry the EOT magic");
+        let magic = data
+            .get(data.len() - font_size..data.len() - font_size + 4)
+            .expect("EOT should end with an sfnt program");
+        assert!(
+            matches!(magic, b"OTTO" | b"\0\x01\0\0" | b"true" | b"typ1"),
+            "{name} does not contain an OpenType/TrueType program: {magic:02X?}"
+        );
+    }
+}
+
+#[test]
 fn slide_count_matches_page_count() {
     let p = parts("one #pagebreak() two #pagebreak() three");
     assert_eq!(slide_count(&p["ppt/presentation.xml"]), 3);

@@ -23,6 +23,7 @@ typst-utils = { workspace = true }
 ecow = { workspace = true }
 rustc-hash = { workspace = true }
 time = { workspace = true }
+ttf-parser = { workspace = true }
 zip = { workspace = true }
 
 [lints]

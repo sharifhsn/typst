@@ -3607,6 +3607,7 @@ dependencies = [
  "ecow",
  "rustc-hash",
  "time",
+ "ttf-parser",
  "typst-export-common",
  "typst-layout",
  "typst-library",

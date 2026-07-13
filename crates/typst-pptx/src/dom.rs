@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use ecow::EcoString;
+use typst_library::text::{Font, FontStyle};
 pub use typst_ooxml_core::dml::{FillSpec, PathSegment, StrokeSpec};
 pub use typst_ooxml_core::media::MediaId;
 use typst_ooxml_core::media::MediaRegistry;
@@ -277,11 +280,16 @@ pub enum PathGeom {
 /// Shared slide conversion context.
 pub struct SlideCtx {
     pub media: MediaRegistry,
+    /// License-permitted font programs used by editable presentation text.
+    pub embedded_fonts: BTreeMap<(EcoString, EmbeddedFontStyle), EmbeddedFontProgram>,
 }
 
 impl Default for SlideCtx {
     fn default() -> Self {
-        Self { media: MediaRegistry::new("ppt/media") }
+        Self {
+            media: MediaRegistry::new("ppt/media"),
+            embedded_fonts: BTreeMap::new(),
+        }
     }
 }
 
@@ -290,4 +298,81 @@ impl SlideCtx {
     pub fn add_media(&mut self, bytes: &[u8], ext: &str) -> MediaId {
         self.media.add(bytes, ext)
     }
+
+    /// Register one exact face for portable editable text when its OpenType
+    /// license permits editing. PowerPoint font parts carry one standalone
+    /// TrueType/OpenType program, so collections are deliberately skipped.
+    pub fn add_font(&mut self, font: &Font) {
+        let data = font.data().as_slice();
+        if data.len() < 32 || ttf_parser::fonts_in_collection(data).is_some() {
+            return;
+        }
+        let Ok(face) = ttf_parser::Face::parse(data, font.index()) else { return };
+        let Some(os2) = face.tables().os2 else { return };
+        if !os2.is_outline_embedding_allowed()
+            || !matches!(
+                os2.permissions(),
+                Some(
+                    ttf_parser::Permissions::Installable
+                        | ttf_parser::Permissions::Editable
+                )
+            )
+        {
+            return;
+        }
+
+        let info = font.info();
+        let bold = info.variant.weight.to_number() >= 600;
+        let italic = !matches!(info.variant.style, FontStyle::Normal);
+        let style = match (bold, italic) {
+            (false, false) => EmbeddedFontStyle::Regular,
+            (true, false) => EmbeddedFontStyle::Bold,
+            (false, true) => EmbeddedFontStyle::Italic,
+            (true, true) => EmbeddedFontStyle::BoldItalic,
+        };
+        let family = EcoString::from(info.family.as_str());
+        self.embedded_fonts.entry((family.clone(), style)).or_insert_with(|| {
+            EmbeddedFontProgram { family, style, data: data.to_vec() }
+        });
+    }
+}
+
+/// One of PresentationML's four embedded family style slots.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum EmbeddedFontStyle {
+    Regular,
+    Bold,
+    Italic,
+    BoldItalic,
+}
+
+impl EmbeddedFontStyle {
+    pub fn element(self) -> &'static str {
+        match self {
+            Self::Regular => "p:regular",
+            Self::Bold => "p:bold",
+            Self::Italic => "p:italic",
+            Self::BoldItalic => "p:boldItalic",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Regular => "Regular",
+            Self::Bold => "Bold",
+            Self::Italic => "Italic",
+            Self::BoldItalic => "Bold Italic",
+        }
+    }
+
+    pub fn is_italic(self) -> bool {
+        matches!(self, Self::Italic | Self::BoldItalic)
+    }
+}
+
+/// Raw single-face OpenType/TrueType data selected for a used text style.
+pub struct EmbeddedFontProgram {
+    pub family: EcoString,
+    pub style: EmbeddedFontStyle,
+    pub data: Vec<u8>,
 }

@@ -38,7 +38,10 @@ an error.
 
 - **Text** — every run is a live, editable DrawingML run: font family, size,
   bold/italic, color, letter-spacing, and RTL. Positions use a measured
-  first-baseline rule so text lands where Typst placed it.
+  first-baseline rule so text lands where Typst placed it. Exact font programs
+  used by editable runs are embedded as PresentationML EOT font parts when the
+  OpenType license grants Installable or Editable embedding; restricted,
+  preview/print-only, bitmap-only, and collection faces are left unembedded.
 - **Links** — external URLs and same-deck slide jumps (`#link((page: n))`).
 - **Vector shapes** — `#rect`, `#circle`/`#ellipse`, `#line`, `#curve`,
   `#polygon` become `prstGeom`/`custGeom` shapes with solid, **linear-gradient**,
@@ -65,6 +68,11 @@ slide stays native and editable.
 
 ## Known limitations
 
+- **Editable text layout still varies by consumer.** Standard EOT font parts
+  preserve the source face in PowerPoint and current LibreOffice Impress, but
+  the applications can apply different text-box and line-breaking metrics. A
+  narrow editable text box can therefore wrap differently even when both use
+  the exact embedded font.
 - **Math compatibility varies by consumer.** PowerPoint can use the OMML choice;
   older Office versions and LibreOffice may display the simpler DrawingML
   fallback instead, which is not visually equivalent for complex equations.

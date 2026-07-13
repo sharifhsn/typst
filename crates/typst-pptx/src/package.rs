@@ -10,7 +10,7 @@ use typst_ooxml_core::ns;
 use typst_ooxml_core::opc::{Package, PackageError, PackageOptions, RelMode, Rels};
 
 use crate::SpeakerNote;
-use crate::dom::{Placeholder, SlideCtx, SlideIr, SlideShape};
+use crate::dom::{EmbeddedFontStyle, Placeholder, SlideCtx, SlideIr, SlideShape};
 use crate::xml::{self, XmlWriter};
 
 const REL_OFFICE_DOCUMENT: &str = ns::rel::OFFICE_DOCUMENT;
@@ -27,6 +27,7 @@ const REL_VIEW_PROPS: &str = ns::rel::VIEW_PROPS;
 const REL_TABLE_STYLES: &str = ns::rel::TABLE_STYLES;
 const REL_IMAGE: &str = ns::rel::IMAGE;
 const REL_HYPERLINK: &str = ns::rel::HYPERLINK;
+const REL_FONT: &str = ns::rel::FONT;
 
 const CT_PRESENTATION: &str = ns::ct::PRESENTATION;
 const CT_SLIDE: &str = ns::ct::SLIDE;
@@ -40,6 +41,7 @@ const CT_VIEW_PROPS: &str = ns::ct::VIEW_PROPS;
 const CT_TABLE_STYLES: &str = ns::ct::TABLE_STYLES;
 const CT_CORE: &str = ns::ct::CORE_PROPS;
 const CT_EXTENDED: &str = ns::ct::EXTENDED_PROPS;
+const CT_FONT_DATA: &str = ns::ct::FONT_DATA;
 
 const PPTX_MEDIA_DEFAULTS: &[(&str, &str)] = &[
     ("gif", "image/gif"),
@@ -91,6 +93,23 @@ pub fn write(
         })
         .collect::<Vec<_>>();
 
+    let mut embedded_font_refs = Vec::new();
+    for (index, font) in ctx.embedded_fonts.values().enumerate() {
+        let file = format!("font{}.fntdata", index + 1);
+        let rid = pres_rels.add(REL_FONT, &format!("fonts/{file}"), RelMode::Internal);
+        package.add_media(
+            &format!("ppt/fonts/{file}"),
+            "fntdata",
+            CT_FONT_DATA,
+            eot_font(&font.data, font.family.as_str(), font.style),
+        );
+        embedded_font_refs.push(EmbeddedFontRef {
+            family: font.family.as_str(),
+            style: font.style,
+            rid,
+        });
+    }
+
     let (cx, cy) = first_page_size(document);
     let placeholder_kinds = slide_placeholder_kinds(slides);
     package.add_xml(
@@ -100,6 +119,7 @@ pub fn write(
             &slide_master_rid,
             notes_master_rid.as_deref(),
             &slide_rids,
+            &embedded_font_refs,
             cx,
             cy,
         ),
@@ -214,6 +234,110 @@ pub fn write(
     package.finish(&root_rels)
 }
 
+/// Wrap an uncompressed single-face sfnt program in EOT 1.0. PowerPoint uses
+/// EOT/MTX payloads for `application/x-fontdata`; a bare TTF/OTF happens to be
+/// accepted as an OPC part by some consumers but is not a valid font payload.
+fn eot_font(data: &[u8], family: &str, style: EmbeddedFontStyle) -> Vec<u8> {
+    let face = ttf_parser::Face::parse(data, 0).expect("registered font was parsed");
+    let os2 = face
+        .raw_face()
+        .table(ttf_parser::Tag::from_bytes(b"OS/2"))
+        .unwrap_or_default();
+    let head = face
+        .raw_face()
+        .table(ttf_parser::Tag::from_bytes(b"head"))
+        .unwrap_or_default();
+
+    let mut out = Vec::with_capacity(data.len() + 256);
+    put_u32(&mut out, 0); // EOTSize, patched after assembly.
+    put_u32(&mut out, data.len() as u32);
+    put_u32(&mut out, 0x0001_0000); // EOT version 1.
+    put_u32(&mut out, 0); // Uncompressed, unencrypted, full font.
+    out.extend_from_slice(os2.get(32..42).unwrap_or(&[0; 10])); // PANOSE.
+    out.push(1); // DEFAULT_CHARSET: no Windows charset preference.
+    out.push(u8::from(style.is_italic()));
+    put_u32(&mut out, be_u16(os2, 4) as u32);
+    put_u16(&mut out, be_u16(os2, 8));
+    put_u16(&mut out, 0x504C); // EOT magic.
+    for offset in [42, 46, 50, 54] {
+        put_u32(&mut out, be_u32(os2, offset));
+    }
+    for offset in [78, 82] {
+        put_u32(&mut out, be_u32(os2, offset));
+    }
+    put_u32(&mut out, be_u32(head, 8));
+    for _ in 0..4 {
+        put_u32(&mut out, 0);
+    }
+    put_u16(&mut out, 0); // Padding1.
+
+    put_eot_string(&mut out, &font_name(&face, ttf_parser::name_id::FAMILY, family));
+    put_u16(&mut out, 0); // Padding2.
+    let style_fallback = style.name();
+    put_eot_string(
+        &mut out,
+        &font_name(&face, ttf_parser::name_id::SUBFAMILY, style_fallback),
+    );
+    put_u16(&mut out, 0); // Padding3.
+    put_eot_string(
+        &mut out,
+        &font_name(&face, ttf_parser::name_id::VERSION, "Version 1.0"),
+    );
+    put_u16(&mut out, 0); // Padding4.
+    put_eot_string(
+        &mut out,
+        &font_name(
+            &face,
+            ttf_parser::name_id::FULL_NAME,
+            &format!("{family} {style_fallback}"),
+        ),
+    );
+    out.extend_from_slice(data);
+    let size = out.len() as u32;
+    out[..4].copy_from_slice(&size.to_le_bytes());
+    out
+}
+
+fn font_name(face: &ttf_parser::Face<'_>, id: u16, fallback: &str) -> String {
+    face.names()
+        .into_iter()
+        .filter(|name| name.name_id == id)
+        .find(|name| name.language_id == 0x0409)
+        .or_else(|| face.names().into_iter().find(|name| name.name_id == id))
+        .and_then(|name| name.to_string())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn put_eot_string(out: &mut Vec<u8>, value: &str) {
+    let utf16 = value.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
+    put_u16(out, (utf16.len() * 2) as u16);
+    for unit in utf16 {
+        put_u16(out, unit);
+    }
+}
+
+fn be_u16(data: &[u8], offset: usize) -> u16 {
+    data.get(offset..offset + 2)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u16::from_be_bytes)
+        .unwrap_or(0)
+}
+
+fn be_u32(data: &[u8], offset: usize) -> u32 {
+    data.get(offset..offset + 4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_be_bytes)
+        .unwrap_or(0)
+}
+
+fn put_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
 fn notes_by_slide(slides: usize, notes: &[SpeakerNote]) -> BTreeMap<usize, String> {
     let mut by_slide = BTreeMap::<usize, String>::new();
     for note in notes {
@@ -289,6 +413,7 @@ fn presentation_xml(
     master_rid: &str,
     notes_master_rid: Option<&str>,
     slide_rids: &[EcoString],
+    embedded_fonts: &[EmbeddedFontRef<'_>],
     cx: i64,
     cy: i64,
 ) -> String {
@@ -296,8 +421,11 @@ fn presentation_xml(
     w.open("p:presentation")
         .attr("xmlns:a", ns::A)
         .attr("xmlns:p", ns::P)
-        .attr("xmlns:r", ns::R)
-        .start_children();
+        .attr("xmlns:r", ns::R);
+    if !embedded_fonts.is_empty() {
+        w.attr("embedTrueTypeFonts", "1");
+    }
+    w.start_children();
 
     w.open("p:sldMasterIdLst").start_children();
     w.open("p:sldMasterId")
@@ -330,8 +458,39 @@ fn presentation_xml(
         .attr("cx", "6858000")
         .attr("cy", "9144000")
         .empty();
+    write_embedded_fonts(&mut w, embedded_fonts);
     w.close();
     w.finish()
+}
+
+struct EmbeddedFontRef<'a> {
+    family: &'a str,
+    style: EmbeddedFontStyle,
+    rid: EcoString,
+}
+
+fn write_embedded_fonts(w: &mut XmlWriter, fonts: &[EmbeddedFontRef<'_>]) {
+    if fonts.is_empty() {
+        return;
+    }
+
+    w.open("p:embeddedFontLst").start_children();
+    let mut start = 0;
+    while start < fonts.len() {
+        let family = fonts[start].family;
+        let end = fonts[start..]
+            .iter()
+            .position(|font| font.family != family)
+            .map_or(fonts.len(), |offset| start + offset);
+        w.open("p:embeddedFont").start_children();
+        w.open("p:font").attr("typeface", family).empty();
+        for font in &fonts[start..end] {
+            w.open(font.style.element()).attr("r:id", &font.rid).empty();
+        }
+        w.close();
+        start = end;
+    }
+    w.close();
 }
 
 fn notes_master_xml() -> String {

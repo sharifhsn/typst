@@ -120,6 +120,9 @@ pub mod ct {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml";
     pub const OBFUSCATED_FONT: &str =
         "application/vnd.openxmlformats-officedocument.obfuscatedFont";
+    /// PowerPoint stores TrueType/OpenType programs under this legacy media
+    /// type rather than Word's obfuscated-font content type.
+    pub const FONT_DATA: &str = "application/x-fontdata";
     pub const WORD_WEB_SETTINGS: &str =
         "application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml";
 
