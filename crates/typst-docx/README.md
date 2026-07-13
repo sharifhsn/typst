@@ -264,11 +264,12 @@ bookmarks use target-node IDs instead of conversion-order names. Resolved page
 counter displays at semantic nodes come from the paged target and supply TOC
 field caches without replaying numbering functions under `Target::Docx`.
 `fidelity_manifest_xml()` serializes the snapshot and fidelity records.
-Every package persists that versioned manifest at
-`customXml/typstFidelity.xml` and duplicates its exact text in the standard
-`TypstFidelityManifestV1` custom document property because LibreOffice Writer
-drops arbitrary custom-XML parts on save but preserves custom properties. The
-finalized IR inventory records every dynamic field's instruction, update owner,
+When `DocxOptions::embed_fidelity_manifest` is enabled, the package persists
+that versioned manifest at `customXml/typstFidelity.xml` and duplicates its exact
+text in the standard `TypstFidelityManifestV1` custom document property because
+LibreOffice Writer drops arbitrary custom-XML parts on save but preserves custom
+properties. Embedding is off by default, including in the CLI; the in-memory
+report remains available to tooling. The finalized IR inventory records every dynamic field's instruction, update owner,
 visibility, cache status, and occurrence count, plus every referenced font, whether it was
 available on the export machine, and its current non-embedded status. The same
 font inventory drives `fontTable.xml`, including fonts used only by individual

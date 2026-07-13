@@ -220,12 +220,13 @@ The default CLI can remain quiet for lossless documents. A `--diagnostic-format`
 or dedicated export report can expose the details without coupling them to
 stderr strings.
 
-DOCX now retains this information on `DocxDocument` and persists a versioned XML
-manifest inside every package at `customXml/typstFidelity.xml`, related from the
-main document part. Because Writer removes arbitrary custom XML during save, the
-exact XML text is redundantly stored in the standards-based
-`TypstFidelityManifestV1` custom document property. A public serializer supports
-external tooling. A finalized IR inventory enrolls every live/static field with
+DOCX now retains this information on `DocxDocument`. When explicitly enabled,
+it persists a versioned XML manifest at `customXml/typstFidelity.xml`, related
+from the main document part. Because Writer removes arbitrary custom XML during
+save, the exact XML text is redundantly stored in the standards-based
+`TypstFidelityManifestV1` custom document property. Embedding is off by default,
+including in the CLI; a public serializer supports external tooling. A finalized
+IR inventory enrolls every live/static field with
 its recalculation owner and visibility, plus every referenced font with
 occurrence counts, export-machine availability, and current non-embedded status.
 Complete native-region and consumer-profile enrollment and an optional
