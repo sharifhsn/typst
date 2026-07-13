@@ -1447,8 +1447,13 @@ fn placed_text_without_vertical_alignment_stays_paragraph_relative() {
 fn floating_placed_text_keeps_clearance_and_wrap_policy() {
     let p = parts("#place(top + center, float: true, clearance: 6pt)[Floating text]");
     let doc = &p["word/document.xml"];
-    assert!(doc.contains("distT=\"76200\" distB=\"76200\""));
-    assert!(doc.contains("<wp:wrapTopAndBottom/>"));
+    assert!(doc.contains("distT=\"0\" distB=\"0\""));
+    assert!(doc.contains("<wp:wrapNone/>"));
+    assert!(
+        doc.contains("<w:spacing w:before=\"0\" w:after=\"0\" w:line=\"")
+            && !doc.contains("w:line=\"1\" w:lineRule=\"exact\""),
+        "the measured textbox plus clearance reserves its Typst float footprint"
+    );
     assert!(doc.contains("<wp:align>center</wp:align>"));
     assert!(doc.contains("<wps:txbx>"));
     assert_all_wellformed(&p);

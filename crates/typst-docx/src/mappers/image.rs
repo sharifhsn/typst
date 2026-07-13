@@ -434,6 +434,7 @@ pub fn place(
             crate::mappers::shape::transformed(body, styles, ctx)?
     {
         set_place_anchor(&mut drawing, elem, styles, ctx);
+        let flow_line = top_floating_text_box_line(&mut drawing, elem, styles);
         ctx.record_content_decision(
             &placed,
             Representation::Native,
@@ -441,7 +442,7 @@ pub fn place(
             LossSet::default(),
             0,
         );
-        return Ok(vec![para_drawing(drawing)]);
+        return Ok(vec![para_drawing_with_line(drawing, flow_line)]);
     }
 
     // Plain text belongs in a real anchored Word text box. This keeps it
@@ -453,6 +454,7 @@ pub fn place(
             crate::mappers::shape::unframed_text_box(body, styles, wrap, ctx)?
     {
         set_place_anchor(&mut drawing, elem, styles, ctx);
+        let flow_line = top_floating_text_box_line(&mut drawing, elem, styles);
         ctx.record_content_decision(
             &placed,
             Representation::Native,
@@ -460,7 +462,7 @@ pub fn place(
             LossSet::default(),
             0,
         );
-        return Ok(vec![para_drawing(drawing)]);
+        return Ok(vec![para_drawing_with_line(drawing, flow_line)]);
     }
 
     // Lower the body like any block once.
@@ -496,10 +498,11 @@ pub fn place(
                 continue;
             };
             set_place_anchor(drawing, elem, styles, ctx);
+            let flow_line = top_floating_text_box_line(drawing, elem, styles);
             para.props.spacing = Some(crate::dom::Spacing {
                 before: Some(0),
                 after: Some(0),
-                line: Some(1),
+                line: Some(flow_line.max(1)),
                 line_rule_auto: false,
                 line_rule_at_least: false,
             });
@@ -691,7 +694,7 @@ fn placed_table_textbox_safe(body: &Content) -> bool {
 }
 
 /// Wraps a drawing in its own paragraph block.
-fn para_drawing(drawing: Drawing) -> Block {
+fn para_drawing_with_line(drawing: Drawing, line: i32) -> Block {
     Block::Para(Para {
         // A floating drawing still needs a paragraph anchor, but that
         // paragraph must not consume a normal text line. Hundreds of placed
@@ -703,7 +706,7 @@ fn para_drawing(drawing: Drawing) -> Block {
             spacing: Some(crate::dom::Spacing {
                 before: Some(0),
                 after: Some(0),
-                line: Some(1),
+                line: Some(line.max(1)),
                 line_rule_auto: false,
                 line_rule_at_least: false,
             }),
@@ -711,6 +714,33 @@ fn para_drawing(drawing: Drawing) -> Block {
         },
         content: vec![ParaChild::Run(Run::Drawing(drawing))],
     })
+}
+
+/// LibreOffice over-reserves `wrapTopAndBottom` around an editable WPS text
+/// box. For a top float, keep the native anchor non-wrapping and reserve the
+/// measured Typst footprint explicitly in its collapsed anchor paragraph.
+fn top_floating_text_box_line(
+    drawing: &mut Drawing,
+    elem: &Packed<typst_library::layout::PlaceElem>,
+    styles: StyleChain,
+) -> i32 {
+    let is_top_float = elem.float.get(styles)
+        && matches!(
+            elem.alignment.get(styles),
+            Smart::Custom(alignment) if alignment.y() == Some(VAlignment::Top)
+        );
+    let has_text_box =
+        drawing.shape.as_ref().and_then(|shape| shape.txbx.as_ref()).is_some();
+    if !is_top_float || !has_text_box {
+        return 1;
+    }
+
+    let clearance_emu = crate::props::abs_to_emu(elem.clearance.resolve(styles));
+    if let Some(anchor) = &mut drawing.anchor {
+        anchor.wrap = AnchorWrap::None;
+        anchor.dist = [0, 0, 0, 0];
+    }
+    ((drawing.h_emu + clearance_emu + 634) / 635).clamp(1, i32::MAX as i64) as i32
 }
 
 /// Sets a `<wp:anchor>` on `drawing` following the place alignment + `dx`/`dy`
