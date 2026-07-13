@@ -25,6 +25,7 @@ pub(crate) struct TextSource<'a> {
     pub item: &'a TextItem,
     pub rot_60k: i32,
     pub scale: f64,
+    pub highlight: Option<[u8; 4]>,
     pub link: Option<LinkTarget>,
     pub slide_number: bool,
 }
@@ -1015,6 +1016,7 @@ fn text_run_props(source: &TextSource<'_>, spc_100pt: Option<i32>) -> TextRun {
         b: variant.weight.to_number() >= 600,
         i: matches!(variant.style, FontStyle::Italic | FontStyle::Oblique),
         color: text_color(&source.item.fill),
+        highlight: source.highlight,
         spc_100pt,
         link: source.link.as_ref().map(|link| match link {
             LinkTarget::Url(url) => RunLink::Url(url.clone()),
@@ -1032,6 +1034,7 @@ fn math_fallback_run(math: &InlineMathSource, spc_100pt: Option<i32>) -> TextRun
         b: false,
         i: false,
         color: [0, 0, 0, 255],
+        highlight: None,
         spc_100pt,
         link: None,
         field: None,
@@ -1088,6 +1091,7 @@ fn synthesize_gap(
             b: props.b,
             i: props.i,
             color: props.color,
+            highlight: None,
             spc_100pt: props.spc_100pt,
             link: None,
             field: None,
@@ -1101,6 +1105,7 @@ fn compatible_run(a: &TextRun, b: &TextRun) -> bool {
         && a.b == b.b
         && a.i == b.i
         && a.color == b.color
+        && a.highlight == b.highlight
         && a.spc_100pt == b.spc_100pt
         && a.field == b.field
         && same_link(&a.link, &b.link)

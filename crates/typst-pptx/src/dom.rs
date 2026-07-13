@@ -151,6 +151,8 @@ pub struct TextRun {
     pub i: bool,
     /// Text color as straight (non-premultiplied) sRGB + alpha.
     pub color: [u8; 4],
+    /// Native DrawingML text highlight color.
+    pub highlight: Option<[u8; 4]>,
     pub spc_100pt: Option<i32>,
     pub link: Option<RunLink>,
     pub field: Option<TextField>,

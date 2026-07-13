@@ -221,6 +221,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                         item: text,
                         rot_60k: similarity.rot_60k,
                         scale: similarity.scale,
+                        highlight: None,
                         link: None,
                         slide_number: false,
                     });

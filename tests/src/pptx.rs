@@ -357,6 +357,24 @@ Hello"##,
 }
 
 #[test]
+fn text_highlight_is_native_and_does_not_cover_the_text() {
+    let p = parts("Before #highlight(fill: yellow)[Highlighted] after.");
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<a:highlight>"), "highlight is a native run property");
+    assert!(slide.contains("<a:t>Highlighted</a:t>"), "highlighted text is its own run");
+    assert!(slide.contains("val=\"FFDC00\""), "the Typst yellow is preserved");
+    assert_all_wellformed(&p);
+
+    let card = parts("#rect(width: 100pt, height: 30pt, fill: yellow)[Card text]");
+    let card_slide = &card["ppt/slides/slide1.xml"];
+    assert!(
+        !card_slide.contains("<a:highlight>"),
+        "a card is not mistaken for a highlight"
+    );
+    assert!(card_slide.contains("val=\"FFDC00\""), "the card background remains");
+}
+
+#[test]
 fn block_equation_exports_native_omml_with_fallback() {
     let p = parts(
         r#"#set page(width: 240pt, height: 120pt, margin: 12pt)

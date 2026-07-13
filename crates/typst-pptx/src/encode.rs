@@ -277,6 +277,7 @@ fn math_fallback_run(math: &MathBox) -> TextRun {
         b: false,
         i: false,
         color: [0, 0, 0, 255],
+        highlight: None,
         spc_100pt: None,
         link: None,
         field: None,
@@ -516,6 +517,11 @@ fn write_r_pr(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink) {
     }
     w.start_children();
     dml::write_solid_fill(w, run.color);
+    if let Some(color) = run.highlight {
+        w.open("a:highlight").start_children();
+        dml::write_srgb(w, color);
+        w.close();
+    }
     w.open("a:latin").attr("typeface", &run.family).empty();
     w.open("a:ea").attr("typeface", &run.family).empty();
     w.open("a:cs").attr("typeface", &run.family).empty();

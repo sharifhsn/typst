@@ -8,7 +8,7 @@ use typst_library::layout::{
 };
 use typst_library::math::EquationElem;
 use typst_library::model::{Destination, Numbering};
-use typst_library::visualize::{Paint, Shape};
+use typst_library::visualize::{Geometry, Paint, Shape};
 use typst_ooxml_core::dml;
 
 use crate::dom::{
@@ -38,6 +38,7 @@ fn slide(
     walker.walk_frame(&page.frame, Transform::identity());
     walker.emit_loose_tables();
     attach_links(&mut walker.text, &walker.links);
+    attach_highlights(&mut walker.text, &mut walker.shapes, &walker.highlight_candidates);
     attach_shape_links(&mut walker.shapes, &walker.links);
 
     let mut ordered = walker.shapes;
@@ -62,6 +63,7 @@ pub(super) struct Walker<'a, 'b> {
     text: Vec<TextSource<'a>>,
     inline_math: Vec<InlineMathSource>,
     links: Vec<LinkRect>,
+    highlight_candidates: Vec<HighlightCandidate>,
     equations: FxHashMap<Location, MathSource>,
     page_size: Size,
     slide_number_fallback: Option<EcoString>,
@@ -83,6 +85,13 @@ pub(super) struct OrderedShape {
 pub(super) struct LinkRect {
     pub(super) rect: Rect,
     pub(super) target: LinkTarget,
+}
+
+#[derive(Copy, Clone)]
+struct HighlightCandidate {
+    order: usize,
+    rect: Rect,
+    color: [u8; 4],
 }
 
 struct MathSource {
@@ -145,6 +154,7 @@ impl<'a, 'b> Walker<'a, 'b> {
             text: Vec::new(),
             inline_math: Vec::new(),
             links: Vec::new(),
+            highlight_candidates: Vec::new(),
             equations: equation_sources(document),
             page_size: page.frame.size(),
             slide_number_fallback: slide_number_fallback(page, slide_index),
@@ -230,6 +240,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                             item: text,
                             rot_60k: similarity.rot_60k,
                             scale: similarity.scale,
+                            highlight: None,
                             link: None,
                             slide_number: false,
                         });
@@ -245,11 +256,19 @@ impl<'a, 'b> Walker<'a, 'b> {
                     }
                 }
                 FrameItem::Shape(shape, span) => {
+                    let highlight =
+                        highlight_candidate(shape, *span, item_transform, order);
                     match crate::shape::shape_to_geom(self.ctx, shape, item_transform, 0)
                     {
-                        Some(geom) => self
-                            .shapes
-                            .push(OrderedShape { order, shape: SlideShape::Geom(geom) }),
+                        Some(geom) => {
+                            self.shapes.push(OrderedShape {
+                                order,
+                                shape: SlideShape::Geom(geom),
+                            });
+                            if let Some(highlight) = highlight {
+                                self.highlight_candidates.push(highlight);
+                            }
+                        }
                         None => {
                             debug_raster("shape", "unmappable", 0);
                             self.raster_item(
@@ -466,6 +485,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                     item: text,
                     rot_60k: similarity.rot_60k,
                     scale: similarity.scale,
+                    highlight: None,
                     link: None,
                     slide_number: false,
                 });
@@ -1000,6 +1020,73 @@ fn point_is_zero(point: Point) -> bool {
 
 fn near_abs(a: Abs, b: Abs) -> bool {
     (a - b).abs().to_pt() <= 0.01
+}
+
+fn highlight_candidate(
+    shape: &Shape,
+    span: typst_syntax::Span,
+    transform: Transform,
+    order: usize,
+) -> Option<HighlightCandidate> {
+    if !span.is_detached() || shape.stroke.is_some() {
+        return None;
+    }
+    let Geometry::Rect(size) = shape.geometry else {
+        return None;
+    };
+    let Some(Paint::Solid(color)) = &shape.fill else {
+        return None;
+    };
+    Some(HighlightCandidate {
+        order,
+        rect: transformed_rect(transform, size),
+        color: crate::shape::srgb_bytes(color),
+    })
+}
+
+fn attach_highlights(
+    text: &mut [TextSource<'_>],
+    shapes: &mut Vec<OrderedShape>,
+    candidates: &[HighlightCandidate],
+) {
+    let mut consumed = Vec::new();
+    for candidate in candidates {
+        let mut best: Option<(usize, f64)> = None;
+        for (index, source) in text.iter().enumerate() {
+            if source.rot_60k != 0
+                || source.scale <= 0.0
+                || source.order.abs_diff(candidate.order) > 2
+            {
+                continue;
+            }
+            let rect = text_rect(source.item, source.baseline, source.scale);
+            let font_size = source.item.size * source.scale;
+            if candidate.rect.size().y < font_size * 0.4
+                || candidate.rect.size().y > font_size * 1.75
+                || candidate.rect.size().x > rect.size().x + font_size * 0.5
+            {
+                continue;
+            }
+            let overlap_x = (candidate.rect.max.x.min(rect.max.x)
+                - candidate.rect.min.x.max(rect.min.x))
+            .max(Abs::zero());
+            let overlap_y = (candidate.rect.max.y.min(rect.max.y)
+                - candidate.rect.min.y.max(rect.min.y))
+            .max(Abs::zero());
+            if overlap_x <= Abs::zero() || overlap_y <= Abs::zero() {
+                continue;
+            }
+            let score = overlap_x.to_pt() * overlap_y.to_pt();
+            if best.as_ref().is_none_or(|(_, current)| score > *current) {
+                best = Some((index, score));
+            }
+        }
+        if let Some((index, _)) = best {
+            text[index].highlight = Some(candidate.color);
+            consumed.push(candidate.order);
+        }
+    }
+    shapes.retain(|shape| !consumed.contains(&shape.order));
 }
 
 pub(super) fn attach_links(text: &mut [TextSource<'_>], links: &[LinkRect]) {
