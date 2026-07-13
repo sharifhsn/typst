@@ -95,9 +95,9 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 - Mixed page sizes are uniformly scaled to fit and centered on PowerPoint's one
   global slide canvas. This preserves content but can introduce letterboxing;
   gradients and other page-relative backgrounds need broader mixed-size coverage.
-- Table capture carries native cell fills, strokes, alignment, and per-side text
-  insets; row and column gutters become editable borderless spacer tracks that
-  participate in spans. It does not yet carry the complete cell-math contract,
+- Table capture carries native cell fills, stroke width/dash/cap, alignment, and
+  per-side text insets; row and column gutters become editable borderless spacer
+  tracks that participate in spans. It does not yet carry the complete cell-math contract,
   and consumer line-box metrics can still expand automatic row heights.
 - Live text regrouping still lacks a complete language and shaping policy. Licensed
   fonts are embedded when their OpenType permissions allow it, but consumer text-box
@@ -126,7 +126,7 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 ## Validation completed on the combined branch
 
 - DOCX integration: 211 tests passed.
-- PPTX integration: 61 tests passed.
+- PPTX integration: 62 tests passed.
 - Pandoc integration: 24 tests passed.
 - DOCX review round trip: 22 tests passed.
 - OOXML math conversion: 27 tests passed.

@@ -11,7 +11,8 @@ use typst_library::layout::{
     Sides, Size, Transform, VAlignment,
 };
 use typst_library::model::{TableCell as TypstTableCell, TableElem};
-use typst_library::visualize::{LineCap, Paint, Stroke};
+use typst_library::visualize::{Paint, Stroke};
+use typst_ooxml_core::dml::{self, AlphaMode};
 
 use crate::dom::{
     CellBorders, CellHAlign, CellInsets, CellVAlign, FillSpec, SlideShape, StrokeSpec,
@@ -736,21 +737,5 @@ fn borders_from_sides(
 
 fn stroke_spec(stroke: &Stroke<Abs>) -> Option<StrokeSpec> {
     let fixed = stroke.clone().unwrap_or_default();
-    let Paint::Solid(color) = fixed.paint else {
-        return None;
-    };
-    Some(StrokeSpec {
-        color: crate::shape::srgb_bytes(&color),
-        w_emu: crate::text::extent_emu(fixed.thickness),
-        cap: line_cap(fixed.cap),
-        dash: None,
-    })
-}
-
-fn line_cap(cap: LineCap) -> &'static str {
-    match cap {
-        LineCap::Butt => "flat",
-        LineCap::Round => "rnd",
-        LineCap::Square => "sq",
-    }
+    dml::resolved_stroke(&Some(fixed), 1.0, AlphaMode::Opaque).flatten()
 }

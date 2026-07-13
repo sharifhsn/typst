@@ -395,6 +395,25 @@ fn table_cell_insets_are_preserved() {
 }
 
 #[test]
+fn table_border_dash_and_cap_are_preserved() {
+    let p = parts(
+        r#"#set page(width: 360pt, height: 200pt)
+#table(
+  columns: 2,
+  stroke: (paint: red, thickness: 3pt, dash: "dashed", cap: "round"),
+  [left], [right],
+)"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("cap=\"rnd\""), "round table border caps");
+    assert!(
+        slide.contains("<a:prstDash val=\"sysDash\"/>"),
+        "table borders should preserve the authored dash preset"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn table_gutters_become_editable_spacer_tracks() {
     let p = parts(
         r#"#set page(width: 8in, height: 4.5in, margin: 24pt)

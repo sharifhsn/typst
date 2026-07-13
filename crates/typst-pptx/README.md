@@ -56,8 +56,8 @@ an error.
   slides by content hash.
 - **SVG images** — embedded as native SVG with a PNG compatibility fallback.
 - **Tables** — eligible laid-out tables become editable DrawingML tables with
-  native cell fills, strokes, alignment, per-side text insets, and borderless
-  spacer tracks for row/column gutters; broader table styling and
+  native cell fills, stroke width/dash/cap, alignment, per-side text insets,
+  and borderless spacer tracks for row/column gutters; broader table styling and
   transformed-table fallback are still incomplete, and consumer line-box
   metrics can expand automatic row heights.
 - **Math** — eligible equations are emitted as OMML inside an Office
