@@ -832,11 +832,13 @@ fn caption_runs(
     // (byte-identical to the previous behaviour for unnumbered captions).
     let Some(numbering) = elem.numbering.get_ref(styles) else {
         let realized = cap.realize(ctx.engine(), styles)?;
-        let mut props = RunProps::default();
-        props.review_origin = Some(ctx.review_origin(
-            crate::convert::review_span(&cap.body),
-            crate::dom::ReviewCandidateKind::InlineText,
-        ));
+        let props = RunProps {
+            review_origin: Some(ctx.review_origin(
+                crate::convert::review_span(&cap.body),
+                crate::dom::ReviewCandidateKind::InlineText,
+            )),
+            ..Default::default()
+        };
         return ctx.inline_runs(&realized, styles, props);
     };
 
@@ -959,11 +961,13 @@ fn caption_runs(
 
     // Caption body. Keep its authored source span distinct from the generated
     // supplement/number/separator so Word edits cannot flatten those fields.
-    let mut body_props = RunProps::default();
-    body_props.review_origin = Some(ctx.review_origin(
-        crate::convert::review_span(&cap.body),
-        crate::dom::ReviewCandidateKind::InlineText,
-    ));
+    let body_props = RunProps {
+        review_origin: Some(ctx.review_origin(
+            crate::convert::review_span(&cap.body),
+            crate::dom::ReviewCandidateKind::InlineText,
+        )),
+        ..Default::default()
+    };
     runs.extend(ctx.inline_runs(&cap.body, styles, body_props)?);
 
     Ok(runs)

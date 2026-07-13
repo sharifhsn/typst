@@ -544,8 +544,10 @@ fn export_docx(
 ) -> SourceResult<()> {
     // The embedded fidelity manifest stays off until a CLI flag exposes it;
     // the report remains queryable on the in-memory document either way.
-    let options =
-        DocxOptions { pretty: config.pretty, embed_fidelity_manifest: false };
+    let options = DocxOptions {
+        pretty: config.pretty,
+        embed_fidelity_manifest: false,
+    };
     let Some(state_path) = &config.docx_review_state else {
         let bytes = typst_docx::docx(document, &options)?;
         return config

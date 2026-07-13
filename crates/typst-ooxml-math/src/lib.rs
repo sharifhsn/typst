@@ -322,7 +322,9 @@ fn convert_fraction(node: Node) -> Atom {
     // A `noBar` fraction is a stacked pair — most often a binomial.
     let ty = frac_type(node);
     match ty {
-        FracType::NoBar => Atom::tight(format!("binom({}, {})", trim_arg(&num), trim_arg(&den))),
+        FracType::NoBar => {
+            Atom::tight(format!("binom({}, {})", trim_arg(&num), trim_arg(&den)))
+        }
         FracType::Skewed | FracType::Linear => {
             // A skewed/linear fraction: `a\/b` reads best as `num\/den`.
             Atom::loose(format!("{}\\/{}", paren_if_loose(&num), paren_if_loose(&den)))
@@ -425,12 +427,22 @@ fn convert_nary(node: Node) -> Atom {
         .and_then(|c| mval(c))
         .and_then(|s| s.chars().next())
         .unwrap_or('∫');
-    let op = symbol_name(chr).map(str::to_string).unwrap_or_else(|| chr.to_string());
+    let op = symbol_name(chr)
+        .map(str::to_string)
+        .unwrap_or_else(|| chr.to_string());
 
     let sub_hidden = hidden(pr, "subHide");
     let sup_hidden = hidden(pr, "supHide");
-    let sub = if sub_hidden { String::new() } else { child(node, "sub").map(convert_row).unwrap_or_default() };
-    let sup = if sup_hidden { String::new() } else { child(node, "sup").map(convert_row).unwrap_or_default() };
+    let sub = if sub_hidden {
+        String::new()
+    } else {
+        child(node, "sub").map(convert_row).unwrap_or_default()
+    };
+    let sup = if sup_hidden {
+        String::new()
+    } else {
+        child(node, "sup").map(convert_row).unwrap_or_default()
+    };
     let body = child(node, "e").map(convert_row).unwrap_or_default();
 
     let mut s = op;
@@ -516,7 +528,9 @@ fn convert_delim(node: Node) -> Atom {
         // `( )` around a construct that already carries its own parens
         // (`binom(..)`) — Word wraps `binom` in a paren delimiter, but Typst's
         // `binom` renders with parens itself, so drop the redundant fence.
-        (Some('('), Some(')')) if inner.starts_with("binom(") && is_single_token(&inner) => {
+        (Some('('), Some(')'))
+            if inner.starts_with("binom(") && is_single_token(&inner) =>
+        {
             Atom::tight(inner)
         }
         (Some('('), Some(')')) => Atom::tight(format!("({inner})")),
@@ -618,7 +632,13 @@ fn convert_groupchr(node: Node) -> Atom {
     let pos = pr.and_then(|pr| child(pr, "pos")).and_then(|p| mval(p));
     let below = pos.as_deref() == Some("bot");
     let func = match chr {
-        Some('⏟') | Some('\u{FE38}') => if below { "underbrace" } else { "overbrace" },
+        Some('⏟') | Some('\u{FE38}') => {
+            if below {
+                "underbrace"
+            } else {
+                "overbrace"
+            }
+        }
         Some('⏞') => "overbrace",
         Some('⏝') | Some('⎵') => "underbracket",
         Some('⏜') | Some('⎴') => "overbracket",
@@ -693,11 +713,7 @@ fn convert_base_atom(e: Option<Node>) -> String {
 /// `i=1`, so we collapse spaces around `=` for the parenthesised form.
 fn script_operand(s: &str) -> String {
     let t = s.trim();
-    if is_single_token(t) {
-        t.to_string()
-    } else {
-        format!("({})", tighten_bounds(t))
-    }
+    if is_single_token(t) { t.to_string() } else { format!("({})", tighten_bounds(t)) }
 }
 
 /// Collapse the spaces around `=` in a script bound so `i = 1` becomes `i=1`
@@ -784,11 +800,7 @@ fn join_atoms(atoms: &[Atom]) -> String {
             out.push(' ');
         }
         attach_tight = matches!(text, "-" | "+")
-            && out
-                .trim_end()
-                .chars()
-                .last()
-                .is_none_or(|c| "([{,;=<>".contains(c));
+            && out.trim_end().chars().last().is_none_or(|c| "([{,;=<>".contains(c));
         out.push_str(text);
     }
     out
@@ -825,7 +837,9 @@ fn delim_token(c: char) -> String {
         '(' | ')' | '[' | ']' | '|' => c.to_string(),
         '{' => "{".to_string(),
         '}' => "}".to_string(),
-        _ => symbol_name(c).map(str::to_string).unwrap_or_else(|| format!("\"{c}\"")),
+        _ => symbol_name(c)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("\"{c}\"")),
     }
 }
 
@@ -867,17 +881,47 @@ fn accent_func(c: char) -> Option<&'static str> {
 fn is_known_function(word: &str) -> bool {
     matches!(
         word,
-        "sin" | "cos" | "tan" | "cot" | "sec" | "csc"
-            | "sinh" | "cosh" | "tanh" | "coth"
-            | "arcsin" | "arccos" | "arctan"
-            | "sech" | "csch"
-            | "asin" | "acos" | "atan"
-            | "log" | "ln" | "lg" | "exp"
-            | "lim" | "limsup" | "liminf"
-            | "max" | "min" | "sup" | "inf"
-            | "arg" | "det" | "dim" | "ker" | "deg"
-            | "gcd" | "hom" | "mod" | "Pr"
-            | "sgn" | "tr" | "id"
+        "sin"
+            | "cos"
+            | "tan"
+            | "cot"
+            | "sec"
+            | "csc"
+            | "sinh"
+            | "cosh"
+            | "tanh"
+            | "coth"
+            | "arcsin"
+            | "arccos"
+            | "arctan"
+            | "sech"
+            | "csch"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "log"
+            | "ln"
+            | "lg"
+            | "exp"
+            | "lim"
+            | "limsup"
+            | "liminf"
+            | "max"
+            | "min"
+            | "sup"
+            | "inf"
+            | "arg"
+            | "det"
+            | "dim"
+            | "ker"
+            | "deg"
+            | "gcd"
+            | "hom"
+            | "mod"
+            | "Pr"
+            | "sgn"
+            | "tr"
+            | "id"
     )
 }
 
@@ -896,7 +940,9 @@ fn child<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Option<Node<'a, 'inp
 }
 
 /// All descendants (for locating `oMath`).
-fn descendants<'a, 'input>(node: Node<'a, 'input>) -> impl Iterator<Item = Node<'a, 'input>> {
+fn descendants<'a, 'input>(
+    node: Node<'a, 'input>,
+) -> impl Iterator<Item = Node<'a, 'input>> {
     node.descendants().filter(|n| n.is_element())
 }
 

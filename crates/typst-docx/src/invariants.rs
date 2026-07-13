@@ -11,8 +11,8 @@ use std::fmt::{self, Display, Formatter};
 use ecow::EcoString;
 
 use crate::dom::{
-    Block, DocxDocument, FieldCacheStatus, FieldDisplay, FieldMode, Footnote,
-    HdrFtrPart, Para, ParaChild, Run,
+    Block, DocxDocument, FieldCacheStatus, FieldDisplay, FieldMode, Footnote, HdrFtrPart,
+    Para, ParaChild, Run,
 };
 
 /// Strips redundant re-emissions of the same bookmark within one part.

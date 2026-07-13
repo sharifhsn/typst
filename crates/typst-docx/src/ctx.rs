@@ -1344,11 +1344,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // `#link(<label>)` to it resolves.
             if let Some(loc) = label_loc
                 && out.len() > child_out_start
+                && let Some((id, name)) = self.bookmark_for_emission(loc)
             {
-                if let Some((id, name)) = self.bookmark_for_emission(loc) {
-                    out.insert(child_out_start, ParaChild::BookmarkStart { id, name });
-                    out.push(ParaChild::BookmarkEnd { id });
-                }
+                out.insert(child_out_start, ParaChild::BookmarkStart { id, name });
+                out.push(ParaChild::BookmarkEnd { id });
             }
         }
 

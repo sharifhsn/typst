@@ -137,11 +137,10 @@ pub fn convert_children(
             // anchor is dangling).
             if child.label().is_some()
                 && let Some(loc) = child.location()
+                && let Some((id, name)) = ctx.bookmark_for_emission(loc)
             {
-                if let Some((id, name)) = ctx.bookmark_for_emission(loc) {
-                    pending.insert(par_start, ParaChild::BookmarkStart { id, name });
-                    pending.push(ParaChild::BookmarkEnd { id });
-                }
+                pending.insert(par_start, ParaChild::BookmarkStart { id, name });
+                pending.push(ParaChild::BookmarkEnd { id });
             }
             have_pending = true;
             last_was_par = true;
@@ -190,9 +189,12 @@ pub fn convert_children(
             last_was_par = false;
         } else if is_inline(child) {
             if !have_pending && pending.is_empty() {
-                let mut props = ParaProps::default();
-                props.review_origin =
-                    Some(ctx.review_origin(child.span(), ReviewCandidateKind::Paragraph));
+                let props = ParaProps {
+                    review_origin: Some(
+                        ctx.review_origin(child.span(), ReviewCandidateKind::Paragraph),
+                    ),
+                    ..Default::default()
+                };
                 pending_props = Some(props);
             }
             push_inline(ctx, child, *styles, &mut pending)?;

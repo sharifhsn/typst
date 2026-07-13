@@ -107,7 +107,10 @@ fn parts(src: &str) -> HashMap<String, String> {
 /// enabled — for the tests that assert the manifest parts themselves.
 fn parts_with_manifest(src: &str) -> HashMap<String, String> {
     let doc = compile_docx(src, &[]);
-    let options = DocxOptions { embed_fidelity_manifest: true, ..Default::default() };
+    let options = DocxOptions {
+        embed_fidelity_manifest: true,
+        ..Default::default()
+    };
     let bytes = docx(&doc, &options).expect("docx export failed");
     zip_parts(bytes)
         .into_iter()
@@ -175,7 +178,10 @@ fn text_parts(doc: &DocxDocument) -> HashMap<String, String> {
 /// Like [`text_parts`], but with the (default-off) embedded fidelity manifest
 /// enabled — for the tests that assert the manifest parts themselves.
 fn text_parts_with_manifest(doc: &DocxDocument) -> HashMap<String, String> {
-    let options = DocxOptions { embed_fidelity_manifest: true, ..Default::default() };
+    let options = DocxOptions {
+        embed_fidelity_manifest: true,
+        ..Default::default()
+    };
     let bytes = docx(doc, &options).expect("docx export failed");
     zip_parts(bytes)
         .into_iter()
@@ -503,7 +509,7 @@ fn review_candidates_are_opt_in_and_preserve_exact_plain_text() {
             },
         );
     }
-    let options = DocxOptions { pretty: false };
+    let options = DocxOptions { pretty: false, embed_fidelity_manifest: false };
     let first = docx_with_review_tags(&document, &options, &tags).unwrap();
     let second = docx_with_review_tags(&document, &options, &tags).unwrap();
     assert_eq!(first, second, "tagged export must remain deterministic");
@@ -4012,8 +4018,7 @@ fn auto_page_height_uses_the_true_paged_size_not_a4() {
     // the auto-height path, not a coincidentally-A4-sized one.
     assert!(real_h_twips > 16838 * 2, "test doc must need much more than A4 height");
 
-    let bytes =
-        docx(&docx_doc, &DocxOptions::default()).expect("docx export failed");
+    let bytes = docx(&docx_doc, &DocxOptions::default()).expect("docx export failed");
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     let mut xml = String::new();
     zip.by_name("word/document.xml")
@@ -4796,7 +4801,7 @@ fn intentionally_hidden_placed_text_is_not_reported_as_dropped() {
         decision.reason == DecisionReason::PositionedContentUnavailable
     }));
 
-    let p = parts("Before #place(hide[SECRET HEADING]) After");
+    let p = parts_with_manifest("Before #place(hide[SECRET HEADING]) After");
     assert!(p["word/document.xml"].contains("Before"));
     assert!(p["word/document.xml"].contains("After"));
     assert!(!p["word/document.xml"].contains("SECRET HEADING"));
@@ -4812,7 +4817,7 @@ fn positioned_multiline_rotated_line_stays_a_native_drawing() {
         decision.reason == DecisionReason::PositionedContentUnavailable
     }));
 
-    let p = parts(src);
+    let p = parts_with_manifest(src);
     let document = &p["word/document.xml"];
     assert!(document.contains("<wp:anchor"), "rotated line should stay positioned");
     assert!(document.contains("<a:custGeom>"), "rotated line should remain native");

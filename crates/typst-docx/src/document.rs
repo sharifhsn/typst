@@ -1884,7 +1884,7 @@ fn run_geometry(
     let vertical_align = body_alignments.next().and_then(|first| {
         body_alignments
             .all(|alignment| alignment == first)
-            .then(|| match first {
+            .then_some(match first {
                 FixedAlignment::Center => Some(VAlign::Center),
                 FixedAlignment::End => Some(VAlign::Bottom),
                 FixedAlignment::Start => None,

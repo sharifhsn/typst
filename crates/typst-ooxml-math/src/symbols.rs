@@ -1085,11 +1085,11 @@ pub fn math_alpha(c: char) -> Option<(char, Style)> {
 /// bold/sans-bold keep their wrapper.
 fn greek_block_style(cp: u32) -> Style {
     match cp {
-        0x1D6A8..=0x1D6E1 => Style::Bold,             // bold Greek
-        0x1D6E2..=0x1D71B => Style::Italic,           // italic Greek (default)
-        0x1D71C..=0x1D755 => Style::Bold,             // bold-italic → bold
-        0x1D756..=0x1D78F => Style::SansBold,         // sans-bold Greek
-        0x1D790..=0x1D7C9 => Style::SansBold,         // sans-bold-italic → sans-bold
+        0x1D6A8..=0x1D6E1 => Style::Bold,     // bold Greek
+        0x1D6E2..=0x1D71B => Style::Italic,   // italic Greek (default)
+        0x1D71C..=0x1D755 => Style::Bold,     // bold-italic → bold
+        0x1D756..=0x1D78F => Style::SansBold, // sans-bold Greek
+        0x1D790..=0x1D7C9 => Style::SansBold, // sans-bold-italic → sans-bold
         _ => Style::Italic,
     }
 }

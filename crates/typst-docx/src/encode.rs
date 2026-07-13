@@ -718,17 +718,30 @@ fn write_drawing(w: &mut XmlWriter, d: &Drawing) {
         w.close(); // mc:Choice
         w.open("mc:Fallback").start_children();
         let top_height = d.h_emu / 2;
-        write_inline_picture_tile(w, d, d.w_emu, top_height, ids[0], 0, 50_000, true);
+        write_inline_picture_tile(
+            w,
+            d,
+            PictureTile {
+                width: d.w_emu,
+                height: top_height,
+                docpr_id: ids[0],
+                crop_top: 0,
+                crop_bottom: 50_000,
+                include_alt: true,
+            },
+        );
         w.leaf("w:br");
         write_inline_picture_tile(
             w,
             d,
-            d.w_emu,
-            d.h_emu - top_height,
-            ids[1],
-            50_000,
-            0,
-            false,
+            PictureTile {
+                width: d.w_emu,
+                height: d.h_emu - top_height,
+                docpr_id: ids[1],
+                crop_top: 50_000,
+                crop_bottom: 0,
+                include_alt: false,
+            },
         );
         w.close(); // mc:Fallback
         w.close(); // mc:AlternateContent
@@ -775,16 +788,24 @@ fn write_drawing(w: &mut XmlWriter, d: &Drawing) {
 /// Emits one vertically cropped half of an inline raster picture. This is used
 /// only inside a compatibility fallback; modern Word keeps the exact single
 /// picture from the matching `mc:Choice`.
-fn write_inline_picture_tile(
-    w: &mut XmlWriter,
-    d: &Drawing,
+struct PictureTile {
     width: i64,
     height: i64,
     docpr_id: u32,
     crop_top: i32,
     crop_bottom: i32,
     include_alt: bool,
-) {
+}
+
+fn write_inline_picture_tile(w: &mut XmlWriter, d: &Drawing, tile: PictureTile) {
+    let PictureTile {
+        width,
+        height,
+        docpr_id,
+        crop_top,
+        crop_bottom,
+        include_alt,
+    } = tile;
     let name = format!("{} compatibility tile", d.name);
     w.open("w:drawing").start_children();
     w.open("wp:inline")
@@ -839,10 +860,8 @@ fn write_inline_picture_tile(
     w.open("pic:cNvPr")
         .attr("id", &docpr_id.to_string())
         .attr("name", &name);
-    if include_alt {
-        if let Some(alt) = &d.alt {
-            w.attr("descr", alt);
-        }
+    if include_alt && let Some(alt) = &d.alt {
+        w.attr("descr", alt);
     }
     w.empty();
     w.open("pic:cNvPicPr").empty();

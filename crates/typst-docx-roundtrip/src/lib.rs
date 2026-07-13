@@ -233,16 +233,15 @@ pub fn parse_docx(docx: &[u8], state: &RoundtripState) -> Result<WordEdits, Erro
 
     for part in story_parts {
         let xml = read_xml_part(&mut archive, &part)?;
-        parse_review_part(
-            &xml,
-            &part,
-            &expected,
-            &wanted_prefix,
-            &mut regions,
-            &mut formats,
-            &mut comment_regions,
-            &mut stories,
-        )?;
+        let mut collector = ReviewPartCollector {
+            expected: &expected,
+            wanted_prefix: &wanted_prefix,
+            regions: &mut regions,
+            formats: &mut formats,
+            comment_regions: &mut comment_regions,
+            stories: &mut stories,
+        };
+        parse_review_part(&xml, &part, &mut collector)?;
     }
     for region in &state.regions {
         if !regions.contains_key(&region.id) {
@@ -280,16 +279,26 @@ fn read_xml_part(
     Ok(xml)
 }
 
+struct ReviewPartCollector<'a> {
+    expected: &'a HashMap<&'a str, &'a Region>,
+    wanted_prefix: &'a str,
+    regions: &'a mut HashMap<String, String>,
+    formats: &'a mut HashMap<String, Vec<FormatSpan>>,
+    comment_regions: &'a mut HashMap<String, String>,
+    stories: &'a mut Vec<StoryShape>,
+}
+
 fn parse_review_part(
     xml: &str,
     part: &str,
-    expected: &HashMap<&str, &Region>,
-    wanted_prefix: &str,
-    regions: &mut HashMap<String, String>,
-    formats: &mut HashMap<String, Vec<FormatSpan>>,
-    comment_regions: &mut HashMap<String, String>,
-    stories: &mut Vec<StoryShape>,
+    collector: &mut ReviewPartCollector<'_>,
 ) -> Result<(), Error> {
+    let expected = collector.expected;
+    let wanted_prefix = collector.wanted_prefix;
+    let regions = &mut *collector.regions;
+    let formats = &mut *collector.formats;
+    let comment_regions = &mut *collector.comment_regions;
+    let stories = &mut *collector.stories;
     let document = Document::parse(xml).map_err(Error::Xml)?;
     let mut review_order = Vec::new();
     for sdt in document.descendants().filter(|node| is_element(*node, "sdt")) {
@@ -303,7 +312,7 @@ fn parse_review_part(
         if !tag.starts_with(TAG_PREFIX) {
             continue;
         }
-        let Some(id) = tag.strip_prefix(&wanted_prefix) else {
+        let Some(id) = tag.strip_prefix(wanted_prefix) else {
             return Err(Error::ForeignControl(tag.to_owned()));
         };
         review_order.push(id.to_owned());
