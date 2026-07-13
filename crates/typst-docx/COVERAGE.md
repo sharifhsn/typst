@@ -2054,3 +2054,20 @@ list-to-list gap about 11 pixels larger than Typst; a package-only 160--180-twip
 consumer calibration scores closer, but the exporter retains the authored
 264-twip paragraph boundary instead of hard-coding a LibreOffice-only fudge.
 All 208 DOCX integration tests pass and clippy remains clean.
+
+## 49. Figure captions retain the figure body's centered alignment
+
+The native figure mapper already centers each in-flow body paragraph, matching
+Typst's figure show rule, but emitted the editable caption with only Word's
+`Caption` style. That built-in style does not imply horizontal centering, so a
+centered image opened with its caption at the left body margin. Caption
+paragraphs now carry both the semantic `Caption` style and direct centered
+paragraph alignment; SEQ numbering, bookmarks, internal references, and the
+editable caption runs are unchanged.
+
+The package regression checks `w:pStyle="Caption"` and `w:jc="center"` on the
+same SEQ-bearing paragraph. In the 2026-07-13 image fixture, LibreOffice places
+the image and caption at the same x center (about 450 rendered pixels), with the
+caption baseline within one pixel of Typst. The image geometry and linked
+`See Figure 1.` reference remain unchanged. All 208 DOCX integration tests pass
+and clippy remains clean.

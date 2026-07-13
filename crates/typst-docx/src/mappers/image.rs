@@ -226,6 +226,7 @@ pub fn figure(
             let runs = caption_runs(elem, cap, styles, ctx)?;
             let props = ParaProps {
                 style: Some(CAPTION_STYLE.into()),
+                jc: Some(Jc::Center),
                 ..Default::default()
             };
             let para = Para {

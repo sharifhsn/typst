@@ -3877,6 +3877,15 @@ fn figure_emits_seq_field() {
         p["word/document.xml"].contains("SEQ Figure"),
         "a captioned figure should number via a SEQ field"
     );
+    let caption = p["word/document.xml"]
+        .split("</w:p>")
+        .find(|paragraph| paragraph.contains("SEQ Figure"))
+        .expect("caption paragraph");
+    assert!(
+        caption.contains("<w:pStyle w:val=\"Caption\"/>")
+            && caption.contains("<w:jc w:val=\"center\"/>"),
+        "the editable caption stays centered with its figure body"
+    );
     assert_all_wellformed(&p);
 }
 
