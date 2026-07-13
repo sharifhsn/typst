@@ -476,6 +476,17 @@ fn build_flow_box(group: &[usize], lines: &[LineSegment]) -> ClusteredText {
 
 fn build_bullet_box(group: &[usize], lines: &[LineSegment]) -> ClusteredText {
     let selected = group.iter().map(|&idx| lines[idx].clone()).collect::<Vec<_>>();
+    // A line without a bullet marker is a continuation of the preceding list
+    // item. If every captured line starts a new item, Typst laid every item out
+    // on one visual line. Preserve that decision instead of letting a consumer
+    // with different font metrics rewrap the item and collide with following
+    // slide content. Lists with real continuation lines remain wrappable and
+    // editable as flowing paragraphs.
+    let wrap = if selected.iter().all(|line| line.bullet.is_some()) {
+        TextWrap::None
+    } else {
+        TextWrap::Square
+    };
     let (left, right, top, bottom) = bounds(&selected);
     let leading = measured_leading(&selected);
     let levels = bullet_levels(&selected);
@@ -518,7 +529,7 @@ fn build_bullet_box(group: &[usize], lines: &[LineSegment]) -> ClusteredText {
             w_emu: extent_emu((right - left).max(Abs::pt(0.1))),
             h_emu: extent_emu((bottom - top).max(Abs::pt(0.1))),
             rot_60k: selected[0].rot_60k,
-            wrap: TextWrap::Square,
+            wrap,
             columns: None,
             placeholder: None,
             paras,

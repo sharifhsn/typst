@@ -712,6 +712,10 @@ fn bullet_list_uses_native_buchar_without_literal_marker_text() {
     let slide = &p["ppt/slides/slide1.xml"];
     assert_eq!(text_shape_count(slide), 1, "bullet list should be one box");
     assert_eq!(slide.matches("<a:buChar char=\"•\"/>").count(), 2);
+    assert!(
+        slide.contains("wrap=\"none\""),
+        "single-line bullet items should not be rewrapped by consumer font metrics"
+    );
     assert_no_text_node_contains(slide, "•");
     assert_all_wellformed(&p);
 }
