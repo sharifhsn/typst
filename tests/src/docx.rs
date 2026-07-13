@@ -980,6 +980,24 @@ fn nested_table_uses_its_parent_cell_width() {
 }
 
 #[test]
+fn measured_table_row_height_does_not_double_count_cell_insets() {
+    let p = parts(
+        "#set page(width: 240pt, height: 120pt, margin: 10pt)\n\
+         #table(columns: 1, [Cell A], [Cell B])",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    assert_eq!(tables.len(), 1);
+    assert_eq!(
+        tables[0]
+            .matches("<w:trHeight w:val=\"145\" w:hRule=\"atLeast\"/>")
+            .count(),
+        2,
+        "the 345-twip physical row already includes 100-twip top and bottom insets"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn table_cell_insets_become_native_cell_margins() {
     let p = parts(
         "#table(columns: 1, table.cell(inset: (left: 18pt, right: 12pt, \

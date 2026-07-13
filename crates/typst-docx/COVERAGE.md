@@ -1960,3 +1960,20 @@ OMML, highlight, external/internal links, bookmark, and outer column geometry
 remain native. The consumer still makes those automatic rows taller than
 Typst, which is tracked as a separate row-metrics fidelity defect rather than
 hidden by widening the table.
+
+## 44. Measured table-row minima do not count cell insets twice
+
+Typst's tagged physical cell height already includes the cell's top and bottom
+insets. Word interprets `w:trHeight` as a content-height minimum and then adds
+`w:tcMar`, so emitting the full tagged height as `atLeast` counted those insets
+twice. Measured rows now subtract the largest non-spanning cell's vertical
+insets from the emitted minimum while retaining the full height as the reference
+for percentage inset resolution. Explicit fixed row heights are unchanged.
+
+The 2026-07-13 embedded-font fixture now emits a 145-twip expandable minimum
+for a 345-twip physical row with 100-twip top and bottom margins. LibreOffice
+reduces the two-row table from roughly 120 to 100 pixels without wrapping,
+clipping, or disturbing outer columns and rich content. Typst remains roughly
+74 pixels because Writer's editable text line box is taller than Typst's glyph
+frame; that remaining consumer-metric difference is not concealed with an
+exact/clipping row height.

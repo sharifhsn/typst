@@ -256,9 +256,29 @@ fn cellgrid(
     let mut rows = Vec::with_capacity(nrows);
     for y in 0..nrows {
         let mut cells = Vec::with_capacity(col_dxa.len());
-        let resolved_row_height = measured
-            .and_then(|geometry| geometry.row_heights.get(y).copied().flatten())
-            .or_else(|| row_height(grid, y));
+        let measured_row_height =
+            measured.and_then(|geometry| geometry.row_heights.get(y).copied().flatten());
+        let full_row_height = measured_row_height.or_else(|| row_height(grid, y));
+        let emitted_row_height = measured_row_height
+            .map(|height| RowHeight {
+                // Typst's physical cell region already includes its vertical
+                // inset. Word adds `w:tcMar` outside the `w:trHeight` minimum,
+                // so subtract the largest non-spanning cell inset or the row
+                // is forced taller by that same inset a second time.
+                val: height
+                    .val
+                    .saturating_sub(row_vertical_inset(
+                        grid,
+                        y,
+                        &col_dxa,
+                        has_column_gutter,
+                        styles,
+                        height.val,
+                    ))
+                    .max(1),
+                exact: height.exact,
+            })
+            .or(full_row_height);
 
         let mut x = 0;
         while x < ncols {
@@ -282,7 +302,7 @@ fn cellgrid(
                         (grid_end - grid_start) as u32,
                         v_merge,
                         Some(w_dxa),
-                        resolved_row_height.map(|height| height.val),
+                        full_row_height.map(|height| height.val),
                     )?);
 
                     x = span_end;
@@ -351,7 +371,7 @@ fn cellgrid(
         rows.push(Row {
             header: is_header_row(y),
             cant_split: row_cant_split(grid, y),
-            height: resolved_row_height,
+            height: emitted_row_height,
             cells,
         });
 
@@ -369,6 +389,30 @@ fn cellgrid(
     };
 
     Ok(vec![Block::Table(tbl)])
+}
+
+fn row_vertical_inset(
+    grid: &CellGrid,
+    y: usize,
+    col_dxa: &[i32],
+    has_column_gutter: bool,
+    styles: StyleChain,
+    height_dxa: i32,
+) -> i32 {
+    let ncols = grid.non_gutter_column_count();
+    let mut maximum = 0;
+    for x in 0..ncols {
+        let Entry::Cell(cell) = &grid.entries[y * ncols + x] else { continue };
+        if cell.rowspan.get() != 1 {
+            continue;
+        }
+        let span_end = (x + cell.colspan.get().max(1)).min(ncols);
+        let (grid_start, grid_end) = spanned_grid_range(has_column_gutter, x, span_end);
+        let width_dxa = col_dxa[grid_start..grid_end].iter().copied().sum();
+        let margins = cell_margins(cell, styles, Some(width_dxa), Some(height_dxa));
+        maximum = maximum.max(margins.top.saturating_add(margins.bottom));
+    }
+    maximum
 }
 
 /// Builds a content cell (`Entry::Cell`) into the DOCX IR.
