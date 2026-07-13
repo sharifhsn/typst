@@ -395,6 +395,41 @@ $ sum_(i=1)^n i = (n(n+1))/2 $"#,
 }
 
 #[test]
+fn math_fallback_preserves_scripts_limits_and_fraction_semantics() {
+    let p = parts(
+        r#"#set page(width: 300pt, height: 140pt, margin: 12pt)
+$ integral_0^1 x^2 dif x = 1/3 $"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let doc = roxmltree::Document::parse(slide).unwrap();
+    let fallback = doc
+        .descendants()
+        .find(|node| {
+            node.tag_name().name() == "Fallback"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/markup-compatibility/2006")
+        })
+        .expect("math should have a compatibility fallback")
+        .descendants()
+        .filter(|node| {
+            node.tag_name().name() == "t"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.openxmlformats.org/drawingml/2006/main")
+        })
+        .filter_map(|node| node.text())
+        .collect::<String>();
+
+    assert!(fallback.contains('₀'), "lower limit should remain a subscript: {fallback}");
+    assert!(
+        fallback.contains('¹'),
+        "upper limit should remain a superscript: {fallback}"
+    );
+    assert!(fallback.contains('²'), "exponent should remain a superscript: {fallback}");
+    assert!(fallback.contains("1/3"), "fraction bar should remain readable: {fallback}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn inline_equation_splices_native_omml_between_text_runs() {
     let p = parts(
         r#"#set page(width: 260pt, height: 120pt, margin: 12pt)

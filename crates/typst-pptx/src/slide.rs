@@ -578,7 +578,7 @@ impl<'a, 'b> Walker<'a, 'b> {
 
         let size = bounds.size();
         let fallback =
-            if active.fallback.is_empty() { source_fallback } else { active.fallback };
+            if source_fallback.is_empty() { active.fallback } else { source_fallback };
 
         if block {
             self.shapes.push(OrderedShape {
@@ -867,6 +867,7 @@ fn equation_sources(document: &PagedDocument) -> FxHashMap<Location, MathSource>
                 .alt
                 .get_cloned(styles)
                 .filter(|text| !text.is_empty())
+                .or_else(|| typst_ooxml_core::omml::omml_fallback_text(&omml))
                 .unwrap_or_else(|| elem.body.plain_text());
             Some((loc, MathSource { omml, fallback, block }))
         })

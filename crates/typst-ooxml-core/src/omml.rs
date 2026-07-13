@@ -1,6 +1,7 @@
 //! OMML fragment writer shared by OOXML exporters.
 
 use ecow::EcoString;
+use roxmltree::Node;
 use typst_library::foundations::{
     Content, Packed, SequenceElem, StyleChain, StyledElem, SymbolElem,
 };
@@ -28,6 +29,177 @@ pub fn equation_omml_fragment(elem: &Packed<EquationElem>) -> Option<String> {
     emitter.buf.close();
 
     emitter.emitted.then(|| emitter.buf.into_string())
+}
+
+/// Produces a readable, editable Unicode fallback for an OMML fragment.
+///
+/// PowerPoint consumes the native OMML branch, but consumers such as
+/// LibreOffice may select DrawingML's plain-text compatibility branch instead.
+/// Concatenating visual glyphs loses the role of limits, scripts, and fraction
+/// bars, so recover those semantics from the structured OMML tree.
+pub fn omml_fallback_text(fragment: &str) -> Option<EcoString> {
+    let wrapped;
+    let source = if fragment.contains("xmlns:m=") {
+        fragment
+    } else {
+        wrapped = format!(
+            "<root xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\">{fragment}</root>"
+        );
+        &wrapped
+    };
+    let document = roxmltree::Document::parse(source).ok()?;
+    let text = linearize_omml(document.root_element())
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!text.trim().is_empty()).then(|| EcoString::from(text))
+}
+
+fn linearize_omml(node: Node<'_, '_>) -> String {
+    let name = node.tag_name().name();
+    match name {
+        "t" => node.text().unwrap_or_default().to_owned(),
+        "r" => node
+            .descendants()
+            .find(|child| child.is_element() && child.tag_name().name() == "t")
+            .and_then(|child| child.text())
+            .unwrap_or_default()
+            .to_owned(),
+        "nary" => {
+            let chr = child(node, "naryPr")
+                .and_then(|pr| child(pr, "chr"))
+                .and_then(attribute_val)
+                .unwrap_or_else(|| "∑".to_owned());
+            let sub = child_text(node, "sub");
+            let sup = child_text(node, "sup");
+            let body = child_text(node, "e");
+            format!("{chr}{}{}{body}", script_text(&sub, false), script_text(&sup, true))
+        }
+        "sSup" => format!(
+            "{}{}",
+            child_text(node, "e"),
+            script_text(&child_text(node, "sup"), true)
+        ),
+        "sSub" => format!(
+            "{}{}",
+            child_text(node, "e"),
+            script_text(&child_text(node, "sub"), false)
+        ),
+        "sSubSup" => format!(
+            "{}{}{}",
+            child_text(node, "e"),
+            script_text(&child_text(node, "sub"), false),
+            script_text(&child_text(node, "sup"), true)
+        ),
+        "sPre" => format!(
+            "{}{}{}",
+            script_text(&child_text(node, "sub"), false),
+            script_text(&child_text(node, "sup"), true),
+            child_text(node, "e")
+        ),
+        "f" => {
+            let num = child_text(node, "num");
+            let den = child_text(node, "den");
+            format!("{}/{}", fraction_operand(&num), fraction_operand(&den))
+        }
+        "rad" => {
+            let degree = child_text(node, "deg");
+            let body = child_text(node, "e");
+            if degree.trim().is_empty() {
+                format!("√({body})")
+            } else {
+                format!("root_{}({body})", degree.trim())
+            }
+        }
+        "d" => {
+            let props = child(node, "dPr");
+            let begin = props
+                .and_then(|pr| child(pr, "begChr"))
+                .and_then(attribute_val)
+                .unwrap_or_else(|| "(".to_owned());
+            let end = props
+                .and_then(|pr| child(pr, "endChr"))
+                .and_then(attribute_val)
+                .unwrap_or_else(|| ")".to_owned());
+            format!("{begin}{}{end}", child_text(node, "e"))
+        }
+        "acc" => {
+            let accent = child(node, "accPr")
+                .and_then(|pr| child(pr, "chr"))
+                .and_then(attribute_val)
+                .unwrap_or_default();
+            format!("{}{accent}", child_text(node, "e"))
+        }
+        "bar" => child_text(node, "e"),
+        _ if name.ends_with("Pr") => String::new(),
+        _ => node
+            .children()
+            .filter(|child| child.is_element())
+            .map(linearize_omml)
+            .collect(),
+    }
+}
+
+fn child<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Option<Node<'a, 'input>> {
+    node.children()
+        .find(|child| child.is_element() && child.tag_name().name() == name)
+}
+
+fn child_text(node: Node<'_, '_>, name: &str) -> String {
+    child(node, name).map(linearize_omml).unwrap_or_default()
+}
+
+fn attribute_val(node: Node<'_, '_>) -> Option<String> {
+    node.attributes()
+        .find(|attribute| attribute.name() == "val")
+        .map(|attribute| attribute.value().to_owned())
+}
+
+fn script_text(text: &str, superscript: bool) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let converted = trimmed
+        .chars()
+        .map(|chr| script_char(chr, superscript))
+        .collect::<Option<String>>();
+    converted.unwrap_or_else(|| {
+        if superscript { format!("^({trimmed})") } else { format!("_({trimmed})") }
+    })
+}
+
+fn script_char(chr: char, superscript: bool) -> Option<char> {
+    let table = if superscript {
+        "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ"
+    } else {
+        "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₙ"
+    };
+    let source = "0123456789+-=()n";
+    source
+        .chars()
+        .position(|candidate| candidate == chr)
+        .and_then(|index| table.chars().nth(index))
+}
+
+fn fraction_operand(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().all(|chr| chr.is_alphanumeric()) {
+        trimmed.to_owned()
+    } else {
+        format!("({trimmed})")
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::omml_fallback_text;
+
+    #[test]
+    fn linearizes_structured_math_for_plain_text_consumers() {
+        let omml = r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:nary><m:naryPr><m:chr m:val="∫"/></m:naryPr><m:sub><m:r><m:t>0</m:t></m:r></m:sub><m:sup><m:r><m:t>1</m:t></m:r></m:sup><m:e><m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:e></m:nary><m:r><m:t>=</m:t></m:r><m:f><m:num><m:r><m:t>1</m:t></m:r></m:num><m:den><m:r><m:t>3</m:t></m:r></m:den></m:f></m:oMath>"#;
+        assert_eq!(omml_fallback_text(omml).as_deref(), Some("∫₀¹x²=1/3"));
+    }
 }
 
 /// Best-effort realized-content → OMML emitter used when no `Engine` is
