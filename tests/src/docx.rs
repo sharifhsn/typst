@@ -819,6 +819,27 @@ fn fixed_vertical_space_between_tables_is_an_explicit_flow_block() {
 }
 
 #[test]
+fn paragraph_spacing_is_preserved_as_native_collapsing_spacing() {
+    let p = parts(
+        "#set par(spacing: 20pt, leading: 1.8em)\n\
+         First paragraph.\n\n\
+         Second paragraph.",
+    );
+    let doc = &p["word/document.xml"];
+    let paragraphs = element_fragments(doc, "p");
+    assert_eq!(paragraphs.len(), 2);
+    for paragraph in paragraphs {
+        assert!(
+            paragraph.contains(
+                "<w:spacing w:before=\"400\" w:after=\"400\" w:line=\"616\" w:lineRule=\"atLeast\"/>"
+            ),
+            "paragraph spacing and leading should remain native: {paragraph}"
+        );
+    }
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn flexible_table_columns_use_the_active_section_width() {
     // 120mm page - 10mm margins on both sides = 100mm = ~5669 twips. The old
     // mapper hard-coded 9360 twips (US Letter's default text area).
@@ -1092,11 +1113,14 @@ fn shape_stroke_dash_and_cap_are_carried_natively() {
     // a plain solid line.
     let p = parts(
         "#rect(width: 100pt, height: 40pt, \
-           stroke: (paint: red, thickness: 2pt, dash: \"dashed\", cap: \"round\"))",
+           stroke: (paint: red, thickness: 3pt, dash: \"dashed\", cap: \"round\"))",
     );
     let doc = &p["word/document.xml"];
     assert!(doc.contains("cap=\"rnd\""), "round cap maps to rnd");
-    assert!(doc.contains("<a:prstDash val=\"dash\"/>"), "dashed maps to the dash preset");
+    assert!(
+        doc.contains("<a:prstDash val=\"sysDash\"/>"),
+        "equal dashed segments map to a system dash rather than dots"
+    );
 
     // Non-horizontal, so it maps to a native shape (a horizontal line keeps
     // its existing paragraph-border mapping, which has no `cap` concept).

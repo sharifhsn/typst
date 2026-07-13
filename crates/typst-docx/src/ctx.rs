@@ -1018,6 +1018,18 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
 
         let font_size = styles.resolve(TextElem::size);
 
+        // G4 paragraph spacing -> symmetric Word before/after spacing. Typst
+        // applies `par.spacing` above and below each paragraph and collapses
+        // adjacent values to the greater one. Word applies the same maximum
+        // rule to adjacent `w:after`/`w:before` values, so emitting both sides
+        // preserves the model without inserting spacer paragraphs.
+        let paragraph_spacing = props::abs_to_twip(styles.resolve(ParElem::spacing));
+        if paragraph_spacing != 0 {
+            let spacing = p.spacing.get_or_insert_with(Default::default);
+            spacing.before = Some(paragraph_spacing);
+            spacing.after = Some(paragraph_spacing);
+        }
+
         // G4 leading → `w:line` at-least, only when it differs from the engine
         // default of 0.65em (emitting it on every paragraph would change all
         // existing fixtures). A faithful at-least line height is the resolved
