@@ -126,6 +126,7 @@ struct ActiveColumnRegion<'a> {
     count: usize,
     gutter: Abs,
     text: Vec<TextSource<'a>>,
+    math: Vec<InlineMathSource>,
     links: Vec<LinkRect>,
 }
 
@@ -182,10 +183,13 @@ impl<'a, 'b> Walker<'a, 'b> {
                 {
                     continue;
                 }
-                if self.capture_column_item(order, item, item_transform) {
+                // Equation tags can be nested inside a column region. Capture their
+                // rendered items before the column's general text collector, or the
+                // equation is flattened into glyph runs and loses its OMML structure.
+                if self.capture_math_item(item, item_transform) {
                     continue;
                 }
-                if self.capture_math_item(item, item_transform) {
+                if self.capture_column_item(order, item, item_transform) {
                     continue;
                 }
             }
@@ -446,6 +450,7 @@ impl<'a, 'b> Walker<'a, 'b> {
             count: region.count.get(),
             gutter: region.gutter * similarity.scale,
             text: Vec::new(),
+            math: Vec::new(),
             links: Vec::new(),
         });
         true
@@ -617,7 +622,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                 }),
             });
         } else {
-            self.inline_math.push(InlineMathSource {
+            let math = InlineMathSource {
                 order: active.order,
                 baseline: active
                     .baseline
@@ -627,7 +632,12 @@ impl<'a, 'b> Walker<'a, 'b> {
                 rot_60k: active.rot_60k,
                 omml,
                 fallback,
-            });
+            };
+            if let Some(column) = self.active_columns.last_mut() {
+                column.math.push(math);
+            } else {
+                self.inline_math.push(math);
+            }
         }
     }
 
@@ -905,7 +915,7 @@ fn column_shape(active: ActiveColumnRegion<'_>) -> Option<OrderedShape> {
     let rect = active.rect;
     let count = active.count;
     let gutter = active.gutter;
-    let paras = column_region_paras(active.text, rect, count, gutter);
+    let paras = column_region_paras(active.text, active.math, rect, count, gutter);
     if paras.is_empty() {
         return None;
     }
@@ -943,6 +953,7 @@ fn column_shape(active: ActiveColumnRegion<'_>) -> Option<OrderedShape> {
 /// designed for — then concatenate the columns in reading order.
 fn column_region_paras(
     text: Vec<TextSource<'_>>,
+    math: Vec<InlineMathSource>,
     rect: Rect,
     count: usize,
     gutter: Abs,
@@ -951,26 +962,39 @@ fn column_region_paras(
     let col_width = ((rect.size().x - total_gutter) / count as f64).max(Abs::pt(1.0));
     let stride = col_width + gutter;
 
-    let mut buckets: Vec<Vec<TextSource<'_>>> = vec![Vec::new(); count];
+    let mut text_buckets: Vec<Vec<TextSource<'_>>> = vec![Vec::new(); count];
     for source in text {
         let offset = (source.baseline.x - rect.min.x).max(Abs::zero());
         let index = ((offset.to_pt() / stride.to_pt()) as usize).min(count - 1);
-        buckets[index].push(source);
+        text_buckets[index].push(source);
+    }
+    let mut math_buckets: Vec<Vec<InlineMathSource>> = vec![Vec::new(); count];
+    for source in math {
+        let offset = (source.min.x - rect.min.x).max(Abs::zero());
+        let index = ((offset.to_pt() / stride.to_pt()) as usize).min(count - 1);
+        math_buckets[index].push(source);
     }
 
     // Order columns by reading order (the minimum walk-order of their
     // contents), not raw bucket index, so this stays correct for RTL columns.
     let mut order: Vec<usize> = (0..count).collect();
-    order
-        .sort_by_key(|&i| buckets[i].iter().map(|s| s.order).min().unwrap_or(usize::MAX));
+    order.sort_by_key(|&i| {
+        text_buckets[i]
+            .iter()
+            .map(|s| s.order)
+            .chain(math_buckets[i].iter().map(|s| s.order))
+            .min()
+            .unwrap_or(usize::MAX)
+    });
 
     let mut paras = Vec::new();
     for i in order {
-        let bucket = std::mem::take(&mut buckets[i]);
-        if bucket.is_empty() {
+        let text = std::mem::take(&mut text_buckets[i]);
+        let math = std::mem::take(&mut math_buckets[i]);
+        if text.is_empty() && math.is_empty() {
             continue;
         }
-        for cluster in crate::text::cluster_text(bucket, Vec::new()) {
+        for cluster in crate::text::cluster_text(text, math) {
             if let SlideShape::TextBox(text) = cluster.shape {
                 paras.extend(text.paras);
             }

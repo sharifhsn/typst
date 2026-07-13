@@ -1234,6 +1234,24 @@ fn explicit_columns_preserve_reading_order_across_wrapped_lines() {
 }
 
 #[test]
+fn explicit_columns_keep_inline_math_in_the_editable_text_flow() {
+    let p = parts(
+        r#"#set page(width: 240pt, height: 120pt, margin: 10pt)
+#columns(2)[Before $x^2 + y^2 = z^2$ after]"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("numCol=\"2\""), "columns stay native");
+    assert!(slide.contains("<m:oMath>"), "inline math should remain native OMML");
+    assert!(slide.contains("<m:sSup>"), "superscripts should retain their structure");
+    assert_eq!(
+        slide.matches("txBox=\"1\"").count(),
+        1,
+        "text and inline math should remain in one editable multicolumn text box"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn text_columns_split_into_separate_boxes() {
     let p = parts(
         r#"#set page(width: 200pt, height: 100pt, margin: 0pt)
