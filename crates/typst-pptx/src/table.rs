@@ -18,10 +18,11 @@ use crate::dom::{
     TableCell, TableRow, TextPara,
 };
 use crate::slide::{
-    LinkRect, OrderedShape, Rect, Walker, classify_similarity, debug_raster,
-    frame_text_chars, text_link_overlays, transformed_rect,
+    HighlightCandidate, LinkRect, OrderedShape, Rect, Walker, attach_highlights,
+    classify_similarity, debug_raster, frame_text_chars, highlight_candidate,
+    text_link_overlays, transformed_rect,
 };
-use crate::text::TextSource;
+use crate::text::{InlineMathSource, TextSource};
 
 pub(super) struct ActiveTable {
     loc: Location,
@@ -43,7 +44,9 @@ pub(super) struct ActiveTableCell<'a> {
     h_align: Option<CellHAlign>,
     v_align: Option<CellVAlign>,
     text: Vec<TextSource<'a>>,
+    pub(super) math: Vec<InlineMathSource>,
     links: Vec<LinkRect>,
+    highlights: Vec<HighlightCandidate>,
 }
 
 pub(super) struct CapturedTableCell {
@@ -132,7 +135,9 @@ impl<'a, 'b> Walker<'a, 'b> {
             h_align,
             v_align,
             text: Vec::new(),
+            math: Vec::new(),
             links: Vec::new(),
+            highlights: Vec::new(),
         });
         true
     }
@@ -143,10 +148,11 @@ impl<'a, 'b> Walker<'a, 'b> {
         else {
             return false;
         };
-        let active = self.active_table_cells.remove(index);
+        let mut active = self.active_table_cells.remove(index);
+        attach_highlights(&mut active.text, &mut self.shapes, &active.highlights);
         self.link_overlays
             .extend(text_link_overlays(&active.text, &active.links));
-        let paras = table_cell_paras(active.text);
+        let paras = table_cell_paras(active.text, active.math);
         let cell = CapturedTableCell {
             order: active.order,
             table: active.table,
@@ -248,10 +254,19 @@ impl<'a, 'b> Walker<'a, 'b> {
                 }
             }
             FrameItem::Shape(shape, span) => {
+                let highlight = highlight_candidate(shape, *span, item_transform, order);
                 match crate::shape::shape_to_geom(self.ctx, shape, item_transform, 0) {
-                    Some(geom) => self
-                        .shapes
-                        .push(OrderedShape { order, shape: SlideShape::Geom(geom) }),
+                    Some(geom) => {
+                        self.shapes
+                            .push(OrderedShape { order, shape: SlideShape::Geom(geom) });
+                        if let Some(highlight) = highlight {
+                            self.active_table_cells
+                                .last_mut()
+                                .unwrap()
+                                .highlights
+                                .push(highlight);
+                        }
+                    }
                     None => {
                         debug_raster("table-cell-shape", "unmappable", 0);
                         self.raster_item(
@@ -282,12 +297,11 @@ impl<'a, 'b> Walker<'a, 'b> {
     }
 }
 
-fn table_cell_paras(text: Vec<TextSource<'_>>) -> Vec<TextPara> {
-    // Cell-local inline-math detection isn't wired up yet (equations inside
-    // a table cell aren't captured by the cell walker); this keeps native
-    // tables compiling and correct for the common text-only case rather than
-    // blocking on that follow-up.
-    crate::text::cluster_text(text, Vec::new())
+fn table_cell_paras(
+    text: Vec<TextSource<'_>>,
+    math: Vec<InlineMathSource>,
+) -> Vec<TextPara> {
+    crate::text::cluster_text(text, math)
         .into_iter()
         .flat_map(|cluster| match cluster.shape {
             SlideShape::TextBox(text) => text.paras,

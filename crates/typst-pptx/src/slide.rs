@@ -90,7 +90,7 @@ pub(super) struct LinkRect {
 }
 
 #[derive(Copy, Clone)]
-struct HighlightCandidate {
+pub(super) struct HighlightCandidate {
     order: usize,
     rect: Rect,
     color: [u8; 4],
@@ -178,6 +178,13 @@ impl<'a, 'b> Walker<'a, 'b> {
             let order = self.reserve_order();
             let item_transform = transform.pre_concat(Transform::translate(pos.x, pos.y));
             if !matches!(item, FrameItem::Tag(_)) {
+                // Equation glyphs inside a table cell must reach the math collector
+                // before the cell's general text collector flattens them into runs.
+                if !self.active_table_cells.is_empty()
+                    && self.capture_math_item(item, item_transform)
+                {
+                    continue;
+                }
                 if self.capture_table_item(order, item, item_transform) {
                     continue;
                 }
@@ -615,7 +622,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         let fallback =
             if source_fallback.is_empty() { active.fallback } else { source_fallback };
 
-        if block {
+        if block && self.active_table_cells.is_empty() {
             self.shapes.push(OrderedShape {
                 order: active.order,
                 shape: SlideShape::MathBox(MathBox {
@@ -640,7 +647,12 @@ impl<'a, 'b> Walker<'a, 'b> {
                 omml,
                 fallback,
             };
-            if let Some(column) = self.active_columns.last_mut() {
+            // A table cell cannot host a free-standing slide shape, but its
+            // text body can carry OMML. Keep both inline and display equations
+            // in the cell's editable text flow.
+            if let Some(cell) = self.active_table_cells.last_mut() {
+                cell.math.push(math);
+            } else if let Some(column) = self.active_columns.last_mut() {
                 column.math.push(math);
             } else {
                 self.inline_math.push(math);
@@ -1092,7 +1104,7 @@ fn near_abs(a: Abs, b: Abs) -> bool {
     (a - b).abs().to_pt() <= 0.01
 }
 
-fn highlight_candidate(
+pub(super) fn highlight_candidate(
     shape: &Shape,
     span: typst_syntax::Span,
     transform: Transform,
@@ -1114,7 +1126,7 @@ fn highlight_candidate(
     })
 }
 
-fn attach_highlights(
+pub(super) fn attach_highlights(
     text: &mut [TextSource<'_>],
     shapes: &mut Vec<OrderedShape>,
     candidates: &[HighlightCandidate],

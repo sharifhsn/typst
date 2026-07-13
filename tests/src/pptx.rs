@@ -1291,6 +1291,31 @@ fn explicit_columns_keep_highlight_as_a_native_run_property() {
 }
 
 #[test]
+fn table_cell_inline_math_stays_native_and_editable() {
+    let p = parts("#table(columns: 1, [Cell equation $x^2 + y^2 = z^2$])");
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<a:tbl>"), "the table stays native");
+    assert!(slide.contains("<m:oMath>"), "cell math should remain native OMML");
+    assert!(slide.contains("<m:sSup>"), "superscripts should retain structure");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn table_cell_highlight_becomes_a_native_run_property() {
+    let p = parts("#table(columns: 1, [Cell #highlight(fill: yellow)[Marked text]])");
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<a:tbl>"), "the table stays native");
+    assert!(slide.contains("<a:highlight>"), "highlight should stay native");
+    assert!(slide.contains("<a:t>Marked text</a:t>"));
+    assert_eq!(
+        slide.matches("<p:sp>").count(),
+        0,
+        "the detached highlight rectangle should be consumed"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn text_columns_split_into_separate_boxes() {
     let p = parts(
         r#"#set page(width: 200pt, height: 100pt, margin: 0pt)
