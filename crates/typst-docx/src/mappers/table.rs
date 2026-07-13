@@ -565,20 +565,51 @@ fn cell_blocks(
     Ok(blocks)
 }
 
-/// Typst collapses `par.spacing` between paragraphs, but it does not add that
-/// spacing outside the cell's content region. Word otherwise applies the first
-/// paragraph's `before` and the last paragraph's `after` inside the cell and can
-/// grow a measured row substantially. Remove only the recorded paragraph-spacing
-/// component; explicit `#v()` space folded into `before` remains intact.
+/// Normalizes Typst's collapsing `par.spacing` inside a Word table cell.
+///
+/// Typst contributes the maximum spacing at each adjacent paragraph boundary
+/// and nothing at the cell's outer edges. Word consumers do not consistently
+/// collapse matching `after`/`before` values, so store each boundary once on the
+/// following paragraph. Remove only the recorded paragraph-spacing component;
+/// explicit `#v()` space folded into `before` remains intact.
 fn collapse_cell_boundary_par_spacing(blocks: &mut [Block]) {
-    let first = blocks.iter_mut().find(|block| !matches!(block, Block::Tag(_)));
-    if let Some(Block::Para(para)) = first {
+    let mut run = Vec::new();
+    for index in 0..blocks.len() {
+        match &blocks[index] {
+            Block::Para(_) => run.push(index),
+            Block::Tag(_) => {}
+            _ => {
+                collapse_par_spacing_run(blocks, &run);
+                run.clear();
+            }
+        }
+    }
+    collapse_par_spacing_run(blocks, &run);
+}
+
+fn collapse_par_spacing_run(blocks: &mut [Block], run: &[usize]) {
+    let amounts = run
+        .iter()
+        .map(|&index| match &blocks[index] {
+            Block::Para(para) => para.props.typst_par_spacing.unwrap_or(0),
+            _ => 0,
+        })
+        .collect::<Vec<_>>();
+
+    for &index in run {
+        let Block::Para(para) = &mut blocks[index] else { continue };
         collapse_par_spacing_side(&mut para.props, true);
+        collapse_par_spacing_side(&mut para.props, false);
     }
 
-    let last = blocks.iter_mut().rev().find(|block| !matches!(block, Block::Tag(_)));
-    if let Some(Block::Para(para)) = last {
-        collapse_par_spacing_side(&mut para.props, false);
+    for (position, &index) in run.iter().enumerate().skip(1) {
+        let gap = amounts[position - 1].max(amounts[position]);
+        if gap == 0 {
+            continue;
+        }
+        let Block::Para(para) = &mut blocks[index] else { continue };
+        let spacing = para.props.spacing.get_or_insert_with(Default::default);
+        spacing.before = Some(spacing.before.unwrap_or(0).saturating_add(gap));
     }
 }
 

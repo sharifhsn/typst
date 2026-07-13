@@ -1020,6 +1020,30 @@ fn table_cell_collapses_outer_par_spacing_but_keeps_explicit_vertical_space() {
 }
 
 #[test]
+fn table_cell_emits_each_internal_paragraph_gap_once() {
+    let p = parts(
+        "#set page(width: 170mm, height: 120mm, margin: 12mm)\n\
+         #set text(size: 11pt)\n\
+         #table(columns: 2, inset: 5pt,\n\
+           [#strong[Cell A] #parbreak() First paragraph.\n\nSecond paragraph.],\n\
+           [Cell B],\n\
+         )",
+    );
+    let cells = element_fragments(&p["word/document.xml"], "tc");
+    assert_eq!(cells.len(), 2);
+    assert_eq!(
+        cells[0].matches("<w:spacing w:before=\"264\"/>").count(),
+        2,
+        "each of the two internal boundaries carries one collapsed gap"
+    );
+    assert!(
+        !cells[0].contains("w:after=\"264\""),
+        "the same gap must not be repeated on the preceding paragraph"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn table_cell_insets_become_native_cell_margins() {
     let p = parts(
         "#table(columns: 1, table.cell(inset: (left: 18pt, right: 12pt, \

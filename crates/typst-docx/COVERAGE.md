@@ -2112,3 +2112,22 @@ unchanged. The remaining height is caused by LibreOffice wrapping two cells
 that Typst keeps on one line; narrowing or removing authored cell padding to
 force that consumer-specific wrap was not retained. All 210 DOCX integration
 tests pass and the crate remains clippy-clean.
+
+## 52. Internal table-cell paragraph gaps are emitted once
+
+Typst collapses the spacing on two adjacent paragraphs to the larger value.
+Word consumers do not consistently collapse matching `w:after` and `w:before`
+inside table cells; LibreOffice applied both 264-twip values and inflated a
+three-paragraph row by roughly 29%. Each consecutive paragraph run now removes
+the recorded Typst component from both sides, then stores one
+`max(previous,current)` gap on the following paragraph. Explicit vertical space
+that shares `w:before` is retained, and paragraphs separated by a non-paragraph
+block form independent runs.
+
+The package regression verifies two internal boundaries produce exactly two
+`w:before="264"` values and no duplicate `w:after`. In the 2026-07-13
+LibreOffice fixture, the two paragraph top-to-top gaps are 25.75pt against
+Typst's 20.44pt; the native `w:tbl`, six editable paragraphs, and measured
+959/433-twip row minima are unchanged. Remaining row/text-box drift is the
+consumer metric issue tracked separately. All 211 DOCX integration tests pass
+and the crate remains clippy-clean.
