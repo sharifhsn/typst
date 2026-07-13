@@ -182,6 +182,7 @@ pub struct Pic {
     pub media: MediaId,
     pub svg_media: Option<MediaId>,
     pub alt: Option<EcoString>,
+    pub link: Option<RunLink>,
     pub geom: PicGeom,
     /// Source-rectangle crop `[left, top, right, bottom]` in 1/1000 % (OOXML
     /// `a:srcRect`), for a cover-fitted image whose overflow the clip hides.
@@ -205,6 +206,7 @@ pub struct GeomShape {
     pub geom: GeomKind,
     pub fill: Option<FillSpec>,
     pub stroke: Option<StrokeSpec>,
+    pub link: Option<RunLink>,
 }
 
 /// The PowerPoint shape kind for a vector shape.

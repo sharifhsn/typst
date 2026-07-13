@@ -12,8 +12,8 @@ use typst_library::visualize::{Paint, Shape};
 use typst_ooxml_core::dml;
 
 use crate::dom::{
-    FillSpec, MathBox, PicGeom, SlideCtx, SlideIr, SlideShape, TextBox, TextColumns,
-    TextPara, TextWrap,
+    FillSpec, MathBox, PicGeom, RunLink, SlideCtx, SlideIr, SlideShape, TextBox,
+    TextColumns, TextPara, TextWrap,
 };
 use crate::table::{ActiveTable, ActiveTableCell, CapturedTableCell};
 use crate::text::{InlineMathSource, LinkTarget, TextSource};
@@ -38,6 +38,7 @@ fn slide(
     walker.walk_frame(&page.frame, Transform::identity());
     walker.emit_loose_tables();
     attach_links(&mut walker.text, &walker.links);
+    attach_shape_links(&mut walker.shapes, &walker.links);
 
     let mut ordered = walker.shapes;
     ordered.extend(
@@ -744,6 +745,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                 media,
                 svg_media,
                 alt,
+                link: None,
                 geom,
                 src_rect,
             }),
@@ -1007,6 +1009,39 @@ pub(super) fn attach_links(text: &mut [TextSource<'_>], links: &[LinkRect]) {
             .iter()
             .find(|link| rect.overlaps(link.rect))
             .map(|link| link.target.clone());
+    }
+}
+
+fn attach_shape_links(shapes: &mut [OrderedShape], links: &[LinkRect]) {
+    for entry in shapes {
+        let (rect, target) = match &mut entry.shape {
+            SlideShape::Geom(shape) => (
+                shape_rect(shape.x_emu, shape.y_emu, shape.w_emu, shape.h_emu),
+                &mut shape.link,
+            ),
+            SlideShape::Pic(pic) => {
+                (shape_rect(pic.x_emu, pic.y_emu, pic.w_emu, pic.h_emu), &mut pic.link)
+            }
+            _ => continue,
+        };
+        *target = links.iter().find(|link| rect.overlaps(link.rect)).map(|link| {
+            match &link.target {
+                LinkTarget::Url(url) => RunLink::Url(url.clone()),
+                LinkTarget::Slide(slide) => RunLink::Slide(*slide),
+            }
+        });
+    }
+}
+
+fn shape_rect(x_emu: i64, y_emu: i64, w_emu: i64, h_emu: i64) -> Rect {
+    let x = Abs::pt(x_emu as f64 / 12_700.0);
+    let y = Abs::pt(y_emu as f64 / 12_700.0);
+    Rect {
+        min: Point::new(x, y),
+        max: Point::new(
+            x + Abs::pt(w_emu as f64 / 12_700.0),
+            y + Abs::pt(h_emu as f64 / 12_700.0),
+        ),
     }
 }
 

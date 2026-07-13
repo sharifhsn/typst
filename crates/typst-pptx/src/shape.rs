@@ -39,6 +39,7 @@ pub(crate) fn shape_to_geom(
         geom: GeomKind::Path(PathGeom::Custom(normalized.segments)),
         fill,
         stroke,
+        link: None,
     })
 }
 
@@ -77,6 +78,7 @@ fn line_to_connector(
         geom: GeomKind::Connector { flip_h: start.x > end.x, flip_v: start.y > end.y },
         fill: None,
         stroke,
+        link: None,
     })
 }
 

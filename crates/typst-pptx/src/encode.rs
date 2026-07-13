@@ -96,7 +96,7 @@ fn write_text_box(
         Some(Placeholder::SlideNumber) => format!("Slide Number Placeholder {id}"),
         None => format!("TextBox {id}"),
     };
-    write_sp_nv(w, id, &name, true, text.placeholder);
+    write_sp_nv(w, id, &name, true, text.placeholder, None, rels);
     w.open("p:spPr").start_children();
     write_xfrm(w, text.x_emu, text.y_emu, text.w_emu, text.h_emu, text.rot_60k);
     dml::write_prst_geom(w, "rect");
@@ -123,7 +123,7 @@ fn write_math_box(
     rels: &mut impl SlideRelSink,
 ) {
     w.open("p:sp").start_children();
-    write_sp_nv(w, id, &format!("Math {id}"), true, None);
+    write_sp_nv(w, id, &format!("Math {id}"), true, None, None, rels);
     w.open("p:spPr").start_children();
     write_xfrm(w, math.x_emu, math.y_emu, math.w_emu, math.h_emu, math.rot_60k);
     dml::write_prst_geom(w, "rect");
@@ -474,15 +474,7 @@ fn write_r_pr(w: &mut XmlWriter, run: &TextRun, rels: &mut impl SlideRelSink) {
     w.open("a:ea").attr("typeface", &run.family).empty();
     w.open("a:cs").attr("typeface", &run.family).empty();
     if let Some(link) = &run.link {
-        let rid = match link {
-            RunLink::Url(url) => rels.hyperlink_rid(url),
-            RunLink::Slide(slide) => rels.slide_rid(*slide),
-        };
-        w.open("a:hlinkClick").attr("r:id", &rid).attr("tooltip", "Open link");
-        if matches!(link, RunLink::Slide(_)) {
-            w.attr("action", "ppaction://hlinksldjump");
-        }
-        w.empty();
+        write_hlink_click(w, link, rels);
     }
     w.close();
 }
@@ -498,7 +490,13 @@ fn write_pic(w: &mut XmlWriter, pic: &Pic, id: u32, rels: &mut impl SlideRelSink
     if let Some(alt) = &pic.alt {
         w.attr("descr", alt);
     }
-    w.empty();
+    if let Some(link) = &pic.link {
+        w.start_children();
+        write_hlink_click(w, link, rels);
+        w.close();
+    } else {
+        w.empty();
+    }
     w.open("p:cNvPicPr").start_children();
     w.open("a:picLocks").attr("noChangeAspect", "1").empty();
     w.close();
@@ -546,7 +544,15 @@ fn write_geom_shape(
     match &geom.geom {
         GeomKind::Path(path) => {
             w.open("p:sp").start_children();
-            write_sp_nv(w, id, &format!("Shape {id}"), false, None);
+            write_sp_nv(
+                w,
+                id,
+                &format!("Shape {id}"),
+                false,
+                None,
+                geom.link.as_ref(),
+                rels,
+            );
             w.open("p:spPr").start_children();
             write_xfrm(w, geom.x_emu, geom.y_emu, geom.w_emu, geom.h_emu, geom.rot_60k);
             write_geom(w, path, geom.w_emu, geom.h_emu);
@@ -558,7 +564,7 @@ fn write_geom_shape(
             w.close();
         }
         GeomKind::Connector { flip_h, flip_v } => {
-            write_connector_shape(w, geom, id, *flip_h, *flip_v);
+            write_connector_shape(w, geom, id, *flip_h, *flip_v, rels);
         }
     }
 }
@@ -569,9 +575,10 @@ fn write_connector_shape(
     id: u32,
     flip_h: bool,
     flip_v: bool,
+    rels: &mut impl SlideRelSink,
 ) {
     w.open("p:cxnSp").start_children();
-    write_cxn_nv(w, id, &format!("Connector {id}"));
+    write_cxn_nv(w, id, &format!("Connector {id}"), geom.link.as_ref(), rels);
     w.open("p:spPr").start_children();
     write_xfrm_with_flips(
         w,
@@ -630,12 +637,18 @@ fn write_sp_nv(
     name: &str,
     text_box: bool,
     placeholder: Option<Placeholder>,
+    link: Option<&RunLink>,
+    rels: &mut impl SlideRelSink,
 ) {
     w.open("p:nvSpPr").start_children();
-    w.open("p:cNvPr")
-        .attr("id", &id.to_string())
-        .attr("name", name)
-        .empty();
+    w.open("p:cNvPr").attr("id", &id.to_string()).attr("name", name);
+    if let Some(link) = link {
+        w.start_children();
+        write_hlink_click(w, link, rels);
+        w.close();
+    } else {
+        w.empty();
+    }
     w.open("p:cNvSpPr");
     if text_box && placeholder.is_none() {
         w.attr("txBox", "1");
@@ -678,15 +691,37 @@ fn write_group_nv(w: &mut XmlWriter, id: u32, name: &str) {
     w.close();
 }
 
-fn write_cxn_nv(w: &mut XmlWriter, id: u32, name: &str) {
+fn write_cxn_nv(
+    w: &mut XmlWriter,
+    id: u32,
+    name: &str,
+    link: Option<&RunLink>,
+    rels: &mut impl SlideRelSink,
+) {
     w.open("p:nvCxnSpPr").start_children();
-    w.open("p:cNvPr")
-        .attr("id", &id.to_string())
-        .attr("name", name)
-        .empty();
+    w.open("p:cNvPr").attr("id", &id.to_string()).attr("name", name);
+    if let Some(link) = link {
+        w.start_children();
+        write_hlink_click(w, link, rels);
+        w.close();
+    } else {
+        w.empty();
+    }
     w.leaf("p:cNvCxnSpPr");
     w.leaf("p:nvPr");
     w.close();
+}
+
+fn write_hlink_click(w: &mut XmlWriter, link: &RunLink, rels: &mut impl SlideRelSink) {
+    let rid = match link {
+        RunLink::Url(url) => rels.hyperlink_rid(url),
+        RunLink::Slide(slide) => rels.slide_rid(*slide),
+    };
+    w.open("a:hlinkClick").attr("r:id", &rid).attr("tooltip", "Open link");
+    if matches!(link, RunLink::Slide(_)) {
+        w.attr("action", "ppaction://hlinksldjump");
+    }
+    w.empty();
 }
 
 fn write_xfrm(w: &mut XmlWriter, x: i64, y: i64, cx: i64, cy: i64, rot_60k: i32) {

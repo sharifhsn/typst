@@ -1147,6 +1147,61 @@ fn url_link_emits_hlink_click_and_relationship() {
 }
 
 #[test]
+fn enclosing_link_makes_the_native_shape_clickable() {
+    let p = parts(
+        r#"#link("https://example.com/")[#rect(width: 80pt, height: 30pt, fill: teal)[Linked shape]]"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let rels = &p["ppt/slides/_rels/slide1.xml.rels"];
+    let doc = roxmltree::Document::parse(slide).unwrap();
+    let shape_props = doc
+        .descendants()
+        .find(|node| {
+            node.tag_name().name() == "cNvPr"
+                && node.attribute("name").is_some_and(|name| name.starts_with("Shape "))
+        })
+        .expect("native linked shape");
+    assert!(
+        shape_props
+            .descendants()
+            .any(|node| node.tag_name().name() == "hlinkClick"),
+        "the whole shape hit area should carry the hyperlink"
+    );
+    assert!(rels.contains("Target=\"https://example.com/\""));
+    assert!(rels.contains("TargetMode=\"External\""));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn enclosing_link_makes_the_native_picture_clickable() {
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="#0b6"/></svg>"##;
+    let p = parts(&format!(
+        "#link(\"https://example.com/image\")[#image({}, width: 80pt)]",
+        bytes_literal(SVG),
+    ));
+    let slide = &p["ppt/slides/slide1.xml"];
+    let rels = &p["ppt/slides/_rels/slide1.xml.rels"];
+    let doc = roxmltree::Document::parse(slide).unwrap();
+    let picture_props = doc
+        .descendants()
+        .find(|node| {
+            node.tag_name().name() == "cNvPr"
+                && node
+                    .attribute("name")
+                    .is_some_and(|name| name.starts_with("Picture "))
+        })
+        .expect("native linked picture");
+    assert!(
+        picture_props
+            .descendants()
+            .any(|node| node.tag_name().name() == "hlinkClick"),
+        "the whole picture hit area should carry the hyperlink"
+    );
+    assert!(rels.contains("Target=\"https://example.com/image\""));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn powerpoint_schema_invariants_hold() {
     // Real Microsoft PowerPoint (unlike LibreOffice) repairs a file that
     // violates these; each was a verified ship-blocker.
