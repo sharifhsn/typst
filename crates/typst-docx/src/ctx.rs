@@ -1035,6 +1035,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         // preserves the model without inserting spacer paragraphs.
         let paragraph_spacing = props::abs_to_twip(styles.resolve(ParElem::spacing));
         if paragraph_spacing != 0 {
+            p.typst_par_spacing = Some(paragraph_spacing);
             let spacing = p.spacing.get_or_insert_with(Default::default);
             spacing.before = Some(paragraph_spacing);
             spacing.after = Some(paragraph_spacing);

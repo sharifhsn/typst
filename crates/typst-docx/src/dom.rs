@@ -472,6 +472,10 @@ impl Underline {
 pub struct ParaProps {
     /// Non-serialized provenance for opt-in Word review controls.
     pub(crate) review_origin: Option<ReviewOrigin>,
+    /// Non-serialized Typst paragraph spacing component. Container mappers use
+    /// this to collapse spacing at outer boundaries without removing explicit
+    /// `#v()` space that was folded into `spacing.before`.
+    pub(crate) typst_par_spacing: Option<i32>,
     pub style: Option<EcoString>,
     pub keep_next: bool,
     /// `<w:pageBreakBefore/>`: ensure this paragraph starts on a new page.

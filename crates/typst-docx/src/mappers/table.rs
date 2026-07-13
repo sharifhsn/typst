@@ -27,7 +27,8 @@ use typst_utils::Numeric;
 use crate::ctx::DocxCtx;
 use crate::dom::{
     Block, Border, Cell, CellBorders, CellMargins, Jc, Para, ParaChild, ParaProps,
-    ReviewCandidateKind, Row, RowHeight, Run, RunProps, Tbl, TblProps, VAlign, VMerge,
+    ReviewCandidateKind, Row, RowHeight, Run, RunProps, Spacing, Tbl, TblProps, VAlign,
+    VMerge,
 };
 use crate::report::{DecisionReason, LossSet, Representation};
 
@@ -521,6 +522,8 @@ fn cell_blocks(
         ctx.blocks(&content, styles)?
     };
 
+    collapse_cell_boundary_par_spacing(&mut blocks);
+
     let paragraph_count =
         blocks.iter().filter(|block| matches!(block, Block::Para(_))).count();
     for block in &mut blocks {
@@ -560,6 +563,35 @@ fn cell_blocks(
     }
 
     Ok(blocks)
+}
+
+/// Typst collapses `par.spacing` between paragraphs, but it does not add that
+/// spacing outside the cell's content region. Word otherwise applies the first
+/// paragraph's `before` and the last paragraph's `after` inside the cell and can
+/// grow a measured row substantially. Remove only the recorded paragraph-spacing
+/// component; explicit `#v()` space folded into `before` remains intact.
+fn collapse_cell_boundary_par_spacing(blocks: &mut [Block]) {
+    let first = blocks.iter_mut().find(|block| !matches!(block, Block::Tag(_)));
+    if let Some(Block::Para(para)) = first {
+        collapse_par_spacing_side(&mut para.props, true);
+    }
+
+    let last = blocks.iter_mut().rev().find(|block| !matches!(block, Block::Tag(_)));
+    if let Some(Block::Para(para)) = last {
+        collapse_par_spacing_side(&mut para.props, false);
+    }
+}
+
+fn collapse_par_spacing_side(props: &mut ParaProps, before: bool) {
+    let Some(amount) = props.typst_par_spacing else { return };
+    let Some(spacing) = props.spacing.as_mut() else { return };
+    let side = if before { &mut spacing.before } else { &mut spacing.after };
+    *side = side
+        .map(|value| value.saturating_sub(amount).max(0))
+        .filter(|value| *value != 0);
+    if *spacing == Spacing::default() {
+        props.spacing = None;
+    }
 }
 
 /// Reads the resolved cell's effective alignment off its `TableCell` body and

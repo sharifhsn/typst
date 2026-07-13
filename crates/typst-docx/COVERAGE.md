@@ -2091,3 +2091,24 @@ now produces the same two pages as Typst: the short first-page paragraph wraps
 to four lines at the same half-page column width, and the following heading
 starts at the top of page two. All 209 DOCX integration tests pass and clippy
 remains clean.
+
+## 51. Table-cell boundaries collapse paragraph spacing without losing explicit space
+
+Typst's `par.spacing` collapses between paragraphs and does not enlarge the
+outer edge of a table cell. Word applies a first paragraph's `w:before` and a
+last paragraph's `w:after` inside the cell. When `#v(12mm)` preceded the first
+text, the exporter combined its 680 twips with 264 twips of paragraph spacing
+and also emitted 264 twips after the paragraph, growing an otherwise correctly
+measured editable row. Paragraph properties now retain the non-serialized Typst
+spacing component so the table mapper can remove only that component at its
+outer boundaries. The explicit `#v()` remains `w:before="680"`; spacing between
+multiple cell paragraphs is unchanged.
+
+The package regression verifies the native table keeps the explicit 680-twip
+offset while dropping the leaked 944/264-twip boundary values. In the
+2026-07-13 LibreOffice fixture, the middle row falls from about 201 to 147 pixels
+at 150 dpi against Typst's 107 pixels, with `w:trHeight="825"` and editable text
+unchanged. The remaining height is caused by LibreOffice wrapping two cells
+that Typst keeps on one line; narrowing or removing authored cell padding to
+force that consumer-specific wrap was not retained. All 210 DOCX integration
+tests pass and the crate remains clippy-clean.

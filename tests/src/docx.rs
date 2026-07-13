@@ -998,6 +998,28 @@ fn measured_table_row_height_does_not_double_count_cell_insets() {
 }
 
 #[test]
+fn table_cell_collapses_outer_par_spacing_but_keeps_explicit_vertical_space() {
+    let p = parts(
+        "#set page(width: 180mm, height: 150mm, margin: 12mm)\n\
+         #set text(size: 11pt)\n\
+         #table(columns: 2, align: horizon,\n\
+           [#v(12mm)Cell with vertical offset], [Plain cell],\n\
+         )",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    assert_eq!(tables.len(), 1);
+    assert!(
+        tables[0].contains("<w:spacing w:before=\"680\"/>"),
+        "the 12mm explicit vertical space remains on the first cell paragraph"
+    );
+    assert!(
+        !tables[0].contains("w:before=\"944\"") && !tables[0].contains("w:after=\"264\""),
+        "default paragraph spacing must collapse at the cell boundaries"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn table_cell_insets_become_native_cell_margins() {
     let p = parts(
         "#table(columns: 1, table.cell(inset: (left: 18pt, right: 12pt, \
