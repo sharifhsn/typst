@@ -14,8 +14,9 @@ histories onto `codex/office-export`. Performance branches remain separate.
   but remains an experimental preview. It is not ready for a general fidelity
   guarantee: editable text metrics, complex math, tables, and some transformed or
   mixed-size layouts still have verified gaps.
-- **Pandoc:** usable as a semantic interchange target, not as a paged-layout
-  preservation target.
+- **Pandoc:** retained as known-incomplete historical/development code. It is not
+  a supported preview or release gate and should be treated as broken for general
+  use.
 - **OOXML math import:** the inverse OMML-to-Typst converter is consolidated, but it
   is an import-side utility rather than part of DOCX/PPTX export.
 

@@ -1,5 +1,9 @@
 # typst-pandoc
 
+> **Known incomplete and unsupported.** This consolidated target is retained for
+> development and historical compatibility, but it is not part of the supported
+> DOCX/PPTX preview or its release gates. Treat it as broken for general use.
+
 Pandoc JSON AST export for Typst. Unlike Pandoc's syntax reader, this exporter
 runs Typst first, so package imports, functions, show rules, and contextual
 content are evaluated before the realized document is lowered to Pandoc nodes.

@@ -46,9 +46,10 @@ consider signing up to our [collaborative online editor][app] for free.
 > Both are **experimental previews** (like Typst's own HTML export); see
 > **[Word export](#word-export-this-fork)** and
 > **[PowerPoint export](#powerpoint-export-this-fork)** below for how to build
-> them, what maps natively, and the honest limitations. This fork also includes
-> a [Pandoc-AST target](crates/typst-pandoc/README.md) for evaluated Typst →
-> LaTeX / Markdown / EPUB / … workflows.
+> them, what maps natively, and the honest limitations. A consolidated
+> [Pandoc-AST target](crates/typst-pandoc/README.md) remains in the source tree,
+> but it is known incomplete, is not a supported preview, and is not a release
+> gate for this fork.
 >
 > This fork is **not affiliated with or endorsed by the Typst maintainers**, and
 > the export code is not part of upstream Typst.
@@ -322,6 +323,11 @@ head-to-head against the existing conversion tools (typ2pptx, typ2docx,
 touying-exporter, pandoc) is in [`COMPARISON.md`](COMPARISON.md).
 
 ## Pandoc export (this fork)
+
+> [!WARNING]
+> **Known incomplete and unsupported.** This target remains available for
+> development and historical compatibility, but it is not part of the supported
+> DOCX/PPTX preview and should be treated as broken for general use.
 
 The fork also exports a typed Pandoc JSON AST. Unlike Pandoc's syntax-only Typst
 reader, this path evaluates packages and Typst code before lowering the realized
