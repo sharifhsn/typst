@@ -1734,6 +1734,10 @@ fn block_columns_emit_continuous_sections() {
          Column content continues here.]\n\
          More text after.",
     );
+    assert!(
+        p["word/settings.xml"].contains("<w:noColumnBalance/>"),
+        "short continuous sections must retain Typst's sequential column fill"
+    );
     let doc = &p["word/document.xml"];
     assert!(doc.contains("Intro text"), "pre-column text is kept");
     assert!(doc.contains("Column content starts"), "column text is kept");

@@ -1732,6 +1732,10 @@ fn build_settings(document: &DocxDocument, pretty: bool) -> String {
     // engine); declaring `compatibilityMode = 15` opens it as a native document.
     // The other settings are the ones Word writes alongside it.
     w.open("w:compat").start_children();
+    // Typst fills columns sequentially and leaves later columns empty when the
+    // content ends early. Word otherwise balances a continuous section at its
+    // end, which can move a second short block or table into the next column.
+    w.leaf("w:noColumnBalance");
     for (name, val) in [
         ("compatibilityMode", "15"),
         ("overrideTableStyleFontSizeAndJustification", "1"),
