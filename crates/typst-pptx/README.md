@@ -56,9 +56,10 @@ an error.
   slides by content hash.
 - **SVG images** — embedded as native SVG with a PNG compatibility fallback.
 - **Tables** — eligible laid-out tables become editable DrawingML tables with
-  native cell fills, strokes, alignment, and per-side text insets; broader table
-  styling and transformed-table fallback are still incomplete, and consumer
-  line-box metrics can expand automatic row heights.
+  native cell fills, strokes, alignment, per-side text insets, and borderless
+  spacer tracks for row/column gutters; broader table styling and
+  transformed-table fallback are still incomplete, and consumer line-box
+  metrics can expand automatic row heights.
 - **Math** — eligible equations are emitted as OMML inside an Office
   compatibility wrapper, with a plain DrawingML text fallback.
 - **Presentation UX** — notes, slide numbers, and inferred title/body

@@ -395,6 +395,64 @@ fn table_cell_insets_are_preserved() {
 }
 
 #[test]
+fn table_gutters_become_editable_spacer_tracks() {
+    let p = parts(
+        r#"#set page(width: 8in, height: 4.5in, margin: 24pt)
+#table(
+  columns: (100pt, 100pt),
+  gutter: 24pt,
+  [Alpha], [Beta],
+  [Left], [Right],
+)"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert_eq!(count_xml_nodes(slide, "gridCol"), 3);
+    assert!(
+        slide.contains("<a:gridCol w=\"304800\"/>"),
+        "24pt horizontal gutter should be a borderless spacer column"
+    );
+    assert_eq!(count_xml_nodes(slide, "tr"), 3);
+    assert!(
+        slide.contains("<a:tr h=\"304800\">"),
+        "24pt vertical gutter should be a borderless spacer row"
+    );
+    assert_eq!(count_xml_nodes(slide, "tc"), 9);
+    for text in ["Alpha", "Beta", "Left", "Right"] {
+        assert_eq!(slide.matches(&format!("<a:t>{text}</a:t>")).count(), 1);
+    }
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn table_gutter_tracks_participate_in_cell_spans() {
+    let p = parts(
+        r#"#set page(width: 360pt, height: 220pt)
+#table(
+  columns: 3,
+  gutter: 10pt,
+  table.cell(colspan: 2)[wide], [c],
+  table.cell(rowspan: 2)[tall], [e], [f],
+  [h], [i],
+)"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert_eq!(count_xml_nodes(slide, "gridCol"), 5);
+    assert_eq!(count_xml_nodes(slide, "tr"), 5);
+    assert!(
+        slide.contains("gridSpan=\"3\""),
+        "a two-column cell also spans its internal spacer track"
+    );
+    assert!(
+        slide.contains("rowSpan=\"3\""),
+        "a two-row cell also spans its internal spacer track"
+    );
+    for text in ["wide", "tall", "c", "e", "f", "h", "i"] {
+        assert_eq!(slide.matches(&format!("<a:t>{text}</a:t>")).count(), 1);
+    }
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn gradient_page_fill_becomes_gradient_slide_background() {
     let p = parts(
         "#set page(fill: gradient.linear(rgb(\"#1A1A2E\"), rgb(\"#16213E\")))\nHello",

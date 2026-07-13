@@ -345,9 +345,9 @@ fn table_shape(order: usize, mut cells: Vec<CapturedTableCell>) -> Option<Ordere
     cells.sort_by_key(|cell| (cell.y, cell.x, cell.order));
     let _has_semantic_table_cells = cells.iter().any(|cell| cell.table);
 
-    let cols = cells.iter().map(|cell| cell.x + cell.colspan).max()?;
-    let rows = cells.iter().map(|cell| cell.y + cell.rowspan).max()?;
-    if cols == 0 || rows == 0 {
+    let source_cols = cells.iter().map(|cell| cell.x + cell.colspan).max()?;
+    let source_rows = cells.iter().map(|cell| cell.y + cell.rowspan).max()?;
+    if source_cols == 0 || source_rows == 0 {
         return None;
     }
 
@@ -359,39 +359,62 @@ fn table_shape(order: usize, mut cells: Vec<CapturedTableCell>) -> Option<Ordere
     }
     let total =
         Size::new((max.x - min.x).max(Abs::pt(0.1)), (max.y - min.y).max(Abs::pt(0.1)));
-    let col_widths = track_widths(&cells, cols, true, total.x);
-    let row_heights = track_widths(&cells, rows, false, total.y);
+    let col_widths = track_widths(&cells, source_cols, true, total.x);
+    let row_heights = track_widths(&cells, source_rows, false, total.y);
+    let col_gaps = track_gaps(&cells, source_cols, true);
+    let row_gaps = track_gaps(&cells, source_rows, false);
+    let has_col_gutter = col_gaps.iter().any(|gap| *gap > Abs::zero());
+    let has_row_gutter = row_gaps.iter().any(|gap| *gap > Abs::zero());
 
-    let mut table_rows = Vec::with_capacity(rows);
-    for (y, row_height) in row_heights.iter().enumerate().take(rows) {
-        let mut row_cells = Vec::with_capacity(cols);
-        for x in 0..cols {
-            if let Some(cell) = cells.iter().find(|cell| cell.x == x && cell.y == y) {
-                row_cells.push(TableCell {
-                    grid_span: cell.colspan.max(1),
-                    row_span: cell.rowspan.max(1),
-                    h_merge: false,
-                    v_merge: false,
-                    fill: cell.fill.clone(),
-                    borders: cell.borders.clone(),
-                    h_align: cell.h_align,
-                    v_align: cell.v_align,
-                    insets: cell.insets,
-                    paras: cell.paras.clone(),
-                });
-            } else if let Some(origin) = covering_cell(&cells, x, y) {
-                row_cells.push(TableCell {
-                    grid_span: 1,
-                    row_span: 1,
-                    h_merge: x > origin.x,
-                    v_merge: y > origin.y,
-                    fill: None,
-                    borders: CellBorders::default(),
-                    h_align: None,
-                    v_align: None,
-                    insets: CellInsets::default(),
-                    paras: Vec::new(),
-                });
+    let physical_cols = if has_col_gutter {
+        source_cols.saturating_mul(2).saturating_sub(1)
+    } else {
+        source_cols
+    };
+    let physical_rows = if has_row_gutter {
+        source_rows.saturating_mul(2).saturating_sub(1)
+    } else {
+        source_rows
+    };
+    let expanded_col_widths = interleave_tracks(&col_widths, &col_gaps, has_col_gutter);
+    let expanded_row_heights = interleave_tracks(&row_heights, &row_gaps, has_row_gutter);
+
+    let mut table_rows = Vec::with_capacity(physical_rows);
+    for (y, row_height) in expanded_row_heights.iter().enumerate() {
+        let mut row_cells = Vec::with_capacity(physical_cols);
+        for x in 0..physical_cols {
+            if let Some(cell) =
+                physical_covering_cell(&cells, x, y, has_col_gutter, has_row_gutter)
+            {
+                let origin_x = physical_index(cell.x, has_col_gutter);
+                let origin_y = physical_index(cell.y, has_row_gutter);
+                if x == origin_x && y == origin_y {
+                    row_cells.push(TableCell {
+                        grid_span: physical_span(cell.colspan, has_col_gutter),
+                        row_span: physical_span(cell.rowspan, has_row_gutter),
+                        h_merge: false,
+                        v_merge: false,
+                        fill: cell.fill.clone(),
+                        borders: cell.borders.clone(),
+                        h_align: cell.h_align,
+                        v_align: cell.v_align,
+                        insets: cell.insets,
+                        paras: cell.paras.clone(),
+                    });
+                } else {
+                    row_cells.push(TableCell {
+                        grid_span: 1,
+                        row_span: 1,
+                        h_merge: x > origin_x,
+                        v_merge: y > origin_y,
+                        fill: None,
+                        borders: CellBorders::default(),
+                        h_align: None,
+                        v_align: None,
+                        insets: CellInsets::default(),
+                        paras: Vec::new(),
+                    });
+                }
             } else {
                 row_cells.push(TableCell {
                     grid_span: 1,
@@ -420,22 +443,108 @@ fn table_shape(order: usize, mut cells: Vec<CapturedTableCell>) -> Option<Ordere
             y_emu: crate::text::emu(min.y),
             w_emu: crate::text::extent_emu(total.x),
             h_emu: crate::text::extent_emu(total.y),
-            cols: col_widths.into_iter().map(crate::text::extent_emu).collect(),
+            cols: expanded_col_widths.into_iter().map(crate::text::extent_emu).collect(),
             rows: table_rows,
         }),
     })
 }
 
-fn covering_cell(
+fn physical_covering_cell(
     cells: &[CapturedTableCell],
     x: usize,
     y: usize,
+    has_col_gutter: bool,
+    has_row_gutter: bool,
 ) -> Option<&CapturedTableCell> {
     cells.iter().find(|cell| {
-        cell.x <= x
-            && x < cell.x + cell.colspan
-            && cell.y <= y
-            && y < cell.y + cell.rowspan
+        let origin_x = physical_index(cell.x, has_col_gutter);
+        let origin_y = physical_index(cell.y, has_row_gutter);
+        origin_x <= x
+            && x < origin_x + physical_span(cell.colspan, has_col_gutter)
+            && origin_y <= y
+            && y < origin_y + physical_span(cell.rowspan, has_row_gutter)
+    })
+}
+
+fn physical_index(index: usize, has_gutter: bool) -> usize {
+    if has_gutter { index.saturating_mul(2) } else { index }
+}
+
+fn physical_span(span: usize, has_gutter: bool) -> usize {
+    let span = span.max(1);
+    if has_gutter { span.saturating_mul(2).saturating_sub(1) } else { span }
+}
+
+fn interleave_tracks(tracks: &[Abs], gaps: &[Abs], has_gutter: bool) -> Vec<Abs> {
+    if !has_gutter {
+        return tracks.to_vec();
+    }
+    let mut expanded = Vec::with_capacity(tracks.len() + gaps.len());
+    for (index, track) in tracks.iter().copied().enumerate() {
+        expanded.push(track);
+        if let Some(gap) = gaps.get(index) {
+            expanded.push((*gap).max(Abs::pt(0.1)));
+        }
+    }
+    expanded
+}
+
+fn track_gaps(cells: &[CapturedTableCell], count: usize, columns: bool) -> Vec<Abs> {
+    (0..count.saturating_sub(1))
+        .map(|boundary| {
+            let mut samples = Vec::new();
+            for left in cells {
+                let left_end =
+                    if columns { left.x + left.colspan } else { left.y + left.rowspan };
+                if left_end != boundary + 1 {
+                    continue;
+                }
+                for right in cells {
+                    let right_start = if columns { right.x } else { right.y };
+                    if right_start != boundary + 1
+                        || !orthogonal_ranges_overlap(left, right, columns)
+                    {
+                        continue;
+                    }
+                    let gap = if columns {
+                        right.rect.min.x - left.rect.max.x
+                    } else {
+                        right.rect.min.y - left.rect.max.y
+                    };
+                    if gap > Abs::zero() {
+                        samples.push(gap);
+                    }
+                }
+            }
+            median_abs(samples).unwrap_or_default()
+        })
+        .collect()
+}
+
+fn orthogonal_ranges_overlap(
+    first: &CapturedTableCell,
+    second: &CapturedTableCell,
+    columns: bool,
+) -> bool {
+    let (first_start, first_end, second_start, second_end) = if columns {
+        (first.y, first.y + first.rowspan, second.y, second.y + second.rowspan)
+    } else {
+        (first.x, first.x + first.colspan, second.x, second.x + second.colspan)
+    };
+    first_start < second_end && second_start < first_end
+}
+
+fn median_abs(mut values: Vec<Abs>) -> Option<Abs> {
+    values.retain(|value| value.to_pt().is_finite() && *value > Abs::zero());
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|left, right| left.to_raw().total_cmp(&right.to_raw()));
+    let middle = values.len() / 2;
+    Some(if values.len() % 2 == 0 {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
     })
 }
 
