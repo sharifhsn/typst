@@ -28,7 +28,7 @@ use typst_library::foundations::{Content, Context, Depth, Packed, Resolve, Style
 use typst_library::layout::Abs;
 use typst_library::model::{
     EnumElem, EnumItem, ListElem, NamedNumeralSystem, Numbering, NumberingPattern,
-    TermsElem,
+    ParElem, TermsElem,
 };
 
 use crate::ctx::DocxCtx;
@@ -65,12 +65,16 @@ pub fn list(
     // outermost list, +1 per enclosing list item body.
     let Depth(depth) = styles.get(ListElem::depth);
     let ilvl = depth.min(8) as u8;
+    let paragraph_spacing = crate::props::abs_to_twip(styles.resolve(ParElem::spacing));
 
     let num_id = ctx.register_list(bullet_spec());
 
     let mut out = Vec::new();
     for item in &elem.children {
-        emit_item(ctx, &item.body, styles, num_id, ilvl, &mut out)?;
+        emit_item(ctx, &item.body, styles, num_id, ilvl, paragraph_spacing, &mut out)?;
+    }
+    if ilvl == 0 {
+        apply_list_boundary_spacing(&mut out, paragraph_spacing);
     }
     Ok(out)
 }
@@ -109,6 +113,7 @@ pub fn enum_(
     // Nesting depth: the number of parent enum numbers folded in so far.
     let parents = styles.get_cloned(EnumElem::parents);
     let ilvl = parents.len().min(8) as u8;
+    let paragraph_spacing = crate::props::abs_to_twip(styles.resolve(ParElem::spacing));
 
     let numbering = elem.numbering.get_ref(styles);
     let reversed = elem.reversed.get(styles);
@@ -129,7 +134,7 @@ pub fn enum_(
         native_enum_levels(numbering, full)
     };
     let Some(mut spec_levels) = levels else {
-        return enum_static_fallback(elem, styles, ctx);
+        return enum_static_fallback(elem, styles, ctx, paragraph_spacing, ilvl);
     };
 
     // The starting value of this enumeration.
@@ -156,8 +161,11 @@ pub fn enum_(
             .body
             .clone()
             .set(EnumElem::parents, core::iter::once(number).collect());
-        emit_item(ctx, &item_body, styles, num_id, ilvl, &mut out)?;
+        emit_item(ctx, &item_body, styles, num_id, ilvl, paragraph_spacing, &mut out)?;
         number = number.saturating_add(1);
+    }
+    if ilvl == 0 {
+        apply_list_boundary_spacing(&mut out, paragraph_spacing);
     }
     Ok(out)
 }
@@ -253,9 +261,10 @@ fn enum_static_fallback(
     elem: &Packed<EnumElem>,
     styles: StyleChain,
     ctx: &mut DocxCtx,
+    paragraph_spacing: i32,
+    ilvl: u8,
 ) -> SourceResult<Vec<Block>> {
     let parents = styles.get_cloned(EnumElem::parents);
-    let ilvl = parents.len().min(8) as u8;
     let ind_left = LEVEL_INDENT_TWIPS * (ilvl as i32 + 1);
 
     let numbering = elem.numbering.get_ref(styles).clone();
@@ -288,10 +297,21 @@ fn enum_static_fallback(
             .body
             .clone()
             .set(EnumElem::parents, core::iter::once(number).collect());
-        emit_static_marker_item(ctx, &item_body, styles, marker, ind, &mut out)?;
+        emit_static_marker_item(
+            ctx,
+            &item_body,
+            styles,
+            marker,
+            ind,
+            paragraph_spacing,
+            &mut out,
+        )?;
 
         number =
             if reversed { number.saturating_sub(1) } else { number.saturating_add(1) };
+    }
+    if ilvl == 0 {
+        apply_list_boundary_spacing(&mut out, paragraph_spacing);
     }
     Ok(out)
 }
@@ -411,6 +431,7 @@ fn emit_item(
     styles: StyleChain,
     num_id: u32,
     ilvl: u8,
+    paragraph_spacing: i32,
     out: &mut Vec<Block>,
 ) -> SourceResult<()> {
     let review_origin = ctx
@@ -434,6 +455,7 @@ fn emit_item(
                     para.props.style = Some(LIST_PARAGRAPH.into());
                     para.props.num = Some((num_id, ilvl));
                     para.props.review_origin = Some(review_origin);
+                    strip_inherited_item_spacing(&mut para, paragraph_spacing);
                     numbered = true;
                 } else if para.props.num.is_none() {
                     // A continuation paragraph in the same item: keep it inside
@@ -486,6 +508,7 @@ fn emit_static_marker_item(
     styles: StyleChain,
     marker: EcoString,
     ind: Indent,
+    paragraph_spacing: i32,
     out: &mut Vec<Block>,
 ) -> SourceResult<()> {
     let blocks = ctx.blocks(body, styles)?;
@@ -510,6 +533,7 @@ fn emit_static_marker_item(
                 if para.props.ind.is_none() {
                     para.props.ind = Some(ind.clone());
                 }
+                strip_inherited_item_spacing(&mut para, paragraph_spacing);
                 out.push(Block::Para(para));
                 emitted_marker = true;
             }
@@ -525,6 +549,48 @@ fn emit_static_marker_item(
         }));
     }
     Ok(())
+}
+
+/// A list owns the vertical rhythm between its item frames. A paragraph
+/// realized inside the first item can otherwise inherit `par.spacing` and put
+/// that full gap both before and after only that marker, making nested lists
+/// jump while their siblings remain tight. Remove only values equal to the
+/// inherited paragraph spacing; explicit line-height and other spacing survive.
+fn strip_inherited_item_spacing(para: &mut Para, paragraph_spacing: i32) {
+    let Some(spacing) = &mut para.props.spacing else { return };
+    if spacing.before == Some(paragraph_spacing) {
+        spacing.before = None;
+    }
+    if spacing.after == Some(paragraph_spacing) {
+        spacing.after = None;
+    }
+    if spacing.before.is_none()
+        && spacing.after.is_none()
+        && spacing.line.is_none()
+        && !spacing.line_rule_auto
+        && !spacing.line_rule_at_least
+    {
+        para.props.spacing = None;
+    }
+}
+
+/// Typst still separates a top-level list block from the following block with
+/// normal paragraph spacing. Put that gap on the final list paragraph, where
+/// Word's adjacent-spacing collapse can combine it with whatever follows.
+/// Nested lists do not receive this boundary gap; their parent list owns the
+/// surrounding item rhythm.
+fn apply_list_boundary_spacing(blocks: &mut [Block], paragraph_spacing: i32) {
+    if paragraph_spacing == 0 {
+        return;
+    }
+    let Some(para) = blocks.iter_mut().rev().find_map(|block| match block {
+        Block::Para(para) => Some(para),
+        _ => None,
+    }) else {
+        return;
+    };
+    let spacing = para.props.spacing.get_or_insert_with(Default::default);
+    spacing.after = Some(spacing.after.unwrap_or(0).max(paragraph_spacing));
 }
 
 /// Applies a left indent to every paragraph in a block list (used to push a

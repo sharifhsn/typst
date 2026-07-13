@@ -2030,3 +2030,27 @@ mixed-font fixture, LibreOffice moves the rich centered header from y≈57 to
 y≈35 against Typst y≈36, and the footer from y≈684 to y≈706 against Typst
 y≈705, without clipping or moving the body/table. A two-line fixture remains at
 504 twips. All 207 DOCX integration tests pass and clippy remains clean.
+
+## 48. List item spacing belongs to the list, not its first paragraph
+
+Typst's list layouter owns the vertical gutter between item frames. Re-realizing
+an item body can nevertheless put the surrounding `par.spacing` on its first
+paragraph; carrying that directly into Word placed the full gap both before and
+after only the first marker. Nested bullets consequently jumped away from their
+parent while later siblings stayed tight. Marker-bearing native-numbering and
+static-marker paragraphs now discard only before/after values equal to the
+inherited paragraph spacing, retaining explicit line-height and other paragraph
+properties. A top-level list keeps the normal paragraph gap once, on its final
+paragraph, so Word can collapse it with the following block. Nested lists do not
+gain that outer boundary gap.
+
+The package regression covers a nested bullet group followed by an enum: the
+first/nested/first-enum paragraphs carry no leaked before/after spacing, while
+the final paragraph of each top-level group carries the 264-twip default
+boundary. In the 2026-07-13 LibreOffice fixture, bullet baselines improve from
+roughly 115/169/196 pixels to 89/115/141 against Typst 83/113/143, with native
+`w:numPr` and level indents unchanged. LibreOffice renders the following
+list-to-list gap about 11 pixels larger than Typst; a package-only 160--180-twip
+consumer calibration scores closer, but the exporter retains the authored
+264-twip paragraph boundary instead of hard-coding a LibreOffice-only fudge.
+All 208 DOCX integration tests pass and clippy remains clean.

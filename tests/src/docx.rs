@@ -1849,6 +1849,36 @@ fn nested_bullets_indent_by_level() {
 }
 
 #[test]
+fn list_spacing_stays_on_group_boundaries() {
+    let p = parts(
+        "- First item\n  - Nested item\n- Second item\n\n+ Ordered one\n+ Ordered two",
+    );
+    let doc = &p["word/document.xml"];
+    let para = |text: &str| {
+        doc.split("</w:p>")
+            .find(|para| para.contains(text))
+            .unwrap_or_else(|| panic!("missing paragraph containing {text}"))
+    };
+
+    for text in ["First item", "Nested item", "Ordered one"] {
+        let paragraph = para(text);
+        assert!(
+            !paragraph.contains("w:before=\"") && !paragraph.contains("w:after=\""),
+            "{text} must not inherit full paragraph spacing inside its list"
+        );
+    }
+    assert!(
+        para("Second item").contains("w:after=\"264\""),
+        "the top-level bullet list keeps paragraph spacing at its trailing boundary"
+    );
+    assert!(
+        para("Ordered two").contains("w:after=\"264\""),
+        "the top-level enum keeps paragraph spacing at its trailing boundary"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn ordered_enum_uses_native_word_numbering() {
     let p = parts("+ first\n+ second\n+ third");
     let doc = &p["word/document.xml"];
