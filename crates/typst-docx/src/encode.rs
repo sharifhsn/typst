@@ -68,6 +68,7 @@ const REL_ENDNOTES: &str = ns::rel::ENDNOTES;
 const REL_SETTINGS: &str = ns::rel::SETTINGS;
 const REL_THEME: &str = ns::rel::THEME;
 const REL_FONT_TABLE: &str = ns::rel::FONT_TABLE;
+const REL_FONT: &str = ns::rel::FONT;
 const REL_WEB_SETTINGS: &str = ns::rel::WEB_SETTINGS;
 
 // Content types.
@@ -84,12 +85,37 @@ const CT_HEADER: &str = ns::ct::WORD_HEADER;
 const CT_FOOTER: &str = ns::ct::WORD_FOOTER;
 const CT_THEME: &str = ns::ct::THEME;
 const CT_FONT_TABLE: &str = ns::ct::WORD_FONT_TABLE;
+const CT_OBFUSCATED_FONT: &str = ns::ct::OBFUSCATED_FONT;
 const CT_WEB_SETTINGS: &str = ns::ct::WORD_WEB_SETTINGS;
 
 fn push_font(fonts: &mut Vec<String>, font: &str) {
     if !fonts.iter().any(|existing| existing == font) {
         fonts.push(font.to_string());
     }
+}
+
+fn format_font_key(key: u128) -> String {
+    let hex = format!("{key:032X}");
+    format!(
+        "{{{}-{}-{}-{}-{}}}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32],
+    )
+}
+
+/// ECMA-376 font obfuscation: reverse the GUID's byte order and XOR that
+/// sixteen-byte key against each of the first two sixteen-byte font blocks.
+fn obfuscate_font(data: &[u8], key: u128) -> Vec<u8> {
+    let mut output = data.to_vec();
+    let mut bytes = key.to_be_bytes();
+    bytes.reverse();
+    for (index, value) in output.iter_mut().take(32).enumerate() {
+        *value ^= bytes[index % bytes.len()];
+    }
+    output
 }
 
 /// Serializes a DOCX document into the OPC zip bytes.
@@ -161,11 +187,36 @@ fn docx_impl(
     if document.uses_math {
         push_font(&mut fonts, "Cambria Math");
     }
+    let mut font_rels = Rels::new();
+    let mut embedded_refs = Vec::new();
+    for font in &document.embedded_fonts {
+        let key = typst_utils::hash128(&(
+            font.family.as_str(),
+            font.style,
+            font.data.as_slice(),
+        ));
+        let file = format!("{key:032X}.odttf");
+        let target = format!("fonts/{file}");
+        let relationship_id = font_rels.add(REL_FONT, &target, RelMode::Internal);
+        package.add_media(
+            &format!("word/{target}"),
+            "odttf",
+            CT_OBFUSCATED_FONT,
+            obfuscate_font(&font.data, key),
+        );
+        embedded_refs.push(crate::parts::FontEmbeddingRef {
+            family: font.family.to_string(),
+            style: font.style,
+            relationship_id: relationship_id.to_string(),
+            font_key: format_font_key(key),
+        });
+    }
     package.add_xml(
         "word/fontTable.xml",
         CT_FONT_TABLE,
-        crate::parts::build_font_table(&fonts, pretty),
+        crate::parts::build_font_table(&fonts, &embedded_refs, pretty),
     );
+    write_part_rels(&mut package, "word/fontTable.xml", &font_rels)?;
     doc_rels.add(REL_FONT_TABLE, "fontTable.xml", RelMode::Internal);
 
     // -- word/webSettings.xml --

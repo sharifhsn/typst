@@ -3275,6 +3275,7 @@ dependencies = [
  "roxmltree 0.21.1",
  "rustc-hash",
  "time",
+ "ttf-parser",
  "typst-export-common",
  "typst-layout",
  "typst-library",

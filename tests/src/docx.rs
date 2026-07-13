@@ -3889,10 +3889,10 @@ fn fidelity_report_enrolls_referenced_fonts() {
             fonts.iter().any(|font| {
                 font.family == family
                     && font.available_at_export
-                    && !font.embedded
+                    && font.embedded
                     && font.occurrences > 0
             }),
-            "{family} must be inventoried as an available, non-embedded font: {fonts:?}"
+            "{family} must be inventoried as an available, embedded font: {fonts:?}"
         );
     }
 
@@ -3900,9 +3900,57 @@ fn fidelity_report_enrolls_referenced_fonts() {
     let manifest = &p["customXml/typstFidelity.xml"];
     assert!(manifest.contains("<typst:fonts>"));
     assert!(manifest.contains("family=\"dejavu sans mono\""));
-    assert!(manifest.contains("embedded=\"false\""));
+    assert!(manifest.contains("embedded=\"true\""));
     assert!(manifest.contains("referencedFonts="));
     assert!(p["word/fontTable.xml"].contains("w:name=\"dejavu sans mono\""));
+}
+
+#[test]
+fn license_permitted_fonts_are_obfuscated_and_embedded() {
+    let package = package_bytes_with_files(
+        "#set text(font: \"Libertinus Serif\")\nPortable embedded text.",
+        &[],
+    );
+    let font_table = std::str::from_utf8(&package["word/fontTable.xml"]).unwrap();
+    let rels = std::str::from_utf8(&package["word/_rels/fontTable.xml.rels"]).unwrap();
+    let content_types = std::str::from_utf8(&package["[Content_Types].xml"]).unwrap();
+    assert!(font_table.contains("<w:embedRegular"));
+    assert!(font_table.contains("w:fontKey=\"{"));
+    assert!(rels.contains("relationships/font"));
+    assert!(rels.contains("Target=\"fonts/"));
+    assert!(
+        content_types
+            .contains("application/vnd.openxmlformats-officedocument.obfuscatedFont")
+    );
+
+    let (name, encoded) = package
+        .iter()
+        .find(|(name, _)| name.starts_with("word/fonts/") && name.ends_with(".odttf"))
+        .expect("embedded font part");
+    assert!(encoded.len() > 32);
+    assert!(
+        !matches!(&encoded[..4], b"OTTO" | b"\0\x01\0\0"),
+        "the packaged font must be obfuscated"
+    );
+    let stem = name
+        .strip_prefix("word/fonts/")
+        .and_then(|name| name.strip_suffix(".odttf"))
+        .unwrap();
+    let key = u128::from_str_radix(stem, 16).unwrap();
+    let mut decoded = encoded.clone();
+    let mut key_bytes = key.to_be_bytes();
+    key_bytes.reverse();
+    for (index, value) in decoded.iter_mut().take(32).enumerate() {
+        *value ^= key_bytes[index % key_bytes.len()];
+    }
+    assert!(
+        matches!(&decoded[..4], b"OTTO" | b"\0\x01\0\0"),
+        "reversing the ECMA-376 XOR must recover an OpenType/TrueType program"
+    );
+    assert_all_wellformed(&text_parts(&compile_docx(
+        "#set text(font: \"Libertinus Serif\")\nPortable embedded text.",
+        &[],
+    )));
 }
 
 #[test]

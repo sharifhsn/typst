@@ -12,14 +12,18 @@ use typst_library::introspection::{Introspector, Location, Locator, PagedPositio
 use typst_library::layout::Abs;
 use typst_library::model::{DocumentInfo, HeadingElem};
 use typst_library::routines::{Arenas, RealizationKind};
+use typst_library::text::{
+    FontBook, FontInfo, FontStretch, FontStyle, FontVariant, FontWeight,
+};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, BookmarkTable, DocxDocument, Field, FieldCacheStatus as DomFieldCacheStatus,
-    FieldDisplay, FieldMode, Footnote, HdrFtrPart, HdrFtrRef, HeadingStyle,
-    HeadingStyleSample, LineNumbering, MediaPart, NumberingTable, Para, ParaChild,
-    ParaProps, PgNumType, ReviewCandidate, ReviewCandidateKind, ReviewOrigin, Run,
-    RunProps, SectPr, SectType, Spacing, TextDefaults, TocFigure, TocHeading, VAlign,
+    Block, BookmarkTable, DocxDocument, EmbeddedFontProgram, EmbeddedFontStyle, Field,
+    FieldCacheStatus as DomFieldCacheStatus, FieldDisplay, FieldMode, Footnote,
+    HdrFtrPart, HdrFtrRef, HeadingStyle, HeadingStyleSample, LineNumbering, MediaPart,
+    NumberingTable, Para, ParaChild, ParaProps, PgNumType, ReviewCandidate,
+    ReviewCandidateKind, ReviewOrigin, Run, RunProps, SectPr, SectType, Spacing,
+    TextDefaults, TocFigure, TocHeading, VAlign,
 };
 use crate::introspect::DocxIntrospector;
 use crate::package::Rels;
@@ -596,6 +600,13 @@ fn docx_document_impl(
         &footer_parts,
         &footnotes,
     );
+    let embedded_fonts =
+        collect_embeddable_fonts(fidelity_report.fonts(), engine.world.book(), |index| {
+            engine.world.font(index)
+        });
+    for font in &embedded_fonts {
+        fidelity_report.mark_font_embedded(&font.family);
+    }
     record_drawing_inventory(
         &mut fidelity_report,
         export_snapshot.logical_id(),
@@ -612,6 +623,7 @@ fn docx_document_impl(
         footnotes,
         numbering,
         media,
+        embedded_fonts,
         doc_rels,
         footnote_rels,
         max_heading_level,
@@ -1009,6 +1021,86 @@ fn record_font(
     family: &str,
 ) {
     report.record_font(snapshot_id, family, book.contains_family(&family.to_lowercase()));
+}
+
+fn collect_embeddable_fonts(
+    facts: &[crate::report::FontFact],
+    book: &FontBook,
+    mut load: impl FnMut(usize) -> Option<typst_library::text::Font>,
+) -> Vec<EmbeddedFontProgram> {
+    let targets = [
+        (
+            EmbeddedFontStyle::Regular,
+            FontVariant::new(FontStyle::Normal, FontWeight::REGULAR, FontStretch::NORMAL),
+        ),
+        (
+            EmbeddedFontStyle::Bold,
+            FontVariant::new(FontStyle::Normal, FontWeight::BOLD, FontStretch::NORMAL),
+        ),
+        (
+            EmbeddedFontStyle::Italic,
+            FontVariant::new(FontStyle::Italic, FontWeight::REGULAR, FontStretch::NORMAL),
+        ),
+        (
+            EmbeddedFontStyle::BoldItalic,
+            FontVariant::new(FontStyle::Italic, FontWeight::BOLD, FontStretch::NORMAL),
+        ),
+    ];
+    let mut programs = Vec::new();
+    for fact in facts.iter().filter(|fact| fact.available_at_export) {
+        let family = fact.family.to_lowercase();
+        for (style, target) in targets {
+            let Some(index) = book.select(&family, target) else { continue };
+            let Some(info) = book.info(index) else { continue };
+            if embedded_font_style(info) != style {
+                // Do not put a synthetic fallback face into a distinct Word
+                // style slot. Word can synthesize that style from the regular
+                // embedded face more accurately than a mislabeled program.
+                continue;
+            }
+            let Some(font) = load(index) else { continue };
+            let data = font.data().as_slice();
+            if data.len() < 32 || ttf_parser::fonts_in_collection(data).is_some() {
+                // Word's obfuscated font part is a single TrueType/OpenType
+                // program. Collections need face extraction, which we do not
+                // yet perform, so retain the declared portable reference.
+                continue;
+            }
+            let Ok(face) = ttf_parser::Face::parse(data, font.index()) else { continue };
+            let Some(os2) = face.tables().os2 else { continue };
+            if !os2.is_outline_embedding_allowed()
+                || !matches!(
+                    os2.permissions(),
+                    Some(
+                        ttf_parser::Permissions::Installable
+                            | ttf_parser::Permissions::Editable
+                    )
+                )
+            {
+                // Restricted fonts must never be embedded. Preview-and-print
+                // rights are also skipped because the DOCX exporter promises
+                // an editable document rather than a read-only artifact.
+                continue;
+            }
+            programs.push(EmbeddedFontProgram {
+                family: fact.family.clone(),
+                style,
+                data: data.to_vec(),
+            });
+        }
+    }
+    programs
+}
+
+fn embedded_font_style(info: &FontInfo) -> EmbeddedFontStyle {
+    let bold = info.variant.weight.to_number() >= FontWeight::SEMIBOLD.to_number();
+    let italic = info.variant.style != FontStyle::Normal;
+    match (bold, italic) {
+        (false, false) => EmbeddedFontStyle::Regular,
+        (true, false) => EmbeddedFontStyle::Bold,
+        (false, true) => EmbeddedFontStyle::Italic,
+        (true, true) => EmbeddedFontStyle::BoldItalic,
+    }
 }
 
 fn record_drawing_inventory(

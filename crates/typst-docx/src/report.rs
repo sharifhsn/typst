@@ -366,7 +366,8 @@ pub struct FontFact {
     /// A missing family can still be a valid portable Word reference, but its
     /// first-open metrics and glyph coverage are consumer-dependent.
     pub available_at_export: bool,
-    /// DOCX currently references fonts but does not embed font programs.
+    /// Whether at least one license-permitted program for this family is
+    /// embedded in the DOCX package.
     pub embedded: bool,
     pub occurrences: usize,
 }
@@ -592,6 +593,14 @@ impl FidelityReport {
             embedded: false,
             occurrences: 1,
         });
+    }
+
+    pub(crate) fn mark_font_embedded(&mut self, family: &str) {
+        for font in &mut self.fonts {
+            if font.family.eq_ignore_ascii_case(family) {
+                font.embedded = true;
+            }
+        }
     }
 
     pub(crate) fn record_drawing(

@@ -58,6 +58,8 @@ pub mod rel {
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
     pub const FONT_TABLE: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable";
+    pub const FONT: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font";
     pub const WEB_SETTINGS: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/webSettings";
     pub const HEADER: &str =
@@ -116,6 +118,8 @@ pub mod ct {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml";
     pub const WORD_FONT_TABLE: &str =
         "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml";
+    pub const OBFUSCATED_FONT: &str =
+        "application/vnd.openxmlformats-officedocument.obfuscatedFont";
     pub const WORD_WEB_SETTINGS: &str =
         "application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml";
 

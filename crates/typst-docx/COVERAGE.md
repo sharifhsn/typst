@@ -1936,3 +1936,27 @@ trip. LibreOffice retains but does not visually apply `w:vAlign`, so its score
 changes only from `0.630572` to `0.630916`. Microsoft Word opens without repair,
 applies the native vertical centering on the cover, and reports 12 pages. The
 remaining consumer-specific pagination drift stays classified as degraded.
+
+## 43. License-permitted fonts are embedded for portable text metrics
+
+DOCX previously declared referenced font families in `fontTable.xml` but never
+stored their programs. A consumer without the Typst font substituted another
+family, changing glyph widths and line breaks even when the exporter preserved
+the exact paged geometry. The exporter now embeds the regular, bold, italic,
+and bold-italic faces it can resolve as deterministic obfuscated OpenType font
+parts, relates them from `fontTable.xml`, and records the family as embedded in
+the fidelity report. It honors the font's OpenType `OS/2.fsType`: restricted,
+preview-and-print-only, bitmap-only, and collection faces remain portable font
+references rather than being embedded. Skipping preview-and-print-only programs
+preserves the exporter's editable-document contract.
+
+A package regression checks the `w:embedRegular` relationship, `w:fontKey`,
+obfuscated-font content type, non-plain stored bytes, and the reversible
+ECMA-376 XOR. All 203 DOCX tests pass. In a dated 2026-07-13 three-column
+fixture, LibreOffice previously substituted Liberation Serif and wrapped
+`Cell A`/`Cell B` inside a 765-twip nested table. The embedded export uses
+Libertinus Serif and keeps both cells on one line at the same authored width;
+OMML, highlight, external/internal links, bookmark, and outer column geometry
+remain native. The consumer still makes those automatic rows taller than
+Typst, which is tracked as a separate row-metrics fidelity defect rather than
+hidden by widening the table.

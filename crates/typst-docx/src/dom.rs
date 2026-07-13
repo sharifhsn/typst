@@ -62,6 +62,9 @@ pub struct DocxDocument {
     pub(crate) footnotes: Vec<Footnote>,
     pub(crate) numbering: NumberingTable,
     pub(crate) media: Vec<MediaPart>,
+    /// License-permitted font programs needed by editable text in this export.
+    /// They are obfuscated into `word/fonts/*.odttf` during packaging.
+    pub(crate) embedded_fonts: Vec<EmbeddedFontProgram>,
     pub(crate) doc_rels: Rels,
     /// Relationships created while lowering footnote bodies — they belong in
     /// `word/_rels/footnotes.xml.rels`, not the document's, or Word rejects the
@@ -113,6 +116,33 @@ pub struct DocxDocument {
     /// target-specific lowering.
     pub(crate) export_snapshot: ExportSnapshot,
     pub(crate) review_candidates: Vec<ReviewCandidate>,
+}
+
+/// One of WordprocessingML's four embedded family style slots.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) enum EmbeddedFontStyle {
+    Regular,
+    Bold,
+    Italic,
+    BoldItalic,
+}
+
+impl EmbeddedFontStyle {
+    pub(crate) fn element(self) -> &'static str {
+        match self {
+            Self::Regular => "w:embedRegular",
+            Self::Bold => "w:embedBold",
+            Self::Italic => "w:embedItalic",
+            Self::BoldItalic => "w:embedBoldItalic",
+        }
+    }
+}
+
+/// Raw OpenType/TrueType program selected for one embedded family style.
+pub(crate) struct EmbeddedFontProgram {
+    pub(crate) family: EcoString,
+    pub(crate) style: EmbeddedFontStyle,
+    pub(crate) data: Vec<u8>,
 }
 
 impl DocxDocument {

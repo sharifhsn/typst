@@ -11,6 +11,14 @@ use typst_ooxml_core::ns;
 
 const A_NS: &str = ns::A;
 const W_NS: &str = ns::W;
+const R_NS: &str = ns::R;
+
+pub(crate) struct FontEmbeddingRef {
+    pub(crate) family: String,
+    pub(crate) style: crate::dom::EmbeddedFontStyle,
+    pub(crate) relationship_id: String,
+    pub(crate) font_key: String,
+}
 
 /// The body/heading font for the theme, falling back to Word's own default.
 fn theme_font(defaults: &TextDefaults) -> &str {
@@ -32,9 +40,13 @@ pub fn build_theme(defaults: &TextDefaults, _pretty: bool) -> String {
 /// Builds `word/fontTable.xml`: the list of fonts the document references, with
 /// the generic-family / pitch / charset metadata Word uses to drive substitution
 /// when a font is missing on the opening machine.
-pub fn build_font_table(fonts: &[String], _pretty: bool) -> String {
+pub fn build_font_table(
+    fonts: &[String],
+    embedded: &[FontEmbeddingRef],
+    _pretty: bool,
+) -> String {
     let mut s = String::from(crate::xml::XML_DECL);
-    s.push_str(&format!("<w:fonts xmlns:w=\"{W_NS}\">"));
+    s.push_str(&format!("<w:fonts xmlns:w=\"{W_NS}\" xmlns:r=\"{R_NS}\">"));
     for font in fonts {
         let f = escape_attr(font);
         // A serif/roman default is a safe generic family + variable pitch; Word
@@ -42,8 +54,20 @@ pub fn build_font_table(fonts: &[String], _pretty: bool) -> String {
         // enough to avoid a missing-font prompt.
         s.push_str(&format!(
             "<w:font w:name=\"{f}\"><w:charset w:val=\"00\"/><w:family w:val=\"auto\"/>\
-             <w:pitch w:val=\"variable\"/></w:font>"
+             <w:pitch w:val=\"variable\"/>"
         ));
+        for reference in embedded
+            .iter()
+            .filter(|reference| reference.family.eq_ignore_ascii_case(font))
+        {
+            s.push_str(&format!(
+                "<{} r:id=\"{}\" w:fontKey=\"{}\"/>",
+                reference.style.element(),
+                escape_attr(&reference.relationship_id),
+                escape_attr(&reference.font_key),
+            ));
+        }
+        s.push_str("</w:font>");
     }
     s.push_str("</w:fonts>");
     s
