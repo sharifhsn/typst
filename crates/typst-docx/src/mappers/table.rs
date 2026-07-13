@@ -1039,11 +1039,17 @@ fn row_cant_split(grid: &CellGrid, y: usize) -> bool {
     any
 }
 
-/// Appends an empty paragraph if `blocks` is empty or does not end in one
-/// (Word requires every `w:tc` to end in a `w:p`).
+/// Appends an empty paragraph if the last serialized block is not one (Word
+/// requires every `w:tc` to end in a `w:p`). Internal `Block::Tag` markers emit
+/// no XML, so trailing tags after a real paragraph must not manufacture a
+/// second visible line in the cell.
 fn ensure_ends_in_para(blocks: &mut Vec<Block>) {
-    let ends_in_para = matches!(blocks.last(), Some(Block::Para(_)));
-    if blocks.is_empty() || !ends_in_para {
+    let ends_in_para = blocks
+        .iter()
+        .rev()
+        .find(|block| !matches!(block, Block::Tag(_)))
+        .is_some_and(|block| matches!(block, Block::Para(_)));
+    if !ends_in_para {
         blocks.push(empty_para_block());
     }
 }

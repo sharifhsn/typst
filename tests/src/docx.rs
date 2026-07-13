@@ -3784,6 +3784,27 @@ fn footnote_has_in_text_reference_and_body_mark() {
 }
 
 #[test]
+fn footnote_only_table_cell_does_not_gain_an_empty_paragraph() {
+    let p = parts("#table(columns: 1, [#footnote[Cell note]])");
+    let document = roxmltree::Document::parse(&p["word/document.xml"]).unwrap();
+    let cell = document
+        .descendants()
+        .find(|node| node.tag_name().name() == "tc")
+        .expect("table cell");
+    let paragraphs = cell
+        .descendants()
+        .filter(|node| node.tag_name().name() == "p")
+        .count();
+    assert_eq!(paragraphs, 1, "footnote mark should stay on one cell line");
+    assert_eq!(
+        cell.descendants()
+            .filter(|node| node.tag_name().name() == "footnoteReference")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn figure_emits_seq_field() {
     let p = parts(
         "#figure(rect(width: 20pt, height: 20pt), caption: [A box]) <f>\n\nSee @f.",

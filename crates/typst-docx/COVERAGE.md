@@ -1977,3 +1977,21 @@ clipping, or disturbing outer columns and rich content. Typst remains roughly
 74 pixels because Writer's editable text line box is taller than Typst's glyph
 frame; that remaining consumer-metric difference is not concealed with an
 exact/clipping row height.
+
+## 45. Trailing semantic tags do not create a second table-cell line
+
+Typst introspection tags survive lowering as internal `Block::Tag` markers but
+serialize to no WordprocessingML. The table terminator previously looked only
+at the final IR block, so a real paragraph followed by a tag gained another
+empty `<w:p>` merely to satisfy Word's requirement that every cell end in a
+paragraph. A footnote-only cell therefore occupied two editable line boxes.
+The terminator now ignores non-serializing tags when locating the last emitted
+block. A package regression verifies one native footnote reference in exactly
+one cell paragraph.
+
+In the 2026-07-13 mixed-font stress fixture, LibreOffice reduces the table from
+roughly 173 to 142 pixels while preserving the native footnote and expandable
+rows. The first row still wraps against Typst's single-line layout. Temporary
+50-twip and zero-twip horizontal-margin probes showed that only removing all
+padding stopped both wraps, at the cost of text touching the cell border, so no
+consumer-specific margin fudge was retained.
