@@ -267,9 +267,10 @@ mod tests {
 
         assert_eq!(angle_60k, 30 * 60_000);
         assert_eq!(stops[0].pos_100k, 0);
-        assert_eq!(stops[1].pos_100k, 100_000);
+        assert_eq!(stops.last().unwrap().pos_100k, 100_000);
         assert_ne!(stops[0].color, raw);
         assert_eq!(stops[0].color, srgb_bytes(&oklab));
+        assert!(stops.len() > 2, "Oklab interpolation needs sampled sRGB stops");
     }
 
     #[test]

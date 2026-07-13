@@ -51,10 +51,11 @@ The exporter also has:
 
 One Typst page maps to one slide. Native coverage includes editable text runs,
 external and slide links, common vector shapes, solid/linear-gradient slide
-backgrounds, PNG/JPEG/GIF, native SVG plus PNG fallback, conservative editable
-tables, eligible OMML math with a DrawingML fallback, notes, slide numbers, and
-inferred title/body placeholders. Unsupported visual regions can become positioned
-pictures while the rest of the slide remains editable.
+backgrounds (including adaptive native stops that preserve Typst's perceptual
+interpolation in sRGB Office consumers), PNG/JPEG/GIF, native SVG plus PNG fallback,
+conservative editable tables, eligible OMML math with a DrawingML fallback, notes,
+slide numbers, and inferred title/body placeholders. Unsupported visual regions can
+become positioned pictures while the rest of the slide remains editable.
 
 ### Pandoc
 

@@ -48,8 +48,10 @@ an error.
 - **Vector shapes** — `#rect`, `#circle`/`#ellipse`, `#line`, `#curve`,
   `#polygon` become `prstGeom`/`custGeom` shapes with solid, **linear-gradient**,
   and **translucent** (alpha) fills, and native stroke width / dash / cap.
+  Perceptual Typst gradients remain editable and use adaptively sampled native
+  stops so Office's sRGB interpolation preserves the authored colors.
 - **Slide backgrounds** — a page `fill:` of a solid color or a linear gradient
-  becomes the slide's `p:bg`.
+  becomes the slide's `p:bg`, with the same interpolation-preserving stops.
 - **Images** — PNG/JPEG/GIF embedded verbatim; media is de-duplicated across
   slides by content hash.
 - **SVG images** — embedded as native SVG with a PNG compatibility fallback.

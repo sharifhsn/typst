@@ -10,7 +10,8 @@ use crate::xml::XmlWriter;
 use typst_export_common::raster;
 use typst_library::layout::{Abs, Frame, Point, Ratio, Size, Transform};
 use typst_library::visualize::{
-    Color, Curve, CurveItem, FixedStroke, Geometry, Gradient, LineCap, Paint, Tiling,
+    Color, Curve, CurveItem, FixedStroke, Geometry, Gradient,
+    GradientStop as TypstGradientStop, LineCap, Paint, Tiling,
 };
 
 const A14_USE_LOCAL_DPI_EXT_URI: &str = "{28A0092B-C50C-407E-A947-70E740481C1C}";
@@ -147,7 +148,7 @@ pub fn gradient_fill(gradient: &Gradient, alpha: AlphaMode) -> Option<FillSpec> 
                 (linear.angle.to_deg().rem_euclid(360.0) * 60_000.0).round() as i32;
             Some(FillSpec::LinearGradient {
                 angle_60k,
-                stops: gradient_stops(&linear.stops, alpha),
+                stops: gradient_stops(gradient, &linear.stops, alpha),
             })
         }
         Gradient::Radial(_) | Gradient::Conic(_) => None,
@@ -190,14 +191,41 @@ fn tile_scale_100k(target: Abs, pixels: u32) -> i32 {
     ((target.to_pt() / natural_pt) * 100_000.0).round() as i32
 }
 
-fn gradient_stops(stops: &[(Color, Ratio)], alpha: AlphaMode) -> Vec<GradientStop> {
-    stops
-        .iter()
-        .map(|(color, pos)| GradientStop {
-            pos_100k: ratio_100k(*pos),
-            color: srgb_rgba(color, alpha),
-        })
-        .collect()
+fn gradient_stops(
+    gradient: &Gradient,
+    stops: &[(Color, Ratio)],
+    alpha: AlphaMode,
+) -> Vec<GradientStop> {
+    let Some((first_color, first_pos)) = stops.first() else {
+        return vec![];
+    };
+
+    let mut lowered = vec![GradientStop {
+        pos_100k: ratio_100k(*first_pos),
+        color: srgb_rgba(first_color, alpha),
+    }];
+
+    for pair in stops.windows(2) {
+        // Office interpolates native stops in sRGB. Add only the samples needed
+        // to approximate Typst's authored interpolation space while retaining an
+        // editable DrawingML gradient rather than flattening it to a picture.
+        let first = TypstGradientStop::new(pair[0].0.clone(), pair[0].1);
+        let second = TypstGradientStop::new(pair[1].0.clone(), pair[1].1);
+        lowered.extend(
+            gradient
+                .generate_intermediate_stops_for_rgb_interpolation(&first, &second)
+                .map(|(color, pos)| GradientStop {
+                    pos_100k: ratio_100k(pos),
+                    color: srgb_rgba(&color, alpha),
+                }),
+        );
+        lowered.push(GradientStop {
+            pos_100k: ratio_100k(pair[1].1),
+            color: srgb_rgba(&pair[1].0, alpha),
+        });
+    }
+
+    lowered
 }
 
 fn ratio_100k(ratio: Ratio) -> i32 {
