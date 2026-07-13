@@ -106,8 +106,9 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   bounds, validated at 90, -90, and 45 degrees in LibreOffice; broader
   angle/font/consumer coverage remains a release gate. External and same-deck
   hyperlinks on text, vector shapes, and pictures retain full-object hit areas.
-- Math fallback quality varies by consumer, especially in LibreOffice and older
-  Office versions.
+- LibreOffice and older Office versions still render math through the compact
+  Unicode fallback rather than native stacked OMML; authored sizing and readable
+  scripts/limits are preserved, but stacked fractions and radicals are not.
 - Page filtering does not remap every slide-jump link.
 - The 2026-07-13 LibreOffice smoke export opened without repair and preserved editable
   content, but visibly wrapped table/list text differently, overlapped a list with a
@@ -124,8 +125,8 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 ## Validation completed on the combined branch
 
-- DOCX integration: 195 tests passed.
-- PPTX integration: 41 tests passed.
+- DOCX integration: 211 tests passed.
+- PPTX integration: 61 tests passed.
 - Pandoc integration: 24 tests passed.
 - DOCX review round trip: 22 tests passed.
 - OOXML math conversion: 27 tests passed.
