@@ -128,32 +128,86 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 - DOCX integration: 211 tests passed.
 - PPTX integration: 62 tests passed.
-- Pandoc integration: 24 tests passed.
 - DOCX review round trip: 22 tests passed.
 - OOXML math conversion: 27 tests passed.
-- Office exporter unit/doc suites: 71 tests passed.
-- Strict Clippy across CLI and all Office/Pandoc crates: passed with warnings denied.
+- Strict Clippy across the CLI and supported DOCX/PPTX crates: passed with
+  warnings denied.
 - DOCX corpus Python tools: bytecode compilation passed.
 - Release CLI build: passed.
-- Real release-mode `.docx`, `.pptx`, and `.pandoc` exports: passed.
+- Real release-mode `.docx` and `.pptx` exports: passed.
 - DOCX and PPTX ZIP integrity: passed.
 - LibreOffice Writer/Impress open and PDF conversion: passed.
-- Visual inspection: DOCX smoke output was structurally clean; PPTX exposed the
-  fidelity limitations described above.
+- Headless visual QA reports exposed the fidelity limitations described above;
+  primary-agent review did not inspect rendered images.
+
+## Current corpus authority (combined revision `c07adc99b70f`)
+
+The 2026-07-13 campaign froze the same 1,408-document public corpus at manifest
+SHA-256 `9b92ee3092b97c9c600547722ccb2397a5d21a1eea1d224418d1c57d1a9e99af`
+and used release-binary SHA-256
+`1f061d3130681a63b3ccaad2a15fb3545b0988058a33ae65cdb8341dba877133`.
+
+### DOCX
+
+- 1,407/1,408 packages were valid; `paper/tracl` retained its source-owned
+  DOCX-target compile failure.
+- LibreOffice produced 1,397 scored renders. Seven conversions timed out, one
+  conversion failed, and two consumer PDFs could not be rasterized.
+- Visual-policy passes: 762; exact page counts: 456; page deltas above one: 635.
+- Across the 1,397 scored renders, mean similarity was `0.954462`, median
+  `0.965868`, p10 `0.909426`, and minimum `0.308371` (`presentation/sleiden-lei`).
+- The last clean v12 authority was materially better: 847 policy passes, 554
+  exact page counts, and 554 page deltas above one. The current revision is a
+  visual/pagination regression until the changed tail is explained.
+- Review export completed for 1,317 documents and failed for 91. Eighty-nine
+  failures violated the terminal-paragraph invariant in a document table cell,
+  one did so in a header table cell, and `paper/tracl` retained its source-owned
+  target failure.
+- The normal CLI now omits embedded fidelity metadata by default, while the
+  corpus classifier still requires it. Consequently 1,399 otherwise classifiable
+  records remain `unverified` for a checker/product-contract reason. This is not
+  counted as visual or package success.
+
+Durable results are under `target/docx-public-corpus-run-c07adc9/`.
+
+### PPTX
+
+- All 120 currently compilable presentation templates exported valid OOXML
+  packages: zero export errors, invalid packages, or timeouts.
+- LibreOffice scored all 120 decks with zero stage failures and zero slide-count
+  mismatches: mean `0.992`, median `0.993`, p10 `0.983`, minimum `0.946`.
+- Native-text recovery was measurable for 109 decks: mean `0.975`, median
+  `1.000`, p10 `0.892`, minimum `0.431`. Eleven decks had no extractable PDF-word
+  denominator; none failed export.
+- The visual result is slightly below the dated 112-template mean of `0.995`, but
+  it covers a larger set on current HEAD and is now the visual authority.
+
+Durable tabular results are `target/pptx-structure-c07adc9.tsv`,
+`target/pptx-visual-c07adc9.tsv`, and `target/pptx-nativeness-c07adc9.tsv`.
+
+## Distribution direction
+
+The canonical public branch is `codex/office-export`, now the fork's default
+branch. A browser-hosted WASM export surface is the preferred distribution goal;
+a native installer is optional. Release archives remain a useful fallback, but
+installer polish is not a prerequisite for the next hosted-preview campaign.
 
 ## Remaining release gates
 
-1. Run the full unfiltered 1,408-document DOCX corpus with package, LibreOffice,
-   visual, editability, and round-trip lanes; publish denominators and failure classes.
-2. Triage and fix or explicitly disposition the remaining DOCX corpus tail, starting
-   from the current handoff's ranked defects.
-3. Add an equivalent current PPTX corpus run on the consolidated revision, with both
-   visual similarity and native-editability measurements, plus PowerPoint testing.
-4. Fix the critical PPTX table-fallback and mixed-page-size issues before widening
+1. Reconcile the DOCX fidelity-manifest checker contract and the 91 review-export
+   failures, then rerun or resume from a clean authority revision.
+2. Explain or disposition the DOCX regression from v12: policy passes fell by 85,
+   exact page matches by 98, and page deltas above one rose by 81.
+3. Retry the ten DOCX consumer/raster failures serially to separate deterministic
+   failures from load-sensitive LibreOffice behavior.
+4. Add real Microsoft PowerPoint testing to the new 120-deck PPTX authority.
+5. Fix the critical PPTX table-fallback and mixed-page-size issues before widening
    availability beyond preview.
-5. Decide the CLI/product contract for fidelity reporting and preview flags, then
+6. Decide the CLI/product contract for fidelity reporting and preview flags, then
    align user-facing documentation and release notes.
-6. Run accessibility and target-version checks in Microsoft Word and PowerPoint for
+7. Prove the DOCX/PPTX export path in the intended browser/WASM hosting architecture,
+   including fonts, packages, filesystem inputs, memory bounds, and file download.
+8. Run accessibility and target-version checks in Microsoft Word and PowerPoint for
    the supported consumer matrix.
 
 Until those gates pass, ship only behind explicit experimental/preview wording.
