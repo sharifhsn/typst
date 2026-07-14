@@ -1,5 +1,7 @@
 # DOCX public-corpus campaign: next-session handoff
 
+> Status: historical session handoff (superseded by office-export-shipping-readiness.md, 2026-07-13).
+
 Updated 2026-07-13. This is the short operational handoff for continuing the
 long-running goal. The detailed historical log remains in
 `docs/dev/docx-corpus-classification-handoff.md`.

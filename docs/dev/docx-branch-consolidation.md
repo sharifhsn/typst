@@ -1,5 +1,7 @@
 # DOCX branch consolidation
 
+> Status: historical session handoff (superseded by office-export-shipping-readiness.md, 2026-07-13).
+
 This file records the Phase 0 integration baseline for the public DOCX export
 work. It is a topology ledger, not a promise that local worktrees can be deleted:
 remove a worktree only after its branch is remotely backed up and the integrated

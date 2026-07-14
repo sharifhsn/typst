@@ -1,5 +1,7 @@
 # DOCX corpus classification handoff
 
+> Status: historical session handoff (superseded by office-export-shipping-readiness.md, 2026-07-13).
+
 ## Objective
 
 Classify every document in the versioned public Typst corpus using observed
