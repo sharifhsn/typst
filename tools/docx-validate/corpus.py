@@ -29,6 +29,7 @@ import run as validator
 FIDELITY_NS = "https://typst.app/schema/2026/fidelity"
 NS = {"typst": FIDELITY_NS}
 FONT_WARNING = re.compile(r"unknown font family: ([^\n]+)", re.IGNORECASE)
+SLIDE_SHAPED_WARNING = "document has slide-shaped pages but is being exported to DOCX"
 DRAWING_COORDINATE = re.compile(
     rb'(?P<attribute>\b(?:cx|cy|x|y|w|h))="(?P<value>-?\d+)"'
     rb'|<wp:posOffset>(?P<offset>-?\d+)</wp:posOffset>'
@@ -155,6 +156,12 @@ def normalized_diagnostic(result: dict[str, Any]) -> str | None:
         return " | ".join(errors)[:2000]
     text = re.sub(r"\s+", " ", text)
     return text[:2000]
+
+
+def format_advisories(result: dict[str, Any]) -> list[str]:
+    """Classify source/export mode mismatches that skew readiness metrics."""
+    stderr = result.get("stderr") or ""
+    return ["slide_shaped_docx"] if SLIDE_SHAPED_WARNING in stderr else []
 
 
 def compile_diagnosis(result: dict[str, Any]) -> dict[str, Any]:
@@ -466,6 +473,8 @@ def classify(record: dict[str, Any]) -> tuple[str, list[str], list[str]]:
     if not record["package"]["ok"]:
         return "package_error", ["invalid_ooxml_package"], []
 
+    reasons.extend(record.get("format_advisories", []))
+
     fidelity = record["fidelity"]
     if fidelity["status"] != "ok":
         reasons.append("fidelity_manifest_missing_or_invalid")
@@ -689,6 +698,7 @@ def validate_document(
             "docx_compile": compile_diagnosis(record["compile"]["docx"]),
             "docx_package": docx_diagnosis(diagnostic_parts),
         }
+        record["format_advisories"] = format_advisories(record["compile"]["docx"])
         libreoffice_status = record["consumers"]["libreoffice"].get("status")
         should_run_libreoffice = libreoffice_status == "not_run" or (
             args.retry_libreoffice_failures and libreoffice_status in {"failed", "unavailable"}
@@ -778,6 +788,7 @@ def validate_document(
         "exporter_binary_sha256": args.exporter_binary_sha256,
         "compile": {"docx": docx_compile, "pdf": pdf_compile},
         "normalized_diagnostic": normalized_diagnostic(docx_compile),
+        "format_advisories": format_advisories(docx_compile),
         "diagnoses": {
             "docx_compile": compile_diagnosis(docx_compile),
             "docx_package": docx_diagnosis(parts),
@@ -842,6 +853,17 @@ def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
         for consumer in ("word", "libreoffice")
     }
     visual_ok = [record for record in records if record["visual"].get("status") == "ok"]
+    slide_shaped = [
+        record
+        for record in records
+        if "slide_shaped_docx" in record.get("format_advisories", [])
+    ]
+    slide_ids = {record["id"] for record in slide_shaped}
+    non_slide_visual_ok = [record for record in visual_ok if record["id"] not in slide_ids]
+    slide_visual_ok = [record for record in visual_ok if record["id"] in slide_ids]
+    advisory_counts = Counter(
+        advisory for record in records for advisory in record.get("format_advisories", [])
+    )
     roundtrip_statuses = Counter(
         record.get("round_trip", {}).get("status", "missing") for record in records
     )
@@ -876,6 +898,7 @@ def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
         "primary_class_rates": {key: {"count": value, "denominator": total, "rate": value / total if total else 0.0} for key, value in sorted(classes.items())},
         "reason_codes": dict(reasons.most_common()),
         "unverified_reasons": dict(unverified.most_common()),
+        "format_advisories": dict(advisory_counts.most_common()),
         "error_codes": {
             code: {"count": count, **ERROR_CATALOG[code]}
             for code, count in error_counts.most_common()
@@ -890,6 +913,27 @@ def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
                 "policy_pass": sum(bool(record["visual"].get("ok")) for record in visual_ok),
                 "exact_page_count": sum(record["visual"].get("page_delta") == 0 for record in visual_ok),
                 "page_delta_over_one": sum((record["visual"].get("page_delta") or 0) > 1 for record in visual_ok),
+                "non_slide": {
+                    "status_ok": len(non_slide_visual_ok),
+                    "policy_pass": sum(
+                        bool(record["visual"].get("ok")) for record in non_slide_visual_ok
+                    ),
+                    "exact_page_count": sum(
+                        record["visual"].get("page_delta") == 0
+                        for record in non_slide_visual_ok
+                    ),
+                    "page_delta_over_one": sum(
+                        (record["visual"].get("page_delta") or 0) > 1
+                        for record in non_slide_visual_ok
+                    ),
+                },
+                "slide_shaped_docx": {
+                    "documents": len(slide_shaped),
+                    "status_ok": len(slide_visual_ok),
+                    "policy_pass": sum(
+                        bool(record["visual"].get("ok")) for record in slide_visual_ok
+                    ),
+                },
             },
             "editability_totals": dict(sorted(editability_totals.items())),
             "fidelity_counts": dict(sorted(fidelity_counts.items())),
@@ -910,6 +954,11 @@ def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
     lines.extend(f"- `{key}`: {value}" for key, value in reasons.most_common(20))
     lines.extend(["", "## Unverified evidence", ""])
     lines.extend(f"- `{key}`: {value}" for key, value in unverified.most_common())
+    lines.extend(["", "## Format advisories", ""])
+    if advisory_counts:
+        lines.extend(f"- `{key}`: {value}" for key, value in advisory_counts.most_common())
+    else:
+        lines.append("- None.")
     lines.extend(["", "## Error-code triage", ""])
     if error_counts:
         lines.extend(
@@ -925,6 +974,14 @@ def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
         lines.append(f"- `{consumer}` statuses: {json.dumps(statuses, sort_keys=True)}")
     lines.append(
         f"- Visual policy pass: {summary['evidence']['visual']['policy_pass']}/{summary['evidence']['visual']['status_ok']} rendered"
+    )
+    non_slide = summary["evidence"]["visual"]["non_slide"]
+    slides = summary["evidence"]["visual"]["slide_shaped_docx"]
+    lines.append(
+        f"- Non-slide visual policy pass: {non_slide['policy_pass']}/{non_slide['status_ok']} rendered"
+    )
+    lines.append(
+        f"- Slide-shaped DOCX (informational): {slides['policy_pass']}/{slides['status_ok']} rendered across {slides['documents']} documents"
     )
     lines.extend(["", "## Round-trip evidence", ""])
     round_trip = summary["evidence"]["round_trip"]
