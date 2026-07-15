@@ -1100,7 +1100,10 @@ def main() -> int:
     args.exporter_binary_sha256 = validator.sha256(Path(args.typst))
     frozen_metadata = json.loads((args.frozen.parent / "metadata.json").read_text())
     corpus_root = Path(frozen_metadata["corpus_root"])
-    documents = [json.loads(line) for line in args.frozen.read_text(encoding="utf-8").splitlines()]
+    all_documents = [
+        json.loads(line) for line in args.frozen.read_text(encoding="utf-8").splitlines()
+    ]
+    documents = all_documents
     if args.filter:
         documents = [
             item for item in documents if any(pattern in item["id"] for pattern in args.filter)
@@ -1160,7 +1163,21 @@ def main() -> int:
             records_by_id[record["id"]] = record
             if completed % 25 == 0 or record["primary_class"] not in {"unverified", "native_good", "fallback_visual"}:
                 print(f'[{completed}/{len(documents)}] {record["primary_class"]:18} {record["id"]}', file=sys.stderr, flush=True)
-    records = [records_by_id[item["id"]] for item in documents]
+    report_documents = documents
+    if args.resume and args.filter:
+        # A filtered retry updates only the selected artifacts, but its summary
+        # remains an authority-wide report. Otherwise every serial retry would
+        # replace the run's aggregate evidence with a misleading tiny subset.
+        report_documents = []
+        for item in all_documents:
+            if item["id"] in records_by_id:
+                report_documents.append(item)
+                continue
+            result_file = args.out / "artifacts" / safe_component(item["id"]) / "result.json"
+            if result_file.is_file():
+                records_by_id[item["id"]] = json.loads(result_file.read_text(encoding="utf-8"))
+                report_documents.append(item)
+    records = [records_by_id[item["id"]] for item in report_documents]
     summary = write_reports(records, args.out)
     print(json.dumps(summary, sort_keys=True))
     return 1 if summary["primary_classes"].get("export_error", 0) or summary["primary_classes"].get("package_error", 0) else 0

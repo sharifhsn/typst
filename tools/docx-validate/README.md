@@ -75,7 +75,15 @@ The corpus output contains `metadata.json`, `documents.jsonl`, `summary.json`,
 licenses, fonts, consumers, text extraction, or visual evidence produce
 `unverified`; they are never folded into a passing denominator. Use repeated
 `--filter <id-substring>` plus `--retry-libreoffice-failures` to isolate a
-consumer failure without rerunning unrelated documents.
+consumer failure without rerunning unrelated documents. Filtered resume runs
+still regenerate authority-wide summaries from every retained result, so a
+serial retry cannot replace the aggregate report with its selected subset.
+
+When semantic extraction rules improve, add `--refresh-semantic` to a resume.
+It recomputes DOCX/PDF word evidence from retained artifacts without compiling
+the corpus again. This currently counts both ordinary Word text and native OMML
+math text; missing or timed-out PDF extraction remains explicit `unverified`
+evidence rather than aborting the run.
 
 Each result also contains a `diagnoses` object. Compiler timeouts, non-zero
 exits, and terminating signals receive stable reason codes (for example,
