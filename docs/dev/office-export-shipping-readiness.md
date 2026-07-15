@@ -213,6 +213,14 @@ focused tests rather than being mislabeled as part of this authority.
   visual policy passed only `raphaelasla`. These focused results are not folded
   into the authority totals above. Durable evidence is under
   `target/docx-public-corpus-focus-dense-fixes-1b38352/`.
+- A later paragraph-leading experiment replaced the nominal font-size component
+  with Typst's cap-height text frame. It improved Alex Mathnote from 187 to 171
+  LibreOffice pages, but regressed Xenolay from 163 to 129 against its 161-page
+  reference. The policy was reverted; neither number describes current HEAD.
+  The two-record run also exposed that the checker re-read Git revision per
+  document when HEAD changed mid-run. The checker now freezes revision, dirty
+  state, and binary identity once per campaign so this cannot produce internally
+  contradictory authority again.
 - Visual-policy passes: 761/1,392 rendered; exact page counts: 457; page deltas
   above one: 631.
 - The checker identifies 164 slide-shaped DOCX exports as a separate informational

@@ -79,6 +79,13 @@ consumer failure without rerunning unrelated documents. Filtered resume runs
 still regenerate authority-wide summaries from every retained result, so a
 serial retry cannot replace the aggregate report with its selected subset.
 
+The exporter revision, dirty-tree fingerprint, and binary hash are captured once
+when a campaign starts and reused by every worker. A commit or checkout while a
+long run is still processing therefore cannot silently give later records a
+different source revision while they continue using the same binary. Resume runs
+preserve each compiled artifact's original identity and record the retry identity
+separately in `metadata.json` under `last_resume`.
+
 When semantic extraction rules improve, add `--refresh-semantic` to a resume.
 It recomputes DOCX/PDF word evidence from retained artifacts without compiling
 the corpus again. This currently counts both ordinary Word text and native OMML

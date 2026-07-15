@@ -75,6 +75,21 @@ def exporter_state() -> dict[str, Any]:
     }
 
 
+def frozen_exporter_identity(args: argparse.Namespace) -> dict[str, Any]:
+    """Return the exporter identity captured once at campaign startup.
+
+    Corpus workers must never re-read Git state: a long-running campaign can
+    overlap a commit or checkout even though every worker still invokes the same
+    already-hashed binary. Reusing this immutable snapshot keeps metadata and
+    every per-document result attributable to one source/binary identity.
+    """
+    return {
+        "exporter_revision": args.exporter_revision,
+        "exporter_state": args.exporter_state,
+        "exporter_binary_sha256": args.exporter_binary_sha256,
+    }
+
+
 def safe_component(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or "document"
 
@@ -704,8 +719,8 @@ def validate_document(
         # A resumed record normally reuses its already compiled DOCX. Preserve
         # the source fingerprint that produced that artifact instead of falsely
         # relabeling it with whatever dirty tree happens to invoke the retry.
-        record.setdefault("exporter_state", args.exporter_state)
-        record.setdefault("exporter_binary_sha256", args.exporter_binary_sha256)
+        for key, value in frozen_exporter_identity(args).items():
+            record.setdefault(key, value)
         record["consumers"]["word"] = word_evidence(artifact)
         docx_path = Path(record["artifacts"]["docx"])
         _, diagnostic_parts = (
@@ -819,9 +834,7 @@ def validate_document(
 
     record: dict[str, Any] = {
         **frozen,
-        "exporter_revision": validator.git_revision(),
-        "exporter_state": args.exporter_state,
-        "exporter_binary_sha256": args.exporter_binary_sha256,
+        **frozen_exporter_identity(args),
         "compile": {"docx": docx_compile, "pdf": pdf_compile},
         "normalized_diagnostic": normalized_diagnostic(docx_compile),
         "format_advisories": format_advisories(docx_compile),
@@ -1107,6 +1120,7 @@ def main() -> int:
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=True)
     args.exporter_state = exporter_state()
+    args.exporter_revision = args.exporter_state["revision"]
     args.exporter_binary_sha256 = validator.sha256(Path(args.typst))
     frozen_metadata = json.loads((args.frozen.parent / "metadata.json").read_text())
     corpus_root = Path(frozen_metadata["corpus_root"])
@@ -1126,7 +1140,7 @@ def main() -> int:
         "generated_at": generated_at,
         "frozen_documents": str(args.frozen),
         "frozen_documents_sha256": validator.sha256(args.frozen),
-        "exporter_revision": validator.git_revision(),
+        "exporter_revision": args.exporter_revision,
         "exporter_state": args.exporter_state,
         "typst_version": validator.command_version([args.typst, "--version"]),
         "typst_sha256": args.exporter_binary_sha256,

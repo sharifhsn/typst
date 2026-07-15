@@ -2151,3 +2151,28 @@ conversion completes in about four seconds. A package regression combines a
 framed footnote body with a later native table and asserts that no `wps:txbx` or
 `w:drawing` enters the footnote part. All 221 DOCX integration tests, 22
 round-trip tests, 65 PPTX tests, strict Clippy, and DOCX/PPTX WASM checks pass.
+
+## 54. Paragraph-leading metric experiment — REJECTED
+
+Typst's default conceptual text frame is cap height to baseline, whereas the
+DOCX mapper uses nominal font size plus `par.leading` for Word's `w:line`
+minimum. Replacing the nominal size with resolved font-edge metrics appeared to
+fix the 145-page Alex Mathnote stress case: LibreOffice fell from 187 to 171
+pages while the authored 1.35em paragraph spacing remained intact. A broader
+spacing-removal mutation reached 144 pages but was already semantically invalid
+because it also altered ordinary prose containing inline formulas.
+
+The mandatory cross-fixture checker then disproved the font-edge policy itself.
+On Xenolay's 161-page reference, the same unchanged experimental binary moved
+LibreOffice from the prior 163 pages to 129. The implementation and its tests
+were reverted rather than retaining a Mathnote-specific heuristic. Durable
+experimental results are under
+`target/docx-public-corpus-focus-leading-ee1ccd4/`; current HEAD therefore keeps
+the nominal-size mapping until a policy can improve both fixtures.
+
+That run also found an authority bug: per-document records re-read Git HEAD even
+though all workers used one already-hashed binary. A commit during the serial
+run made Xenolay claim the experimental revision and Mathnote claim its revert.
+The corpus checker now captures revision, dirty-tree fingerprint, and binary
+hash once at startup and reuses that frozen identity for every fresh record;
+resume continues to preserve the artifact's original identity.
