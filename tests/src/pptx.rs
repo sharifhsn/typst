@@ -350,6 +350,28 @@ fn transformed_table_content_uses_picture_fallback() {
         rels.contains("/image"),
         "fallback picture should have an image relationship"
     );
+
+    let doc = roxmltree::Document::parse(slide).unwrap();
+    let transparent_text: String = doc
+        .descendants()
+        .filter(|node| {
+            node.tag_name().name() == "sp"
+                && node.descendants().any(|child| {
+                    child.tag_name().name() == "alpha"
+                        && child.attribute("val") == Some("0")
+                })
+        })
+        .flat_map(|shape| {
+            shape
+                .descendants()
+                .filter(|node| node.tag_name().name() == "t")
+                .filter_map(|node| node.text())
+        })
+        .collect();
+    assert_eq!(
+        transparent_text, "ABCD",
+        "the exact table picture must retain searchable/editable cell text"
+    );
     assert_all_wellformed(&p);
 }
 
