@@ -29,6 +29,10 @@ pub(super) struct ActiveTable {
     loc: Location,
     order: usize,
     cells: Vec<CapturedTableCell>,
+    /// Once a cell cannot be represented natively, rasterize the entire
+    /// table's contents. Mixing a partial native table with fallback pictures
+    /// would duplicate or reorder content.
+    fallback: bool,
 }
 
 pub(super) struct ActiveTableCell<'a> {
@@ -82,6 +86,7 @@ impl<'a, 'b> Walker<'a, 'b> {
             loc: tag.location(),
             order,
             cells: Vec::new(),
+            fallback: false,
         });
         true
     }
@@ -110,10 +115,21 @@ impl<'a, 'b> Walker<'a, 'b> {
         let Some(region) = elem.to_packed::<GridCellRegion>() else {
             return false;
         };
+        if self.active_tables.last().is_some_and(|table| table.fallback) {
+            return true;
+        }
         let Some(similarity) = classify_similarity(item_transform) else {
+            if let Some(table) = self.active_tables.last_mut() {
+                table.fallback = true;
+                table.cells.clear();
+            }
             return true;
         };
         if similarity.rot_60k != 0 {
+            if let Some(table) = self.active_tables.last_mut() {
+                table.fallback = true;
+                table.cells.clear();
+            }
             return true;
         }
 
@@ -194,6 +210,14 @@ impl<'a, 'b> Walker<'a, 'b> {
         item_transform: Transform,
     ) -> bool {
         if self.active_table_cells.is_empty() {
+            if self.active_tables.last().is_some_and(|table| table.fallback) {
+                // Unsupported table transforms (rotation, skew, or
+                // non-uniform scale) cannot be encoded by a DrawingML table.
+                // Preserve the complete cell content as positioned pictures
+                // rather than silently swallowing it in the table walker.
+                self.raster_item(order, item.clone(), item_transform, None);
+                return true;
+            }
             return false;
         }
 

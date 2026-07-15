@@ -330,6 +330,26 @@ fn table_exports_as_native_drawingml_table() {
 }
 
 #[test]
+fn transformed_table_content_uses_picture_fallback() {
+    let p = parts(
+        r#"#set page(width: 320pt, height: 180pt)
+#rotate(20deg)[#table(columns: 2, [A], [B], [C], [D])]"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    // A rotated table has no native DrawingML representation. Its content
+    // must remain present through the generic picture fallback instead of
+    // disappearing when table capture rejects the transform.
+    assert!(!slide.contains("<a:tbl>"));
+    assert!(slide.contains("<p:pic>"), "transformed table needs picture fallback");
+    let rels = &p["ppt/slides/_rels/slide1.xml.rels"];
+    assert!(
+        rels.contains("/image"),
+        "fallback picture should have an image relationship"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn table_colspan_and_rowspan_emit_merge_attrs() {
     let p = parts(
         r#"#set page(width: 360pt, height: 200pt)
