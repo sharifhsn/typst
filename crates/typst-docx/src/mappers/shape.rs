@@ -85,6 +85,15 @@ pub fn text_box(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
+    // A footnote is a separate flowing story. Keep framed content there as
+    // ordinary editable runs (the caller's fallback) instead of nesting a WPS
+    // text box in `footnotes.xml`. LibreOffice can enter a layout loop when a
+    // footnote contains these text boxes and the main story later contains a
+    // table; inline raw/code spans are a common real-world trigger.
+    if ctx.in_footnote {
+        return Ok(None);
+    }
+
     let Some(framed) = framed_container(child, styles) else {
         return Ok(None);
     };
@@ -181,7 +190,9 @@ pub fn unframed_text_box(
     wrap: TextBoxWrap,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
-    if !crate::convert::body_extractable(body) || crate::convert::body_has_footnote(body)
+    if ctx.in_footnote
+        || !crate::convert::body_extractable(body)
+        || crate::convert::body_has_footnote(body)
     {
         return Ok(None);
     }

@@ -3872,6 +3872,27 @@ fn footnote_in_a_box_never_lands_in_a_text_box() {
 }
 
 #[test]
+fn framed_content_inside_a_footnote_stays_in_flow() {
+    // A footnote is its own flowing story. A standalone styled box inside it
+    // must remain editable run content: WPS text boxes in footnotes can send
+    // LibreOffice into a layout loop once the main story also contains tables.
+    let p = parts(
+        "Body#footnote[Before.\n\n#box(fill: silver, inset: 2pt)[boxed code]\n\nAfter.]\n\n#table(columns: 1, [cell])",
+    );
+    let notes = &p["word/footnotes.xml"];
+    assert!(notes.contains("boxed code"), "the framed text is preserved");
+    assert!(
+        !notes.contains("<wps:txbx>"),
+        "footnote content must not be nested in a WPS text box"
+    );
+    assert!(
+        !notes.contains("<w:drawing>"),
+        "a text-only framed footnote does not need a drawing"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn figure_in_a_box_is_not_a_text_box() {
     // A figure/image/table inside a framed container must NOT become a text box
     // (Word-fragile, and the size+extract double-layout corrupts its cross-ref

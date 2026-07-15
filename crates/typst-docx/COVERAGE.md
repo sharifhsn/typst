@@ -2131,3 +2131,23 @@ Typst's 20.44pt; the native `w:tbl`, six editable paragraphs, and measured
 959/433-twip row minima are unchanged. Remaining row/text-box drift is the
 consumer metric issue tracked separately. All 211 DOCX integration tests pass
 and the crate remains clippy-clean.
+
+## 53. Framed footnote content remains in the footnote flow
+
+Inline raw/code styling can realize as standalone framed containers. The DOCX
+block mapper previously promoted those containers to editable WPS text boxes
+even while lowering `footnotes.xml`. LibreOffice can enter a layout loop when a
+footnote story contains those text boxes and the main story later contains
+tables. The retained public thesis package failed after a 300-second isolated
+LibreOfficeDev 26.8 attempt with `Unspecified Application Error` despite valid
+ZIP/XML and review-round-trip structure.
+
+Framed and placed text-box candidates now decline WPS lowering while
+`DocxCtx::in_footnote` is active. The existing fallback keeps their text,
+proofing state, border/shading, and editability as ordinary runs. In the exact
+thesis reproduction, footnote-story text boxes and drawings fall from five to
+zero, footnotes 5 and 6 retain their complete text, and fresh-profile PDF
+conversion completes in about four seconds. A package regression combines a
+framed footnote body with a later native table and asserts that no `wps:txbx` or
+`w:drawing` enters the footnote part. All 221 DOCX integration tests, 22
+round-trip tests, 65 PPTX tests, strict Clippy, and DOCX/PPTX WASM checks pass.

@@ -185,17 +185,19 @@ focused tests rather than being mislabeled as part of this authority.
   retained as failures in the authority score. ZIP/XML validation and prefix
   bisection point to consumer scalability rather than malformed OOXML, but this
   is a diagnosis rather than proof for every record. The deterministic failure
-  is also a valid package; it
-  reproducibly triggers LibreOffice's `Unspecified Application Error`. Its
-  retained package contains 103 tables, 75 modern text boxes, and 128 drawings.
-  Prefix bisection places
-  its first trigger at an inline dashed DrawingML line, but merely padding that
-  line's one-EMU degenerate dimension does not resolve the full document, and
-  deleting that shape run does not either. The LibreOffice failure is cumulative,
-  non-local, or has a later independent trigger. A focused rerun with the current
-  exporter reconfirmed `DOCX-E202`: the package is valid and review round trip
-  passes, but LibreOffice still produces no PDF. Durable evidence is under
-  `target/docx-public-corpus-focus-e2021-1b38352/`.
+  was also a valid package and reproducibly triggered LibreOffice's
+  `Unspecified Application Error`. Its retained package contains 103 tables,
+  75 modern text boxes, and 128 drawings. A later reduction supersedes the
+  initial dashed-line hypothesis: the decisive trigger was WPS text boxes inside
+  footnotes 5 and 6 (inline raw/code spans) combined with the document's later
+  table-heavy flow. The unmodified package failed a fresh bundled
+  LibreOfficeDev 26.8 PDF conversion after 300 seconds. Keeping framed footnote
+  content as editable flowing runs removes all five footnote-story text boxes,
+  preserves the note text, and renders the exact thesis to PDF in about four
+  seconds. ZIP/XML validation and the 221-test DOCX structural suite pass. The
+  frozen pre-fix evidence remains under
+  `target/docx-public-corpus-focus-e2021-1b38352/`; this focused HEAD fix is not
+  folded into the older full-corpus totals above.
 - Focused HEAD validation after that frozen authority adds two explicitly reported
   raster fallbacks for pathological visual canvases. The one-page `raphaelasla`
   shape swarm uses one full-page fallback, retains one page, and scores `0.979955`.
