@@ -141,7 +141,8 @@ pub fn text_box(
     // Extract the real text and forward its introspection tags (cites/refs/labels
     // inside the box must still reach the introspector — the text box is opaque
     // to the IR tag-collection walk).
-    let blocks = ctx.blocks(&body, styles)?;
+    let mut blocks = ctx.blocks(&body, styles)?;
+    crate::mappers::table::collapse_par_spacing(&mut blocks);
     crate::document::collect_tags(&blocks, &mut ctx.deferred_tags);
 
     let geom = if rounded { ShapeGeom::RoundRect } else { ShapeGeom::Rect };
@@ -193,10 +194,11 @@ pub fn unframed_text_box(
         return Ok(None);
     }
 
-    let blocks = ctx.blocks(body, styles)?;
+    let mut blocks = ctx.blocks(body, styles)?;
     if blocks.is_empty() {
         return Ok(None);
     }
+    crate::mappers::table::collapse_par_spacing(&mut blocks);
     crate::document::collect_tags(&blocks, &mut ctx.deferred_tags);
 
     let docpr_id = ctx.next_drawing_id();

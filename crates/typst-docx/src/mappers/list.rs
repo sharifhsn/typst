@@ -557,6 +557,12 @@ fn emit_static_marker_item(
 /// jump while their siblings remain tight. Remove only values equal to the
 /// inherited paragraph spacing; explicit line-height and other spacing survive.
 fn strip_inherited_item_spacing(para: &mut Para, paragraph_spacing: i32) {
+    if para.props.typst_par_spacing_before == Some(paragraph_spacing) {
+        para.props.typst_par_spacing_before = None;
+    }
+    if para.props.typst_par_spacing_after == Some(paragraph_spacing) {
+        para.props.typst_par_spacing_after = None;
+    }
     let Some(spacing) = &mut para.props.spacing else { return };
     if spacing.before == Some(paragraph_spacing) {
         spacing.before = None;
@@ -591,6 +597,7 @@ fn apply_list_boundary_spacing(blocks: &mut [Block], paragraph_spacing: i32) {
     };
     let spacing = para.props.spacing.get_or_insert_with(Default::default);
     spacing.after = Some(spacing.after.unwrap_or(0).max(paragraph_spacing));
+    para.props.typst_par_spacing_after = Some(paragraph_spacing);
 }
 
 /// Applies a left indent to every paragraph in a block list (used to push a

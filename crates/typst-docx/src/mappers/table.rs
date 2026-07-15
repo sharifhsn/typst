@@ -522,7 +522,7 @@ fn cell_blocks(
         ctx.blocks(&content, styles)?
     };
 
-    collapse_cell_boundary_par_spacing(&mut blocks);
+    collapse_par_spacing(&mut blocks);
 
     let paragraph_count =
         blocks.iter().filter(|block| matches!(block, Block::Para(_))).count();
@@ -565,14 +565,14 @@ fn cell_blocks(
     Ok(blocks)
 }
 
-/// Normalizes Typst's collapsing `par.spacing` inside a Word table cell.
+/// Normalizes Typst's collapsing `par.spacing` in a sequence of Word blocks.
 ///
 /// Typst contributes the maximum spacing at each adjacent paragraph boundary
-/// and nothing at the cell's outer edges. Word consumers do not consistently
+/// and nothing at the sequence's outer edges. Word consumers do not consistently
 /// collapse matching `after`/`before` values, so store each boundary once on the
 /// following paragraph. Remove only the recorded paragraph-spacing component;
 /// explicit `#v()` space folded into `before` remains intact.
-fn collapse_cell_boundary_par_spacing(blocks: &mut [Block]) {
+pub(crate) fn collapse_par_spacing(blocks: &mut [Block]) {
     let mut run = Vec::new();
     for index in 0..blocks.len() {
         match &blocks[index] {
@@ -591,8 +591,11 @@ fn collapse_par_spacing_run(blocks: &mut [Block], run: &[usize]) {
     let amounts = run
         .iter()
         .map(|&index| match &blocks[index] {
-            Block::Para(para) => para.props.typst_par_spacing.unwrap_or(0),
-            _ => 0,
+            Block::Para(para) => (
+                para.props.typst_par_spacing_before.unwrap_or(0),
+                para.props.typst_par_spacing_after.unwrap_or(0),
+            ),
+            _ => (0, 0),
         })
         .collect::<Vec<_>>();
 
@@ -603,7 +606,7 @@ fn collapse_par_spacing_run(blocks: &mut [Block], run: &[usize]) {
     }
 
     for (position, &index) in run.iter().enumerate().skip(1) {
-        let gap = amounts[position - 1].max(amounts[position]);
+        let gap = amounts[position - 1].1.max(amounts[position].0);
         if gap == 0 {
             continue;
         }
@@ -614,7 +617,12 @@ fn collapse_par_spacing_run(blocks: &mut [Block], run: &[usize]) {
 }
 
 fn collapse_par_spacing_side(props: &mut ParaProps, before: bool) {
-    let Some(amount) = props.typst_par_spacing else { return };
+    let amount = if before {
+        props.typst_par_spacing_before
+    } else {
+        props.typst_par_spacing_after
+    };
+    let Some(amount) = amount else { return };
     let Some(spacing) = props.spacing.as_mut() else { return };
     let side = if before { &mut spacing.before } else { &mut spacing.after };
     *side = side

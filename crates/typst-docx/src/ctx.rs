@@ -1028,14 +1028,15 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
 
         let font_size = styles.resolve(TextElem::size);
 
-        // G4 paragraph spacing -> symmetric Word before/after spacing. Typst
-        // applies `par.spacing` above and below each paragraph and collapses
-        // adjacent values to the greater one. Word applies the same maximum
-        // rule to adjacent `w:after`/`w:before` values, so emitting both sides
-        // preserves the model without inserting spacer paragraphs.
+        // G4 paragraph spacing. Record the Typst component symmetrically while
+        // lowering so explicit `#v()` additions remain distinguishable. Once a
+        // complete block sequence is known, `collapse_par_spacing` removes the
+        // outer values and stores each adjacent maximum once on the following
+        // paragraph. This avoids relying on consumer-specific Word collapsing.
         let paragraph_spacing = props::abs_to_twip(styles.resolve(ParElem::spacing));
         if paragraph_spacing != 0 {
-            p.typst_par_spacing = Some(paragraph_spacing);
+            p.typst_par_spacing_before = Some(paragraph_spacing);
+            p.typst_par_spacing_after = Some(paragraph_spacing);
             let spacing = p.spacing.get_or_insert_with(Default::default);
             spacing.before = Some(paragraph_spacing);
             spacing.after = Some(paragraph_spacing);

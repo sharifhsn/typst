@@ -828,15 +828,67 @@ fn paragraph_spacing_is_preserved_as_native_collapsing_spacing() {
     let doc = &p["word/document.xml"];
     let paragraphs = element_fragments(doc, "p");
     assert_eq!(paragraphs.len(), 2);
-    for paragraph in paragraphs {
-        assert!(
-            paragraph.contains(
-                "<w:spacing w:before=\"400\" w:after=\"400\" w:line=\"616\" w:lineRule=\"atLeast\"/>"
-            ),
-            "paragraph spacing and leading should remain native: {paragraph}"
-        );
-    }
+    assert!(paragraphs[0].contains("w:line=\"616\""), "{}", paragraphs[0]);
+    assert!(!paragraphs[0].contains("w:before=\"400\""), "{}", paragraphs[0]);
+    assert!(!paragraphs[0].contains("w:after=\"400\""), "{}", paragraphs[0]);
+    assert!(paragraphs[1].contains("w:before=\"400\""), "{}", paragraphs[1]);
+    assert!(paragraphs[1].contains("w:line=\"616\""), "{}", paragraphs[1]);
+    assert!(!paragraphs[1].contains("w:after=\"400\""), "{}", paragraphs[1]);
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn paragraph_spacing_uses_the_larger_adjacent_value_once() {
+    let p = parts(
+        "#set par(spacing: 20pt)\n\
+         First paragraph.\n\n\
+         #set par(spacing: 10pt)\n\
+         Second paragraph.",
+    );
+    let paragraphs = element_fragments(&p["word/document.xml"], "p");
+    assert_eq!(paragraphs.len(), 2);
+    assert!(!paragraphs[0].contains("w:before=\"400\""), "{}", paragraphs[0]);
+    assert!(!paragraphs[0].contains("w:after=\"400\""), "{}", paragraphs[0]);
+    assert!(paragraphs[1].contains("w:before=\"400\""), "{}", paragraphs[1]);
+    assert!(!paragraphs[1].contains("w:after="), "{}", paragraphs[1]);
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn paragraph_spacing_collapses_in_auxiliary_stories() {
+    let assert_pair = |xml: &str, first: &str, second: &str| {
+        let paragraphs = element_fragments(xml, "p");
+        let first = paragraphs
+            .iter()
+            .find(|paragraph| paragraph.contains(first))
+            .unwrap_or_else(|| panic!("missing paragraph containing {first}"));
+        let second = paragraphs
+            .iter()
+            .find(|paragraph| paragraph.contains(second))
+            .unwrap_or_else(|| panic!("missing paragraph containing {second}"));
+        assert!(!first.contains("w:before=\"400\""), "{first}");
+        assert!(!first.contains("w:after=\"400\""), "{first}");
+        assert!(second.contains("w:before=\"400\""), "{second}");
+        assert!(!second.contains("w:after=\"400\""), "{second}");
+    };
+
+    let furniture = parts(
+        "#set page(header: [#set par(spacing: 20pt); Header first.\n\nHeader second.])\n\
+         Body.",
+    );
+    assert_pair(&furniture["word/header1.xml"], "Header first.", "Header second.");
+
+    let footnote =
+        parts("Body.#footnote[#set par(spacing: 20pt); Note first.\n\nNote second.]");
+    assert_pair(&footnote["word/footnotes.xml"], "Note first.", "Note second.");
+
+    let text_box = parts(
+        "#rect(width: 5cm, fill: aqua)[#set par(spacing: 20pt); Box first.\n\nBox second.]",
+    );
+    assert_pair(&text_box["word/document.xml"], "Box first.", "Box second.");
+    assert_all_wellformed(&furniture);
+    assert_all_wellformed(&footnote);
+    assert_all_wellformed(&text_box);
 }
 
 #[test]
@@ -1931,7 +1983,7 @@ fn nested_bullets_indent_by_level() {
 #[test]
 fn list_spacing_stays_on_group_boundaries() {
     let p = parts(
-        "- First item\n  - Nested item\n- Second item\n\n+ Ordered one\n+ Ordered two",
+        "- First item\n  - Nested item\n- Second item\n\n+ Ordered one\n+ Ordered two\n\nAfter.",
     );
     let doc = &p["word/document.xml"];
     let para = |text: &str| {
@@ -1940,7 +1992,7 @@ fn list_spacing_stays_on_group_boundaries() {
             .unwrap_or_else(|| panic!("missing paragraph containing {text}"))
     };
 
-    for text in ["First item", "Nested item", "Ordered one"] {
+    for text in ["First item", "Nested item"] {
         let paragraph = para(text);
         assert!(
             !paragraph.contains("w:before=\"") && !paragraph.contains("w:after=\""),
@@ -1948,12 +2000,14 @@ fn list_spacing_stays_on_group_boundaries() {
         );
     }
     assert!(
-        para("Second item").contains("w:after=\"264\""),
-        "the top-level bullet list keeps paragraph spacing at its trailing boundary"
+        !para("Second item").contains("w:after=\"264\"")
+            && para("Ordered one").contains("w:before=\"264\""),
+        "the gap between adjacent lists is stored once on the following list"
     );
     assert!(
-        para("Ordered two").contains("w:after=\"264\""),
-        "the top-level enum keeps paragraph spacing at its trailing boundary"
+        !para("Ordered two").contains("w:after=\"264\"")
+            && para("After.").contains("w:before=\"264\""),
+        "the gap after a list is stored once on the following paragraph"
     );
     assert_all_wellformed(&p);
 }

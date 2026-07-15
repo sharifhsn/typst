@@ -494,6 +494,11 @@ fn docx_document_impl(
         &mut toc_planning,
     );
 
+    crate::mappers::table::collapse_par_spacing(&mut body);
+    for footnote in &mut footnotes {
+        crate::mappers::table::collapse_par_spacing(&mut footnote.blocks);
+    }
+
     let review_candidates = collect_review_candidates(
         &body,
         &footnotes,
@@ -2663,6 +2668,8 @@ fn lower_furniture(
         {
             blocks.push(block);
         }
+
+        crate::mappers::table::collapse_par_spacing(&mut blocks);
 
         let rels = ctx.part_rels.take().unwrap_or_default();
         ctx.part_rels = saved;
