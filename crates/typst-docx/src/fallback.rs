@@ -26,6 +26,9 @@ use crate::report::{
 /// What [`DocxCtx::rasterize`] produces for renderable content: the media
 /// relationship id, drawing size, and plain text recovered from the frame.
 pub(crate) type Rasterized = Option<(EcoString, typst_library::layout::Size, String)>;
+type TiledRasterized = Option<(Vec<(EcoString, Size)>, String)>;
+type RawRasterized = Option<(Vec<u8>, Size, String)>;
+type RasterizeResult = (Vec<Tag>, RawRasterized, bool);
 
 /// A cached [`DocxCtx::rasterize_page_overlay`] result, keyed on its inputs.
 pub(crate) struct CachedOverlay {
@@ -307,7 +310,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         content: &Content,
         styles: StyleChain,
         span: Span,
-    ) -> SourceResult<Option<(Vec<(EcoString, Size)>, String)>> {
+    ) -> SourceResult<TiledRasterized> {
         let (tags, rendered, _) = self.rasterize_impl(content, styles, span, true)?;
         self.deferred_tags.extend(tags);
         let Some((png, size, text)) = rendered else {
@@ -343,7 +346,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
         span: Span,
         crop: bool,
-    ) -> SourceResult<(Vec<Tag>, Option<(Vec<u8>, Size, String)>, bool)> {
+    ) -> SourceResult<RasterizeResult> {
         if std::env::var_os("DOCX_DEBUG_RASTER").is_some() {
             eprintln!("RASTERIZE: {}", content.elem().name());
         }

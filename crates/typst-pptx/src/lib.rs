@@ -76,8 +76,10 @@ fn pptx_impl(
     options: &PptxOptions,
     physical_page_to_slide: Option<&[Option<usize>]>,
 ) -> SourceResult<Vec<u8>> {
-    let mut ctx = SlideCtx::default();
-    ctx.physical_page_to_slide = physical_page_to_slide.map(|mapping| mapping.to_vec());
+    let mut ctx = SlideCtx {
+        physical_page_to_slide: physical_page_to_slide.map(|mapping| mapping.to_vec()),
+        ..SlideCtx::default()
+    };
     let slides = slide::slides(document, &mut ctx);
     let extracted;
     let notes = match &options.speaker_notes {
