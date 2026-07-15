@@ -1083,7 +1083,7 @@ fn centered_layout_grid_inset_uses_the_measured_row_box() {
     };
     let grid = parts(
         "#set page(width: 240pt, height: 120pt, margin: 10pt)\n\
-         #grid(columns: 1, grid.cell(inset: (top: 4pt, bottom: 4pt), \
+         #grid(columns: 1, grid.cell(inset: 4pt, \
          align: horizon)[Code])",
     );
     let grid_table = element_fragments(&grid["word/document.xml"], "tbl")[0];
@@ -1092,12 +1092,17 @@ fn centered_layout_grid_inset_uses_the_measured_row_box() {
             && grid_table.contains("<w:bottom w:w=\"0\" w:type=\"dxa\"/>"),
         "symmetric centered inset must not be added outside the measured row"
     );
+    assert!(
+        grid_table.contains("<w:left w:w=\"78\" w:type=\"dxa\"/>")
+            && grid_table.contains("<w:right w:w=\"78\" w:type=\"dxa\"/>"),
+        "centered symmetric grid insets retain a two-twip glyph-fit tolerance"
+    );
     assert!(grid_table.contains("<w:vAlign w:val=\"center\"/>"));
     assert_all_wellformed(&grid);
 
     let table = parts(
         "#set page(width: 240pt, height: 120pt, margin: 10pt)\n\
-         #table(columns: 1, table.cell(inset: (top: 4pt, bottom: 4pt), \
+         #table(columns: 1, table.cell(inset: 4pt, \
          align: horizon)[Code])",
     );
     let semantic_table = element_fragments(&table["word/document.xml"], "tbl")[0];
@@ -1112,7 +1117,42 @@ fn centered_layout_grid_inset_uses_the_measured_row_box() {
             && semantic_table.contains("<w:bottom w:w=\"80\" w:type=\"dxa\"/>"),
         "semantic table cell margins remain authored Word cell margins"
     );
+    assert!(
+        semantic_table.contains("<w:left w:w=\"80\" w:type=\"dxa\"/>")
+            && semantic_table.contains("<w:right w:w=\"80\" w:type=\"dxa\"/>"),
+        "semantic table horizontal margins remain exact"
+    );
     assert_all_wellformed(&table);
+
+    let asymmetric = parts(
+        "#set page(width: 240pt, height: 120pt, margin: 10pt)\n\
+         #grid(columns: 1, grid.cell(\
+           inset: (left: 4pt, right: 5pt, top: 4pt, bottom: 4pt), \
+           align: horizon,\
+         )[Code])",
+    );
+    let asymmetric_grid = element_fragments(&asymmetric["word/document.xml"], "tbl")[0];
+    assert!(
+        asymmetric_grid.contains("<w:left w:w=\"80\" w:type=\"dxa\"/>")
+            && asymmetric_grid.contains("<w:right w:w=\"100\" w:type=\"dxa\"/>"),
+        "asymmetric horizontal grid insets must remain authored"
+    );
+    assert_all_wellformed(&asymmetric);
+
+    let non_centered = parts(
+        "#set page(width: 240pt, height: 120pt, margin: 10pt)\n\
+         #grid(columns: 1, grid.cell(inset: 4pt, align: top)[Code])",
+    );
+    let non_centered_grid =
+        element_fragments(&non_centered["word/document.xml"], "tbl")[0];
+    assert!(
+        non_centered_grid.contains("<w:left w:w=\"80\" w:type=\"dxa\"/>")
+            && non_centered_grid.contains("<w:right w:w=\"80\" w:type=\"dxa\"/>")
+            && non_centered_grid.contains("<w:top w:w=\"80\" w:type=\"dxa\"/>")
+            && non_centered_grid.contains("<w:bottom w:w=\"80\" w:type=\"dxa\"/>"),
+        "non-centered grid cells must keep their authored insets"
+    );
+    assert_all_wellformed(&non_centered);
 }
 
 #[test]

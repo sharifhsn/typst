@@ -2230,3 +2230,48 @@ layout grids use their full measured row with zero redundant vertical margins
 while an equivalent semantic table keeps its authored 4pt Word margins. All 223
 DOCX integration tests, 15 DOCX unit tests, 22 round-trip tests, 65 PPTX tests,
 strict Clippy, and DOCX/PPTX WASM checks pass.
+
+## 56. Centered layout grids absorb the Word inline-fit boundary
+
+The remaining Tura excess came from the narrow line-number track in the same
+editable Codly grids. Its 381-twip cell carried 84-twip margins on both sides,
+leaving 213 twips for a two-digit 9pt monospace number. LibreOffice wrapped
+every two-digit number vertically. A `w:noWrap` counterfactual was pixel-identical
+and did not help. Holding the consumer fixed established a sharp boundary:
+83-twip margins still produced 293 pages, while 82 twips kept the digits on one
+line and produced 254 pages in the package-level experiment.
+
+The mapper now leaves a bounded two-twip tolerance on each horizontal edge only
+for a known layout-grid cell with centered vertical alignment and equal nonzero
+left/right insets. This keeps the centerline, outer geometry, and editable
+content intact. Semantic tables and asymmetric, zero-inset, or non-centered
+grid cells do not enter the policy. Unlike vertical row-box reconciliation,
+horizontal integer-DXA tolerance does not require a measured row. The tolerance
+is applied before content lowering, so the emitted Word box and the width used
+by the mapper agree.
+
+An initial measured-row-only implementation rendered at 261 pages, but visual QA
+found lines 65–75 in a late Dijkstra block still wrapping vertically and split
+line 69 across two pages. Package inspection found 465 unmeasured centered rows,
+including all 28 three-digit gutters. Applying the same horizontal tolerance to
+those provenance-safe rows removes that accidental eligibility boundary.
+
+The clean exporter result renders Tura at 254 pages against the 265-page Typst
+reference, down from 293, with score `0.975362`, semantic text coverage
+`0.991067`, and the same successful 6,880-region review round trip. Delegated
+180-dpi visual QA confirmed that late lines 65–75 stay horizontal, line 69 no
+longer splits across pages, and the affected rows retain intact glyphs, about
+8pt of gutter-to-code separation, aligned fills/baselines, and no clipping,
+collision, overlap, or page-furniture contact. A same-consumer six-document
+guard passed package, LibreOffice 26.2.4.2, and review lanes 6/6; Mathnote stayed
+171 pages, the table/footnote thesis 195, Xenolay 163, gb-ctr 202, and the
+missing-font C++ guide one. Evidence is under
+`target/docx-public-corpus-focus-grid-inline-guard-v2-stable/`.
+
+The tolerance fixes the measured two-digit boundary, not arbitrary minimum
+content width. In a later 118-line block, three-digit gutters 100–117 still
+wrap and line 109 splits across pages because three 9pt monospace glyphs cannot
+fit the 381-twip column after any reasonable padding. The next correction must
+carry rendered per-line minimum width into column reconstruction and rebalance
+tracks while preserving the table's total measured width; further margin
+reduction would be the wrong model.

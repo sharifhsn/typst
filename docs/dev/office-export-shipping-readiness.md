@@ -240,6 +240,30 @@ focused tests rather than being mislabeled as part of this authority.
   keep their authored Word cell margins. Durable evidence is under
   `target/docx-public-corpus-focus-centered-grid-stable/`; the older full-corpus
   totals above do not include this focused fix.
+- Tura's remaining page growth was then traced to a 381-twip editable code-line
+  number cell whose symmetric 84-twip margins left two-digit 9pt monospace
+  numbers on LibreOffice's wrap boundary. `w:noWrap` had no effect; 83-twip
+  margins still produced 293 pages, while 82 kept the numbers horizontal. The
+  mapper now applies that bounded two-twip-per-edge tolerance only to known
+  layout-grid cells with centered vertical alignment and equal nonzero
+  horizontal insets; semantic tables and asymmetric, zero-inset, or non-centered
+  cells remain unchanged. A measured-row-only intermediate rendered at 261
+  pages but left lines 65–75 wrapping and split line 69 across a page boundary;
+  package inspection traced those to 465 unmeasured centered rows, including all
+  28 three-digit gutters. Separating the horizontal tolerance from vertical
+  row-box measurement produces 254 pages against the 265-page reference, score
+  `0.975362`, semantic coverage `0.991067`, and a successful 6,880-region review
+  round trip. Delegated 180-dpi visual QA confirmed that late lines 65–75 remain
+  horizontal, line 69 no longer splits across pages, padding and row alignment
+  remain intact, and there is no clipping, collision, overlap, or page-furniture
+  contact. The same-consumer six-document
+  guard again passed package, LibreOffice, and review lanes 6/6; evidence is in
+  `target/docx-public-corpus-focus-grid-inline-guard-v2-stable/`.
+  Three-digit gutters remain a separate verified gap: lines 100–117 in a
+  118-line block still wrap, and line 109 splits across pages. Their rendered
+  glyph width cannot fit the 381-twip track after padding, so the next fix needs
+  source-derived per-line minimum-width capture and column rebalancing rather
+  than more margin removal.
 - Visual-policy passes: 761/1,392 rendered; exact page counts: 457; page deltas
   above one: 631.
 - The checker identifies 164 slide-shaped DOCX exports as a separate informational

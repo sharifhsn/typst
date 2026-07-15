@@ -48,8 +48,17 @@ struct MeasuredTableGeometry {
 struct CellGeometry {
     width_dxa: Option<i32>,
     height_dxa: Option<i32>,
+    layout_grid: bool,
     centered_grid_inset: bool,
 }
+
+/// Word stores table-cell insets in whole twips, while its text layout can
+/// consume a little more horizontal space than Typst for the same embedded
+/// face. Leave a one-tenth-point tolerance on each side of a centered,
+/// symmetric layout-grid cell so a glyph that fits the authored physical cell
+/// does not wrap solely at the integer-DXA boundary. Unlike vertical row-box
+/// reconciliation, this tolerance does not depend on measured row geometry.
+const LAYOUT_GRID_INLINE_TOLERANCE_DXA: i32 = 2;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum TableOrigin {
@@ -337,6 +346,7 @@ fn cellgrid(
                         CellGeometry {
                             width_dxa: Some(w_dxa),
                             height_dxa: full_row_height.map(|height| height.val),
+                            layout_grid: origin == TableOrigin::LayoutGrid,
                             centered_grid_inset,
                         },
                     )?);
@@ -518,6 +528,14 @@ fn build_cell(
     if geometry.centered_grid_inset && valign == Some(VAlign::Center) {
         margins.top = 0;
         margins.bottom = 0;
+    }
+    if geometry.layout_grid
+        && valign == Some(VAlign::Center)
+        && margins.left == margins.right
+        && margins.left > 0
+    {
+        margins.left = margins.left.saturating_sub(LAYOUT_GRID_INLINE_TOLERANCE_DXA);
+        margins.right = margins.right.saturating_sub(LAYOUT_GRID_INLINE_TOLERANCE_DXA);
     }
 
     // Cell body → blocks. The body is the packed `TableCell`; lower its inner
