@@ -130,7 +130,7 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 ## Validation completed on the combined branch
 
-- DOCX integration: 222 tests passed.
+- DOCX integration: 220 tests passed.
 - PPTX integration: 65 tests passed.
 - DOCX review round trip: 22 tests passed.
 - OOXML math conversion: 27 tests passed.
@@ -153,10 +153,6 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 - DOCX paragraph spacing is emitted once per collapsed Typst boundary across body,
   list, table, furniture, footnote, and text-box stories, avoiding consumer-specific
   `before` + `after` summation.
-- DOCX paragraph leading now uses Typst's resolved text-frame metrics instead of
-  assuming the nominal font size is the frame height. On the exact Alex Mathnote
-  fixture this reduces LibreOffice pagination from 187 to 171 pages against the
-  145-page Typst reference, while retaining the authored paragraph spacing.
 - PPTX raster fallbacks preserve searchable/editable transparent text. On the
   previous worst nativeness deck, `steady-rvl-slides`, recovery increased from
   28/65 to 65/65 words; `clari-docs` and `sdu-touying-simpl` recover about 99.7%
@@ -198,8 +194,8 @@ focused tests rather than being mislabeled as part of this authority.
   LibreOfficeDev 26.8 PDF conversion after 300 seconds. Keeping framed footnote
   content as editable flowing runs removes all five footnote-story text boxes,
   preserves the note text, and renders the exact thesis to PDF in about four
-  seconds. ZIP/XML validation and the then-current 221-test DOCX structural suite
-  pass. The frozen pre-fix evidence remains under
+  seconds. ZIP/XML validation and the 221-test DOCX structural suite pass. The
+  frozen pre-fix evidence remains under
   `target/docx-public-corpus-focus-e2021-1b38352/`; this focused HEAD fix is not
   folded into the older full-corpus totals above.
 - Focused HEAD validation after that frozen authority adds two explicitly reported
@@ -217,12 +213,6 @@ focused tests rather than being mislabeled as part of this authority.
   visual policy passed only `raphaelasla`. These focused results are not folded
   into the authority totals above. Durable evidence is under
   `target/docx-public-corpus-focus-dense-fixes-1b38352/`.
-- A later exact-source HEAD reproduction corrects the paragraph-leading metric and
-  reduces Alex Mathnote from 187 to 171 LibreOffice pages against the same 145-page
-  Typst reference. It is focused post-authority evidence, not a replacement for a
-  fresh corpus run; the prior score above remains attached to its frozen package.
-  Exact source, binary, package, consumer, command, and gate provenance is under
-  `target/docx-mathnote-leading-head/`.
 - Visual-policy passes: 761/1,392 rendered; exact page counts: 457; page deltas
   above one: 631.
 - The checker identifies 164 slide-shaped DOCX exports as a separate informational

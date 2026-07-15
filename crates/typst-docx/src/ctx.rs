@@ -981,52 +981,6 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         }
     }
 
-    /// Resolves the height of Typst's conceptual text frame for paragraph
-    /// line-spacing calculations.
-    ///
-    /// Typst's default text frame runs from the font's cap height to its
-    /// baseline, which is usually substantially shorter than the nominal font
-    /// size. Treating the font size itself as the frame height makes Word's
-    /// `w:line` minimum too tall, especially in documents with many short
-    /// paragraphs or equations. Bounds-based edges require actual shaped glyphs,
-    /// which are unavailable while resolving paragraph properties, so those and
-    /// unavailable fonts retain the conservative nominal-size fallback.
-    fn text_frame_height(&self, styles: StyleChain, font_size: Abs) -> Abs {
-        use typst_library::text::{
-            BottomEdge, BottomEdgeMetric, TextEdgeBounds, TextElem, TopEdge,
-            TopEdgeMetric, families, variant,
-        };
-
-        let top_edge = styles.get(TextElem::top_edge);
-        let bottom_edge = styles.get(TextElem::bottom_edge);
-        if matches!(top_edge, TopEdge::Metric(TopEdgeMetric::Bounds))
-            || matches!(bottom_edge, BottomEdge::Metric(BottomEdgeMetric::Bounds))
-        {
-            return font_size;
-        }
-
-        let variant = variant(styles);
-        let variations = styles.get_cloned(TextElem::variations);
-        let book = self.engine.world.book();
-        families(styles)
-            .find_map(|family| {
-                book.select(family.as_str(), variant)
-                    .and_then(|id| self.engine.world.font(id))
-            })
-            .map(|font| {
-                let instance = font.instantiate(variant, font_size, &variations);
-                let (top, bottom) = instance.edges(
-                    top_edge,
-                    bottom_edge,
-                    font_size,
-                    TextEdgeBounds::Zero,
-                );
-                top + bottom
-            })
-            .filter(|height| *height > Abs::zero())
-            .unwrap_or(font_size)
-    }
-
     /// Resolves a `ParElem`'s paragraph properties.
     pub fn resolve_par_props(
         &self,
@@ -1090,16 +1044,12 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
 
         // G4 leading → `w:line` at-least, only when it differs from the engine
         // default of 0.65em (emitting it on every paragraph would change all
-        // existing fixtures). Typst inserts `leading` between conceptual text
-        // frames, whose height is controlled by the resolved top/bottom edges;
-        // the nominal font size is only a fallback when those metrics cannot be
-        // resolved. Using `font_size + leading` overstates the line pitch for
-        // the default cap-height-to-baseline frame.
+        // existing fixtures). A faithful at-least line height is the resolved
+        // leading plus the font size.
         let leading = styles.resolve(ParElem::leading);
         let default_leading = Em::new(0.65).at(font_size);
         if (leading - default_leading).to_pt().abs() > 1e-3 {
-            let line =
-                props::abs_to_twip(leading + self.text_frame_height(styles, font_size));
+            let line = props::abs_to_twip(leading + font_size);
             p.spacing.get_or_insert_with(Default::default).line = Some(line);
             // at-least (not exact, not auto-multiple): never clip a tall line.
             if let Some(sp) = &mut p.spacing {

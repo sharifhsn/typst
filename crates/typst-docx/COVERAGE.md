@@ -2151,31 +2151,3 @@ conversion completes in about four seconds. A package regression combines a
 framed footnote body with a later native table and asserts that no `wps:txbx` or
 `w:drawing` enters the footnote part. All 221 DOCX integration tests, 22
 round-trip tests, 65 PPTX tests, strict Clippy, and DOCX/PPTX WASM checks pass.
-
-## 54. Paragraph leading uses Typst's resolved text-frame height
-
-Typst lays out a text line from its configured top edge to bottom edge; the
-default frame is the selected font's cap height to its baseline. The DOCX
-paragraph mapper instead treated the nominal font size as that frame height and
-added `par.leading` to it for Word's `w:line` minimum. For ordinary fonts this
-made every explicitly led paragraph several points too tall, accumulating into
-large pagination drift in documents with thousands of short math paragraphs.
-
-The mapper now selects the first locally available styled font, instantiates its
-resolved variation, and measures the same top/bottom font metrics used by Typst
-before adding the authored leading. Bounds-based edges need shaped glyphs and
-missing fonts are a normal portability case, so both retain the conservative
-nominal-size fallback. A structural regression checks the default Libertinus
-cap-height calculation (`541` instead of `616` twips for 11pt text with 1.8em
-leading), while a bounds-edge regression proves the `616`-twip fallback remains.
-The same fallback regression covers both edge directions and an unavailable font
-with automatic fallback disabled.
-
-On the exact 145-page Alex Mathnote reference, a release export from this change
-opens through a fresh LibreOfficeDev profile as 171 pages instead of 187. That
-recovers 16 pages without deleting the authored 1.35em paragraph spacing; a
-diagnostic mutation that removed spacing from every math-bearing paragraph
-reached 144 pages but was deliberately rejected because it would also alter
-ordinary prose containing inline formulas. All 222 DOCX integration tests, 15
-crate tests, 22 round-trip tests, 65 PPTX tests, strict library Clippy, and
-DOCX/PPTX WASM checks pass.

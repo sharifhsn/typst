@@ -217,7 +217,6 @@ fn readable_math_atom(text: &str) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 mod fallback_tests {
     use super::omml_fallback_text;
 
