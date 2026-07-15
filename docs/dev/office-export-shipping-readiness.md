@@ -195,11 +195,19 @@ focused tests rather than being mislabeled as part of this authority.
   non-local, or has a later independent trigger.
 - Focused HEAD validation after that frozen authority adds two explicitly reported
   raster fallbacks for pathological visual canvases. The one-page `raphaelasla`
-  shape swarm now opens in LibreOffice in under 9 seconds, retains one page, and
-  scores `0.979955` against the Typst reference. The drawing-heavy `gb-ctr` record
-  now opens in about 21 seconds and scores `0.968292`, but expands from 164 to 202
-  pages; that removes the consumer hang without resolving its reflow fidelity.
-  These focused results are not folded into the authority totals above.
+  shape swarm uses one full-page fallback, retains one page, and scores `0.979955`.
+  `gb-ctr` uses 92 dense-canvas fallbacks and scores `0.968293`, but expands from
+  164 to 202 pages. Tura uses seven dense-canvas fallbacks and scores `0.975914`,
+  but expands from 265 to 351 pages. Those three records now complete LibreOffice
+  conversion instead of hanging, though the two long documents retain substantial
+  reflow errors.
+- A serial 300-second retry also rendered the math-heavy `xenolay` and Alex mathnote
+  packages without new raster policies. They score `0.949368` (163 versus 161 pages)
+  and `0.977457` (187 versus 145 pages), respectively. Across the five-record
+  focused run, packages, LibreOffice rendering, and review round trip passed 5/5;
+  visual policy passed only `raphaelasla`. These focused results are not folded
+  into the authority totals above. Durable evidence is under
+  `target/docx-public-corpus-focus-dense-fixes-1b38352/`.
 - Visual-policy passes: 761/1,392 rendered; exact page counts: 457; page deltas
   above one: 631.
 - The checker identifies 164 slide-shaped DOCX exports as a separate informational
@@ -286,9 +294,9 @@ arbitrary Typst Universe/proprietary-app project compatibility is not yet proven
 
 ## Remaining release gates
 
-1. Re-run the consumer lane to disposition the authority-run LibreOffice failures
-   after the two focused HEAD fixes, then address the remaining math-heavy timeout,
-   deterministic conversion failure, and incomplete raster evidence.
+1. Re-run the full consumer lane to establish the focused 5/5 timeout recovery as
+   corpus-wide authority, then address the deterministic LibreOffice conversion
+   failure and incomplete raster evidence.
 2. Run a new authority after the post-`1bf829900` paragraph-spacing and checker
    changes and establish it as the new reproducible baseline; do not use the
    unretained v12 aggregate for causal claims.
