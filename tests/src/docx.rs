@@ -660,7 +660,7 @@ fn flexible_table_uses_converged_paged_cell_geometry() {
     }));
 
     let p = parts_with_manifest(src);
-    let widths = grid_widths(&element_fragments(&p["word/document.xml"], "tbl")[0]);
+    let widths = grid_widths(element_fragments(&p["word/document.xml"], "tbl")[0]);
     assert_eq!(widths.len(), 2);
     assert!((widths[1] as f64 / widths[0] as f64 - 2.0).abs() < 0.01);
     let manifest = &p["customXml/typstFidelity.xml"];
@@ -3122,7 +3122,7 @@ fn page_background_preserves_its_blank_coordinate_space() {
     assert_eq!((png.width(), png.height()), (800, 600));
     let mut ink = png.pixels().iter().enumerate().filter(|(_, pixel)| pixel.alpha() > 0);
     let (first, _) = ink.next().expect("background has ink");
-    let last = ink.last().map_or(first, |(index, _)| index);
+    let last = ink.next_back().map_or(first, |(index, _)| index);
     assert!(first / 800 > 550, "ink stays near the bottom of the page");
     assert!(last % 800 > 750, "ink stays near the right edge of the page");
 }
