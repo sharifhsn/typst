@@ -192,7 +192,10 @@ focused tests rather than being mislabeled as part of this authority.
   its first trigger at an inline dashed DrawingML line, but merely padding that
   line's one-EMU degenerate dimension does not resolve the full document, and
   deleting that shape run does not either. The LibreOffice failure is cumulative,
-  non-local, or has a later independent trigger.
+  non-local, or has a later independent trigger. A focused rerun with the current
+  exporter reconfirmed `DOCX-E202`: the package is valid and review round trip
+  passes, but LibreOffice still produces no PDF. Durable evidence is under
+  `target/docx-public-corpus-focus-e2021-1b38352/`.
 - Focused HEAD validation after that frozen authority adds two explicitly reported
   raster fallbacks for pathological visual canvases. The one-page `raphaelasla`
   shape swarm uses one full-page fallback, retains one page, and scores `0.979955`.
