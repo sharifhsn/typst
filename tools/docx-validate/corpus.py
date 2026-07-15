@@ -222,9 +222,9 @@ ERROR_CATALOG: dict[str, dict[str, str]] = {
         "next": "Read normalized_diagnostic and the artifact's docx.stderr.log.",
     },
     "DOCX-E101": {
-        "name": "package_invalid",
-        "summary": "The exported DOCX package is missing, corrupt, or contains invalid XML.",
-        "next": "Inspect package.errors and unzip the artifact to the named part.",
+        "name": "package_missing_or_invalid",
+        "summary": "No DOCX package was produced, or the package is corrupt or contains invalid XML.",
+        "next": "If the package is absent, inspect the compile diagnostic; otherwise inspect package.errors and unzip the named part.",
     },
     "DOCX-W102": {
         "name": "drawing_coordinate_outlier",
@@ -349,8 +349,18 @@ def error_entries(record: dict[str, Any]) -> list[dict[str, Any]]:
     }
     if compile_code in compile_codes:
         found.append((compile_codes[compile_code], "compile", record["diagnoses"]["docx_compile"]))
-    if not record.get("package", {}).get("ok", False):
-        found.append(("DOCX-E101", "package", record.get("package", {}).get("errors", [])))
+    package = record.get("package", {})
+    if not package.get("ok", False):
+        package_errors = package.get("errors", [])
+        package_missing = compile_code in compile_codes or any(
+            "no package" in str(error).lower() for error in package_errors
+        )
+        detail = (
+            {"kind": "missing", "errors": package_errors}
+            if package_missing
+            else {"kind": "invalid", "errors": package_errors}
+        )
+        found.append(("DOCX-E101", "package", detail))
     package_code = record.get("diagnoses", {}).get("docx_package", {}).get("code")
     if package_code == "drawing_coordinate_outlier":
         found.append(("DOCX-W102", "package", record["diagnoses"]["docx_package"]))
