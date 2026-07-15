@@ -901,38 +901,72 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     /// maximal spans — so a single-script run (the common case) still
     /// produces exactly one span.
     fn split_by_font_coverage(
-        &self,
+        &mut self,
         text: &str,
         styles: StyleChain,
     ) -> Vec<(EcoString, EcoString)> {
+        // Source-declared families remain fidelity evidence even when Typst's
+        // own shaping contract emits no glyphs for them. Final-IR inventory
+        // cannot see an intentionally omitted run, so enroll unavailable
+        // declarations here before selecting the actual visible families.
+        let unavailable_declared: Vec<EcoString> = styles
+            .get_ref(TextElem::font)
+            .into_iter()
+            .filter(|family| {
+                self.engine
+                    .world
+                    .book()
+                    .select(family.as_str(), typst_library::text::variant(styles))
+                    .is_none()
+            })
+            .map(|family| family.as_str().into())
+            .collect();
+        for family in unavailable_declared {
+            self.fidelity_report.record_font(0, &family, false);
+        }
+
         let book = self.engine.world.book();
         let variant = typst_library::text::variant(styles);
         let families: Vec<&typst_library::text::FontFamily> =
             typst_library::text::families(styles).collect();
-        let Some(first) = families.first() else {
+        if families.is_empty() {
             return vec![(EcoString::new(), text.into())];
-        };
+        }
 
-        // If the leading requested family isn't resolvable at all on this
-        // machine, there is no coverage data to justify overriding it: DOCX
-        // preserves font names as portable references for whatever
-        // application eventually opens the file (unlike PDF, which must
-        // embed real glyph outlines from a locally available font and so
-        // is already limited to what's installed here) — a font simply
-        // being absent from the compiling machine's font book is the
-        // ordinary case, not evidence it lacks coverage. Keep the exact
-        // original single-font behavior rather than guessing a local
-        // substitute.
-        let Some(first_info) =
-            book.select(first.as_str(), variant).and_then(|id| book.info(id))
-        else {
-            return vec![(first.as_str().into(), text.into())];
+        // Typst shaping tries each explicitly declared family in order. Only
+        // after exhausting that list may it consult the global fallback search,
+        // and only when `text(fallback: true)` permits that search. Preserve the
+        // same local rendering authority here: an unavailable first family must
+        // not hide an available second declared family, while an entirely
+        // unavailable list with fallback disabled produces no glyphs in paged
+        // output and therefore must not acquire consumer-selected glyphs merely
+        // because DOCX can carry the unresolved family name.
+        let fallback_enabled = styles.get(TextElem::fallback);
+        let resolved_first = families.iter().find_map(|family| {
+            book.select(family.as_str(), variant)
+                .and_then(|id| book.info(id))
+                .map(|info| (family.as_str(), info, family.covers()))
+        });
+        let (first_name, first_info, first_covers) = match resolved_first.or_else(|| {
+            fallback_enabled
+                .then(|| book.select_fallback(None, variant, text))
+                .flatten()
+                .and_then(|id| book.info(id))
+                .map(|info| (info.family.as_str(), info, None))
+        }) {
+            Some(pair) => pair,
+            None => return Vec::new(),
         };
 
         // Fast path: the (locally resolvable) leading font already covers
         // every character — the overwhelming common case.
-        if text.chars().all(|c| first_info.coverage.contains(c as u32)) {
-            return vec![(first.as_str().into(), text.into())];
+        if text.chars().all(|c| {
+            let mut buf = [0; 4];
+            first_info.coverage.contains(c as u32)
+                && first_covers
+                    .is_none_or(|covers| covers.is_match(c.encode_utf8(&mut buf)))
+        }) {
+            return vec![(first_name.into(), text.into())];
         }
 
         let like = Some(first_info);
@@ -940,6 +974,13 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         for c in text.chars() {
             let mut chosen: Option<&str> = None;
             for family in &families {
+                let mut buf = [0; 4];
+                if family
+                    .covers()
+                    .is_some_and(|covers| !covers.is_match(c.encode_utf8(&mut buf)))
+                {
+                    continue;
+                }
                 if let Some(id) = book.select(family.as_str(), variant)
                     && let Some(info) = book.info(id)
                     && info.coverage.contains(c as u32)
@@ -949,17 +990,22 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 }
             }
             let font_name: EcoString = match chosen.or_else(|| {
-                // None of the declared families cover this character — fall
-                // back the same way Typst's own shaping does.
-                book.select_fallback(like, variant, c.encode_utf8(&mut [0; 4]))
+                // None of the declared families cover this character. Typst
+                // consults the fallback book only when fallback is enabled.
+                fallback_enabled
+                    .then(|| {
+                        book.select_fallback(like, variant, c.encode_utf8(&mut [0; 4]))
+                    })
+                    .flatten()
                     .and_then(|id| book.info(id))
                     .map(|info| info.family.as_str())
             }) {
                 Some(name) => name.into(),
-                // No installed font covers this character at all — keep the
-                // originally requested family; Word falls back to its own
-                // missing-glyph handling, no worse than before this split.
-                None => families.first().map(|f| f.as_str().into()).unwrap_or_default(),
+                // Once Typst has shaped at least part of a segment with a real
+                // font, an uncovered remainder becomes notdef glyphs in that
+                // first used font. Retain that font here rather than silently
+                // enabling a fallback family that the source disabled.
+                None => first_name.into(),
             };
             match spans.last_mut() {
                 Some((last_font, last_text)) if *last_font == font_name => {
@@ -1693,6 +1739,27 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 p.bdr.get_or_insert(b);
             }
             out.extend(self.inline_runs(&body, styles, p)?);
+        } else if let Some(elem) = child.to_packed::<typst_library::layout::BlockElem>()
+            && block_is_plain(elem, styles)
+            && let Some(typst_library::layout::BlockBody::Content(body)) =
+                elem.body.get_ref(styles)
+            && crate::convert::body_extractable(body)
+            && crate::convert::body_inline_extractable(body)
+        {
+            // A plain block nested where Word permits only inline runs — most
+            // importantly a full-width `link(block(..)[label])` inside a table
+            // cell — cannot retain its block box without dropping the link or
+            // manufacturing an illegal nested paragraph. Preserve its content
+            // and hyperlink as ordinary editable runs and report only the lost
+            // width/inset/hit-area geometry.
+            self.record_content_decision(
+                child,
+                Representation::Approximate,
+                DecisionReason::InlineBlockFlowApproximation,
+                LossSet::VISUAL_ONLY,
+                body.plain_text().chars().count(),
+            );
+            out.extend(self.inline_runs(body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<typst_library::layout::BoxElem>() {
             // A non-text-box `#box` (no visible frame, or a body that must
             // rasterize): keep the existing rasterize/extract handling.
@@ -2026,6 +2093,20 @@ fn box_is_plain(
     }
     let s = elem.stroke.get_cloned(styles);
     s.top.is_none() && s.bottom.is_none() && s.left.is_none() && s.right.is_none()
+}
+
+fn block_is_plain(
+    elem: &typst_library::foundations::Packed<typst_library::layout::BlockElem>,
+    styles: StyleChain,
+) -> bool {
+    if elem.fill.get_cloned(styles).is_some() || elem.clip.get(styles) {
+        return false;
+    }
+    let stroke = elem.stroke.get_cloned(styles);
+    stroke.top.is_none()
+        && stroke.bottom.is_none()
+        && stroke.left.is_none()
+        && stroke.right.is_none()
 }
 
 /// Derives a Word underline style + colour from a resolved line stroke.

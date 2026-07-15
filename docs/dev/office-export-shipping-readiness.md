@@ -130,7 +130,7 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 ## Validation completed on the combined branch
 
-- DOCX integration: 223 tests passed.
+- DOCX integration: 227 tests passed.
 - PPTX integration: 65 tests passed.
 - DOCX review round trip: 22 tests passed.
 - OOXML math conversion: 27 tests passed.
@@ -153,6 +153,13 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 - DOCX paragraph spacing is emitted once per collapsed Typst boundary across body,
   list, table, furniture, footnote, and text-box stories, avoiding consumer-specific
   `before` + `after` summation.
+- DOCX font selection follows Typst's declared-family, `covers`, and
+  `fallback` contract. Unavailable fallback-disabled text no longer becomes
+  consumer-invented visible glyphs, while unavailable declarations remain
+  explicit fidelity evidence. On the frozen `gb-ctr` north star this reduces
+  LibreOffice pagination from 202 to 173 pages against a 164-page reference and
+  raises semantic coverage from 67.4% to 88.7% without regressing the six-document
+  sentinel lane.
 - PPTX raster fallbacks preserve searchable/editable transparent text. On the
   previous worst nativeness deck, `steady-rvl-slides`, recovery increased from
   28/65 to 65/65 words; `clari-docs` and `sdu-touying-simpl` recover about 99.7%

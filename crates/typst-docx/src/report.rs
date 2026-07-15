@@ -112,6 +112,11 @@ pub enum DecisionReason {
     /// A table/grid stayed native and editable, but its cell paint, border
     /// nuance, or track sizing cannot be reproduced exactly by Word.
     TableGeometryApproximation,
+    /// Block-level layout used inside an inline-only context (commonly a
+    /// full-cell hyperlink) was unwrapped to native runs. Text and link
+    /// semantics survive, while block width, padding, and hit-area geometry do
+    /// not have a run-level Word equivalent.
+    InlineBlockFlowApproximation,
     /// A table/grid had no resolved `CellGrid`, and both native lowering and
     /// whole-region fallback produced no representation.
     TableResolutionUnavailable,

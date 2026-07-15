@@ -1291,8 +1291,9 @@ pub fn laid_out_fallback_with_tags(
 /// image carries the exact visual; alongside it, the text recovered from the
 /// laid-out frame is kept as HIDDEN runs (`w:vanish`), so the rasterized region
 /// stays searchable, selectable, copy-pasteable, and screen-reader accessible
-/// instead of being pure dead pixels. Line breaks in the recovered text become
-/// `<w:br/>`s within the hidden run sequence.
+/// instead of being pure dead pixels. Recovered line boundaries are flattened
+/// to spaces: a bare `<w:br/>` is layout-visible even beside vanished text and
+/// can otherwise manufacture blank pages after a large fallback.
 fn fallback_runs(
     ctx: &mut DocxCtx,
     rel: EcoString,
@@ -1361,25 +1362,21 @@ fn fallback_runs_tiled(
 
 /// Appends the frame-recovered `text` as hidden (`w:vanish`) runs — the words
 /// stay searchable/selectable but take no visual space beside the image.
-/// `\n` line separators become `Run::Break`s. The block is bracketed with
-/// hidden spaces so its first/last words keep a boundary against any adjacent
-/// visible run (otherwise a consumer concatenating run text — pandoc, Word's
-/// Find, copy-paste — would glue e.g. `urbane` + `Stoicos` into one token).
+/// Line separators become ordinary spaces inside the vanished run because
+/// `Run::Break` has no run properties and therefore still consumes layout.
+/// Leading/trailing spaces keep a boundary against adjacent visible runs
+/// (otherwise a consumer concatenating run text — pandoc, Word's Find,
+/// copy-paste — would glue e.g. `urbane` + `Stoicos` into one token).
 fn hidden_text_runs(text: &str, out: &mut Vec<Run>) {
-    if text.trim().is_empty() {
+    let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flattened.is_empty() {
         return;
     }
     let hidden = RunProps { vanish: true, ..RunProps::default() };
-    out.push(Run::Text { props: hidden.clone(), text: " ".into() });
-    for (i, line) in text.split('\n').enumerate() {
-        if i > 0 {
-            out.push(Run::Break);
-        }
-        if !line.is_empty() {
-            out.push(Run::Text { props: hidden.clone(), text: line.into() });
-        }
-    }
-    out.push(Run::Text { props: hidden.clone(), text: " ".into() });
+    out.push(Run::Text {
+        props: hidden,
+        text: format!(" {flattened} ").into(),
+    });
 }
 
 // ---------------------------------------------------------------------------

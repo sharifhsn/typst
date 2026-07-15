@@ -861,6 +861,81 @@ fn paragraph_leading_uses_nominal_size_when_text_metrics_are_unavailable() {
 }
 
 #[test]
+fn unavailable_fonts_follow_typst_fallback_policy() {
+    let missing = "Definitely Missing Test Font";
+
+    let disabled = parts(&format!(
+        "#set text(font: \"{missing}\", fallback: false)\nInvisibleSourceText"
+    ));
+    assert!(
+        !disabled["word/document.xml"].contains("InvisibleSourceText"),
+        "text with no shapeable source font must not become visible only in DOCX"
+    );
+    assert_all_wellformed(&disabled);
+
+    let declared_alternative = parts(&format!(
+        "#set text(font: (\"{missing}\", \"Libertinus Serif\"), fallback: false)\n\
+         ExplicitAlternativeText"
+    ));
+    assert!(
+        declared_alternative["word/document.xml"].contains("ExplicitAlternativeText"),
+        "Typst tries later explicitly declared families before giving up"
+    );
+    assert_all_wellformed(&declared_alternative);
+
+    let enabled = parts(&format!(
+        "#set text(font: \"{missing}\", fallback: true)\nFallbackEnabledText"
+    ));
+    assert!(
+        enabled["word/document.xml"].contains("FallbackEnabledText"),
+        "enabled fallback keeps text visible through an installed fallback family"
+    );
+    assert_all_wellformed(&enabled);
+
+    let constrained = parts(
+        "#set text(font: (\n\
+           (name: \"New Computer Modern\", covers: regex(\"[0-9]\")),\n\
+           \"Libertinus Serif\",\n\
+         ), fallback: false)\n\
+         The number 123.",
+    );
+    let constrained_doc = &constrained["word/document.xml"];
+    assert!(
+        constrained_doc.contains("w:ascii=\"new computer modern\"")
+            && constrained_doc.contains(">123</w:t>"),
+        "declared coverage constraints must route digits to their selected family: \
+         {constrained_doc}"
+    );
+    assert_all_wellformed(&constrained);
+}
+
+#[test]
+fn inline_block_inside_link_keeps_text_and_link_semantics() {
+    let src = "#table(columns: 1, inset: 0pt, \
+               link(\"https://example.com/op\", \
+                 block(width: 100%, inset: 5pt)[Mnemonic]))";
+    let compiled = compile_docx(src, &[]);
+    let decision = compiled
+        .fidelity_report()
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::InlineBlockFlowApproximation)
+        .expect("inline block geometry must be reported as an approximation");
+    assert_eq!(decision.representation, Representation::Approximate);
+    assert_eq!(decision.losses, typst_docx::LossSet::VISUAL_ONLY);
+
+    let p = parts(src);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("Mnemonic"), "linked cell text remains editable");
+    assert!(document.contains("<w:hyperlink r:id="), "external link remains live");
+    assert!(
+        !document.contains("<w:drawing>"),
+        "plain inline block must not become a raster fallback"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn paragraph_spacing_uses_the_larger_adjacent_value_once() {
     let p = parts(
         "#set par(spacing: 20pt)\n\
@@ -1484,6 +1559,15 @@ fn rasterized_content_keeps_its_text_as_hidden_runs() {
     assert!(decision.losses.semantic_structure);
     assert!(decision.losses.editability);
     assert!(decision.affected_text_chars >= "HiddenSkewWord".len());
+
+    let multiline = parts("#skew(ax: 20deg)[HiddenSkewWord#linebreak()SecondSkewLine]");
+    let multiline_doc = &multiline["word/document.xml"];
+    assert!(multiline_doc.contains("HiddenSkewWord SecondSkewLine"));
+    assert!(
+        !multiline_doc.contains("<w:br"),
+        "recovered line boundaries must stay inside vanished text, not create layout breaks"
+    );
+    assert_all_wellformed(&multiline);
 }
 
 #[test]
@@ -3031,9 +3115,9 @@ fn document_default_text_props_are_hoisted_into_doc_defaults_and_normal() {
     // The root StyleChain's font/size/color is hoisted into `docDefaults` and
     // Normal; body runs that match inherit it, while deviations stay direct.
     let p = parts(
-        "#set text(font: \"Liberation Serif\", size: 12pt, fill: rgb(\"123456\"))\n\
+        "#set text(font: \"Libertinus Serif\", size: 12pt, fill: rgb(\"123456\"))\n\
          Plain body text here.\n\n\
-         #text(font: \"Liberation Mono\", fill: rgb(\"AA0000\"))[deviating run]",
+         #text(font: \"DejaVu Sans Mono\", fill: rgb(\"AA0000\"))[deviating run]",
     );
     let styles = &p["word/styles.xml"];
     let doc = &p["word/document.xml"];
@@ -3041,7 +3125,7 @@ fn document_default_text_props_are_hoisted_into_doc_defaults_and_normal() {
     // docDefaults carries the document's root font + size + color.
     let dd = &styles[styles.find("<w:docDefaults>").unwrap()..];
     let dd = &dd[..dd.find("</w:docDefaults>").unwrap()];
-    assert!(dd.contains("liberation serif"), "default font hoisted: {dd}");
+    assert!(dd.contains("libertinus serif"), "default font hoisted: {dd}");
     assert!(
         dd.contains("w:val=\"24\""),
         "default size (12pt = 24 half-pt) hoisted: {dd}"
@@ -3050,7 +3134,7 @@ fn document_default_text_props_are_hoisted_into_doc_defaults_and_normal() {
 
     // Normal carries the same defaults so restyling Normal is effective.
     let normal = style_fragment(styles, "Normal");
-    assert!(normal.contains("liberation serif"), "Normal owns default font");
+    assert!(normal.contains("libertinus serif"), "Normal owns default font");
     assert!(normal.contains("w:val=\"24\""), "Normal owns default size");
     assert!(normal.contains("<w:color w:val=\"123456\"/>"), "Normal owns color");
 
@@ -3058,7 +3142,7 @@ fn document_default_text_props_are_hoisted_into_doc_defaults_and_normal() {
     let plain = run_fragment_containing(doc, "Plain body text here.");
     assert!(!plain.contains("<w:rPr>"), "plain body inherits defaults: {plain}");
     let deviating = run_fragment_containing(doc, "deviating run");
-    assert!(deviating.contains("liberation mono"), "deviating font stays direct");
+    assert!(deviating.contains("dejavu sans mono"), "deviating font stays direct");
     assert!(
         deviating.contains("<w:color w:val=\"AA0000\"/>"),
         "deviating color stays direct: {deviating}"
@@ -3069,8 +3153,8 @@ fn document_default_text_props_are_hoisted_into_doc_defaults_and_normal() {
 #[test]
 fn heading_style_owns_matching_run_formatting() {
     let p = parts(
-        "#set text(font: \"Liberation Serif\", size: 11pt)\n\
-         #show heading.where(level: 1): set text(font: \"Liberation Sans\", size: 20pt, fill: rgb(\"224466\"))\n\
+        "#set text(font: \"Libertinus Serif\", size: 11pt)\n\
+         #show heading.where(level: 1): set text(font: \"DejaVu Sans Mono\", size: 20pt, fill: rgb(\"224466\"))\n\
          = Styled Heading\n\n\
          Body.",
     );
@@ -3078,7 +3162,7 @@ fn heading_style_owns_matching_run_formatting() {
     let doc = &p["word/document.xml"];
 
     let heading_style = style_fragment(styles, "Heading1");
-    assert!(heading_style.contains("liberation sans"), "Heading1 owns font");
+    assert!(heading_style.contains("dejavu sans mono"), "Heading1 owns font");
     assert!(heading_style.contains("<w:sz w:val=\"40\"/>"), "Heading1 owns size");
     assert!(heading_style.contains("<w:color w:val=\"224466\"/>"), "Heading1 owns color");
     assert!(heading_style.contains("<w:b/>"), "Heading1 owns bold");
@@ -3099,21 +3183,21 @@ fn heading_style_owns_matching_run_formatting() {
 #[test]
 fn heading_deviation_equal_to_normal_remains_direct() {
     let p = parts(
-        "#set text(font: \"Liberation Serif\", size: 11pt, fill: rgb(\"AA0000\"))\n\
-         #show heading.where(level: 1): set text(font: \"Liberation Sans\", size: 20pt, fill: rgb(\"224466\"))\n\
-         = Styled #text(font: \"Liberation Serif\", size: 11pt, fill: rgb(\"AA0000\"))[Normal-looking]",
+        "#set text(font: \"Libertinus Serif\", size: 11pt, fill: rgb(\"AA0000\"))\n\
+         #show heading.where(level: 1): set text(font: \"DejaVu Sans Mono\", size: 20pt, fill: rgb(\"224466\"))\n\
+         = Styled #text(font: \"Libertinus Serif\", size: 11pt, fill: rgb(\"AA0000\"))[Normal-looking]",
     );
     let styles = &p["word/styles.xml"];
     let doc = &p["word/document.xml"];
 
     let heading_style = style_fragment(styles, "Heading1");
-    assert!(heading_style.contains("liberation sans"));
+    assert!(heading_style.contains("dejavu sans mono"));
     assert!(heading_style.contains("w:val=\"40\""));
     assert!(heading_style.contains("w:val=\"224466\""));
 
     let deviation = run_fragment_containing(doc, "Normal-looking");
     assert!(
-        deviation.contains("liberation serif"),
+        deviation.contains("libertinus serif"),
         "font equal to Normal must still override Heading1: {deviation}"
     );
     assert!(
@@ -4536,7 +4620,7 @@ fn license_permitted_fonts_are_obfuscated_and_embedded() {
 }
 
 #[test]
-fn fidelity_report_marks_missing_fonts_as_consumer_dependent() {
+fn fidelity_report_keeps_missing_source_fonts_after_fallback_selection() {
     let family = "definitely missing typst font";
     let src = "#set text(font: \"Definitely Missing Typst Font\")\nPortable reference.";
     let compiled = compile_docx(src, &[]);
@@ -4562,7 +4646,11 @@ fn fidelity_report_marks_missing_fonts_as_consumer_dependent() {
     );
     assert!(
         p["word/fontTable.xml"].contains("w:name=\"definitely missing typst font\""),
-        "the portable Word reference remains declared"
+        "the authored family remains declared for style/default portability"
+    );
+    assert!(
+        p["word/document.xml"].contains("Portable reference."),
+        "fallback-enabled source text remains visible through a selected local family"
     );
 }
 

@@ -2305,3 +2305,52 @@ conversion timeout. Mathnote remains 171 pages, the table/footnote thesis 195,
 Xenolay 163, gb-ctr 202, and the missing-font C++ guide one; their scores and
 semantic coverage remain effectively unchanged. Combined evidence is under
 `target/docx-public-corpus-focus-grid-auto-width-v4-stable/`.
+
+## 58. Source-authoritative font fallback and layout-neutral hidden text
+
+The `gb-ctr` north-star document exposed a general divergence between Typst
+shaping and DOCX text lowering. Typst skips unavailable declared families,
+tries later explicitly declared families even when `fallback: false`, honors
+each family's `covers` constraint, and consults automatic fallback only when
+enabled. DOCX instead preserved an unavailable first family as a portable Word
+request and unconditionally selected local fallback for uncovered characters.
+That let Word manufacture visible pseudocode, icons, and register labels which
+the same source did not render in Typst.
+
+DOCX font-span selection now follows that source contract. Missing declared
+families remain explicit fidelity/font evidence, but a run with no shapeable
+family and disabled fallback emits no consumer-selected glyphs. Later declared
+families and coverage-constrained families remain native and editable. A plain
+block encountered inside an inline-only context, such as a full-cell hyperlink,
+is also unwrapped to linked editable runs and reports
+`InlineBlockFlowApproximation` for the unavailable width/inset hit-area
+geometry instead of becoming an unsupported raster/drop boundary.
+
+Raster fallback accessibility text previously translated every recovered line
+boundary into a bare `w:br`. Run properties cannot hide that break, so large
+fallbacks could manufacture pages of invisible layout. Recovered text is now
+whitespace-normalized into one vanished run. It remains searchable and bounded
+by leading/trailing word separators without participating in pagination.
+
+On the frozen `gb-ctr` source and LibreOffice 26.2.4.2, the combined general
+policy renders 173 pages against the 164-page Typst reference, down from 202.
+Semantic text coverage rises from `0.673707` to `0.887061`; package validation,
+consumer conversion, and the 2,511-region review round trip pass. Delegated
+visual QA confirmed that unavailable pseudocode disappears in both outputs,
+the former instruction spill pages are removed, and no new document-wide
+missing region, clipping, or collision appears. Five extra blank instruction
+pages, four additional memory-table pages, fragmented placed-canvas labels,
+the compressed TOC, and sampled page furniture remain separate architectural
+gaps. The opcode table's linked-block capability is structurally covered, but
+its current `gb-ctr` mnemonics remain absent in both outputs because the entire
+table explicitly uses the unavailable `Anonymous Pro` with fallback disabled.
+
+The same-consumer six-document sentinel passes package, LibreOffice, and review
+lanes 6/6 under `target/docx-gb-north-star-sentinel-v1/`. Tura improves from
+254 to 253 pages, Mathnote from 171 to 168, the thesis from 195 to 129,
+Xenolay stays 163, and the missing-font C++ guide stays exactly one page;
+semantic coverage is unchanged on all five documents where it is measurable.
+The thesis still has a pre-existing visual-loss defect at tiled raster
+boundaries even though its complete bibliography survives as hidden text.
+All 227 DOCX integration tests, 15 DOCX unit tests, 22 round-trip tests, 65
+PPTX tests, strict Clippy, and DOCX/PPTX WASM checks pass.
