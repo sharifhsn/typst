@@ -2268,10 +2268,40 @@ guard passed package, LibreOffice 26.2.4.2, and review lanes 6/6; Mathnote staye
 missing-font C++ guide one. Evidence is under
 `target/docx-public-corpus-focus-grid-inline-guard-v2-stable/`.
 
-The tolerance fixes the measured two-digit boundary, not arbitrary minimum
-content width. In a later 118-line block, three-digit gutters 100–117 still
-wrap and line 109 splits across pages because three 9pt monospace glyphs cannot
-fit the 381-twip column after any reasonable padding. The next correction must
-carry rendered per-line minimum width into column reconstruction and rebalance
-tracks while preserving the table's total measured width; further margin
-reduction would be the wrong model.
+That run still exposed a distinct minimum-content-width failure in a later
+118-line block: three-digit gutters 100–117 wrapped and line 109 split across
+pages because three 9pt monospace glyphs could not fit the 381-twip column.
+
+## 57. Repeated auto tracks use the widest Typst measurement
+
+Codly declares the line-number gutter as `auto` beside `1fr`. Typst already
+measured the later three-digit occurrence wider, but repeated grids share one
+logical source identity and DOCX's table plan selected only the first physical
+occurrence. That froze every table to the earlier two-digit 381-twip gutter and
+discarded Typst's own shaped intrinsic-width evidence.
+
+For repeated layout grids in the same measured-width context, the mapper now
+raises each `auto` track to the widest axis-aligned, unspanned physical
+measurement retained for that logical grid. It takes the exact increase from
+`fr` tracks, preserving the table's total width and all explicit gutter tracks.
+Fixed tracks, unrelated widths, transformed/spanned samples, insufficient
+fractional donors, and semantic tables retain their previous plan. A bounded
+two-twip Office metric tolerance makes the result independent of which repeated
+occurrence appears first.
+
+The Tura package now uses a 489-twip number gutter and an 8,262-twip code track,
+retaining the exact 8,751-twip table total. Stable LibreOffice 26.2.4.2 renders
+254 pages, score `0.975426`, semantic coverage `0.991067`, and a successful
+6,880-region review round trip. Delegated 180-dpi QA confirmed that lines
+100–117 and line 109 remain horizontal and intact, the page break occurs after
+the code block rather than inside a number, the adjacent long code lines remain
+single-line, and the earlier two-digit Dijkstra sample is visually unchanged.
+The focused artifact is under
+`target/docx-public-corpus-focus-tura-auto-width-v4-stable/`.
+
+The same-consumer six-document guard passed package, LibreOffice 26.2.4.2, and
+review lanes 6/6 after a serial retry recovered one load-sensitive Tura
+conversion timeout. Mathnote remains 171 pages, the table/footnote thesis 195,
+Xenolay 163, gb-ctr 202, and the missing-font C++ guide one; their scores and
+semantic coverage remain effectively unchanged. Combined evidence is under
+`target/docx-public-corpus-focus-grid-auto-width-v4-stable/`.

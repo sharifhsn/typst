@@ -1156,6 +1156,93 @@ fn centered_layout_grid_inset_uses_the_measured_row_box() {
 }
 
 #[test]
+fn repeated_layout_grid_snapshot_retains_each_auto_track_width() {
+    let compiled = compile_docx(
+        "#set page(width: 240pt, height: 160pt, margin: 10pt)\n\
+         #let code(number) = grid(\
+           columns: (auto, 1fr),\
+           [#text(font: \"DejaVu Sans Mono\", size: 9pt)[#number]],\
+           [body],\
+         )\n\
+         #code(99)\n\
+         #code(109)",
+        &[],
+    );
+    let tables = compiled.export_snapshot().tables();
+    assert_eq!(tables.len(), 2);
+    assert_eq!(tables[0].logical_id, tables[1].logical_id);
+    let first_width = tables[0]
+        .cells
+        .iter()
+        .find(|cell| cell.x == 0 && cell.colspan == 1)
+        .expect("first auto cell")
+        .width_pt;
+    let second_width = tables[1]
+        .cells
+        .iter()
+        .find(|cell| cell.x == 0 && cell.colspan == 1)
+        .expect("second auto cell")
+        .width_pt;
+    assert!(second_width > first_width, "{first_width} !< {second_width}");
+
+    let package_parts = text_parts(&compiled);
+    let exported = element_fragments(&package_parts["word/document.xml"], "tbl");
+    assert_eq!(exported.len(), 2);
+    let first_grid = grid_widths(exported[0]);
+    let second_grid = grid_widths(exported[1]);
+    assert_eq!(first_grid, second_grid, "reused grids need one stable track plan");
+    assert!(
+        (first_grid[0] as f64 - (second_width * 20.0 + 2.0)).abs() <= 2.0,
+        "the widest paged auto track must drive DOCX: {first_grid:?}"
+    );
+    let paged_total = tables[0]
+        .cells
+        .iter()
+        .filter(|cell| cell.y == 0)
+        .map(|cell| cell.width_pt)
+        .sum::<f64>();
+    assert!(
+        (first_grid.iter().sum::<i32>() as f64 - paged_total * 20.0).abs() <= 2.0,
+        "the fr donor must preserve total table width"
+    );
+
+    let reversed = parts(
+        "#set page(width: 240pt, height: 160pt, margin: 10pt)\n\
+         #let code(number) = grid(\
+           columns: (auto, 1fr),\
+           [#text(font: \"DejaVu Sans Mono\", size: 9pt)[#number]],\
+           [body],\
+         )\n\
+         #code(109)\n\
+         #code(99)",
+    );
+    let reversed_tables = element_fragments(&reversed["word/document.xml"], "tbl");
+    assert_eq!(grid_widths(reversed_tables[0]), first_grid);
+    assert_eq!(grid_widths(reversed_tables[1]), first_grid);
+    assert_all_wellformed(&package_parts);
+    assert_all_wellformed(&reversed);
+}
+
+#[test]
+fn repeated_fixed_layout_grid_track_remains_authored() {
+    let p = parts(
+        "#set page(width: 240pt, height: 160pt, margin: 10pt)\n\
+         #let code(number) = grid(\
+           columns: (20pt, 1fr),\
+           [#text(font: \"DejaVu Sans Mono\", size: 9pt)[#number]],\
+           [body],\
+         )\n\
+         #code(99)\n\
+         #code(109)",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    assert_eq!(tables.len(), 2);
+    assert_eq!(grid_widths(tables[0])[0], 400);
+    assert_eq!(grid_widths(tables[1])[0], 400);
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn table_cell_collapses_outer_par_spacing_but_keeps_explicit_vertical_space() {
     let p = parts(
         "#set page(width: 180mm, height: 150mm, margin: 12mm)\n\

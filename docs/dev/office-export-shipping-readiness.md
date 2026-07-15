@@ -259,11 +259,23 @@ focused tests rather than being mislabeled as part of this authority.
   contact. The same-consumer six-document
   guard again passed package, LibreOffice, and review lanes 6/6; evidence is in
   `target/docx-public-corpus-focus-grid-inline-guard-v2-stable/`.
-  Three-digit gutters remain a separate verified gap: lines 100–117 in a
-  118-line block still wrap, and line 109 splits across pages. Their rendered
-  glyph width cannot fit the 381-twip track after padding, so the next fix needs
-  source-derived per-line minimum-width capture and column rebalancing rather
-  than more margin removal.
+  A later three-digit case initially remained: lines 100–117 wrapped and line
+  109 split across pages because repeated grids shared one logical identity and
+  DOCX retained only the first occurrence's two-digit auto-track measurement.
+  Typst had already measured the later `(auto, 1fr)` occurrence wider. DOCX now
+  takes the widest same-context auto measurement and donates the exact delta
+  from fractional tracks, preserving total table width; a bounded two-twip
+  Office metric tolerance makes the result call-order independent. Tura now
+  emits a 489/8,262-twip split with the same 8,751-twip total and renders 254
+  pages, score `0.975426`. Delegated QA confirmed all lines 100–117 and line 109
+  are horizontal and intact, adjacent code does not newly wrap, and the earlier
+  two-digit sample is unchanged. Focused evidence is under
+  `target/docx-public-corpus-focus-tura-auto-width-v4-stable/`.
+  The same-consumer six-document guard then passed package, LibreOffice 26.2.4.2,
+  and review lanes 6/6 after a serial retry recovered one load-sensitive Tura
+  timeout. Mathnote remains 171 pages, the table/footnote thesis 195, Xenolay
+  163, gb-ctr 202, and the missing-font C++ guide one. Combined evidence is in
+  `target/docx-public-corpus-focus-grid-auto-width-v4-stable/`.
 - Visual-policy passes: 761/1,392 rendered; exact page counts: 457; page deltas
   above one: 631.
 - The checker identifies 164 slide-shaped DOCX exports as a separate informational

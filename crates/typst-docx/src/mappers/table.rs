@@ -74,7 +74,7 @@ pub fn table(
     let source = elem.clone().pack();
     execute_table_plan(
         &source,
-        preflight_table(&source, elem.grid.as_deref(), ctx),
+        preflight_table(&source, elem.grid.as_deref(), TableOrigin::SemanticTable, ctx),
         TableOrigin::SemanticTable,
         styles,
         ctx,
@@ -94,7 +94,7 @@ pub fn grid(
     let source = elem.clone().pack();
     execute_table_plan(
         &source,
-        preflight_table(&source, elem.grid.as_deref(), ctx),
+        preflight_table(&source, elem.grid.as_deref(), TableOrigin::LayoutGrid, ctx),
         TableOrigin::LayoutGrid,
         styles,
         ctx,
@@ -104,13 +104,14 @@ pub fn grid(
 fn preflight_table<'a>(
     source: &Content,
     grid: Option<&'a CellGrid>,
+    origin: TableOrigin,
     ctx: &DocxCtx,
 ) -> TablePlan<'a> {
     let Some(grid) = grid else { return TablePlan::Raster };
     if grid.non_gutter_column_count() == 0 || grid.entries.is_empty() {
         return TablePlan::Empty;
     }
-    let measured = measured_table_geometry(source, grid, ctx);
+    let measured = measured_table_geometry(source, grid, origin, ctx);
     if table_geometry_is_approximate(grid, measured.as_ref()) {
         TablePlan::Approximate { grid, measured }
     } else {
@@ -902,6 +903,7 @@ fn color_to_rgb(color: &Color) -> [u8; 3] {
 fn measured_table_geometry(
     source: &Content,
     grid: &CellGrid,
+    origin: TableOrigin,
     ctx: &DocxCtx,
 ) -> Option<MeasuredTableGeometry> {
     let logical_id = typst_export_common::paged::logical_id(source);
@@ -958,6 +960,15 @@ fn measured_table_geometry(
             columns_dxa.push(pt_to_positive_dxa(*gutter)?);
         }
     }
+    if origin == TableOrigin::LayoutGrid {
+        widen_repeated_auto_columns(
+            logical_id,
+            grid,
+            ctx,
+            has_column_gutter,
+            &mut columns_dxa,
+        );
+    }
 
     let row_heights = row_samples
         .into_iter()
@@ -982,6 +993,121 @@ fn measured_table_geometry(
         .collect();
 
     Some(MeasuredTableGeometry { columns_dxa, row_heights })
+}
+
+/// A reused layout grid can have a wider intrinsic `auto` track in a later
+/// physical occurrence (for example, a code gutter that grows from two to
+/// three digits). The paged snapshot retains each occurrence, but the flowing
+/// DOCX table plan otherwise uses only the first one. Raise auto tracks to the
+/// widest measurement seen in the same-width context and take the exact delta
+/// from fractional tracks so the table's outer width remains unchanged.
+fn widen_repeated_auto_columns(
+    logical_id: u128,
+    grid: &CellGrid,
+    ctx: &DocxCtx,
+    has_column_gutter: bool,
+    columns_dxa: &mut [i32],
+) {
+    let tracks: Vec<_> = if grid.has_gutter {
+        grid.cols.iter().step_by(2).copied().collect()
+    } else {
+        grid.cols.clone()
+    };
+    let ncols = tracks.len();
+    if ncols == 0 {
+        return;
+    }
+    let column_index = |x: usize| if has_column_gutter { x * 2 } else { x };
+    if column_index(ncols - 1) >= columns_dxa.len() {
+        return;
+    }
+
+    let base_total: i32 = (0..ncols).map(|x| columns_dxa[column_index(x)]).sum();
+    let mut floors: Vec<i32> = (0..ncols).map(|x| columns_dxa[column_index(x)]).collect();
+    let mut occurrences = 0usize;
+    for table in ctx
+        .paged_geometry
+        .tables()
+        .iter()
+        .filter(|table| table.logical_id == logical_id)
+    {
+        if table.cells.iter().any(|cell| !cell.axis_aligned) {
+            continue;
+        }
+        let Some(widths) = (0..ncols)
+            .map(|x| {
+                median_positive(
+                    table
+                        .cells
+                        .iter()
+                        .filter(|cell| cell.x == x && cell.colspan == 1)
+                        .map(|cell| cell.width_pt)
+                        .collect(),
+                )
+                .and_then(pt_to_positive_dxa)
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let occurrence_total: i32 = widths.iter().sum();
+        if occurrence_total.abs_diff(base_total) > 2 {
+            continue;
+        }
+        occurrences += 1;
+        for (x, sizing) in tracks.iter().enumerate() {
+            if matches!(sizing, Sizing::Auto) {
+                floors[x] = floors[x].max(widths[x]);
+            }
+        }
+    }
+    if occurrences < 2 {
+        return;
+    }
+    for (x, sizing) in tracks.iter().enumerate() {
+        if matches!(sizing, Sizing::Auto) {
+            floors[x] = floors[x].saturating_add(LAYOUT_GRID_INLINE_TOLERANCE_DXA);
+        }
+    }
+
+    let delta: i32 = (0..ncols)
+        .map(|x| floors[x].saturating_sub(columns_dxa[column_index(x)]))
+        .sum();
+    if delta == 0 {
+        return;
+    }
+    let donors: Vec<_> = tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(x, sizing)| matches!(sizing, Sizing::Fr(_)).then_some(x))
+        .collect();
+    let total_capacity: i32 = donors
+        .iter()
+        .map(|&x| columns_dxa[column_index(x)].saturating_sub(1))
+        .sum();
+    if total_capacity < delta {
+        return;
+    }
+
+    for x in 0..ncols {
+        columns_dxa[column_index(x)] = floors[x];
+    }
+    let mut remaining = delta;
+    let mut remaining_capacity = total_capacity;
+    for (position, &x) in donors.iter().enumerate() {
+        let index = column_index(x);
+        let capacity = columns_dxa[index].saturating_sub(1);
+        let take = if position + 1 == donors.len() {
+            remaining
+        } else {
+            ((remaining as i64 * capacity as i64) / remaining_capacity as i64) as i32
+        }
+        .min(capacity);
+        columns_dxa[index] -= take;
+        remaining -= take;
+        remaining_capacity -= capacity;
+    }
+    debug_assert_eq!(remaining, 0);
 }
 
 fn median_positive(mut values: Vec<f64>) -> Option<f64> {
