@@ -12,8 +12,8 @@ use ecow::EcoString;
 use typst_export_common::raster;
 use typst_library::diag::{SourceDiagnostic, SourceResult};
 use typst_library::foundations::{Content, StyleChain};
-use typst_library::introspection::Tag;
-use typst_library::layout::{Abs, Frame, FrameItem, Point, Size};
+use typst_library::introspection::{Location, Tag};
+use typst_library::layout::{Abs, Frame, FrameItem, PlaceElem, Point, Size};
 use typst_library::math::EquationElem;
 use typst_library::visualize::{Color, Geometry};
 use typst_syntax::Span;
@@ -307,6 +307,32 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         Some((rel, rendered.size, frame_text))
     }
 
+    /// Embeds an already-converged coherent placed canvas at its authored
+    /// logical frame size. Cropping to the ink bounds would turn harmless
+    /// visual overflow into additional Word flow height and can move later
+    /// sections onto extra pages; the finite canvas frame is the authoritative
+    /// layout footprint.
+    pub(crate) fn rasterize_coherent_placed_canvas(
+        &mut self,
+        source: &Content,
+        frame: Frame,
+    ) -> Rasterized {
+        let mut tags = Vec::new();
+        collect_frame_tags(&frame, &mut tags);
+        self.deferred_tags.extend(tags);
+        let frame_text = frame_to_placed_text(&frame);
+        let rendered = raster::render_full_frame_to_png(frame, 2.0)?;
+        let rel = self.add_image(&rendered.png, "png");
+        self.record_content_decision(
+            source,
+            Representation::Raster,
+            DecisionReason::DensePlacedCanvasRasterFallback,
+            LossSet::RASTER,
+            frame_text.chars().count(),
+        );
+        Some((rel, rendered.size, frame_text))
+    }
+
     /// Same as [`Self::rasterize`], but returns the frame tags to the caller
     /// instead of appending them to `deferred_tags`. The final boolean
     /// distinguishes failed layout from intentionally empty output when no
@@ -571,11 +597,50 @@ fn collect_frame_text(
     }
 }
 
-/// Reconstructs approximate reading-order text from a laid-out frame.
-fn frame_to_text(frame: &Frame) -> String {
-    use typst_library::layout::Point;
-    let mut items: Vec<(Point, EcoString, Abs, Abs)> = Vec::new();
-    collect_frame_text(frame, Point::zero(), &mut items);
+/// Collects text under its innermost placed semantic scope. A coherent canvas
+/// can intentionally overlap labels, so global x/y adjacency is not a safe
+/// word-boundary oracle: two independent placed labels at the same coordinate
+/// must remain separate searchable words.
+fn collect_placed_frame_text(
+    frame: &Frame,
+    offset: typst_library::layout::Point,
+    active: &mut Vec<(Location, usize)>,
+    groups: &mut Vec<Vec<(Point, EcoString, Abs, Abs)>>,
+) {
+    for (pos, item) in frame.items() {
+        let point = offset + *pos;
+        match item {
+            FrameItem::Tag(Tag::Start(content, _)) if content.is::<PlaceElem>() => {
+                let Some(location) = content.location() else { continue };
+                groups.push(Vec::new());
+                active.push((location, groups.len() - 1));
+            }
+            FrameItem::Tag(Tag::End(location, ..)) => {
+                if let Some(index) =
+                    active.iter().rposition(|(active, _)| active == location)
+                {
+                    active.remove(index);
+                }
+            }
+            FrameItem::Group(group) => {
+                let transform = &group.transform;
+                collect_placed_frame_text(
+                    &group.frame,
+                    point + Point::new(transform.tx, transform.ty),
+                    active,
+                    groups,
+                );
+            }
+            FrameItem::Text(text) if !text.text.is_empty() => {
+                let Some((_, index)) = active.last().copied() else { continue };
+                groups[index].push((point, text.text.clone(), text.size, text.width()));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn positioned_text_to_string(mut items: Vec<(Point, EcoString, Abs, Abs)>) -> String {
     if items.is_empty() {
         return String::new();
     }
@@ -606,6 +671,27 @@ fn frame_to_text(frame: &Frame) -> String {
         last_x_end = Some(pos.x + width);
     }
     output
+}
+
+/// Reconstructs approximate reading-order text from a laid-out frame.
+fn frame_to_text(frame: &Frame) -> String {
+    let mut items: Vec<(Point, EcoString, Abs, Abs)> = Vec::new();
+    collect_frame_text(frame, Point::zero(), &mut items);
+    positioned_text_to_string(items)
+}
+
+/// Reconstructs a coherent canvas's searchable text while preserving a hard
+/// boundary between independently placed labels.
+fn frame_to_placed_text(frame: &Frame) -> String {
+    let mut active = Vec::new();
+    let mut groups = Vec::new();
+    collect_placed_frame_text(frame, Point::zero(), &mut active, &mut groups);
+    groups
+        .into_iter()
+        .map(positioned_text_to_string)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]

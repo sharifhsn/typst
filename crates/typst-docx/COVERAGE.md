@@ -2352,5 +2352,50 @@ Xenolay stays 163, and the missing-font C++ guide stays exactly one page;
 semantic coverage is unchanged on all five documents where it is measurable.
 The thesis still has a pre-existing visual-loss defect at tiled raster
 boundaries even though its complete bibliography survives as hidden text.
-All 227 DOCX integration tests, 15 DOCX unit tests, 22 round-trip tests, 65
+All 233 DOCX integration tests, 15 DOCX unit tests, 22 round-trip tests, 65
 PPTX tests, strict Clippy, and DOCX/PPTX WASM checks pass.
+
+## 59. Placed-canvas coherence follows realized frame semantics
+
+The previous Cetz safeguard treated object count as a proxy for whether placed
+shapes and labels formed one visual composition. It rasterized only canvases
+with more than 64 placements, leaving smaller timing diagrams decomposed into
+independent Word anchors and text boxes. That lost the shared coordinate
+system: labels collided with headings, waveforms disappeared, and the same
+source rendered differently solely because one diagram had fewer objects.
+
+DOCX now detects coherence at the nearest finite block/framed root from the
+converged Typst frame. `PlaceElem` start/end tags survive realization, frame
+inlining, and nested groups, so the classifier can require at least two placed
+scopes, both shape and rich/text visuals, and no visual leaf outside a placed
+scope. Pure-shape roots retain the native DrawingML group path, text-only roots
+retain editable text boxes, and ordinary flow with decorative placement is not
+captured. The classifier returns the same converged frame for rendering, which
+avoids a second layout pass and possible divergence from the classified frame.
+
+Atomic canvases render at their authored logical frame size instead of an
+ink-cropped size, preventing harmless visual overflow from becoming extra Word
+flow height. Searchable hidden text is reconstructed per placed semantic scope
+before the scopes are joined; this
+preserves hard word boundaries even when independent labels intentionally
+overlap at the same x/y coordinate.
+
+On frozen `gb-ctr`, all 224 runtime Cetz canvases now use the atomic path (92
+before). LibreOffice renders 175 pages against the 164-page Typst reference,
+versus 173 before; the two-page cost is the honest footprint of restored small
+diagrams rather than hundreds of one-twip anchor paragraphs. Visual score rises
+from `0.969502` to `0.969851`, and semantic text coverage rises from `0.887061`
+to `0.954820`. Delegated visual QA found complete, unclipped clock,
+fetch/execute, instruction, and external-bus timing diagrams where the prior
+export had severe overlap or missing content. Two new blank instruction pages
+remain after RL(HL) and RR(HL), the pre-existing blank-page set remains, and an
+external-bus footnote still repeats across a page boundary; those are explicit
+follow-on pagination/state defects rather than reasons to re-fragment the
+canvases.
+
+The same-consumer six-document sentinel passes package, LibreOffice, and review
+lanes 6/6 under `target/docx-gb-coherence-sentinel-v4/`. The five non-gb guards
+remain stable except Tura, whose newly coherent placed diagrams improve it from
+253 to 264 pages against a 265-page reference, visual score from `0.975358` to
+`0.975850`, and semantic coverage from `0.991067` to `0.996455`. The thesis
+stays 129 pages, Mathnote 168, Xenolay 163, and the C++ guide one.

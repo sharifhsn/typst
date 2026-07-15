@@ -1852,12 +1852,12 @@ fn dense_visual_page_budget_keeps_nine_hundred_shapes_native() {
 }
 
 #[test]
-fn dense_mixed_placed_canvas_uses_atomic_raster_with_hidden_text() {
+fn coherent_mixed_placed_canvas_uses_atomic_raster_with_hidden_text() {
     let src = r#"#block(width: 80pt, height: 30pt)[
-  #for i in range(65) {
-    place(dx: i * 0.1pt, square(size: 1pt, fill: black))
-  }
+  #place(dx: 2pt, dy: 2pt, rect(width: 28pt, height: 14pt, fill: luma(230)))
   #place(dx: 25pt, dy: 10pt)[Canvas label]
+  #place(dx: 25pt, dy: 10pt)[Second label]
+  #place(dx: 31pt, dy: 9pt, line(length: 20pt, stroke: 1pt))
 ]"#;
     let compiled = compile_docx(src, &[]);
     let p = text_parts(&compiled);
@@ -1865,6 +1865,7 @@ fn dense_mixed_placed_canvas_uses_atomic_raster_with_hidden_text() {
     assert_eq!(document.matches("<a:blip ").count(), 1);
     assert!(!document.contains("<wps:wsp"));
     assert!(document.contains("Canvas label"));
+    assert!(document.contains("Canvas label Second label"));
     assert!(document.contains("<w:vanish/>"));
     assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
         decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
@@ -1874,21 +1875,19 @@ fn dense_mixed_placed_canvas_uses_atomic_raster_with_hidden_text() {
 }
 
 #[test]
-fn dense_mixed_curve_canvas_counts_curve_commands_as_shapes() {
+fn coherent_mixed_curve_canvas_counts_curve_commands_as_shapes() {
     let src = r#"#block(width: 80pt, height: 30pt)[
-  #for i in range(65) {
-    place(
-      dx: i * 0.1pt,
-      curve(
-        curve.move((0pt, 0pt)),
-        curve.line((1pt, 0pt)),
-        curve.quad((1.25pt, 0.25pt), (1pt, 0.5pt)),
-        curve.cubic((0.75pt, 0.75pt), (0.25pt, 1pt), (0pt, 0.5pt)),
-        curve.close(mode: "straight"),
-        fill: black,
-      ),
-    )
-  }
+  #place(
+    dx: 2pt,
+    curve(
+      curve.move((0pt, 0pt)),
+      curve.line((10pt, 0pt)),
+      curve.quad((12pt, 2pt), (10pt, 5pt)),
+      curve.cubic((7pt, 7pt), (2pt, 10pt), (0pt, 5pt)),
+      curve.close(mode: "straight"),
+      fill: black,
+    ),
+  )
   #place(dx: 25pt, dy: 10pt)[Canvas label]
 ]"#;
     let compiled = compile_docx(src, &[]);
@@ -1904,17 +1903,159 @@ fn dense_mixed_curve_canvas_counts_curve_commands_as_shapes() {
 }
 
 #[test]
-fn mixed_placed_canvas_budget_keeps_sixty_four_items_native() {
-    let src = r#"#block(width: 80pt, height: 30pt)[
-  #for i in range(63) {
-    place(dx: i * 0.1pt, square(size: 1pt, fill: black))
-  }
-  #place(dx: 25pt, dy: 10pt)[Canvas label]
+fn sparse_single_root_mixed_canvas_is_still_coherent() {
+    let src = r#"#block(width: 300pt, height: 30pt)[
+  #place(dx: 0pt, square(size: 5pt, fill: red))
+  #place(dx: 280pt, dy: 10pt)[Far label]
 ]"#;
-    let p = parts(src);
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<a:blip ").count(), 1);
+    assert!(document.contains("Far label"));
+    assert!(document.contains("<w:vanish/>"));
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
+            && decision.representation == Representation::Raster
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn pure_shape_placed_root_remains_native() {
+    let src = r#"#block(width: 50pt, height: 25pt)[
+  #place(dx: 1pt, square(size: 8pt, fill: red))
+  #place(dx: 14pt, circle(radius: 4pt, fill: blue))
+  #place(dx: 26pt, line(length: 15pt, stroke: 1pt))
+]"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
     let document = &p["word/document.xml"];
     assert!(!document.contains("<a:blip "));
-    assert!(document.contains("Canvas label"));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn ordinary_flow_with_decorative_place_is_not_an_atomic_canvas() {
+    let src = r#"#block(width: 100pt)[
+  Ordinary flowing paragraph.
+  #place(top + right, circle(radius: 3pt, fill: gray))
+  Second flowing paragraph.
+]"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert!(!document.contains("<a:blip "));
+    assert!(document.contains("Ordinary flowing paragraph."));
+    assert!(document.contains("Second flowing paragraph."));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn nested_coherent_canvas_does_not_absorb_outer_flow() {
+    let src = r#"#block(width: 120pt)[
+  Outer prefix.
+  #block(width: 55pt, height: 24pt)[
+    #place(dx: 1pt, rect(width: 30pt, height: 12pt, fill: aqua))
+    #place(dx: 7pt, dy: 4pt)[Inner label]
+  ]
+  Outer suffix.
+]"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<a:blip ").count(), 1);
+    assert!(document.contains("Inner label"));
+    assert!(document.contains("Outer prefix."));
+    assert!(document.contains("Outer suffix."));
+    assert_eq!(
+        compiled
+            .fidelity_report()
+            .decisions()
+            .iter()
+            .filter(|decision| {
+                decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
+            })
+            .count(),
+        1
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn wrapper_only_canvas_rasterizes_at_the_nearest_inner_root() {
+    let src = r#"#block(width: 120pt)[
+  #block(width: 55pt, height: 24pt)[
+    #place(dx: 1pt, rect(width: 30pt, height: 12pt, fill: aqua))
+    #place(dx: 7pt, dy: 4pt)[Inner label]
+  ]
+]"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<a:blip ").count(), 1);
+    assert!(document.contains("cx=\"698500\" cy=\"304800\""));
+    assert_eq!(
+        compiled
+            .fidelity_report()
+            .decisions()
+            .iter()
+            .filter(|decision| {
+                decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
+            })
+            .count(),
+        1
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn sibling_coherent_canvases_keep_separate_ownership_roots() {
+    let src = r#"#block(width: 120pt)[
+  #block(width: 55pt, height: 24pt)[
+    #place(dx: 1pt, rect(width: 30pt, height: 12pt, fill: aqua))
+    #place(dx: 7pt, dy: 4pt)[First label]
+  ]
+  #block(width: 55pt, height: 24pt)[
+    #place(dx: 1pt, rect(width: 30pt, height: 12pt, fill: orange))
+    #place(dx: 7pt, dy: 4pt)[Second label]
+  ]
+]"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<a:blip ").count(), 2);
+    assert_eq!(
+        compiled
+            .fidelity_report()
+            .decisions()
+            .iter()
+            .filter(|decision| {
+                decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
+            })
+            .count(),
+        2
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn floating_mixed_placements_do_not_become_an_inline_atomic_canvas() {
+    let src = r#"#block(width: 80pt, height: 30pt)[
+  #place(float: true, top + left, rect(width: 28pt, height: 14pt, fill: aqua))
+  #place(float: true, top + right)[Floating label]
+]"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
+    }));
     assert_all_wellformed(&p);
 }
 

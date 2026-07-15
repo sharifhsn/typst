@@ -985,22 +985,20 @@ fn handle_block_inner(
         out.extend(mappers::image::place(elem, styles, ctx)?);
     } else if (child.is::<typst_library::layout::BlockElem>()
         || is_framed_container(child))
-        && dense_mixed_placed_canvas(child, styles)
+        && structurally_owned_placed_canvas(child, styles)
+        && let Some(frame) = coherent_mixed_placed_canvas(child, styles, ctx)?
     {
-        // Cetz-style canvases can contain dozens or hundreds of independently placed
-        // shapes interleaved with labels. Lowering that mixed content into
-        // many Word drawings/tables crosses a reproducible cumulative
-        // LibreOffice layout-hang threshold. Preserve the diagram atomically
-        // as one raster plus hidden searchable text; ordinary containers and
-        // pure-shape compositions remain native.
-        if let Some(para) =
-            fallback_para(mappers::image::laid_out_block_fallback_with_reason(
-                child,
-                styles,
-                ctx,
-                DecisionReason::DensePlacedCanvasRasterFallback,
-            )?)
-        {
+        // A finite canvas whose material content is entirely positioned, with
+        // shapes interleaved with labels, is one authored visual composition.
+        // Lowering its placements independently loses their shared coordinate
+        // system even when the canvas is small; large canvases also cross a
+        // reproducible cumulative LibreOffice layout-hang threshold. Preserve
+        // the nearest owning canvas atomically as one raster plus hidden
+        // searchable text. Ordinary flow, nested roots, text-only placement,
+        // and pure-shape compositions retain their editable/native paths.
+        if let Some(para) = fallback_para(
+            mappers::image::coherent_placed_canvas_fallback(child, frame, ctx)?,
+        ) {
             out.push(para);
         } else {
             ctx.warn_ignored(child.elem().name(), child.span());
@@ -1414,38 +1412,200 @@ pub(crate) fn contains_place(child: &Content) -> bool {
     )
 }
 
-/// A mixed placed canvas large enough to cross the consumer-safe native-shape
-/// budget. Pure-shape containers still take the editable DrawingML group path;
-/// this fallback is for diagram canvases whose placed labels and shapes would
-/// otherwise fan out into hundreds of independent Word objects.
-fn dense_mixed_placed_canvas(child: &Content, styles: StyleChain) -> bool {
-    use std::ops::ControlFlow;
-    use typst_library::layout::PlaceElem;
+/// Whether `child` is the nearest finite layout root for a coherent mixed
+/// placed composition.
+///
+/// Object count is not evidence of coherence: a label centered in one waveform
+/// is already coupled to that shape, while hundreds of pure shapes can remain a
+/// native DrawingML group. Instead, ownership is structural. Every material
+/// leaf under this root must belong to a non-floating `#place`, and the root
+/// must mix at least one native-shape placement with one rich/text placement.
+/// Nested block/framed roots are deliberately not traversed, so an outer prose
+/// block cannot aggregate unrelated annotations or absorb a smaller canvas.
+fn coherent_mixed_placed_canvas(
+    child: &Content,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Option<typst_library::layout::Frame>> {
+    use typst_library::introspection::{Location, Tag};
+    use typst_library::layout::{Frame, FrameItem, PlaceElem};
 
-    const PLACED_ITEM_BUDGET: usize = 64;
-    let mut places = 0;
-    let mut shape_places = 0;
-    let mut rich_places = 0;
-    let _ = child.traverse(&mut |element: Content| {
-        if let Some(place) = element.to_packed::<PlaceElem>() {
-            places += 1;
-            if body_shape_only(&place.body, styles) {
-                shape_places += 1;
-            } else {
-                rich_places += 1;
-            }
-            if places > PLACED_ITEM_BUDGET
-                && shape_places >= PLACED_ITEM_BUDGET / 2
-                && rich_places > 0
-            {
-                return ControlFlow::Break(());
+    #[derive(Default)]
+    struct Composition {
+        active_places: Vec<Location>,
+        places: usize,
+        saw_shape: bool,
+        saw_rich: bool,
+        visual_outside_place: bool,
+        invalid_tag: bool,
+    }
+
+    fn visit(frame: &Frame, composition: &mut Composition) {
+        for (_, item) in frame.items() {
+            match item {
+                FrameItem::Tag(Tag::Start(content, _)) if content.is::<PlaceElem>() => {
+                    let Some(location) = content.location() else {
+                        composition.invalid_tag = true;
+                        continue;
+                    };
+                    composition.active_places.push(location);
+                    composition.places += 1;
+                }
+                FrameItem::Tag(Tag::End(location, ..)) => {
+                    if let Some(index) = composition
+                        .active_places
+                        .iter()
+                        .rposition(|active| active == location)
+                    {
+                        composition.active_places.remove(index);
+                    }
+                }
+                FrameItem::Tag(_) | FrameItem::Link(_, _) => {}
+                FrameItem::Group(group) => visit(&group.frame, composition),
+                FrameItem::Shape(_, _) => {
+                    if composition.active_places.is_empty() {
+                        composition.visual_outside_place = true;
+                    } else {
+                        composition.saw_shape = true;
+                    }
+                }
+                FrameItem::Text(_) | FrameItem::Image(_, _, _) => {
+                    if composition.active_places.is_empty() {
+                        composition.visual_outside_place = true;
+                    } else {
+                        composition.saw_rich = true;
+                    }
+                }
             }
         }
-        ControlFlow::Continue(())
-    });
-    places > PLACED_ITEM_BUDGET
-        && shape_places >= PLACED_ITEM_BUDGET / 2
-        && rich_places > 0
+    }
+
+    let (frame, failed) =
+        ctx.layout_export_frame(child, styles, child.span(), ctx.available_height)?;
+    if failed {
+        return Ok(None);
+    }
+    let Some(frame) = frame else { return Ok(None) };
+
+    let mut composition = Composition::default();
+    visit(&frame, &mut composition);
+    let coherent = !composition.invalid_tag
+        && !composition.visual_outside_place
+        && composition.places >= 2
+        && composition.saw_shape
+        && composition.saw_rich;
+    Ok(coherent.then_some(frame))
+}
+
+/// Cheap ownership partition before the authoritative frame probe. It ensures
+/// only roots whose material source is entirely non-floating placement reach
+/// layout classification, so rejected ordinary containers do not advance the
+/// real export locator. Nested finite roots stop the walk and own their own
+/// placements when conversion recurses into them.
+fn structurally_owned_placed_canvas(child: &Content, styles: StyleChain) -> bool {
+    use typst_library::foundations::{SequenceElem, StyledElem};
+    use typst_library::introspection::TagElem;
+    use typst_library::layout::{
+        AlignElem, BlockBody, BlockElem, BoxElem, MoveElem, PadElem, PlaceElem,
+        RotateElem, ScaleElem, SkewElem, StackChild, StackElem,
+    };
+    use typst_library::text::SpaceElem;
+    use typst_library::visualize::{RectElem, SquareElem};
+
+    #[derive(Default)]
+    struct Composition {
+        places: usize,
+        shape_places: usize,
+        rich_places: usize,
+    }
+
+    fn visit(
+        content: &Content,
+        styles: StyleChain,
+        composition: &mut Composition,
+    ) -> bool {
+        if let Some(place) = content.to_packed::<PlaceElem>() {
+            if place.float.get(styles) {
+                return false;
+            }
+            composition.places += 1;
+            if body_shape_only(&place.body, styles) {
+                composition.shape_places += 1;
+            } else {
+                composition.rich_places += 1;
+            }
+            return true;
+        }
+
+        if content.is::<BlockElem>()
+            || content.is::<BoxElem>()
+            || content.is::<RectElem>()
+            || content.is::<SquareElem>()
+        {
+            return false;
+        }
+        if content.is::<TagElem>()
+            || content.is::<SpaceElem>()
+            || content.is::<ParbreakElem>()
+        {
+            return true;
+        }
+        if let Some(sequence) = content.to_packed::<SequenceElem>() {
+            return sequence
+                .children
+                .iter()
+                .all(|child| visit(child, styles, composition));
+        }
+        if let Some(styled) = content.to_packed::<StyledElem>() {
+            return visit(&styled.child, styles.chain(&styled.styles), composition);
+        }
+        if let Some(align) = content.to_packed::<AlignElem>() {
+            return visit(&align.body, styles, composition);
+        }
+        if let Some(moved) = content.to_packed::<MoveElem>() {
+            return visit(&moved.body, styles, composition);
+        }
+        if let Some(padded) = content.to_packed::<PadElem>() {
+            return visit(&padded.body, styles, composition);
+        }
+        if let Some(rotated) = content.to_packed::<RotateElem>() {
+            return visit(&rotated.body, styles, composition);
+        }
+        if let Some(scaled) = content.to_packed::<ScaleElem>() {
+            return visit(&scaled.body, styles, composition);
+        }
+        if let Some(skewed) = content.to_packed::<SkewElem>() {
+            return visit(&skewed.body, styles, composition);
+        }
+        if let Some(stack) = content.to_packed::<StackElem>() {
+            return stack.children.iter().all(|child| match child {
+                StackChild::Spacing(_) => true,
+                StackChild::Block(content) => visit(content, styles, composition),
+            });
+        }
+        false
+    }
+
+    let body = if let Some(block) = child.to_packed::<BlockElem>() {
+        match block.body.get_ref(styles).as_ref() {
+            Some(BlockBody::Content(body)) => Some(body),
+            _ => None,
+        }
+    } else if let Some(boxed) = child.to_packed::<BoxElem>() {
+        boxed.body.get_ref(styles).as_ref()
+    } else if let Some(rect) = child.to_packed::<RectElem>() {
+        rect.body.get_ref(styles).as_ref()
+    } else if let Some(square) = child.to_packed::<SquareElem>() {
+        square.body.get_ref(styles).as_ref()
+    } else {
+        None
+    };
+
+    let mut composition = Composition::default();
+    body.is_some_and(|body| visit(body, styles, &mut composition))
+        && composition.places >= 2
+        && composition.shape_places > 0
+        && composition.rich_places > 0
 }
 
 /// Whether every `#place` body inside `child` is structurally a composition of

@@ -1263,6 +1263,21 @@ pub(crate) fn laid_out_block_fallback_with_reason(
     Ok(fallback_runs_tiled(ctx, tiles, &text))
 }
 
+/// Renders a coherent mixed placed canvas from the same converged frame used
+/// to classify it, preserving the root's authored logical footprint rather
+/// than expanding Word flow to the canvas's cropped ink bounds.
+pub(crate) fn coherent_placed_canvas_fallback(
+    content: &Content,
+    frame: typst_library::layout::Frame,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Vec<Run>> {
+    let Some((rel, size, text)) = ctx.rasterize_coherent_placed_canvas(content, frame)
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(fallback_runs(ctx, rel, size, &text))
+}
+
 /// Same as [`laid_out_fallback`], but hands the laid-out frame's introspection
 /// tags back to the caller instead of deferring them to the end of the
 /// document. Paragraph-level callers use this to keep state/counter updates

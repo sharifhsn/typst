@@ -130,7 +130,7 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 ## Validation completed on the combined branch
 
-- DOCX integration: 227 tests passed.
+- DOCX integration: 233 tests passed.
 - PPTX integration: 65 tests passed.
 - DOCX review round trip: 22 tests passed.
 - OOXML math conversion: 27 tests passed.
@@ -160,6 +160,14 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   LibreOffice pagination from 202 to 173 pages against a 164-page reference and
   raises semantic coverage from 67.4% to 88.7% without regressing the six-document
   sentinel lane.
+- Mixed placed canvases are now classified from realized `PlaceElem` frame tags
+  at their nearest finite owner instead of a 64-object threshold. On `gb-ctr`,
+  all 224 Cetz canvases are atomic: delegated QA confirms that clock,
+  fetch/execute, instruction, and external-bus timing diagrams are complete and
+  unclipped. Visual score improves from 0.969502 to 0.969851 and searchable text
+  coverage from 88.7% to 95.5%. The export is 175 pages versus the 164-page
+  reference; two new blank instruction pages and a repeated external-bus
+  footnote remain known pagination/state defects.
 - PPTX raster fallbacks preserve searchable/editable transparent text. On the
   previous worst nativeness deck, `steady-rvl-slides`, recovery increased from
   28/65 to 65/65 words; `clari-docs` and `sdu-touying-simpl` recover about 99.7%
