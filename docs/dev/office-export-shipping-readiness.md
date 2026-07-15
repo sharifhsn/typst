@@ -179,6 +179,18 @@ focused tests rather than being mislabeled as part of this authority.
   remain timeouts, one remains a deterministic conversion failure, and four
   records failed downstream raster evidence while three were never submitted to
   the consumer because they did not produce a DOCX package.
+- Longer isolated retries have opened three of those eight timeout records,
+  including a 261-page, 23.9 MB package. Four others still hang for at least
+  120 seconds (`raphaelasla` for more than 297 seconds), and `xenolay` remains
+  un-retried. They are retained as failures in the
+  authority score, but the evidence points to load and timeout budgeting rather
+  than malformed OOXML. The deterministic failure is also a valid package; it
+  reproducibly triggers LibreOffice's `Unspecified Application Error` on a dense
+  document with 623 tables and 150 text-box containers. Prefix bisection places
+  its first trigger at an inline dashed DrawingML line, but merely padding that
+  line's one-EMU degenerate dimension does not resolve the full document, and
+  deleting that shape run does not either. The LibreOffice failure is cumulative,
+  non-local, or has a later independent trigger.
 - Visual-policy passes: 761/1,392 rendered; exact page counts: 457; page deltas
   above one: 631.
 - The checker identifies 164 slide-shaped DOCX exports as a separate informational
