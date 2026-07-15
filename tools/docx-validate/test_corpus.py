@@ -125,6 +125,30 @@ class ExporterIdentityTests(unittest.TestCase):
         self.assertEqual(original["exporter_state"]["revision"], "original-revision")
         self.assertEqual(original["exporter_binary_sha256"], "original-binary")
 
+    def test_resume_rejects_changed_consumer_tools(self) -> None:
+        original = {
+            "soffice": "LibreOffice 26.2.4.2",
+            "pdftotext": "pdftotext 26.06.0",
+            "pdftoppm": "pdftoppm 26.06.0",
+        }
+        current = dict(original)
+        current["soffice"] = "LibreOfficeDev 26.8.0.0.alpha0"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"soffice: 'LibreOffice 26\.2\.4\.2' -> "
+            r"'LibreOfficeDev 26\.8\.0\.0\.alpha0'.*new --out",
+        ):
+            corpus.require_same_resume_tools(original, current)
+
+    def test_resume_accepts_identical_consumer_tools(self) -> None:
+        tools = {
+            "soffice": "LibreOffice 26.2.4.2",
+            "pdftotext": "pdftotext 26.06.0",
+            "pdftoppm": "pdftoppm 26.06.0",
+        }
+        corpus.require_same_resume_tools(tools, dict(tools))
+
 
 if __name__ == "__main__":
     unittest.main()

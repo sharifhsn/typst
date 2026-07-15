@@ -86,6 +86,13 @@ different source revision while they continue using the same binary. Resume runs
 preserve each compiled artifact's original identity and record the retry identity
 separately in `metadata.json` under `last_resume`.
 
+The validation-tool identity is equally authoritative. A resume now refuses to
+mix a different `soffice`, `pdftotext`, or `pdftoppm` version into an existing
+run directory; start a new `--out` directory after a tool upgrade. Visual scores
+and page counts from separate runs are comparable only when their
+`metadata.json` tool identities match. In particular, LibreOffice stable and a
+LibreOfficeDev alpha can paginate the same byte-identical DOCX differently.
+
 When semantic extraction rules improve, add `--refresh-semantic` to a resume.
 It recomputes DOCX/PDF word evidence from retained artifacts without compiling
 the corpus again. This currently counts both ordinary Word text and native OMML

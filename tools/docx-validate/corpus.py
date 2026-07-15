@@ -90,6 +90,28 @@ def frozen_exporter_identity(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def require_same_resume_tools(
+    original: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> None:
+    """Prevent one authority directory from mixing consumer/tool identities."""
+    if original == current:
+        return
+    original = original or {}
+    changed = sorted(
+        key
+        for key in set(original) | set(current)
+        if original.get(key) != current.get(key)
+    )
+    details = ", ".join(
+        f"{key}: {original.get(key)!r} -> {current.get(key)!r}" for key in changed
+    )
+    raise ValueError(
+        "cannot resume a DOCX authority with different validation tools "
+        f"({details}); choose a new --out directory"
+    )
+
+
 def safe_component(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or "document"
 
@@ -1135,6 +1157,13 @@ def main() -> int:
     if args.limit:
         documents = documents[: args.limit]
     generated_at = datetime.now(timezone.utc).isoformat()
+    validation_tools = {
+        "soffice": validator.command_version(
+            [shutil.which("soffice") or "soffice", "--version"]
+        ),
+        "pdftotext": validator.command_version(["pdftotext", "-v"]),
+        "pdftoppm": validator.command_version(["pdftoppm", "-v"]),
+    }
     invocation_metadata = {
         "schema_version": 1,
         "generated_at": generated_at,
@@ -1150,15 +1179,15 @@ def main() -> int:
         "timeout": args.timeout,
         "libreoffice_requested": args.libreoffice,
         "roundtrip_requested": args.roundtrip,
-        "tools": {
-            "soffice": validator.command_version([shutil.which("soffice") or "soffice", "--version"]),
-            "pdftotext": validator.command_version(["pdftotext", "-v"]),
-            "pdftoppm": validator.command_version(["pdftoppm", "-v"]),
-        },
+        "tools": validation_tools,
     }
     metadata_path = args.out / "metadata.json"
     if args.resume and metadata_path.is_file():
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        try:
+            require_same_resume_tools(metadata.get("tools"), validation_tools)
+        except ValueError as error:
+            parser.error(str(error))
         # Keep the original run identity. A resume may only enrich or retry
         # existing artifacts, and must not make them appear freshly compiled by
         # the current source tree or executable.
@@ -1169,6 +1198,7 @@ def main() -> int:
             "exporter_state": args.exporter_state,
             "typst_version": invocation_metadata["typst_version"],
             "typst_sha256": args.exporter_binary_sha256,
+            "tools": validation_tools,
             "jobs": args.jobs,
             "filters": args.filter,
             "refresh_semantic": args.refresh_semantic,
