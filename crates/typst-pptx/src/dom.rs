@@ -291,6 +291,8 @@ pub enum PathGeom {
 /// Shared slide conversion context.
 pub struct SlideCtx {
     pub media: MediaRegistry,
+    /// Original physical page to exported slide mapping for filtered decks.
+    pub physical_page_to_slide: Option<Vec<Option<usize>>>,
     /// License-permitted font programs used by editable presentation text.
     pub embedded_fonts: BTreeMap<(EcoString, EmbeddedFontStyle), EmbeddedFontProgram>,
 }
@@ -299,6 +301,7 @@ impl Default for SlideCtx {
     fn default() -> Self {
         Self {
             media: MediaRegistry::new("ppt/media"),
+            physical_page_to_slide: None,
             embedded_fonts: BTreeMap::new(),
         }
     }

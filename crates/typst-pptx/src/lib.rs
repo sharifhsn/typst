@@ -55,7 +55,29 @@ pub struct SpeakerNote {
 
 /// Export a paged Typst document as a PowerPoint presentation.
 pub fn pptx(document: &PagedDocument, options: &PptxOptions) -> SourceResult<Vec<u8>> {
+    pptx_impl(document, options, None)
+}
+
+/// Export a filtered paged document while retaining its original physical-page
+/// numbering for explicit slide links.
+///
+/// Each entry maps one zero-based original page to an optional zero-based slide
+/// in `document`. Omitted or out-of-range targets are dropped.
+pub fn pptx_with_page_mapping(
+    document: &PagedDocument,
+    options: &PptxOptions,
+    physical_page_to_slide: &[Option<usize>],
+) -> SourceResult<Vec<u8>> {
+    pptx_impl(document, options, Some(physical_page_to_slide))
+}
+
+fn pptx_impl(
+    document: &PagedDocument,
+    options: &PptxOptions,
+    physical_page_to_slide: Option<&[Option<usize>]>,
+) -> SourceResult<Vec<u8>> {
     let mut ctx = SlideCtx::default();
+    ctx.physical_page_to_slide = physical_page_to_slide.map(|mapping| mapping.to_vec());
     let slides = slide::slides(document, &mut ctx);
     let extracted;
     let notes = match &options.speaker_notes {

@@ -835,7 +835,7 @@ impl<'a, 'b> Walker<'a, 'b> {
     pub(super) fn destination(&self, dest: &Destination) -> Option<LinkTarget> {
         match dest {
             Destination::Url(url) => Some(LinkTarget::Url(EcoString::from(url.as_str()))),
-            Destination::Position(pos) => self.slide_target(pos.page.get()),
+            Destination::Position(pos) => self.physical_slide_target(pos.page.get()),
             Destination::Location(loc) => self
                 .document
                 .introspector()
@@ -851,6 +851,22 @@ impl<'a, 'b> Walker<'a, 'b> {
     fn slide_target(&self, page_1based: usize) -> Option<LinkTarget> {
         let index = page_1based.checked_sub(1)?;
         (index < self.document.pages().len()).then_some(LinkTarget::Slide(index))
+    }
+
+    /// Resolve a physical page reference through the caller's filtered-deck
+    /// map. Location links deliberately do not use this: the filtered
+    /// document's introspector has already renumbered retained locations.
+    fn physical_slide_target(&self, page_1based: usize) -> Option<LinkTarget> {
+        let index = page_1based.checked_sub(1)?;
+        match &self.ctx.physical_page_to_slide {
+            Some(mapping) => mapping
+                .get(index)
+                .copied()
+                .flatten()
+                .filter(|slide| *slide < self.document.pages().len())
+                .map(LinkTarget::Slide),
+            None => self.slide_target(page_1based),
+        }
     }
 }
 

@@ -28,7 +28,7 @@ use typst_kit::timer::Timer;
 use typst_layout::{Page, PagedDocument};
 use typst_pandoc::{PandocDocument, PandocOptions};
 use typst_pdf::{PdfOptions, PdfStandards, Timestamp};
-use typst_pptx::{PptxOptions, SpeakerNote};
+use typst_pptx::{PptxOptions, SpeakerNote, pptx_with_page_mapping};
 use typst_render::RenderOptions;
 use typst_svg::SvgOptions;
 use typst_utils::Scalar;
@@ -1244,8 +1244,11 @@ fn export_pptx(document: &PagedDocument, config: &CompileConfig) -> SourceResult
             Some(SpeakerNote { slide_index, text: note.text })
         })
         .collect();
-    let bytes =
-        typst_pptx::pptx(&filtered, &PptxOptions { speaker_notes: Some(speaker_notes) })?;
+    let bytes = pptx_with_page_mapping(
+        &filtered,
+        &PptxOptions { speaker_notes: Some(speaker_notes) },
+        &page_to_slide,
+    )?;
     config
         .output
         .write(&bytes)

@@ -6,12 +6,13 @@ use std::io::Read;
 
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime, Duration};
+use typst::model::Document;
 use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
 use typst_layout::PagedDocument;
-use typst_pptx::{PptxOptions, pptx};
+use typst_pptx::{PptxOptions, pptx, pptx_with_page_mapping};
 
 /// A minimal world: the embedded Typst fonts and a single detached source.
 struct TestWorld {
@@ -87,9 +88,7 @@ fn binary_parts(src: &str) -> HashMap<String, Vec<u8>> {
     map
 }
 
-/// Compiles `src` to a PPTX and returns text parts as `name -> text`.
-fn parts(src: &str) -> HashMap<String, String> {
-    let bytes = pptx_bytes(src);
+fn text_parts(bytes: Vec<u8>) -> HashMap<String, String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     let mut map = HashMap::new();
     for i in 0..zip.len() {
@@ -101,6 +100,11 @@ fn parts(src: &str) -> HashMap<String, String> {
         }
     }
     map
+}
+
+/// Compiles `src` to a PPTX and returns text parts as `name -> text`.
+fn parts(src: &str) -> HashMap<String, String> {
+    text_parts(pptx_bytes(src))
 }
 
 fn text_parts_from_binary(parts: &HashMap<String, Vec<u8>>) -> HashMap<String, String> {
@@ -1327,6 +1331,101 @@ fn out_of_range_page_link_is_dropped() {
     assert!(!rels.contains("slide99.xml"), "no relationship to a missing slide");
     assert!(!rels.contains("hlinksldjump"), "no dangling slide-jump");
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn filtered_pages_remap_physical_slide_links_and_drop_omitted_targets() {
+    let src = r#"#link((page: 3, x: 0pt, y: 0pt))[Keep]
+#link((page: 2, x: 0pt, y: 0pt))[Drop]
+#pagebreak()
+Page two
+#pagebreak()
+Page three"#;
+    let world = TestWorld::new(src);
+    let document = typst::compile::<PagedDocument>(&world)
+        .output
+        .expect("compilation failed");
+
+    let full = text_parts(pptx(&document, &PptxOptions::default()).unwrap());
+    let full_rels = &full["ppt/slides/_rels/slide1.xml.rels"];
+    assert!(
+        full_rels.contains("slide2.xml"),
+        "full export keeps the page-2 link: {full_rels}",
+    );
+    assert!(
+        full_rels.contains("slide3.xml"),
+        "full export keeps the page-3 link: {full_rels}",
+    );
+
+    let pages = ecow::eco_vec![document.pages()[0].clone(), document.pages()[2].clone()];
+    let filtered = PagedDocument::new(pages, document.info().clone());
+    let filtered = text_parts(
+        pptx_with_page_mapping(
+            &filtered,
+            &PptxOptions::default(),
+            &[Some(0), None, Some(1)],
+        )
+        .unwrap(),
+    );
+    let filtered_rels = &filtered["ppt/slides/_rels/slide1.xml.rels"];
+    assert!(
+        filtered_rels.contains("slide2.xml"),
+        "physical page 3 becomes exported slide 2: {filtered_rels}",
+    );
+    assert_eq!(
+        filtered_rels.matches("slide2.xml").count(),
+        1,
+        "the omitted physical page 2 does not create a second slide jump",
+    );
+    assert!(!filtered_rels.contains("slide3.xml"));
+    assert_all_wellformed(&filtered);
+
+    let malformed = text_parts(
+        pptx_with_page_mapping(
+            &PagedDocument::new(
+                ecow::eco_vec![document.pages()[0].clone(), document.pages()[2].clone()],
+                document.info().clone(),
+            ),
+            &PptxOptions::default(),
+            &[Some(0), None, Some(99)],
+        )
+        .unwrap(),
+    );
+    let malformed_rels = &malformed["ppt/slides/_rels/slide1.xml.rels"];
+    assert!(
+        !malformed_rels.contains("../slides/"),
+        "an invalid caller map cannot create a dangling slide relationship",
+    );
+}
+
+#[test]
+fn filtered_location_links_use_the_renumbered_introspector_page() {
+    let src = r#"#link(<third>)[Jump to third]
+#pagebreak()
+Page two
+#pagebreak()
+Page three <third>"#;
+    let world = TestWorld::new(src);
+    let document = typst::compile::<PagedDocument>(&world)
+        .output
+        .expect("compilation failed");
+    let filtered = PagedDocument::new(
+        ecow::eco_vec![document.pages()[0].clone(), document.pages()[2].clone()],
+        document.info().clone(),
+    );
+    let parts = text_parts(
+        pptx_with_page_mapping(
+            &filtered,
+            &PptxOptions::default(),
+            &[Some(0), None, Some(1)],
+        )
+        .unwrap(),
+    );
+    let slide = &parts["ppt/slides/slide1.xml"];
+    let rels = &parts["ppt/slides/_rels/slide1.xml.rels"];
+    assert!(slide.contains("ppaction://hlinksldjump"));
+    assert!(rels.contains("slide2.xml"));
+    assert_all_wellformed(&parts);
 }
 
 #[test]
