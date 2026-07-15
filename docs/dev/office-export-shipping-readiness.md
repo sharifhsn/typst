@@ -130,7 +130,7 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 ## Validation completed on the combined branch
 
-- DOCX integration: 219 tests passed.
+- DOCX integration: 220 tests passed.
 - PPTX integration: 65 tests passed.
 - DOCX review round trip: 22 tests passed.
 - OOXML math conversion: 27 tests passed.
@@ -197,7 +197,7 @@ focused tests rather than being mislabeled as part of this authority.
   raster fallbacks for pathological visual canvases. The one-page `raphaelasla`
   shape swarm now opens in LibreOffice in under 9 seconds, retains one page, and
   scores `0.979955` against the Typst reference. The drawing-heavy `gb-ctr` record
-  now opens in under 80 seconds and scores `0.968309`, but expands from 164 to 202
+  now opens in about 21 seconds and scores `0.968292`, but expands from 164 to 202
   pages; that removes the consumer hang without resolving its reflow fidelity.
   These focused results are not folded into the authority totals above.
 - Visual-policy passes: 761/1,392 rendered; exact page counts: 457; page deltas

@@ -1490,7 +1490,8 @@ pub(crate) fn body_shape_only(
     };
     use typst_library::text::SpaceElem;
     use typst_library::visualize::{
-        CircleElem, CurveElem, EllipseElem, LineElem, PolygonElem, RectElem, SquareElem,
+        CircleElem, CurveClose, CurveCubic, CurveElem, CurveLine, CurveMove, CurveQuad,
+        EllipseElem, LineElem, PolygonElem, RectElem, SquareElem,
     };
 
     let mut saw_shape = false;
@@ -1501,6 +1502,18 @@ pub(crate) fn body_shape_only(
 
         if e.is::<LineElem>() || e.is::<CurveElem>() {
             saw_shape = true;
+            return ControlFlow::Continue(());
+        }
+
+        // Curve command values are traversed as content children of `CurveElem`.
+        // They are not standalone visual objects, but rejecting them here would
+        // make every path-based Cetz placement look rich instead of shape-only.
+        if e.is::<CurveMove>()
+            || e.is::<CurveLine>()
+            || e.is::<CurveQuad>()
+            || e.is::<CurveCubic>()
+            || e.is::<CurveClose>()
+        {
             return ControlFlow::Continue(());
         }
 

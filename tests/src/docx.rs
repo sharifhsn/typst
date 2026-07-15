@@ -1597,6 +1597,36 @@ fn dense_mixed_placed_canvas_uses_atomic_raster_with_hidden_text() {
 }
 
 #[test]
+fn dense_mixed_curve_canvas_counts_curve_commands_as_shapes() {
+    let src = r#"#block(width: 80pt, height: 30pt)[
+  #for i in range(65) {
+    place(
+      dx: i * 0.1pt,
+      curve(
+        curve.move((0pt, 0pt)),
+        curve.line((1pt, 0pt)),
+        curve.quad((1.25pt, 0.25pt), (1pt, 0.5pt)),
+        curve.cubic((0.75pt, 0.75pt), (0.25pt, 1pt), (0pt, 0.5pt)),
+        curve.close(mode: "straight"),
+        fill: black,
+      ),
+    )
+  }
+  #place(dx: 25pt, dy: 10pt)[Canvas label]
+]"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<a:blip ").count(), 1);
+    assert!(!document.contains("<wps:wsp"));
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
+            && decision.representation == Representation::Raster
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn mixed_placed_canvas_budget_keeps_sixty_four_items_native() {
     let src = r#"#block(width: 80pt, height: 30pt)[
   #for i in range(63) {
