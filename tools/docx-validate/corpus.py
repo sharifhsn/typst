@@ -114,11 +114,16 @@ def command(
 def extract_pdf_text(path: Path) -> tuple[str | None, str | None]:
     if not shutil.which("pdftotext"):
         return None, "pdftotext unavailable"
-    result = subprocess.run(
-        ["pdftotext", "-nopgbrk", "-q", str(path), "-"],
-        capture_output=True,
-        timeout=180,
-    )
+    try:
+        result = subprocess.run(
+            ["pdftotext", "-nopgbrk", "-q", str(path), "-"],
+            capture_output=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "pdftotext timed out after 180 seconds"
+    except OSError as error:
+        return None, f"pdftotext failed: {error}"
     if result.returncode != 0:
         return None, result.stderr.decode("utf-8", "replace")[-4000:]
     return result.stdout.decode("utf-8", "replace"), None
@@ -693,12 +698,33 @@ def validate_document(
         record.setdefault("exporter_binary_sha256", args.exporter_binary_sha256)
         record["consumers"]["word"] = word_evidence(artifact)
         docx_path = Path(record["artifacts"]["docx"])
-        _, diagnostic_parts = validator.package_check(docx_path) if docx_path.is_file() else ({}, {})
+        _, diagnostic_parts = (
+            validator.package_check(docx_path) if docx_path.is_file() else ({}, {})
+        )
         record["diagnoses"] = {
             "docx_compile": compile_diagnosis(record["compile"]["docx"]),
             "docx_package": docx_diagnosis(diagnostic_parts),
         }
         record["format_advisories"] = format_advisories(record["compile"]["docx"])
+        if args.refresh_semantic:
+            pdf_artifact = record.get("artifacts", {}).get("pdf")
+            pdf_path = Path(pdf_artifact) if pdf_artifact else None
+            docx_text = validator.word_text(diagnostic_parts)
+            pdf_text, pdf_text_error = (
+                extract_pdf_text(pdf_path)
+                if pdf_path is not None and pdf_path.is_file()
+                else (None, "PDF unavailable")
+            )
+            record["semantic"] = {
+                "docx_word_count": len(validator.TEXT_RE.findall(docx_text)),
+                "pdf_word_count": len(validator.TEXT_RE.findall(pdf_text or "")),
+                "text_coverage": (
+                    validator.token_jaccard(pdf_text, docx_text)
+                    if pdf_text is not None
+                    else None
+                ),
+                "pdf_text_error": pdf_text_error,
+            }
         libreoffice_status = record["consumers"]["libreoffice"].get("status")
         should_run_libreoffice = libreoffice_status == "not_run" or (
             args.retry_libreoffice_failures and libreoffice_status in {"failed", "unavailable"}
@@ -1002,6 +1028,11 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=240)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--refresh-semantic",
+        action="store_true",
+        help="recompute semantic text evidence from retained DOCX/PDF artifacts",
+    )
     parser.add_argument("--libreoffice", action="store_true")
     parser.add_argument("--retry-libreoffice-failures", action="store_true")
     parser.add_argument("--roundtrip", action="store_true")
@@ -1113,6 +1144,7 @@ def main() -> int:
             "typst_sha256": args.exporter_binary_sha256,
             "jobs": args.jobs,
             "filters": args.filter,
+            "refresh_semantic": args.refresh_semantic,
             "retry_libreoffice_failures": args.retry_libreoffice_failures,
             "retry_roundtrip_failures": args.retry_roundtrip_failures,
         }
