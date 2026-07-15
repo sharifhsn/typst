@@ -34,6 +34,8 @@ from xml.etree import ElementTree
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+TEXT_TAGS = {f"{{{WORD_NS}}}t", f"{{{MATH_NS}}}t"}
 TEXT_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
 
 
@@ -113,7 +115,7 @@ def word_text(parts: dict[str, bytes]) -> str:
             root = ElementTree.fromstring(data)
         except ElementTree.ParseError:
             continue
-        texts.extend(node.text or "" for node in root.iter(f"{{{WORD_NS}}}t"))
+        texts.extend(node.text or "" for node in root.iter() if node.tag in TEXT_TAGS)
     return " ".join(texts)
 
 
