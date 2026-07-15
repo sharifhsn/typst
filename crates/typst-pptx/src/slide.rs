@@ -13,7 +13,7 @@ use typst_ooxml_core::{dml, units};
 
 use crate::dom::{
     FillSpec, LinkOverlay, MathBox, PicGeom, RunLink, SlideCtx, SlideIr, SlideShape,
-    TextBox, TextColumns, TextPara, TextWrap,
+    TextBox, TextChild, TextColumns, TextPara, TextRun, TextWrap,
 };
 use crate::table::{ActiveTable, ActiveTableCell, CapturedTableCell};
 use crate::text::{InlineMathSource, LinkTarget, TextSource};
@@ -735,6 +735,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         item_transform: Transform,
         alt: Option<EcoString>,
     ) {
+        let fallback_text = raster_fallback_text(&item);
         let mut inner = Frame::soft(Size::zero());
         inner.push(Point::zero(), item);
         let mut group = typst_library::layout::GroupItem::new(inner);
@@ -742,8 +743,57 @@ impl<'a, 'b> Walker<'a, 'b> {
         let mut outer = Frame::soft(Size::zero());
         outer.push(Point::zero(), FrameItem::Group(group));
         if let Some((media, off, size)) = crate::image::raster_fallback(self.ctx, outer) {
-            self.push_pic(order, (media, None), off, size, alt);
+            let fallback_alt = (!fallback_text.is_empty()).then(|| fallback_text.clone());
+            self.push_pic(order, (media, None), off, size, alt.or(fallback_alt));
+            if !fallback_text.is_empty() {
+                self.push_raster_text_fallback(order, off, size, fallback_text);
+            }
         }
+    }
+
+    /// Keeps text swallowed by an exact raster fallback searchable and editable
+    /// without competing with the picture for visual authority. DrawingML has
+    /// no Word-style hidden-run property, so the ordinary text run is fully
+    /// transparent. When there is no authored alt text, the picture also carries
+    /// this recovered source text as accessibility metadata.
+    fn push_raster_text_fallback(
+        &mut self,
+        order: usize,
+        pos: Point,
+        size: Size,
+        text: EcoString,
+    ) {
+        self.shapes.push(OrderedShape {
+            order,
+            shape: SlideShape::TextBox(TextBox {
+                x_emu: crate::text::emu(pos.x),
+                y_emu: crate::text::emu(pos.y),
+                w_emu: crate::text::extent_emu(size.x),
+                h_emu: crate::text::extent_emu(size.y),
+                rot_60k: 0,
+                wrap: TextWrap::Square,
+                columns: None,
+                placeholder: None,
+                paras: vec![TextPara {
+                    children: vec![TextChild::Run(TextRun {
+                        text,
+                        family: EcoString::from("Arial"),
+                        sz_100pt: 100,
+                        b: false,
+                        i: false,
+                        color: [0, 0, 0, 0],
+                        highlight: None,
+                        spc_100pt: None,
+                        field: None,
+                    })],
+                    rtl: false,
+                    margin_left_emu: None,
+                    first_line_indent_emu: None,
+                    line_spacing_100pt: None,
+                    bullet: None,
+                }],
+            }),
+        });
     }
 
     pub(super) fn try_emit_clipped_image(
@@ -1375,6 +1425,29 @@ fn append_frame_text(frame: &Frame, out: &mut EcoString) {
             _ => {}
         }
     }
+}
+
+fn raster_fallback_text(item: &FrameItem) -> EcoString {
+    fn append(item: &FrameItem, out: &mut EcoString) {
+        match item {
+            FrameItem::Text(text) => {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&text.text);
+            }
+            FrameItem::Group(group) => {
+                for (_, child) in group.frame.items() {
+                    append(child, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut text = EcoString::new();
+    append(item, &mut text);
+    text
 }
 
 impl Rect {

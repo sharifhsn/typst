@@ -1224,9 +1224,26 @@ fn real_clip_still_rasterizes_exactly() {
     );
     let slide = &p["ppt/slides/slide1.xml"];
     assert!(slide.contains("<p:pic"), "a real clip must keep the exact raster");
-    assert!(
-        !slide.contains("<a:t>This long text"),
-        "clipped-off text must not leak as an unclipped live run"
+    let doc = roxmltree::Document::parse(slide).unwrap();
+    let fallbacks: Vec<_> = doc
+        .descendants()
+        .filter(|node| {
+            node.tag_name().name() == "sp"
+                && node.descendants().any(|child| {
+                    child.tag_name().name() == "alpha"
+                        && child.attribute("val") == Some("0")
+                })
+        })
+        .collect();
+    assert_eq!(fallbacks.len(), 1, "one transparent fallback text box per raster");
+    let recovered: String = fallbacks[0]
+        .descendants()
+        .filter(|node| node.tag_name().name() == "t")
+        .filter_map(|node| node.text())
+        .collect();
+    assert_eq!(
+        recovered, "This long text is genuinely cut off by the clip",
+        "rasterized text should remain searchable and editable"
     );
     assert_all_wellformed(&p);
 }
