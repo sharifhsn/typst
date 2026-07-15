@@ -1,7 +1,7 @@
 //! The top-level recursion entry and the native-element block dispatch.
 
 use typst_library::diag::SourceResult;
-use typst_library::foundations::Content;
+use typst_library::foundations::{Content, StyleChain};
 use typst_library::introspection::TagElem;
 use typst_library::math::EquationElem;
 use typst_library::model::{
@@ -985,6 +985,28 @@ fn handle_block_inner(
         out.extend(mappers::image::place(elem, styles, ctx)?);
     } else if (child.is::<typst_library::layout::BlockElem>()
         || is_framed_container(child))
+        && dense_mixed_placed_canvas(child, styles)
+    {
+        // Cetz-style canvases can contain dozens or hundreds of independently placed
+        // shapes interleaved with labels. Lowering that mixed content into
+        // many Word drawings/tables crosses a reproducible cumulative
+        // LibreOffice layout-hang threshold. Preserve the diagram atomically
+        // as one raster plus hidden searchable text; ordinary containers and
+        // pure-shape compositions remain native.
+        if let Some(para) =
+            fallback_para(mappers::image::laid_out_block_fallback_with_reason(
+                child,
+                styles,
+                ctx,
+                DecisionReason::DensePlacedCanvasRasterFallback,
+            )?)
+        {
+            out.push(para);
+        } else {
+            ctx.warn_ignored(child.elem().name(), child.span());
+        }
+    } else if (child.is::<typst_library::layout::BlockElem>()
+        || is_framed_container(child))
         && contains_place(child)
         && placed_bodies_shape_only(child, styles)
         && let Some(run) = mappers::shape::transformed(child, styles, ctx)?
@@ -1390,6 +1412,40 @@ pub(crate) fn contains_place(child: &Content) -> bool {
         }),
         ControlFlow::Break(())
     )
+}
+
+/// A mixed placed canvas large enough to cross the consumer-safe native-shape
+/// budget. Pure-shape containers still take the editable DrawingML group path;
+/// this fallback is for diagram canvases whose placed labels and shapes would
+/// otherwise fan out into hundreds of independent Word objects.
+fn dense_mixed_placed_canvas(child: &Content, styles: StyleChain) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::layout::PlaceElem;
+
+    const PLACED_ITEM_BUDGET: usize = 64;
+    let mut places = 0;
+    let mut shape_places = 0;
+    let mut rich_places = 0;
+    let _ = child.traverse(&mut |element: Content| {
+        if let Some(place) = element.to_packed::<PlaceElem>() {
+            places += 1;
+            if body_shape_only(&place.body, styles) {
+                shape_places += 1;
+            } else {
+                rich_places += 1;
+            }
+            if places > PLACED_ITEM_BUDGET
+                && shape_places >= PLACED_ITEM_BUDGET / 2
+                && rich_places > 0
+            {
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    });
+    places > PLACED_ITEM_BUDGET
+        && shape_places >= PLACED_ITEM_BUDGET / 2
+        && rich_places > 0
 }
 
 /// Whether every `#place` body inside `child` is structurally a composition of

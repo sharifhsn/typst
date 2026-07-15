@@ -282,6 +282,31 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         Ok(Some((rel, rendered.size, frame_text)))
     }
 
+    /// Embeds an already-converged full page as one PNG. This is reserved for
+    /// text-free pages whose hundreds of independent native shapes cross the
+    /// Office-consumer complexity budget; re-layout would both repeat the
+    /// expensive work and risk diverging from the paged authority.
+    pub(crate) fn rasterize_dense_visual_page(
+        &mut self,
+        source: &Content,
+        frame: Frame,
+    ) -> Rasterized {
+        let mut tags = Vec::new();
+        collect_frame_tags(&frame, &mut tags);
+        self.deferred_tags.extend(tags);
+        let frame_text = frame_to_text(&frame);
+        let rendered = raster::render_full_frame_to_png(frame, 2.0)?;
+        let rel = self.add_image(&rendered.png, "png");
+        self.record_content_decision(
+            source,
+            Representation::Raster,
+            DecisionReason::DenseVisualPageRasterFallback,
+            LossSet::RASTER,
+            frame_text.chars().count(),
+        );
+        Some((rel, rendered.size, frame_text))
+    }
+
     /// Same as [`Self::rasterize`], but returns the frame tags to the caller
     /// instead of appending them to `deferred_tags`. The final boolean
     /// distinguishes failed layout from intentionally empty output when no

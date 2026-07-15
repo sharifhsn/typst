@@ -40,6 +40,12 @@ pub enum DecisionReason {
     EquationTextFallback,
     /// A page-relative background or foreground rendered as a PNG.
     PageOverlayRasterFallback,
+    /// A text-free page exceeded the Office-consumer DrawingML complexity
+    /// budget and was preserved as one exact page raster.
+    DenseVisualPageRasterFallback,
+    /// A mixed text-and-shape placed canvas exceeded the Office-consumer
+    /// DrawingML complexity budget and was preserved atomically as a raster.
+    DensePlacedCanvasRasterFallback,
     /// A block layout callback and its whole-region paged fallback both failed,
     /// so no safe representation could be emitted.
     LayoutCallbackUnavailable,

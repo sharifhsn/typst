@@ -293,7 +293,20 @@ fn docx_document_impl(
             // `Block::SectionBreak`s carrying the earlier sections' `sectPr`.
             let (body, sect, header_parts, footer_parts) = if sections.len() <= 1 {
                 ctx.line_numbering_active = first_geom.line_numbers.is_some();
-                let body = crate::convert::run(&mut ctx, &pairs)?;
+                let dense_visual_page = (content_text_chars(content) == 0)
+                    .then(|| ctx.paged_geometry.dense_visual_page().cloned())
+                    .flatten();
+                let body = if let Some(frame) = dense_visual_page {
+                    if let Some(block) =
+                        dense_visual_page_block(&mut ctx, content, frame, &first_geom)
+                    {
+                        vec![block]
+                    } else {
+                        crate::convert::run(&mut ctx, &pairs)?
+                    }
+                } else {
+                    crate::convert::run(&mut ctx, &pairs)?
+                };
                 let full_width = ctx.page_content_width_dxa();
                 let (sect, h, f) = ctx.with_available_width(full_width, |ctx| {
                     build_section(ctx, &first_geom, styles)
@@ -3198,6 +3211,51 @@ fn anchor_wrap_name(wrap: crate::dom::AnchorWrap) -> &'static str {
         crate::dom::AnchorWrap::Square(value) => value,
         crate::dom::AnchorWrap::None => "none",
     }
+}
+
+/// Replaces a one-page, text-free DrawingML shape swarm with one full-page
+/// raster. This is a consumer-safety fallback: LibreOffice crosses from an
+/// 18-second open to a multi-minute hang around 950 independent custom shapes,
+/// while the converged Typst page frame is already the exact visual authority.
+fn dense_visual_page_block(
+    ctx: &mut DocxCtx,
+    source: &Content,
+    frame: typst_library::layout::Frame,
+    geom: &SectGeom,
+) -> Option<crate::dom::Block> {
+    use crate::dom::{
+        Anchor, AnchorPos, AnchorWrap, Block, Drawing, Para, ParaChild, Run,
+    };
+
+    const EMU_PER_TWIP: i64 = 635;
+    let (rel, _size, _text) = ctx.rasterize_dense_visual_page(source, frame)?;
+    let docpr_id = ctx.next_drawing_id();
+    let drawing = Drawing {
+        rel,
+        svg_rel: None,
+        compatibility_split_ids: None,
+        w_emu: geom.page_w as i64 * EMU_PER_TWIP,
+        h_emu: geom.page_h as i64 * EMU_PER_TWIP,
+        source_offset_emu: [0, 0],
+        alt: None,
+        decorative: false,
+        docpr_id,
+        name: ecow::eco_format!("Dense visual page {docpr_id}"),
+        anchor: Some(Anchor {
+            z: ctx.next_z(),
+            pos_h: AnchorPos { rel_from: "page", align: None, offset: Some(0) },
+            pos_v: AnchorPos { rel_from: "page", align: None, offset: Some(0) },
+            wrap: AnchorWrap::None,
+            dist: [0, 0, 0, 0],
+            behind: false,
+        }),
+        shape: None,
+        group: None,
+    };
+    Some(Block::Para(Para {
+        props: crate::dom::ParaProps::default(),
+        content: vec![ParaChild::Run(Run::Drawing(drawing))],
+    }))
 }
 
 /// Rasterizes `set page(background:)` or `set page(foreground:)` content and

@@ -1535,6 +1535,98 @@ fn positioned_drawings_use_collapsed_anchor_paragraphs() {
 }
 
 #[test]
+fn dense_text_free_visual_page_uses_one_consumer_safe_raster() {
+    let src = r#"#page(
+  width: 31pt,
+  height: 30pt,
+  margin: 0pt,
+  for i in range(901) {
+    place(dx: i * 0.01pt, square(size: 1pt, fill: black))
+  },
+)"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<wp:anchor ").count(), 1);
+    assert_eq!(document.matches("<a:blip ").count(), 1);
+    assert!(!document.contains("<wps:wsp"), "shape swarm must not reach Word");
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::DenseVisualPageRasterFallback
+            && decision.representation == Representation::Raster
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn dense_visual_page_budget_keeps_nine_hundred_shapes_native() {
+    let src = r#"#page(
+  width: 31pt,
+  height: 30pt,
+  margin: 0pt,
+  for i in range(900) {
+    place(dx: i * 0.01pt, square(size: 1pt, fill: black))
+  },
+)"#;
+    let p = parts(src);
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<wp:anchor ").count(), 900);
+    assert!(!document.contains("<a:blip "));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn dense_mixed_placed_canvas_uses_atomic_raster_with_hidden_text() {
+    let src = r#"#block(width: 80pt, height: 30pt)[
+  #for i in range(65) {
+    place(dx: i * 0.1pt, square(size: 1pt, fill: black))
+  }
+  #place(dx: 25pt, dy: 10pt)[Canvas label]
+]"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<a:blip ").count(), 1);
+    assert!(!document.contains("<wps:wsp"));
+    assert!(document.contains("Canvas label"));
+    assert!(document.contains("<w:vanish/>"));
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
+            && decision.representation == Representation::Raster
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn mixed_placed_canvas_budget_keeps_sixty_four_items_native() {
+    let src = r#"#block(width: 80pt, height: 30pt)[
+  #for i in range(63) {
+    place(dx: i * 0.1pt, square(size: 1pt, fill: black))
+  }
+  #place(dx: 25pt, dy: 10pt)[Canvas label]
+]"#;
+    let p = parts(src);
+    let document = &p["word/document.xml"];
+    assert!(!document.contains("<a:blip "));
+    assert!(document.contains("Canvas label"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn many_placed_text_labels_remain_editable() {
+    let src = r#"#block(width: 80pt, height: 30pt)[
+  #for i in range(65) {
+    place(dx: i * 0.1pt)[Label]
+  }
+]"#;
+    let p = parts(src);
+    let document = &p["word/document.xml"];
+    assert!(!document.contains("<a:blip "));
+    assert_eq!(document.matches("<wps:txbx>").count(), 65);
+    assert_eq!(document.matches("<mc:Choice Requires=\"wps\">").count(), 65);
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn positioned_line_keeps_its_explicit_source_origin() {
     let p = parts("#place(line(start: (10pt, 20pt), end: (30pt, 40pt), stroke: 1pt))");
     let document = &p["word/document.xml"];

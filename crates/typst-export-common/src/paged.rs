@@ -23,9 +23,19 @@ pub fn logical_id(content: &Content) -> u128 {
 }
 
 /// Geometry recovered from all converged page frames.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct PagedGeometry {
     tables: Vec<PagedTableGeometry>,
+    dense_visual_page: Option<Frame>,
+}
+
+// The retained frame is an exporter cache, not part of the recovered semantic
+// table geometry. Keep the equality contract that callers had before the cache
+// was introduced.
+impl PartialEq for PagedGeometry {
+    fn eq(&self, other: &Self) -> bool {
+        self.tables == other.tables
+    }
 }
 
 impl PagedGeometry {
@@ -35,7 +45,18 @@ impl PagedGeometry {
             scanner.page = index + 1;
             scanner.walk_frame(&page.frame, Transform::identity());
         }
-        Self { tables: scanner.tables }
+        // Word and LibreOffice become pathologically slow when a visual-only
+        // page is emitted as roughly a thousand independent DrawingML shapes.
+        // Retain the converged frame only for that narrow one-page case so the
+        // DOCX exporter can replace the consumer-hostile shape swarm with one
+        // exact page raster. Ordinary documents keep no duplicate page frame.
+        let dense_visual_page = document
+            .pages()
+            .first()
+            .filter(|_| document.pages().len() == 1)
+            .filter(|page| dense_visual_only(&page.frame))
+            .map(|page| page.frame.clone());
+        Self { tables: scanner.tables, dense_visual_page }
     }
 
     pub fn tables(&self) -> &[PagedTableGeometry] {
@@ -45,6 +66,34 @@ impl PagedGeometry {
     pub fn first_table(&self, logical_id: u128) -> Option<&PagedTableGeometry> {
         self.tables.iter().find(|table| table.logical_id == logical_id)
     }
+
+    /// A one-page, text-free frame whose native shape count exceeds the
+    /// consumer-safety budget.
+    pub fn dense_visual_page(&self) -> Option<&Frame> {
+        self.dense_visual_page.as_ref()
+    }
+}
+
+fn dense_visual_only(frame: &Frame) -> bool {
+    const SHAPE_BUDGET: usize = 900;
+
+    fn scan(frame: &Frame, shapes: &mut usize, has_rich_content: &mut bool) {
+        for (_, item) in frame.items() {
+            match item {
+                FrameItem::Group(group) => scan(&group.frame, shapes, has_rich_content),
+                FrameItem::Shape(..) => *shapes += 1,
+                FrameItem::Text(..) | FrameItem::Image(..) | FrameItem::Link(..) => {
+                    *has_rich_content = true
+                }
+                FrameItem::Tag(..) => {}
+            }
+        }
+    }
+
+    let mut shapes = 0;
+    let mut has_rich_content = false;
+    scan(frame, &mut shapes, &mut has_rich_content);
+    !has_rich_content && shapes > SHAPE_BUDGET
 }
 
 /// One physical occurrence of a semantic table or grid.
