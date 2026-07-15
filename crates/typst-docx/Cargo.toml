@@ -32,6 +32,7 @@ zip = { workspace = true }
 flate2 = { workspace = true }
 time = { workspace = true }
 ttf-parser = { workspace = true }
+tiny-skia = { workspace = true }
 
 [lints]
 workspace = true

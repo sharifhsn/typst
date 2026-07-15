@@ -289,7 +289,52 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
         span: Span,
     ) -> SourceResult<(Vec<Tag>, Rasterized, bool)> {
-        self.rasterize_impl(content, styles, span, true)
+        let (tags, rendered, failed) =
+            self.rasterize_impl(content, styles, span, true)?;
+        Ok((
+            tags,
+            rendered.map(|(png, size, text)| (self.add_image(&png, "png"), size, text)),
+            failed,
+        ))
+    }
+
+    /// Rasterize a tall fallback into page-sized PNGs. Word/Writer handle a
+    /// sequence of ordinary inline pictures much more reliably than a single
+    /// multi-page-height bitmap (the latter can make LibreOffice spend minutes
+    /// importing the document). Text is returned once and remains searchable.
+    pub(crate) fn rasterize_tiled(
+        &mut self,
+        content: &Content,
+        styles: StyleChain,
+        span: Span,
+    ) -> SourceResult<Option<(Vec<(EcoString, Size)>, String)>> {
+        let (tags, rendered, _) = self.rasterize_impl(content, styles, span, true)?;
+        self.deferred_tags.extend(tags);
+        let Some((png, size, text)) = rendered else {
+            return Ok(None);
+        };
+        if size.y <= self.raster_height {
+            let rel = self.add_image(&png, "png");
+            return Ok(Some((vec![(rel, size)], text)));
+        }
+        let pixmap = tiny_skia::Pixmap::decode_png(&png).map_err(
+            |_| -> ecow::EcoVec<SourceDiagnostic> {
+                vec![SourceDiagnostic::error(
+                    span,
+                    "could not decode DOCX raster fallback",
+                )]
+                .into()
+            },
+        )?;
+        let px_per_pt = pixmap.height() as f64 / size.y.to_pt();
+        let tile_px = (self.raster_height.to_pt() * px_per_pt).floor().max(1.0) as u32;
+        let raw_tiles = slice_png_tiles(&pixmap, tile_px, span)?;
+        let mut tiles = Vec::with_capacity(raw_tiles.len());
+        for (bytes, h) in raw_tiles {
+            let tile_size = Size::new(size.x, Abs::pt(h as f64 / px_per_pt));
+            tiles.push((self.add_image(&bytes, "png"), tile_size));
+        }
+        Ok(Some((tiles, text)))
     }
 
     fn rasterize_impl(
@@ -298,7 +343,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
         span: Span,
         crop: bool,
-    ) -> SourceResult<(Vec<Tag>, Rasterized, bool)> {
+    ) -> SourceResult<(Vec<Tag>, Option<(Vec<u8>, Size, String)>, bool)> {
         if std::env::var_os("DOCX_DEBUG_RASTER").is_some() {
             eprintln!("RASTERIZE: {}", content.elem().name());
         }
@@ -352,11 +397,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         ) else {
             return Ok((tags, None, false));
         };
-        Ok((
-            tags,
-            Some((self.add_image(&rendered.png, "png"), rendered.size, frame_text)),
-            false,
-        ))
+        Ok((tags, Some((rendered.png, rendered.size, frame_text)), false))
     }
 
     /// Forwards tags from a frame consumed by a non-raster fallback, such as a
@@ -413,6 +454,56 @@ fn usable_size(size: typst_library::layout::Size) -> bool {
         && size.y.to_pt().is_finite()
         && size.x > Abs::zero()
         && size.y > Abs::zero()
+}
+
+fn slice_png_tiles(
+    pixmap: &tiny_skia::Pixmap,
+    max_height: u32,
+    span: Span,
+) -> SourceResult<Vec<(Vec<u8>, u32)>> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < pixmap.height() {
+        let target = (start + max_height).min(pixmap.height());
+        let mut end = target;
+        // Prefer a transparent seam near the page limit so glyphs/lines are not
+        // cut in half. The window is bounded, and the exact limit is retained
+        // when no safe row exists.
+        for row in (start + 1..target).rev().take(64) {
+            let pixels = &pixmap.data()[row as usize * pixmap.width() as usize * 4
+                ..(row + 1) as usize * pixmap.width() as usize * 4];
+            if pixels.chunks_exact(4).all(|px| px[3] == 0) {
+                end = row + 1;
+                break;
+            }
+        }
+        let rect = tiny_skia::IntRect::from_ltrb(
+            0,
+            start as i32,
+            pixmap.width() as i32,
+            end as i32,
+        )
+        .ok_or_else(|| -> ecow::EcoVec<SourceDiagnostic> {
+            vec![SourceDiagnostic::error(span, "could not split DOCX raster fallback")]
+                .into()
+        })?;
+        let tile = pixmap.clone_rect(rect).ok_or_else(
+            || -> ecow::EcoVec<SourceDiagnostic> {
+                vec![SourceDiagnostic::error(
+                    span,
+                    "could not split DOCX raster fallback",
+                )]
+                .into()
+            },
+        )?;
+        let bytes = tile.encode_png().map_err(|_| -> ecow::EcoVec<SourceDiagnostic> {
+            vec![SourceDiagnostic::error(span, "could not encode DOCX raster tile")]
+                .into()
+        })?;
+        out.push((bytes, end - start));
+        start = end;
+    }
+    Ok(out)
 }
 
 /// Recursively collects introspection tags from a laid-out frame.
@@ -487,4 +578,32 @@ fn frame_to_text(frame: &Frame) -> String {
         last_x_end = Some(pos.x + width);
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slice_png_tiles;
+    use typst_syntax::Span;
+
+    #[test]
+    fn tall_raster_tiles_prefer_transparent_seams_and_preserve_rows() {
+        let mut pixmap = tiny_skia::Pixmap::new(2, 10).unwrap();
+        for y in 0..10 {
+            for x in 0..2 {
+                pixmap.pixels_mut()[y * 2 + x] =
+                    tiny_skia::PremultipliedColorU8::from_rgba(0, y as u8, 0, 255)
+                        .unwrap();
+            }
+        }
+        pixmap.data_mut()[4 * 2 * 4..5 * 2 * 4].fill(0);
+        let tiles = slice_png_tiles(&pixmap, 6, Span::detached()).unwrap();
+        let heights: Vec<u32> = tiles.iter().map(|(_, h)| *h).collect();
+        assert_eq!(heights, vec![5, 5]);
+        let mut rows = Vec::new();
+        for (png, _) in tiles {
+            let tile = tiny_skia::Pixmap::decode_png(&png).unwrap();
+            rows.extend(tile.pixels().iter().map(|p| p.green()));
+        }
+        assert_eq!(rows, pixmap.pixels().iter().map(|p| p.green()).collect::<Vec<_>>());
+    }
 }

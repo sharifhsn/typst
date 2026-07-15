@@ -1019,7 +1019,7 @@ fn handle_block_inner(
         // box to an image instead — a centered inline image renders correctly in
         // every consumer (Word renders the text box fine, but this keeps both).
         if let Some(para) =
-            fallback_para(mappers::image::laid_out_fallback(child, styles, ctx)?)
+            fallback_para(mappers::image::laid_out_block_fallback(child, styles, ctx)?)
         {
             out.push(para);
         } else {
@@ -1056,7 +1056,7 @@ fn handle_block_inner(
                 content: runs.into_iter().map(ParaChild::Run).collect(),
             }));
         } else if let Some(para) =
-            fallback_para(mappers::image::laid_out_fallback(child, styles, ctx)?)
+            fallback_para(mappers::image::laid_out_block_fallback(child, styles, ctx)?)
         {
             // A drawable block with no extractable text — a diagonal/endpoint
             // `#line`, `#polygon`, `#curve`, a `#layout`/`#stack`/`#move`/
@@ -1088,7 +1088,7 @@ fn handle_layout(
             out.extend(ctx.blocks(&content, styles)?);
         }
         None => {
-            if let Some(para) = fallback_para(mappers::image::laid_out_fallback(
+            if let Some(para) = fallback_para(mappers::image::laid_out_block_fallback(
                 elem.pack_ref(),
                 styles,
                 ctx,
@@ -1170,7 +1170,7 @@ fn handle_block_box(
             // A layouter body (`#block(width => ..)`) is an opaque closure with
             // no extractable content: rasterize the whole box (and recover its
             // laid-out text as hidden searchable runs beside the image).
-            if let Some(para) = fallback_para(mappers::image::laid_out_fallback(
+            if let Some(para) = fallback_para(mappers::image::laid_out_block_fallback(
                 elem.pack_ref(),
                 styles,
                 ctx,

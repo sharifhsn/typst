@@ -1228,6 +1228,41 @@ pub(crate) fn laid_out_fallback_with_reason(
     Ok(fallback_runs(ctx, rel, size, &text))
 }
 
+/// Block-level raster fallback. Tall regions are split into page-sized images;
+/// inline/table/positioned callers must use [`laid_out_fallback`] instead.
+pub(crate) fn laid_out_block_fallback(
+    content: &Content,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Vec<Run>> {
+    laid_out_block_fallback_with_reason(
+        content,
+        styles,
+        ctx,
+        DecisionReason::RasterFallback,
+    )
+}
+
+pub(crate) fn laid_out_block_fallback_with_reason(
+    content: &Content,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+    reason: DecisionReason,
+) -> SourceResult<Vec<Run>> {
+    let Some((tiles, text)) = ctx.rasterize_tiled(content, styles, content.span())?
+    else {
+        return Ok(Vec::new());
+    };
+    ctx.record_content_decision(
+        content,
+        Representation::Raster,
+        reason,
+        LossSet::RASTER,
+        text.chars().count(),
+    );
+    Ok(fallback_runs_tiled(ctx, tiles, &text))
+}
+
 /// Same as [`laid_out_fallback`], but hands the laid-out frame's introspection
 /// tags back to the caller instead of deferring them to the end of the
 /// document. Paragraph-level callers use this to keep state/counter updates
@@ -1283,6 +1318,43 @@ fn fallback_runs(
         shape: None,
         group: None,
     }));
+    hidden_text_runs(text, &mut runs);
+    runs
+}
+
+fn fallback_runs_tiled(
+    ctx: &mut DocxCtx,
+    tiles: Vec<(EcoString, typst_library::layout::Size)>,
+    text: &str,
+) -> Vec<Run> {
+    let mut runs = Vec::with_capacity(tiles.len() * 2 + 1);
+    for (index, (rel, size)) in tiles.into_iter().enumerate() {
+        if index > 0 {
+            runs.push(Run::PageBreak);
+        }
+        let docpr_id = ctx.next_drawing_id();
+        let name: EcoString = ecow::eco_format!("Picture {docpr_id}");
+        runs.push(Run::Drawing(Drawing {
+            rel,
+            svg_rel: None,
+            compatibility_split_ids: None,
+            w_emu: crate::props::abs_to_emu(size.x),
+            h_emu: crate::props::abs_to_emu(size.y),
+            source_offset_emu: [0, 0],
+            alt: if index == 0 {
+                Some(text.replace('\n', " ").into())
+                    .filter(|s: &EcoString| !s.trim().is_empty())
+            } else {
+                None
+            },
+            decorative: false,
+            docpr_id,
+            name,
+            anchor: None,
+            shape: None,
+            group: None,
+        }));
+    }
     hidden_text_runs(text, &mut runs);
     runs
 }
