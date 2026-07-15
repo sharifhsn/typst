@@ -72,9 +72,10 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 ### DOCX
 
-- A fresh, unfiltered public-corpus authority has not been completed after the
-  current TOC, review-export, and tall-raster fixes. The current handoff calls for
-  all 1,408 records with LibreOffice and round-trip lanes.
+- The fresh 1,408-document authority completed at `1bf829900`, followed by
+  serial consumer retries and an OMML-aware semantic refresh. It produced 1,405
+  valid packages, 1,392 successful LibreOffice renders, nine remaining
+  consumer failures, and one source-owned DOCX-target error (`paper/tracl`).
 - The current corpus handoff still identifies real low-fidelity documents, including
   `presentation/sleiden-lei` (page growth, displaced logo content, missing text, and
   unsupported-content drops).
@@ -110,7 +111,10 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 - LibreOffice and older Office versions still render math through the compact
   Unicode fallback rather than native stacked OMML; authored sizing and readable
   scripts/limits are preserved, but stacked fractions and radicals are not.
-- Page filtering does not remap every slide-jump link.
+- Rasterized clipped or transformed groups now retain transparent editable text
+  plus accessibility metadata. This preserves search/copy/edit richness without
+  competing with the raster picture for visual authority; broader PowerPoint
+  save-and-reopen testing remains necessary.
 - The 2026-07-13 LibreOffice smoke export opened without repair and preserved editable
   content, but visibly wrapped table/list text differently, overlapped a list with a
   following shape, and rendered the inline equation less faithfully. This confirms
@@ -126,7 +130,7 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 ## Validation completed on the combined branch
 
-- DOCX integration: 212 tests passed.
+- DOCX integration: 214 tests passed.
 - PPTX integration: 65 tests passed.
 - DOCX review round trip: 22 tests passed.
 - OOXML math conversion: 27 tests passed.
@@ -146,8 +150,52 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   table, positioned, and math fallbacks remain atomic.
 - Filtered PPTX exports remap explicit physical-page links to their retained slide
   numbers and drop links whose target page was omitted.
+- DOCX paragraph spacing is emitted once per collapsed Typst boundary across body,
+  list, table, furniture, footnote, and text-box stories, avoiding consumer-specific
+  `before` + `after` summation.
+- PPTX raster fallbacks preserve searchable/editable transparent text. On the
+  previous worst nativeness deck, `steady-rvl-slides`, recovery increased from
+  28/65 to 65/65 words; `clari-docs` and `sdu-touying-simpl` recover about 99.7%
+  and 101.0% of reference words respectively while retaining valid packages.
 - Headless visual QA reports exposed the fidelity limitations described above;
   primary-agent review did not inspect rendered images.
+
+## Current DOCX corpus authority (revision `1bf8299001ff`)
+
+The 2026-07-15 campaign compiled the frozen 1,408-document corpus with release
+binary SHA-256
+`66711ff6daa4506f8ceac2fd59e098c8da1b3b74ecb57da449a9e6be80c412a2`.
+The subsequent retries reused that exact binary and retained the original run
+identity; later checker and exporter fixes on this branch are validated by
+focused tests rather than being mislabeled as part of this authority.
+
+- 1,405/1,408 packages were valid. Two very large documents exceeded the
+  240-second compile timeout; `paper/tracl` explicitly lacks a DOCX target. Those
+  three absent packages are also the checker's `DOCX-E101` records.
+- Both timeout cases succeeded when retried serially with a 600-second budget
+  (DOCX compilation took about 82 and 134 seconds), classifying them as
+  load-sensitive authority-run failures rather than unsupported documents.
+- LibreOffice rendered 1,392 documents. Serial retry recovered four cases; eight
+  remain timeouts, one remains a deterministic conversion failure, and four
+  records failed downstream raster evidence while three were never submitted to
+  the consumer because they did not produce a DOCX package.
+- Visual-policy passes: 761/1,392 rendered; exact page counts: 457; page deltas
+  above one: 631.
+- The checker identifies 164 slide-shaped DOCX exports as a separate informational
+  lane. Non-slide results account for 1,228 rendered documents, 713 policy passes,
+  437 exact page counts, and 515 page deltas above one.
+- Review round trip passed for 1,405 documents, failed only with `paper/tracl`, and
+  was unavailable for two. It enrolled 520,021 regions across 1,138 documents.
+- OMML text is now included in semantic extraction. This fixed false zero-text
+  reports for math-heavy documents; semantic coverage remains an advisory, not a
+  proof of loss, especially for CJK, raster-heavy, and slide-shaped sources.
+- The strict classifier still labels 1,398 records `unverified`, chiefly because
+  current Microsoft Word evidence is absent for 1,405, fonts are unavailable for
+  749, and licenses are unverified for 518. Completion of the authority means all
+  configured lanes ran and retained evidence; it does not turn missing consumer,
+  font, or license evidence into a pass.
+
+Durable results are under `target/docx-public-corpus-run-1bf8299-clean/`.
 
 ## Baseline corpus authority (revision `c07adc99b70f`)
 
@@ -169,15 +217,16 @@ fallback. Its metrics remain reproducible baseline evidence, not a score for HEA
   `0.965868`, p10 `0.909426`, and minimum `0.308371` (`presentation/sleiden-lei`).
 - The last clean v12 authority was materially better: 847 policy passes, 554
   exact page counts, and 554 page deltas above one. A limited three-revision
-  follow-up found that `report/kdl` now matches Typst's 13-page reference, but a
-  fresh authority is required before classifying the aggregate delta on HEAD.
+  follow-up found that `report/kdl` now matches Typst's 13-page reference. The
+  current authority remains below v12 at 761/457/631, so the aggregate delta is
+  confirmed but still needs causal disposition.
 - At this baseline, review export completed for 1,317 documents and failed for
   91. Eighty-nine failures violated the terminal-paragraph invariant in a
   document table cell, one did so in a header table cell, and `paper/tracl`
   retained its source-owned target failure.
 - At this baseline, 1,399 records were `unverified` because its CLI exports omitted
-  fidelity metadata required by the corpus classifier. New CLI exports embed that
-  metadata by default; the full authority still needs to be rerun under that contract.
+  fidelity metadata required by the corpus classifier. The current authority has
+  now rerun the full corpus under the embedded-metadata contract.
 
 Durable results are under `target/docx-public-corpus-run-c07adc9/`.
 
@@ -207,18 +256,21 @@ The separate `typst-office` demo now imports folders or bounded ZIP projects,
 loads project-local fonts, resolves relative modules, and maps vendored packages
 from `packages/<namespace>/<name>/<version>/...` into Typst's package namespace.
 Its local WASM smoke exports both DOCX and PPTX with relative and `@local` imports.
-This proves the browser conversion core, not yet the deployed GitHub Pages path or
-arbitrary Typst Universe/proprietary-app project compatibility.
+The deployed GitHub Pages path currently serves the browser JS and WASM with the
+correct `application/wasm` content type, and the exact CI smoke path passes locally.
+Three newer project-import/package/filename commits still need to reach the remote;
+arbitrary Typst Universe/proprietary-app project compatibility is not yet proven.
 
 ## Remaining release gates
 
-1. Run a fresh 1,408-document DOCX authority on HEAD so the fixed fidelity-manifest
-   and review-export contracts, pagination tail, and tiled fallback are scored together.
-2. Explain or disposition the remaining DOCX delta from v12 rather than carrying
+1. Explain or disposition the remaining DOCX delta from v12 rather than carrying
    the historical aggregate forward as a current regression claim.
-3. Retry the historical DOCX consumer/raster failures serially to separate fixed,
-   deterministic, and load-sensitive LibreOffice behavior.
-4. Add real Microsoft PowerPoint testing to the new 120-deck PPTX authority.
+2. Disposition the eight serially reproducible LibreOffice timeouts, the remaining
+   deterministic conversion failure, and incomplete raster evidence.
+3. Run a new authority after the post-`1bf829900` paragraph-spacing and checker
+   changes rather than attributing focused fixes to the earlier binary.
+4. Add real Microsoft PowerPoint testing to the new 120-deck PPTX authority,
+   including save-and-reopen behavior for transparent recovered text.
 5. Expand PPTX table-fallback and mixed-page-size coverage before widening
    availability beyond preview.
 6. Document the CLI/library fidelity-reporting contract and preview status in the
