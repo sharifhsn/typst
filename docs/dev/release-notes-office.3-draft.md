@@ -1,10 +1,8 @@
 # v0.15.0-office.3 — draft release notes
 
 > **DRAFT.** Not published. Do not tag or cut a release from this draft yet.
-> **Blocker:** a known bug bakes the page number `1` into every table-of-contents
-> entry (a TOC page-number caching defect, tracked as task #177). That fix is
-> being done separately and is **not** included in the commit range below. It
-> must land and be validated before `v0.15.0-office.3` is tagged.
+> A fresh post-fix corpus authority and Microsoft Office consumer validation
+> remain release blockers; the former TOC page-cache blocker is fixed.
 
 Supersedes `v0.15.0-office.2` (2026-07-04). Like both prior releases, this
 remains **experimental preview** software: Typst can export `.docx` and
@@ -33,12 +31,22 @@ for the full current verdict.
 - Corpus-driven hardening pass: a large batch of real-document fallback and
   classification fixes landed together as part of consolidating the combined
   DOCX branch history (see "Corpus and validation" below).
+- Table-of-contents entries now use their physical paged-snapshot positions
+  instead of caching page `1` for every entry.
+- Review export now emits the required terminal paragraph in table cells; 90 of
+  the 91 historical failures now pass, with the remaining template failing
+  during source compilation before export.
+- Tall block-level picture fallbacks are page-tiled, preventing one reproduced
+  LibreOffice import hang while retaining searchable hidden text.
 
 ### PowerPoint (.pptx)
 
 - Tables are substantially more native: cell alignment, insets, gutters (as
   editable spacer tracks), border dash styles, and richer per-cell content are
   now preserved instead of falling back.
+- Transformed tables use a whole-region picture fallback instead of disappearing.
+- Explicit page links are remapped when `--pages` filters the deck; links to omitted
+  pages are dropped instead of pointing at a missing slide.
 - Text fidelity improvements: native first-line indents, wide paragraph
   leading, single-line bullet layout, text highlights, and authored hyperlink
   styling (including on shapes and pictures, not just text) are now preserved.
@@ -66,8 +74,8 @@ for the full current verdict.
   [`docs/dev/office-export-shipping-readiness.md`](office-export-shipping-readiness.md),
   with corpus validation counts and the supported-preview wording kept in
   sync with the latest corpus campaign.
-- DOCX fidelity-manifest behavior in the docs now matches the CLI (the
-  manifest is opt-in, off by default).
+- DOCX fidelity-manifest behavior in the docs now matches the CLI (new CLI
+  exports embed it by default; library callers remain opt-in).
 
 ## Known limitations
 
@@ -76,8 +84,8 @@ document's verified-gaps section — this list is intentionally not exhaustive;
 see that document for the complete picture.
 
 **DOCX:**
-- A fresh, unfiltered full public-corpus authority on the combined revision is
-  not yet complete; the existing aggregate reflects a filtered subset.
+- A fresh, unfiltered full public-corpus authority after the latest fixes is
+  not yet complete; the existing 1,408-record authority is a pre-fix baseline.
 - Real low-fidelity documents remain, including `presentation/sleiden-lei`
   (page growth, displaced content, missing text).
 - Headers/footers that vary beyond Word's first/even/default model freeze to
@@ -88,8 +96,8 @@ see that document for the complete picture.
   equivalent.
 
 **PPTX:**
-- Some unsupported or transformed native-table regions can still be accepted
-  without a full table/region fallback.
+- Other unsupported or partially captured table edge cases still need broader
+  corpus coverage after the transformed-table fallback fix.
 - Mixed page sizes are uniformly scaled and centered on one global slide
   canvas, which can introduce letterboxing.
 - Table cell-math handling is incomplete, and consumer line-box metrics can
@@ -103,17 +111,12 @@ see that document for the complete picture.
   faithfully. This confirms package validity but is not a general
   visual-fidelity claim.
 
-**Known, separately tracked bug (this release does not fix it):**
-- Table-of-contents page numbers are cached as `1` for every entry (task
-  #177). Do not rely on TOC page numbers in documents exported by this
-  branch until the fix lands and this note is removed.
-
 **Pandoc target:** retained as known-incomplete historical/development code.
 It is not a supported preview and is not a release gate.
 
 ## Validation
 
-Carried forward from the current corpus authority (combined revision
+Carried forward as a pre-fix baseline from revision
 `c07adc99b70f`, 1,408-document public corpus, manifest SHA-256
 `9b92ee3092b97c9c600547722ccb2397a5d21a1eea1d224418d1c57d1a9e99af`):
 
@@ -122,21 +125,23 @@ Carried forward from the current corpus authority (combined revision
 - PPTX: all 120 compilable presentation templates exported valid OOXML with
   zero export errors; mean LibreOffice visual similarity `0.992` across all
   120 decks.
-- DOCX integration (211), PPTX integration (62), DOCX review round-trip (22),
+- DOCX integration (212), PPTX integration (65), DOCX review round-trip (22),
   and OOXML math conversion (27) test suites passed; strict Clippy passed
   with warnings denied.
 
 See
 [`docs/dev/office-export-shipping-readiness.md`](office-export-shipping-readiness.md)
-for full detail, including the DOCX visual/pagination regression against the
-prior v12 authority that remains to be explained before this can be
-considered a clean improvement over `v0.15.0-office.2` on corpus terms, even
-though the per-feature fixes above are real and additive.
+for full detail, including why a fresh authority is required before classifying
+the aggregate DOCX pagination delta against v12 on current HEAD.
 
 <details>
 <summary>Commit-level detail (`v0.15.0-office.2..HEAD`, docs/CI-only commits omitted from the summary above)</summary>
 
 ```
+14d36e2 pptx: remap links in filtered exports
+9bea579 docx: tile tall raster fallbacks
+fe4afc3d9 pptx: preserve transformed table content
+42a26b348 docx: fix TOC and review export validation
 a0ab69044 docs: record current office corpus authority
 c07adc99b docs: narrow the supported export preview
 bd1318c72 pptx: preserve table border dash styles

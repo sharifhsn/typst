@@ -1,6 +1,6 @@
 # Office export shipping readiness
 
-Status date: 2026-07-13
+Status date: 2026-07-14
 
 This is the current product and validation snapshot after consolidating the DOCX,
 PPTX, Pandoc, shared Office, DOCX review, corpus-hardening, and OOXML-math branch
@@ -44,7 +44,7 @@ The exporter also has:
 - structured fidelity decisions for native, approximate, raster, and dropped
   content;
 - converged paged-layout snapshot data for semantic IDs and page-dependent fields;
-- opt-in embedded fidelity metadata (off by default in the CLI);
+- embedded fidelity metadata by default in the CLI (library callers remain opt-in);
 - an experimental source-safe Word review workflow for enrolled text regions,
   comments, formatting/structural conflict detection, and transactional apply.
 
@@ -72,9 +72,9 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 ### DOCX
 
-- A fresh, unfiltered public-corpus authority has not been completed on the combined
-  revision. The current handoff calls for all 1,408 records with LibreOffice and
-  round-trip lanes; the existing v14 aggregate contains only a filtered subset.
+- A fresh, unfiltered public-corpus authority has not been completed after the
+  current TOC, review-export, and tall-raster fixes. The current handoff calls for
+  all 1,408 records with LibreOffice and round-trip lanes.
 - The current corpus handoff still identifies real low-fidelity documents, including
   `presentation/sleiden-lei` (page growth, displaced logo content, missing text, and
   unsupported-content drops).
@@ -91,8 +91,8 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 ### PPTX
 
-- Unsupported or transformed native-table regions can still be accepted by capture
-  without a table or whole-region fallback.
+- Transformed tables now use a whole-region picture fallback instead of disappearing.
+  Other unsupported or partially captured table edge cases still need corpus coverage.
 - Mixed page sizes are uniformly scaled to fit and centered on PowerPoint's one
   global slide canvas. This preserves content but can introduce letterboxing;
   gradients and other page-relative backgrounds need broader mixed-size coverage.
@@ -126,8 +126,8 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 ## Validation completed on the combined branch
 
-- DOCX integration: 211 tests passed.
-- PPTX integration: 62 tests passed.
+- DOCX integration: 212 tests passed.
+- PPTX integration: 65 tests passed.
 - DOCX review round trip: 22 tests passed.
 - OOXML math conversion: 27 tests passed.
 - Strict Clippy across the CLI and supported DOCX/PPTX crates: passed with
@@ -137,15 +137,26 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 - Real release-mode `.docx` and `.pptx` exports: passed.
 - DOCX and PPTX ZIP integrity: passed.
 - LibreOffice Writer/Impress open and PDF conversion: passed.
+- Fresh CLI exports embed fidelity metadata: validator 2/2 passed with zero
+  unverified records.
+- Ninety of the 91 historical review-export failures now pass. The remaining
+  `paper/tracl` failure occurs during source compilation before export.
+- Tall block-level raster fallbacks are split into page-bounded pictures; the
+  previously hanging `elegant-culsc` LibreOffice conversion now completes. Inline,
+  table, positioned, and math fallbacks remain atomic.
+- Filtered PPTX exports remap explicit physical-page links to their retained slide
+  numbers and drop links whose target page was omitted.
 - Headless visual QA reports exposed the fidelity limitations described above;
   primary-agent review did not inspect rendered images.
 
-## Current corpus authority (combined revision `c07adc99b70f`)
+## Baseline corpus authority (revision `c07adc99b70f`)
 
 The 2026-07-13 campaign froze the same 1,408-document public corpus at manifest
 SHA-256 `9b92ee3092b97c9c600547722ccb2397a5d21a1eea1d224418d1c57d1a9e99af`
 and used release-binary SHA-256
 `1f061d3130681a63b3ccaad2a15fb3545b0988058a33ae65cdb8341dba877133`.
+This authority predates the current DOCX TOC/review fixes and PPTX transformed-table
+fallback. Its metrics remain reproducible baseline evidence, not a score for HEAD.
 
 ### DOCX
 
@@ -157,16 +168,16 @@ and used release-binary SHA-256
 - Across the 1,397 scored renders, mean similarity was `0.954462`, median
   `0.965868`, p10 `0.909426`, and minimum `0.308371` (`presentation/sleiden-lei`).
 - The last clean v12 authority was materially better: 847 policy passes, 554
-  exact page counts, and 554 page deltas above one. The current revision is a
-  visual/pagination regression until the changed tail is explained.
-- Review export completed for 1,317 documents and failed for 91. Eighty-nine
-  failures violated the terminal-paragraph invariant in a document table cell,
-  one did so in a header table cell, and `paper/tracl` retained its source-owned
-  target failure.
-- The normal CLI now omits embedded fidelity metadata by default, while the
-  corpus classifier still requires it. Consequently 1,399 otherwise classifiable
-  records remain `unverified` for a checker/product-contract reason. This is not
-  counted as visual or package success.
+  exact page counts, and 554 page deltas above one. A limited three-revision
+  follow-up found that `report/kdl` now matches Typst's 13-page reference, but a
+  fresh authority is required before classifying the aggregate delta on HEAD.
+- At this baseline, review export completed for 1,317 documents and failed for
+  91. Eighty-nine failures violated the terminal-paragraph invariant in a
+  document table cell, one did so in a header table cell, and `paper/tracl`
+  retained its source-owned target failure.
+- At this baseline, 1,399 records were `unverified` because its CLI exports omitted
+  fidelity metadata required by the corpus classifier. New CLI exports embed that
+  metadata by default; the full authority still needs to be rerun under that contract.
 
 Durable results are under `target/docx-public-corpus-run-c07adc9/`.
 
@@ -192,19 +203,26 @@ branch. A browser-hosted WASM export surface is the preferred distribution goal;
 a native installer is optional. Release archives remain a useful fallback, but
 installer polish is not a prerequisite for the next hosted-preview campaign.
 
+The separate `typst-office` demo now imports folders or bounded ZIP projects,
+loads project-local fonts, resolves relative modules, and maps vendored packages
+from `packages/<namespace>/<name>/<version>/...` into Typst's package namespace.
+Its local WASM smoke exports both DOCX and PPTX with relative and `@local` imports.
+This proves the browser conversion core, not yet the deployed GitHub Pages path or
+arbitrary Typst Universe/proprietary-app project compatibility.
+
 ## Remaining release gates
 
-1. Reconcile the DOCX fidelity-manifest checker contract and the 91 review-export
-   failures, then rerun or resume from a clean authority revision.
-2. Explain or disposition the DOCX regression from v12: policy passes fell by 85,
-   exact page matches by 98, and page deltas above one rose by 81.
-3. Retry the ten DOCX consumer/raster failures serially to separate deterministic
-   failures from load-sensitive LibreOffice behavior.
+1. Run a fresh 1,408-document DOCX authority on HEAD so the fixed fidelity-manifest
+   and review-export contracts, pagination tail, and tiled fallback are scored together.
+2. Explain or disposition the remaining DOCX delta from v12 rather than carrying
+   the historical aggregate forward as a current regression claim.
+3. Retry the historical DOCX consumer/raster failures serially to separate fixed,
+   deterministic, and load-sensitive LibreOffice behavior.
 4. Add real Microsoft PowerPoint testing to the new 120-deck PPTX authority.
-5. Fix the critical PPTX table-fallback and mixed-page-size issues before widening
+5. Expand PPTX table-fallback and mixed-page-size coverage before widening
    availability beyond preview.
-6. Decide the CLI/product contract for fidelity reporting and preview flags, then
-   align user-facing documentation and release notes.
+6. Document the CLI/library fidelity-reporting contract and preview status in the
+   user-facing release notes.
 7. Prove the DOCX/PPTX export path in the intended browser/WASM hosting architecture,
    including fonts, packages, filesystem inputs, memory bounds, and file download.
 8. Run accessibility and target-version checks in Microsoft Word and PowerPoint for
