@@ -828,13 +828,36 @@ fn paragraph_spacing_is_preserved_as_native_collapsing_spacing() {
     let doc = &p["word/document.xml"];
     let paragraphs = element_fragments(doc, "p");
     assert_eq!(paragraphs.len(), 2);
-    assert!(paragraphs[0].contains("w:line=\"616\""), "{}", paragraphs[0]);
+    // Libertinus Serif's default cap-height-to-baseline frame is 7.25pt at
+    // 11pt, so the Word line pitch is 7.25pt + 1.8em = 27.05pt (541 twips),
+    // not the nominal 11pt + 1.8em.
+    assert!(paragraphs[0].contains("w:line=\"541\""), "{}", paragraphs[0]);
     assert!(!paragraphs[0].contains("w:before=\"400\""), "{}", paragraphs[0]);
     assert!(!paragraphs[0].contains("w:after=\"400\""), "{}", paragraphs[0]);
     assert!(paragraphs[1].contains("w:before=\"400\""), "{}", paragraphs[1]);
-    assert!(paragraphs[1].contains("w:line=\"616\""), "{}", paragraphs[1]);
+    assert!(paragraphs[1].contains("w:line=\"541\""), "{}", paragraphs[1]);
     assert!(!paragraphs[1].contains("w:after=\"400\""), "{}", paragraphs[1]);
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn paragraph_leading_uses_nominal_size_when_text_metrics_are_unavailable() {
+    for setup in [
+        "#set text(top-edge: \"bounds\")",
+        "#set text(bottom-edge: \"bounds\")",
+        "#set text(font: \"Definitely Missing Test Font\", fallback: false)",
+    ] {
+        let p = parts(&format!("{setup}\n#set par(leading: 1.8em)\nFallback paragraph."));
+        let paragraphs = element_fragments(&p["word/document.xml"], "p");
+        assert_eq!(paragraphs.len(), 1);
+        assert!(
+            paragraphs[0].contains("w:line=\"616\""),
+            "setup={setup}: {}",
+            paragraphs[0]
+        );
+        assert!(paragraphs[0].contains("w:lineRule=\"atLeast\""), "{}", paragraphs[0]);
+        assert_all_wellformed(&p);
+    }
 }
 
 #[test]
@@ -1047,6 +1070,49 @@ fn measured_table_row_height_does_not_double_count_cell_insets() {
         "the 345-twip physical row already includes 100-twip top and bottom insets"
     );
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn centered_layout_grid_inset_uses_the_measured_row_box() {
+    let row_height = |xml: &str| {
+        xml.split("<w:trHeight w:val=\"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .and_then(|value| value.parse::<i32>().ok())
+            .expect("measured row height")
+    };
+    let grid = parts(
+        "#set page(width: 240pt, height: 120pt, margin: 10pt)\n\
+         #grid(columns: 1, grid.cell(inset: (top: 4pt, bottom: 4pt), \
+         align: horizon)[Code])",
+    );
+    let grid_table = element_fragments(&grid["word/document.xml"], "tbl")[0];
+    assert!(
+        grid_table.contains("<w:top w:w=\"0\" w:type=\"dxa\"/>")
+            && grid_table.contains("<w:bottom w:w=\"0\" w:type=\"dxa\"/>"),
+        "symmetric centered inset must not be added outside the measured row"
+    );
+    assert!(grid_table.contains("<w:vAlign w:val=\"center\"/>"));
+    assert_all_wellformed(&grid);
+
+    let table = parts(
+        "#set page(width: 240pt, height: 120pt, margin: 10pt)\n\
+         #table(columns: 1, table.cell(inset: (top: 4pt, bottom: 4pt), \
+         align: horizon)[Code])",
+    );
+    let semantic_table = element_fragments(&table["word/document.xml"], "tbl")[0];
+    assert_eq!(
+        row_height(grid_table) - row_height(semantic_table),
+        160,
+        "the layout grid keeps the full measured row while the semantic table \
+         leaves its authored 8pt vertical inset in tcMar"
+    );
+    assert!(
+        semantic_table.contains("<w:top w:w=\"80\" w:type=\"dxa\"/>")
+            && semantic_table.contains("<w:bottom w:w=\"80\" w:type=\"dxa\"/>"),
+        "semantic table cell margins remain authored Word cell margins"
+    );
+    assert_all_wellformed(&table);
 }
 
 #[test]

@@ -130,7 +130,7 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 ## Validation completed on the combined branch
 
-- DOCX integration: 220 tests passed.
+- DOCX integration: 223 tests passed.
 - PPTX integration: 65 tests passed.
 - DOCX review round trip: 22 tests passed.
 - OOXML math conversion: 27 tests passed.
@@ -213,14 +213,33 @@ focused tests rather than being mislabeled as part of this authority.
   visual policy passed only `raphaelasla`. These focused results are not folded
   into the authority totals above. Durable evidence is under
   `target/docx-public-corpus-focus-dense-fixes-1b38352/`.
-- A later paragraph-leading experiment replaced the nominal font-size component
-  with Typst's cap-height text frame. It improved Alex Mathnote from 187 to 171
-  LibreOffice pages, but regressed Xenolay from 163 to 129 against its 161-page
-  reference. The policy was reverted; neither number describes current HEAD.
-  The two-record run also exposed that the checker re-read Git revision per
-  document when HEAD changed mid-run. The checker now freezes revision, dirty
-  state, and binary identity once per campaign so this cannot produce internally
-  contradictory authority again.
+- Explicit paragraph leading now uses Typst's resolved font-edge text frame
+  instead of adding the nominal font size. With LibreOffice 26.2.4.2 held fixed,
+  Alex Mathnote improves from 187 to 171 pages, while Xenolay remains 163 pages
+  from a byte-identical DOCX. The earlier reported Xenolay 129-page regression
+  came from LibreOfficeDev 26.8 alpha and was incorrectly compared with the
+  stable-consumer result. The checker now freezes revision, dirty state, and
+  binary identity once per campaign, and refuses resumes whose `soffice`,
+  `pdftotext`, or `pdftoppm` identities differ from the original authority. A
+  six-document LibreOffice 26.2 guard run passed package, consumer, and review
+  lanes 6/6: Mathnote improved 187 to 171 pages, the table/footnote thesis
+  improved 212 to 195, Tura retained 293, Xenolay retained 163, gb-ctr retained
+  202, and a missing-font C++ guide retained its exact one page. Evidence is in
+  `target/docx-public-corpus-focus-leading-grid-stable/`.
+- Tura's 420 native DOCX tables were traced to editable layout grids produced by
+  roughly 280 code blocks, not to authored semantic tables. Word added symmetric
+  grid-cell margins outside the already measured row minimum, expanding the
+  265-page reference to 351 pages. Layout-grid rows whose cells already request
+  centered alignment and equal top/bottom inset now retain the full measured row
+  box and realize that inset through the existing centering instead of counting it
+  again as `w:tcMar`. The focused consumer result is 293 pages, score `0.975292`,
+  semantic text coverage `0.991067`, and a successful 6,880-region review round
+  trip. This removes 58 of 86 excess pages without exact/clipping heights or a
+  package-name heuristic. Delegated headless visual QA found no new glyph clipping,
+  overlap, or lost row separation in sampled code-heavy pages. Semantic tables
+  keep their authored Word cell margins. Durable evidence is under
+  `target/docx-public-corpus-focus-centered-grid-stable/`; the older full-corpus
+  totals above do not include this focused fix.
 - Visual-policy passes: 761/1,392 rendered; exact page counts: 457; page deltas
   above one: 631.
 - The checker identifies 164 slide-shaped DOCX exports as a separate informational

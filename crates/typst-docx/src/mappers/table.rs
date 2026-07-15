@@ -44,6 +44,19 @@ struct MeasuredTableGeometry {
     row_heights: Vec<Option<RowHeight>>,
 }
 
+#[derive(Clone, Copy)]
+struct CellGeometry {
+    width_dxa: Option<i32>,
+    height_dxa: Option<i32>,
+    centered_grid_inset: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TableOrigin {
+    SemanticTable,
+    LayoutGrid,
+}
+
 pub fn table(
     elem: &Packed<TableElem>,
     styles: StyleChain,
@@ -53,6 +66,7 @@ pub fn table(
     execute_table_plan(
         &source,
         preflight_table(&source, elem.grid.as_deref(), ctx),
+        TableOrigin::SemanticTable,
         styles,
         ctx,
     )
@@ -72,6 +86,7 @@ pub fn grid(
     execute_table_plan(
         &source,
         preflight_table(&source, elem.grid.as_deref(), ctx),
+        TableOrigin::LayoutGrid,
         styles,
         ctx,
     )
@@ -97,6 +112,7 @@ fn preflight_table<'a>(
 fn execute_table_plan(
     source: &Content,
     plan: TablePlan<'_>,
+    origin: TableOrigin,
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Vec<Block>> {
@@ -109,7 +125,7 @@ fn execute_table_plan(
                 LossSet::default(),
                 content_text_chars(source),
             );
-            cellgrid(grid, styles, ctx, measured.as_ref())
+            cellgrid(grid, styles, ctx, measured.as_ref(), origin)
         }
         TablePlan::Approximate { grid, measured } => {
             ctx.record_content_decision(
@@ -119,7 +135,7 @@ fn execute_table_plan(
                 LossSet::VISUAL_ONLY,
                 content_text_chars(source),
             );
-            cellgrid(grid, styles, ctx, measured.as_ref())
+            cellgrid(grid, styles, ctx, measured.as_ref(), origin)
         }
         TablePlan::Empty => Ok(Vec::new()),
         TablePlan::Raster => {
@@ -220,6 +236,7 @@ fn cellgrid(
     styles: StyleChain,
     ctx: &mut DocxCtx,
     measured: Option<&MeasuredTableGeometry>,
+    origin: TableOrigin,
 ) -> SourceResult<Vec<Block>> {
     let ncols = grid.non_gutter_column_count();
     if ncols == 0 || grid.entries.is_empty() {
@@ -260,23 +277,38 @@ fn cellgrid(
         let measured_row_height =
             measured.and_then(|geometry| geometry.row_heights.get(y).copied().flatten());
         let full_row_height = measured_row_height.or_else(|| row_height(grid, y));
+        let centered_grid_inset = origin == TableOrigin::LayoutGrid
+            && measured_row_height.is_some_and(|height| {
+                row_uses_centered_symmetric_inset(
+                    grid,
+                    y,
+                    &col_dxa,
+                    has_column_gutter,
+                    styles,
+                    height.val,
+                )
+            });
         let emitted_row_height = measured_row_height
             .map(|height| RowHeight {
                 // Typst's physical cell region already includes its vertical
                 // inset. Word adds `w:tcMar` outside the `w:trHeight` minimum,
                 // so subtract the largest non-spanning cell inset or the row
                 // is forced taller by that same inset a second time.
-                val: height
-                    .val
-                    .saturating_sub(row_vertical_inset(
-                        grid,
-                        y,
-                        &col_dxa,
-                        has_column_gutter,
-                        styles,
-                        height.val,
-                    ))
-                    .max(1),
+                val: if centered_grid_inset {
+                    height.val
+                } else {
+                    height
+                        .val
+                        .saturating_sub(row_vertical_inset(
+                            grid,
+                            y,
+                            &col_dxa,
+                            has_column_gutter,
+                            styles,
+                            height.val,
+                        ))
+                        .max(1)
+                },
                 exact: height.exact,
             })
             .or(full_row_height);
@@ -302,8 +334,11 @@ fn cellgrid(
                         styles,
                         (grid_end - grid_start) as u32,
                         v_merge,
-                        Some(w_dxa),
-                        full_row_height.map(|height| height.val),
+                        CellGeometry {
+                            width_dxa: Some(w_dxa),
+                            height_dxa: full_row_height.map(|height| height.val),
+                            centered_grid_inset,
+                        },
                     )?);
 
                     x = span_end;
@@ -392,6 +427,46 @@ fn cellgrid(
     Ok(vec![Block::Table(tbl)])
 }
 
+/// A centered layout-grid cell already encodes equal top and bottom inset in
+/// the measured physical row height. Word adds `w:tcMar` outside
+/// `w:trHeight`, so carrying both makes short repeated grid rows grow by the
+/// inset again. Preserve the full measured row and let the existing centered
+/// alignment realize that symmetric space instead.
+fn row_uses_centered_symmetric_inset(
+    grid: &CellGrid,
+    y: usize,
+    col_dxa: &[i32],
+    has_column_gutter: bool,
+    styles: StyleChain,
+    height_dxa: i32,
+) -> bool {
+    let ncols = grid.non_gutter_column_count();
+    let mut has_inset = false;
+    for x in 0..ncols {
+        let Entry::Cell(cell) = &grid.entries[y * ncols + x] else {
+            // Spans make the row's independent physical height ambiguous.
+            return false;
+        };
+        if cell.rowspan.get() != 1 || cell.colspan.get() != 1 {
+            return false;
+        }
+        let (grid_start, grid_end) = spanned_grid_range(has_column_gutter, x, x + 1);
+        let width_dxa = col_dxa[grid_start..grid_end].iter().copied().sum();
+        let margins = cell_margins(cell, styles, Some(width_dxa), Some(height_dxa));
+        if margins.top != margins.bottom {
+            return false;
+        }
+        if margins.top > 0 {
+            let (_, valign) = cell_alignment(cell, styles);
+            if valign != Some(VAlign::Center) {
+                return false;
+            }
+            has_inset = true;
+        }
+    }
+    has_inset
+}
+
 fn row_vertical_inset(
     grid: &CellGrid,
     y: usize,
@@ -423,8 +498,7 @@ fn build_cell(
     styles: StyleChain,
     grid_span: u32,
     v_merge: Option<VMerge>,
-    w_dxa: Option<i32>,
-    h_dxa: Option<i32>,
+    geometry: CellGeometry,
 ) -> SourceResult<Cell> {
     // Cell fill → `w:shd`.
     let shd_fill = cell.fill.as_ref().and_then(paint_to_rgb);
@@ -440,11 +514,15 @@ fn build_cell(
     // Alignment: the resolved cell folds its effective alignment back onto the
     // `TableCell` body, so read it from there.
     let (jc, valign) = cell_alignment(cell, styles);
-    let margins = cell_margins(cell, styles, w_dxa, h_dxa);
+    let mut margins = cell_margins(cell, styles, geometry.width_dxa, geometry.height_dxa);
+    if geometry.centered_grid_inset && valign == Some(VAlign::Center) {
+        margins.top = 0;
+        margins.bottom = 0;
+    }
 
     // Cell body → blocks. The body is the packed `TableCell`; lower its inner
     // `body` content through the shared block pipeline.
-    let content_width = w_dxa.map(|width| {
+    let content_width = geometry.width_dxa.map(|width| {
         width
             .saturating_sub(margins.left)
             .saturating_sub(margins.right)
@@ -456,7 +534,7 @@ fn build_cell(
     ensure_ends_in_para(&mut blocks);
 
     Ok(Cell {
-        w_dxa,
+        w_dxa: geometry.width_dxa,
         grid_span: grid_span.max(1),
         v_merge,
         borders,
