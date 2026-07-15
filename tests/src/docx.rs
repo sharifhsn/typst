@@ -660,7 +660,7 @@ fn flexible_table_uses_converged_paged_cell_geometry() {
     }));
 
     let p = parts_with_manifest(src);
-    let widths = grid_widths(&element_fragments(&p["word/document.xml"], "tbl")[0]);
+    let widths = grid_widths(element_fragments(&p["word/document.xml"], "tbl")[0]);
     assert_eq!(widths.len(), 2);
     assert!((widths[1] as f64 / widths[0] as f64 - 2.0).abs() < 0.01);
     let manifest = &p["customXml/typstFidelity.xml"];
@@ -828,13 +828,36 @@ fn paragraph_spacing_is_preserved_as_native_collapsing_spacing() {
     let doc = &p["word/document.xml"];
     let paragraphs = element_fragments(doc, "p");
     assert_eq!(paragraphs.len(), 2);
-    assert!(paragraphs[0].contains("w:line=\"616\""), "{}", paragraphs[0]);
+    // Libertinus Serif's default cap-height-to-baseline frame is 7.25pt at
+    // 11pt, so the Word line pitch is 7.25pt + 1.8em = 27.05pt (541 twips),
+    // not the nominal 11pt + 1.8em.
+    assert!(paragraphs[0].contains("w:line=\"541\""), "{}", paragraphs[0]);
     assert!(!paragraphs[0].contains("w:before=\"400\""), "{}", paragraphs[0]);
     assert!(!paragraphs[0].contains("w:after=\"400\""), "{}", paragraphs[0]);
     assert!(paragraphs[1].contains("w:before=\"400\""), "{}", paragraphs[1]);
-    assert!(paragraphs[1].contains("w:line=\"616\""), "{}", paragraphs[1]);
+    assert!(paragraphs[1].contains("w:line=\"541\""), "{}", paragraphs[1]);
     assert!(!paragraphs[1].contains("w:after=\"400\""), "{}", paragraphs[1]);
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn paragraph_leading_uses_nominal_size_when_text_metrics_are_unavailable() {
+    for setup in [
+        "#set text(top-edge: \"bounds\")",
+        "#set text(bottom-edge: \"bounds\")",
+        "#set text(font: \"Definitely Missing Test Font\", fallback: false)",
+    ] {
+        let p = parts(&format!("{setup}\n#set par(leading: 1.8em)\nFallback paragraph."));
+        let paragraphs = element_fragments(&p["word/document.xml"], "p");
+        assert_eq!(paragraphs.len(), 1);
+        assert!(
+            paragraphs[0].contains("w:line=\"616\""),
+            "setup={setup}: {}",
+            paragraphs[0]
+        );
+        assert!(paragraphs[0].contains("w:lineRule=\"atLeast\""), "{}", paragraphs[0]);
+        assert_all_wellformed(&p);
+    }
 }
 
 #[test]
@@ -3122,7 +3145,7 @@ fn page_background_preserves_its_blank_coordinate_space() {
     assert_eq!((png.width(), png.height()), (800, 600));
     let mut ink = png.pixels().iter().enumerate().filter(|(_, pixel)| pixel.alpha() > 0);
     let (first, _) = ink.next().expect("background has ink");
-    let last = ink.last().map_or(first, |(index, _)| index);
+    let last = ink.next_back().map_or(first, |(index, _)| index);
     assert!(first / 800 > 550, "ink stays near the bottom of the page");
     assert!(last % 800 > 750, "ink stays near the right edge of the page");
 }
