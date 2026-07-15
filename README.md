@@ -272,6 +272,18 @@ comparison against typ2docx and pandoc is in [`COMPARISON.md`](COMPARISON.md).
 The cross-target design, current architectural risks, and validation model are
 in [`docs/dev/office-export-architecture.md`](docs/dev/office-export-architecture.md).
 
+**Fidelity-reporting contract:** the CLI always embeds the versioned DOCX
+fidelity manifest at `customXml/typstFidelity.xml` and mirrors it into
+`docProps/custom.xml`. It records native, approximate, rasterized, and dropped
+representations; dynamic fields; fonts; drawing labels; and suppressed
+diagnostics. This is exporter provenance, not proof that Microsoft Word or
+LibreOffice verified the result. Library callers always receive the same
+queryable [`FidelityReport`](crates/typst-docx/src/report.rs) on `DocxDocument`,
+but package embedding is deliberately opt-in through
+`DocxOptions::embed_fidelity_manifest` because the payload can expose details
+about the authoring environment. PPTX does not yet embed an equivalent manifest;
+its package structure and CLI warnings are the current machine-visible evidence.
+
 **Accessibility status:** the exporter emits native headings, lists, tables,
 language/direction metadata, image descriptions, and explicit decorative-art
 markers, and its fidelity manifest reports unlabeled drawings. Those structural
@@ -282,7 +294,8 @@ missing alternative text, verify reading order, and test the document with the
 screen reader used by its audience. A successful package validation or a clean
 open in Word is not an accessibility conformance result.
 
-Output is byte-for-byte reproducible under `SOURCE_DATE_EPOCH`. This is preview
+For identical inputs, toolchain, fonts, and environment, output is byte-for-byte
+reproducible under `SOURCE_DATE_EPOCH`. This is preview
 software: please report anything that opens wrong or looks off.
 
 ## PowerPoint export (this fork)

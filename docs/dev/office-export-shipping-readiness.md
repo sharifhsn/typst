@@ -1,6 +1,6 @@
 # Office export shipping readiness
 
-Status date: 2026-07-14
+Status date: 2026-07-15
 
 This is the current product and validation snapshot after consolidating the DOCX,
 PPTX, Pandoc, shared Office, DOCX review, corpus-hardening, and OOXML-math branch
@@ -130,7 +130,7 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 ## Validation completed on the combined branch
 
-- DOCX integration: 214 tests passed.
+- DOCX integration: 219 tests passed.
 - PPTX integration: 65 tests passed.
 - DOCX review round trip: 22 tests passed.
 - OOXML math conversion: 27 tests passed.
@@ -180,17 +180,26 @@ focused tests rather than being mislabeled as part of this authority.
   records failed downstream raster evidence while three were never submitted to
   the consumer because they did not produce a DOCX package.
 - Longer isolated retries have opened three of those eight timeout records,
-  including a 261-page, 23.9 MB package. Four others still hang for at least
-  120 seconds (`raphaelasla` for more than 297 seconds), and `xenolay` remains
-  un-retried. They are retained as failures in the
-  authority score, but the evidence points to load and timeout budgeting rather
-  than malformed OOXML. The deterministic failure is also a valid package; it
-  reproducibly triggers LibreOffice's `Unspecified Application Error` on a dense
-  document with 623 tables and 150 text-box containers. Prefix bisection places
+  including a 261-page, 23.9 MB package. The other five still hang for at least
+  120 seconds in LibreOffice, including the math-heavy `xenolay` record. They are
+  retained as failures in the authority score. ZIP/XML validation and prefix
+  bisection point to consumer scalability rather than malformed OOXML, but this
+  is a diagnosis rather than proof for every record. The deterministic failure
+  is also a valid package; it
+  reproducibly triggers LibreOffice's `Unspecified Application Error`. Its
+  retained package contains 103 tables, 75 modern text boxes, and 128 drawings.
+  Prefix bisection places
   its first trigger at an inline dashed DrawingML line, but merely padding that
   line's one-EMU degenerate dimension does not resolve the full document, and
   deleting that shape run does not either. The LibreOffice failure is cumulative,
   non-local, or has a later independent trigger.
+- Focused HEAD validation after that frozen authority adds two explicitly reported
+  raster fallbacks for pathological visual canvases. The one-page `raphaelasla`
+  shape swarm now opens in LibreOffice in under 9 seconds, retains one page, and
+  scores `0.979955` against the Typst reference. The drawing-heavy `gb-ctr` record
+  now opens in under 80 seconds and scores `0.968309`, but expands from 164 to 202
+  pages; that removes the consumer hang without resolving its reflow fidelity.
+  These focused results are not folded into the authority totals above.
 - Visual-policy passes: 761/1,392 rendered; exact page counts: 457; page deltas
   above one: 631.
 - The checker identifies 164 slide-shaped DOCX exports as a separate informational
@@ -230,8 +239,10 @@ fallback. Its metrics remain reproducible baseline evidence, not a score for HEA
 - The last clean v12 authority was materially better: 847 policy passes, 554
   exact page counts, and 554 page deltas above one. A limited three-revision
   follow-up found that `report/kdl` now matches Typst's 13-page reference. The
-  current authority remains below v12 at 761/457/631, so the aggregate delta is
-  confirmed but still needs causal disposition.
+  current authority is lower at 761/457/631, but the v12 directory, binary, and
+  per-record JSON are no longer retained locally or in Git. Its aggregate is
+  therefore historical evidence, not a reproducible comparison authority, and
+  exact record-level or causal attribution is no longer possible.
 - At this baseline, review export completed for 1,317 documents and failed for
   91. Eighty-nine failures violated the terminal-paragraph invariant in a
   document table cell, one did so in a header table cell, and `paper/tracl`
@@ -275,21 +286,17 @@ arbitrary Typst Universe/proprietary-app project compatibility is not yet proven
 
 ## Remaining release gates
 
-1. Explain or disposition the remaining DOCX delta from v12 rather than carrying
-   the historical aggregate forward as a current regression claim.
-2. Disposition the eight serially reproducible LibreOffice timeouts, the remaining
+1. Re-run the consumer lane to disposition the authority-run LibreOffice failures
+   after the two focused HEAD fixes, then address the remaining math-heavy timeout,
    deterministic conversion failure, and incomplete raster evidence.
-3. Run a new authority after the post-`1bf829900` paragraph-spacing and checker
-   changes rather than attributing focused fixes to the earlier binary.
-4. Add real Microsoft PowerPoint testing to the new 120-deck PPTX authority,
+2. Run a new authority after the post-`1bf829900` paragraph-spacing and checker
+   changes and establish it as the new reproducible baseline; do not use the
+   unretained v12 aggregate for causal claims.
+3. Add real Microsoft PowerPoint testing to the new 120-deck PPTX authority,
    including save-and-reopen behavior for transparent recovered text.
-5. Expand PPTX table-fallback and mixed-page-size coverage before widening
-   availability beyond preview.
-6. Document the CLI/library fidelity-reporting contract and preview status in the
-   user-facing release notes.
-7. Prove the DOCX/PPTX export path in the intended browser/WASM hosting architecture,
+4. Prove the DOCX/PPTX export path in the intended browser/WASM hosting architecture,
    including fonts, packages, filesystem inputs, memory bounds, and file download.
-8. Run accessibility and target-version checks in Microsoft Word and PowerPoint for
+5. Run accessibility and target-version checks in Microsoft Word and PowerPoint for
    the supported consumer matrix.
 
 Until those gates pass, ship only behind explicit experimental/preview wording.
