@@ -5048,6 +5048,19 @@ fn toc_page_cache_uses_the_paged_snapshot_not_the_docx_target() {
 }
 
 #[test]
+fn toc_page_cache_uses_physical_page_for_default_numbering() {
+    let src = "#outline()\n#pagebreak()\n= Entry";
+    let doc = parts(src)["word/document.xml"].clone();
+    let toc = doc.find(" PAGEREF ").expect("TOC page field");
+    let result = &doc[toc..];
+    assert!(
+        result.contains("<w:fldChar w:fldCharType=\"end\"/>")
+            && result.contains("><w:t xml:space=\"preserve\">2</w:t>"),
+        "TOC cache should reflect the heading's physical second page: {result}"
+    );
+}
+
+#[test]
 fn failing_standalone_caption_uses_an_attributed_whole_region_fallback() {
     // A custom figure show rule can emit `it.caption` outside the figure. Its
     // DOCX-target numbering closure used to fail realization and silently

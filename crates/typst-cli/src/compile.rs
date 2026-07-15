@@ -542,11 +542,13 @@ fn export_docx(
     world: &SystemWorld,
     config: &CompileConfig,
 ) -> SourceResult<()> {
-    // The embedded fidelity manifest stays off until a CLI flag exposes it;
-    // the report remains queryable on the in-memory document either way.
+    // CLI exports include the fidelity manifest so downstream validation can
+    // distinguish a measured export from one whose approximation decisions
+    // are unavailable. This is provenance, not a claim that Word or
+    // LibreOffice has independently verified the document.
     let options = DocxOptions {
         pretty: config.pretty,
-        embed_fidelity_manifest: false,
+        embed_fidelity_manifest: true,
     };
     let Some(state_path) = &config.docx_review_state else {
         let bytes = typst_docx::docx(document, &options)?;

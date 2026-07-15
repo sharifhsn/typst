@@ -19,6 +19,13 @@ LibreOffice-to-PDF render comparison. Visual scores are diagnostic thresholds,
 not a claim of pixel identity: Word is a flowing layout engine and a page break
 may legitimately differ.
 
+The Typst CLI embeds `customXml/typstFidelity.xml` in every DOCX export. The
+manifest records exporter-side representation and approximation decisions; it
+does not certify Word compatibility or visual equivalence. Library callers
+using `typst-docx` directly may opt out with
+`DocxOptions::embed_fidelity_manifest = false`, in which case the validator
+correctly reports the export as unverified rather than inferring fidelity.
+
 ## Run locally
 
 ```sh

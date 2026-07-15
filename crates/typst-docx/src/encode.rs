@@ -28,7 +28,8 @@ pub struct DocxOptions {
     /// (`customXml/typstFidelity.xml`, mirrored into a custom document
     /// property so it survives a LibreOffice Writer save).
     ///
-    /// Off by default: the manifest describes the EXPORT (including which
+    /// Off by default for library callers: the manifest describes the EXPORT
+    /// (including which
     /// referenced fonts were available on the exporting machine and every
     /// approximation/drop decision), roughly doubles that description by
     /// mirroring it into `docProps/custom.xml`, and shows up in Word's own
@@ -717,12 +718,18 @@ fn write_cell(
     }
     // A block content control may wrap the final editable cell paragraph, but
     // Word still requires the `w:tc` itself to end in a direct `w:p` child.
-    if cell.blocks.last().is_some_and(|block| {
-        let Block::Para(para) = block else { return false };
-        para.props.review_origin.is_some_and(|origin| {
-            review_tags.is_some_and(|tags| tags.contains_key(&origin.join_id))
+    if cell
+        .blocks
+        .iter()
+        .rev()
+        .find(|block| !matches!(block, Block::Tag(_)))
+        .is_some_and(|block| {
+            let Block::Para(para) = block else { return false };
+            para.props.review_origin.is_some_and(|origin| {
+                review_tags.is_some_and(|tags| tags.contains_key(&origin.join_id))
+            })
         })
-    }) {
+    {
         w.leaf(xml::W_P);
     }
 

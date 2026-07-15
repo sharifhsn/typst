@@ -262,7 +262,7 @@ fn cached_page_text(
     };
     let Some(location) = location else { return unavailable(fidelity_report) };
     if let Some(display) = snapshot.page_counter_for_location(location) {
-        return (display.into(), FieldCacheStatus::Resolved);
+        return (display, FieldCacheStatus::Resolved);
     }
     let span = Span::detached();
     let Some(numbering) = engine.introspect(PageNumberingIntrospection(location, span))

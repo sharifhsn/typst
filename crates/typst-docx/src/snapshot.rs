@@ -260,12 +260,30 @@ impl ExportSnapshot {
     pub(crate) fn page_counter_for_location(
         &self,
         location: typst_library::introspection::Location,
-    ) -> Option<&str> {
-        self.nodes
+    ) -> Option<EcoString> {
+        let node = self
+            .nodes
             .iter()
-            .find(|node| node.source.location == Some(location))
-            .and_then(|node| node.page_counters.first())
-            .map(|counter| counter.display.as_str())
+            .find(|node| node.source.location == Some(location))?;
+
+        // A source location can be realized more than once by the paged
+        // oracle. Prefer the counter for the first concrete occurrence rather
+        // than blindly selecting the page-1 entry for every TOC item.
+        let page = node.paged_positions.first().map(|position| position.page);
+        let counter = node
+            .page_counters
+            .iter()
+            .find(|counter| Some(counter.page) == page)
+            .or_else(|| node.page_counters.first());
+        match (page, counter) {
+            (_, Some(counter)) => Some(counter.display.clone()),
+            // The default Typst page numbering has no explicit numbering
+            // pattern, so there is no `page_counters` entry. The paged oracle
+            // still records the physical page and that is the exact cache
+            // value Word should show before refreshing fields.
+            (Some(page), None) => Some(page.to_string().into()),
+            _ => None,
+        }
     }
 }
 

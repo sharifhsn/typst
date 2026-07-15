@@ -843,7 +843,6 @@ f47e8b81aae825ddeedb7f35123ae9be issue-7991-show-text-symbol-grapheme-sliced
 e757b359586c26a3453ab45df86c1591 issue-8261-string-as-non-numeric
 49c58d52a09c8a0e2941f0c9b3e02a26 issue-8372-stretched-glyphs
 c09d6d3c63dcd6a04c2daea43e75e0cb issue-852-mat-type
-d2c75477a39f501e64b586e9154160c4 issue-8520-script-stylistic-set
 da43cee0ff9ba707d843f89147cd6be0 issue-886-args-sink
 9693e8d3687688b8ed78ae16ae815352 issue-color-mix-luma
 4c01dfc0d145e59abdb4413234dfd836 issue-columns-heading
@@ -1186,7 +1185,6 @@ bc63b7ee0d0561149855362dc562874e math-lr-nested
 6918fd2212cb204a25ab6c40113d2305 math-lr-nested-mid
 e6481b0ea5af2197156b0eca9f37be0b math-lr-scripts
 32184b4092e12c8f1185dff6d1aefd83 math-lr-shorthands
-fa030eb5d5b5ce523908a301f35fed09 math-lr-single-line-align
 458b3f86e5a5c3a19244a8a1f5e07d7d math-lr-size
 080ca93ba2eeb0a09b93acbbae60e3f2 math-lr-sym-call
 d9aa3e9283d9c4670daa5f892052c510 math-lr-sym-call-size
@@ -1234,13 +1232,10 @@ e68b43430148020fa8fad4b402523609 math-non-math-content
 202fd1cab59cbfc8ae7166c0942d19e6 math-op-call
 7f6caddba58067ad3f679dc16948a88d math-op-custom
 3d2e256350a6abd18c8e2593bc92c74e math-op-font
-6190ab00e996183a67f359fdd06fce7d math-op-large-stretch
 cf5d9ea5c6c439ad0016d8d172467ee9 math-op-predefined
 78589b8644adfc7399ddeed398d518a1 math-op-scripts-vs-limits
 62c4462b8fa36afac06cb7d31e5eee73 math-op-set-font
-b6c070c80eb2e707fcdd35bc21036300 math-op-stretch-relative
 d9a2ef434678496809bf12c1f1b20ac0 math-op-styled
-8df936b5e30528c2314437d1867cc24e math-op-symbol-baseline
 b98414de3e5dd10cbc5c8b5b0be844fb math-optical-size-frac-script-script
 26c6b2388d523812cacbe6a19b4bedcb math-optical-size-nested-scripts
 abe085cc1b58d8d3a4c3cca4a6a77761 math-optical-size-prime-large-operator
@@ -1305,7 +1300,6 @@ cf031060bea7acc11ca9ad2ea198703b math-stretch-explicit-mixed
 f3ccdd06af639f81a10e7789194fd866 math-stretch-fallback-explicit
 b6144b5c4078db0be6cb768b6431035c math-stretch-horizontal
 71dfba701816929954174d9e25fd74bd math-stretch-horizontal-attach
-966704d2567040f133e84831707e9393 math-stretch-horizontal-attach-constants
 44efabd08e811679a40e2563097d6070 math-stretch-lr-nested-horizontal
 231edd8f485a737f6afb2446e6f90e85 math-stretch-lr-nested-horizontal-attach
 21136a330e3fefb087624b1ebdba230d math-stretch-lr-nested-vertical
@@ -1555,7 +1549,6 @@ dcf57b436cda18759ba277484a105c3b raw-empty-lines
 612e931676efdabcf60baef49c46f92a raw-highlight-py
 2ba90e0ee8be3c4d3161d804411fa99e raw-highlight-rust
 caf3b918783770597b8b1c65b05c7edd raw-highlight-typ
-115aced8f3fd7788e92fbaa7f0ce9a97 raw-highlight-typ-invalid-ints
 b3eb184b1e5eb7fc13307ef840fffc5c raw-highlight-typc
 41c4ca656e0b9f35b4d5008b8e50546c raw-highlight-typm
 6cd13c0ff105515362afee974f2e1ef2 raw-highlight-typm-idents
