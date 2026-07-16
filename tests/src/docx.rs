@@ -3568,6 +3568,34 @@ fn block_columns_with_manual_break_use_top_aligned_editable_cells() {
 }
 
 #[test]
+fn manual_column_relative_images_use_the_column_width() {
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40"><rect width="80" height="40" fill="#0b6"/></svg>"##;
+
+    let p = parts_with_files(
+        r#"#set page(width: 240pt, height: 300pt, margin: 10pt)
+#columns(2, gutter: 20pt)[
+  #image("logo.svg", width: 100%)
+  #colbreak()
+  #image("logo.svg", width: 100%)
+]
+#image("logo.svg", width: 100%)"#,
+        &[("logo.svg", SVG)],
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<w:tbl>"));
+    assert_eq!(
+        doc.matches("<wp:extent cx=\"1270000\" cy=\"635000\"/>").count(),
+        2,
+        "100% resolves to 100pt in both physical columns"
+    );
+    assert!(
+        doc.contains("<wp:extent cx=\"2794000\" cy=\"1397000\"/>"),
+        "the parent page width is restored after lowering the columns body"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn page_level_columns_stay_a_single_section() {
     let p = parts("#set page(columns: 2)\nLeft.\n#colbreak()\nNext column.");
     let doc = &p["word/document.xml"];

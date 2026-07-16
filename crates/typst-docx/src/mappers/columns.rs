@@ -48,7 +48,14 @@ pub(crate) fn columns(
         *last += content_width - base_width * count as i32;
     }
 
-    let blocks = ctx.blocks(&elem.body, styles)?;
+    // Every authored column has the same physical content width (apart from a
+    // whole-twip rounding remainder assigned to the final cell). Lower relative
+    // children against that width, not the enclosing page width. Otherwise a
+    // `width: 100%` image or nested table is sized for the whole page before it
+    // is inserted into a half-width Word cell, inflating the row and forcing
+    // content onto later pages.
+    let blocks =
+        ctx.with_available_width(base_width, |ctx| ctx.blocks(&elem.body, styles))?;
     let mut columns = split_at_column_breaks(blocks);
     columns.resize_with(count, Vec::new);
 

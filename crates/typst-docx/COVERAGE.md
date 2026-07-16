@@ -2580,3 +2580,44 @@ LibreOffice passes five documents in the batch. The slow Xenolay calculus
 document repeats its known batch-only timeout; its DOCX is byte-identical to the
 pre-refinement v23 sentinel, and the unchanged isolated authority documented in
 section 62 passes LibreOffice.
+
+## 64. Explicit columns lower relative children against their cell width
+
+Manual `#columns(..)` regions with an authored `#colbreak()` use a borderless
+one-row Word table so both physical columns remain editable and top-aligned.
+Previously the entire body was lowered before those cells existed, so `100%`
+images and other relative-width children resolved against the enclosing page.
+The resulting page-wide drawings were then inserted into half-page cells,
+inflating Appendix D from one Typst page to three Word pages.
+
+Manual columns now lower their body inside the equal physical column width,
+using the same saved/restored container-width scope as nested tables and stack
+cells. The final cell may own the whole-twip division remainder, but relative
+children retain Typst's equal-column semantic width. A package-level regression
+proves that `100%` SVGs in both columns receive 100pt extents and that a sibling
+after the columns region again receives the 220pt page-content width.
+
+The accepted focused authority is
+`target/docx-public-corpus-focus-gb-column-width-v29/`: exactly 164 pages against
+164, score `0.977734`, with package validation, LibreOffice conversion, and the
+2,326-region review round trip all passing. Delegated visual QA found Appendix D
+on one page with all five sharp, legible pinout diagrams and captions, no
+clipping, overlap, blank-page loss, or regression in Appendices B/C or the
+bibliography. All 243 DOCX integration tests, 18 DOCX unit tests, 22 round-trip
+tests, 65 PPTX tests, strict DOCX Clippy, and the headless DOCX smoke validator
+pass. No executable focused DOCX/PPTX WASM gate is currently discoverable in
+the repository, so this increment does not claim a newly run WASM result.
+
+Exact pagination is not semantic identity. Delegated QA still observes
+pre-existing Appendix D numbering differences (`D`/`D.1` rather than
+`D.1`/`D.2`, and `Figure D.0` rather than `Figure D.15`) plus bibliography
+ordering/number differences. Those remain active north-star defects rather than
+being hidden by the page-count milestone.
+
+The heterogeneous guard passes package and review lanes 6/6 under
+`target/docx-gb-column-width-sentinel-v30-six/`, preserving 26,851 enrolled
+regions and improving the batch to two exact-page-count documents and three
+visual-policy passes. LibreOffice passes five documents; Xenolay calculus repeats
+the known batch timeout and its DOCX is byte-identical to v28. The non-gb Word
+stories are unchanged from v28 (the only differing parts in Mathnote and the
+thesis are custom fidelity metadata).
