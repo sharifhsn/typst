@@ -2673,3 +2673,51 @@ enrolled regions. `gb-ctr` and the C++ guide retain exact page counts; Tura is
 within one page. The thesis, Xenolay calculus, and Mathnote retain their known
 visual-policy misses rather than acquiring a new compile, package, consumer, or
 round-trip regression.
+
+## 66. Paragraph-wrapped flowing callouts avoid character-border strips
+
+A full-book visual audit initially classified missing `bit`/`bin`/`hex` helper
+values as a DOCX loss. Source and artifact inspection corrected that diagnosis:
+the helpers request unavailable `Anonymous Pro` with `fallback: false`, and the
+same values are absent from the current Typst reference. An experimental
+Word-only substitution restored the strings but expanded the DOCX from 164 to
+176 pages and reduced the visual score to `0.969546`; it was rejected. The
+source-authoritative font policy from section 58 remains intact. A genuinely
+portable visible result for those helpers requires supplying the requested font
+to both authorities, not silently changing fallback semantics in DOCX alone.
+
+The audit did expose a separate pervasive callout defect. `gb-ctr` builds each
+Caveat/Warning/Speculation panel as one paragraph-wrapped `#box` containing a
+filled header block and a flowing body block. Because the outer box was nominally
+inline, its fill and uniform stroke became character `w:shd`/`w:bdr` properties
+on every body run. LibreOffice therefore drew a separate bordered rectangle
+around each wrapped line. A paragraph whose sole framed container has genuine
+flowing/nested block content now routes through the established block-callout
+lowering path. Mid-sentence boxes remain inline; frameless wrappers keep their
+existing narrow flow-container gates. The result preserves editable, breakable
+body text with paragraph shading/borders. Square Word corners remain an explicit
+approximation of Typst's rounded frame rather than forcing the whole callout to
+a non-editable raster.
+
+A package regression proves the nested header/body callout emits paragraph
+borders and shading, never character borders, while retaining both text regions.
+The accepted focused authority is
+`target/docx-public-corpus-focus-gb-callout-block-v40/`: 164 pages against 164,
+score `0.977892`, with package validation, LibreOffice conversion, visual policy,
+and the unchanged 2,326-region review round trip passing. Twenty header/body
+regions move from raster fallback to native flow. Delegated visual QA inspected
+pages 3, 10, 15, 111, and 134–145 and confirmed the boxed-run strips are gone,
+headers, fills, borders, and body text remain, and no pagination shift appears.
+Appendix D page 163 and the bibliography on page 164 remain intact. All 249 DOCX
+integration tests, 18 DOCX unit tests, 22 round-trip tests, 65 PPTX tests, strict
+DOCX Clippy, and `git diff --check` pass.
+
+The exact final release binary (SHA-256
+`2983203825dad855df00bcf6c2c73bc53c57c0dc9fddaf0697f9cdeef2abd834`)
+passes package and round-trip lanes 6/6 under
+`target/docx-gb-callout-sentinel-v41-six/`, preserving 26,851 enrolled regions.
+LibreOffice passes five documents; Xenolay calculus repeats its known batch-only
+180-second timeout while its package and round trip pass. `gb-ctr` remains
+164/164 at `0.977892`; Tura remains within one page and the C++ guide exact. The
+thesis and Mathnote retain their pre-existing visual-policy misses, with no new
+compile, package, or review regression.

@@ -686,6 +686,10 @@ pub(crate) fn body_is_frameless_flow_container(body: &Content) -> bool {
 ///   shape::inline_frame`) is inherently a uniform box, so e.g. `box(stroke:
 ///   (bottom: ..))` (a common "border as a section-title underline" idiom in
 ///   CV/resume templates) silently became a full four-sided box.
+/// - the framed body itself contains flowing/nested block content. Character
+///   borders repeat around every wrapped run, turning a callout into a stack of
+///   boxed text strips; the block path instead keeps one editable, breakable
+///   paragraph container. Genuine mid-sentence framed boxes remain inline.
 ///
 /// Mirrors `handle_block_framed`'s own acceptance tests exactly so a
 /// redirect here only ever routes to a call it would have accepted anyway.
@@ -701,13 +705,17 @@ fn paragraph_sole_block_container<'a>(
     if !body_extractable(&fbody) {
         return None;
     }
+    let has_border = block_borders(&stroke_sides, styles).is_some();
+    if body_is_flowing(&fbody, styles) && (fill.is_some() || has_border) {
+        return Some(inner);
+    }
     if stroke_sides_nonuniform(&stroke_sides) {
         return Some(inner);
     }
     if fill.is_some() {
         return None;
     }
-    if block_borders(&stroke_sides, styles).is_some() {
+    if has_border {
         return None;
     }
     (body_is_wrap_figure(&fbody) || body_is_frameless_flow_container(&fbody))

@@ -4416,6 +4416,31 @@ fn block_level_callout_flows_as_a_shaded_paragraph() {
 }
 
 #[test]
+fn paragraph_wrapped_nested_callout_uses_paragraph_not_run_borders() {
+    let p = parts(
+        "#box(width: 100%, fill: luma(240), stroke: 2pt + red)[\n\
+           #block(width: 100%, fill: red)[Caveat]\n\
+           #block(width: 100%)[\n\
+             This sufficiently long body wraps across several lines and must\n\
+             remain one editable, breakable callout instead of boxed runs.\n\
+           ]\n\
+         ]",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<w:pBdr>"), "the outer frame uses paragraph borders");
+    assert!(doc.contains("<w:shd "), "the outer fill uses paragraph shading");
+    assert!(
+        !doc.contains("<w:bdr "),
+        "a block callout must not repeat character borders around wrapped runs"
+    );
+    assert!(
+        doc.contains("Caveat") && doc.contains("one editable, breakable callout"),
+        "nested header and body text survive"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn fixed_height_filled_block_uses_a_native_bounded_cell() {
     let p = parts(
         r#"#block(height: 300pt, fill: rgb(32, 32, 32), inset: 8pt)[
