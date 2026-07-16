@@ -17,7 +17,9 @@ The always-on gate validates the DOCX ZIP, every XML and relationship part,
 required visible text, and structural editability metrics. `--visual` adds a
 LibreOffice-to-PDF render comparison. Visual scores are diagnostic thresholds,
 not a claim of pixel identity: Word is a flowing layout engine and a page break
-may legitimately differ.
+may legitimately differ. Retained page PNGs preserve the rendered colors for
+human fidelity review; the compact automated layout score converts those color
+artifacts to grayscale internally so color and geometry remain separate signals.
 
 The Typst CLI embeds `customXml/typstFidelity.xml` in every DOCX export. The
 manifest records exporter-side representation and approximation decisions; it

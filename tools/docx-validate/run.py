@@ -188,13 +188,21 @@ def pdf_text(pdf_path: Path) -> tuple[str | None, str | None]:
     return command["stdout"], None
 
 
-def page_count(pdf_path: Path, directory: Path, prefix: str) -> tuple[list[Path], str | None]:
+def rasterize_pages(
+    pdf_path: Path, directory: Path, prefix: str
+) -> tuple[list[Path], str | None]:
+    """Render PDF pages for both automated scoring and human visual review.
+
+    Keep the page artifacts in color. The layout score intentionally converts
+    them to grayscale in ``strip`` below, but grayscale source artifacts make
+    it impossible to inspect color fidelity independently of layout fidelity.
+    """
     if not shutil.which("pdftoppm"):
         return [], "pdftoppm unavailable"
     for stale in directory.glob(f"{prefix}-*.png"):
         stale.unlink(missing_ok=True)
     result = run_command(
-        ["pdftoppm", "-png", "-gray", "-r", "60", str(pdf_path), str(directory / prefix)],
+        ["pdftoppm", "-png", "-r", "60", str(pdf_path), str(directory / prefix)],
         timeout=180,
     )
     pages = sorted(directory.glob(f"{prefix}-*.png"))
@@ -246,8 +254,8 @@ def visual_check(pdf_path: Path, docx_path: Path, directory: Path) -> dict[str, 
     if conversion["exit_code"] != 0 or not rendered.exists():
         return {"status": "failed", "reason": conversion["stderr"] or "LibreOffice produced no PDF"}
 
-    gold_pages, gold_error = page_count(pdf_path, directory, "gold-page")
-    docx_pages, docx_error = page_count(rendered, directory, "docx-page")
+    gold_pages, gold_error = rasterize_pages(pdf_path, directory, "gold-page")
+    docx_pages, docx_error = rasterize_pages(rendered, directory, "docx-page")
     if gold_error:
         return {
             "status": "unavailable",
