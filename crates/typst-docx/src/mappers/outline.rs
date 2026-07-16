@@ -17,10 +17,13 @@
 //! If the baked result includes Typst-only fallback entries, the field is locked:
 //! Word cannot reconstruct those entries and must not erase them on update.
 
+use comemo::Track;
 use ecow::{EcoString, eco_format};
 use typst_library::diag::{SourceResult, warning};
 use typst_library::engine::Engine;
-use typst_library::foundations::{Element, Packed, Repr, Selector, StyleChain};
+use typst_library::foundations::{
+    Context, Element, Packed, Repr, Resolve, Selector, Smart, StyleChain,
+};
 use typst_library::introspection::{
     Counter, CounterKey, Location, PageNumberingIntrospection,
 };
@@ -29,8 +32,8 @@ use typst_syntax::Span;
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, Field, FieldCacheStatus, FieldDisplay, FieldMode, Para, ParaChild, ParaProps,
-    Run, RunProps, TabAlign, TabLeader, TabStop, Toc, TocFigure, TocHeading,
+    Block, Field, FieldCacheStatus, FieldDisplay, FieldMode, Indent, Para, ParaChild,
+    ParaProps, Run, RunProps, TabAlign, TabLeader, TabStop, Toc, TocFigure, TocHeading,
 };
 use crate::report::{
     DecisionReason, ExportSource, ExportStage, FidelityReport, LossSet, Representation,
@@ -122,6 +125,28 @@ pub fn outline(
     let depth = caption_category.is_none().then(|| toc_depth(elem, styles));
     // Right-tab position (page content width, in twips) for the dot leader.
     let tab_pos = ctx.available_width_dxa();
+    let mut entry_indents = Vec::with_capacity(DEFAULT_TOC_DEPTH);
+    for level in 1..=DEFAULT_TOC_DEPTH {
+        let level = std::num::NonZeroUsize::new(level).expect("TOC levels are nonzero");
+        let resolved = match elem.indent.get_ref(styles) {
+            // Auto indentation depends on measured numbering-prefix widths.
+            // Retain the TOC style fallback until that introspection sidecar is
+            // available instead of pretending the documented 1.2em fallback
+            // covers numbered entries too.
+            Smart::Auto => None,
+            Smart::Custom(indent) => {
+                let indent = indent.resolve(
+                    ctx.engine(),
+                    Context::new(elem.location(), Some(styles)).track(),
+                    level,
+                    elem.span(),
+                )?;
+                let resolved = indent.resolve(styles).relative_to(ctx.available_width);
+                Some(crate::props::abs_to_twip(resolved))
+            }
+        };
+        entry_indents.push(resolved);
+    }
 
     // Shown only when no entries are baked (a list whose figures had no captions,
     // or a document with no headings): an italic "update me" placeholder.
@@ -137,6 +162,7 @@ pub fn outline(
         caption_category,
         semantic_headings,
         tab_pos,
+        entry_indents,
         entries: Vec::new(),
         fallback,
     }));
@@ -195,6 +221,10 @@ pub(crate) fn fill_tocs(
                         page_text,
                         cache_status,
                         toc.tab_pos,
+                        toc.entry_indents
+                            .get(h.level.saturating_sub(1))
+                            .copied()
+                            .flatten(),
                     )
                 })
                 .collect();
@@ -223,6 +253,7 @@ pub(crate) fn fill_tocs(
                         page_text,
                         cache_status,
                         toc.tab_pos,
+                        toc.entry_indents.first().copied().flatten(),
                     )
                 })
                 .collect();
@@ -282,6 +313,7 @@ fn entry_para(
     page_text: EcoString,
     cache_status: FieldCacheStatus,
     tab_pos: i32,
+    indent_left: Option<i32>,
 ) -> Para {
     let text_run = Run::Text { props: RunProps::default(), text: text.clone() };
     let mut content = Vec::new();
@@ -315,6 +347,7 @@ fn entry_para(
     Para {
         props: ParaProps {
             style: Some(eco_format!("TOC{}", level.min(9))),
+            ind: indent_left.map(|left| Indent { left: Some(left), ..Indent::default() }),
             tabs: vec![TabStop {
                 val: TabAlign::End,
                 leader: Some(TabLeader::Dot),

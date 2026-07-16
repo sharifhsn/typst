@@ -2978,6 +2978,45 @@ fn outline_bakes_entries_with_resolvable_bookmarks() {
 }
 
 #[test]
+fn outline_defines_a_stable_non_heading_title_style() {
+    let p = parts("#outline()\n\n= Alpha");
+    let styles = &p["word/styles.xml"];
+    let start = styles
+        .find("w:styleId=\"TOCHeading\"")
+        .expect("TOCHeading must be package-defined");
+    let style = &styles[start..][..styles[start..].find("</w:style>").unwrap()];
+    assert!(style.contains("w:basedOn w:val=\"Normal\""));
+    assert!(style.contains("<w:b/>"), "the outline title keeps heading emphasis");
+    assert!(
+        !style.contains("w:outlineLvl"),
+        "the TOC title must not become an entry when fields are refreshed"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn outline_entries_preserve_resolved_function_indent() {
+    let p = parts(
+        "#set par(leading: 1em)\n\
+         #set outline(indent: n => calc.max(0, n - 1) * 2em)\n\
+         #outline()\n\n= Alpha\n\n== Beta\n\n=== Gamma",
+    );
+    let doc = &p["word/document.xml"];
+    let entry = |style: &str| {
+        doc.split("<w:p>")
+            .find(|para| para.contains(&format!("w:pStyle w:val=\"{style}\"")))
+            .unwrap_or_else(|| panic!("missing {style} entry"))
+    };
+    let level2 = entry("TOC2");
+    assert!(level2.contains("w:ind w:left=\"0\""), "{level2}");
+    let level3 = entry("TOC3");
+    assert!(level3.contains("w:ind w:left=\"440\""), "{level3}");
+    assert!(doc.contains(" TOC \\o"), "the live TOC field is retained");
+    assert!(doc.contains(" PAGEREF "), "live page-reference fields are retained");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn heading_outline_is_a_toc_content_control() {
     // A heading table of contents is wrapped in a Word "Table of Contents"
     // content control (`w:sdt`/`docPartObj`) — the idiomatic, gallery-aware form.

@@ -250,6 +250,10 @@ pub struct Toc {
     pub semantic_headings: Vec<TocHeading>,
     /// Right tab position (twips) for the dot leader + page number.
     pub tab_pos: i32,
+    /// Resolved custom Typst outline indentation for levels 1 through 9, in
+    /// twips. `None` retains Word's style fallback for context-dependent auto
+    /// indentation.
+    pub entry_indents: Vec<Option<i32>>,
     /// Baked entries, filled in a post-conversion pass from the headings/figures
     /// that were actually emitted (so the bookmarks they target always exist).
     pub entries: Vec<Para>,

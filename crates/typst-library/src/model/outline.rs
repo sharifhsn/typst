@@ -423,7 +423,10 @@ pub enum OutlineIndent {
 
 impl OutlineIndent {
     /// Resolve the indent for an entry with the given level.
-    fn resolve(
+    ///
+    /// This evaluates function-backed indentation in the supplied contextual
+    /// engine, using a zero-based nesting depth as Typst's public API specifies.
+    pub fn resolve(
         &self,
         engine: &mut Engine,
         context: Tracked<Context>,

@@ -2842,3 +2842,47 @@ passes package and round trip 6/6 under
 `target/docx-gb-centered-figure-table-sentinel-v52-six/`, preserving 26,851
 regions. LibreOffice again passes 5/6 with only Xenolay's known timeout; all
 other heterogeneous sentinel classifications remain unchanged.
+
+## 70. TOC titles and custom indentation have package-owned semantics
+
+DOCX emitted the outline title with `TOCHeading` but left that style undefined,
+so Word and LibreOffice were free to substitute different latent built-in
+formatting. Cached outline entries also used fixed `TOC1..9` indentation even
+when Typst supplied an explicit relative or function-backed `outline.indent`.
+
+`styles.xml` now defines `TOCHeading` from the resolved Heading 1 visual sample
+while basing it on `Normal` and omitting `outlineLvl`; the title is stable but
+cannot become an entry when Word refreshes the field. Typst's
+`OutlineIndent::resolve` is reusable by exporters, and DOCX resolves explicit
+custom indentation for levels 1 through 9 into direct paragraph indentation.
+Context-dependent automatic indentation deliberately retains the existing Word
+style fallback until measured numbering-prefix widths can be carried across.
+Regressions prove a function can keep level 2 flush and indent level 3 by 2em
+without disturbing the live `TOC` and `PAGEREF` fields, and prove the title
+style is explicitly defined without heading outline semantics.
+
+The rejected experiment
+`target/docx-public-corpus-focus-gb-outline-geometry-v53/` mapped paragraph
+leading directly to entry `space-before`. Delegated page QA showed that this
+was not Typst's block-collapse behavior: the TOC spilled beyond page 8, with
+physical pages 5 through 8 ending at referenced pages 29, 63, 98, and 127,
+where the Typst reference ends at 41, 90, 130, and 164. That spacing model was
+removed rather than tuned to gb-ctr.
+
+The accepted focused authority is
+`target/docx-public-corpus-focus-gb-outline-style-indent-v55/`: package,
+LibreOffice, visual policy, and all 2,326 round-trip regions pass at 163 pages
+against 164 with score `0.976704`. Its rendered pages are byte-identical to the
+delegated-approved v54 authority. TOC pages 5 through 8 retain the accepted
+ends at referenced pages 45, 100, 138, and 164; title typography, hierarchy
+indentation, dotted leaders, page-number alignment, and centered footers are
+clean, with no visible regression from section 69.
+
+All 255 DOCX integration tests, 18 DOCX unit tests, 22 round-trip tests, 65 PPTX
+tests, strict DOCX and library Clippy, formatting, and `git diff --check` pass.
+The exact release binary (SHA-256
+`4d1e1a71491785727666bafa78cf2063c1da80a76d2fca5791ab174bff03afe5`)
+passes package and round trip 6/6 under
+`target/docx-gb-outline-style-indent-sentinel-v56-six/`, preserving 26,851
+regions. LibreOffice passes 5/6 with only Xenolay's known timeout; the two
+existing visual-policy misses remain unchanged.

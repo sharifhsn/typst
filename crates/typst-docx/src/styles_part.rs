@@ -122,6 +122,39 @@ pub fn build(
         w.close(); // style
     }
 
+    // Define TOCHeading explicitly instead of relying on a consumer's latent
+    // built-in style. It copies Heading 1's resolved visual properties without
+    // inheriting its outline level, so a refreshed Word TOC cannot list its own
+    // title as an entry.
+    let toc_heading = heading_styles.iter().find(|style| style.level == 1);
+    w.open("w:style")
+        .attr("w:type", "paragraph")
+        .attr("w:styleId", "TOCHeading")
+        .start_children();
+    w.open("w:name").attr(xml::W_VAL, "TOC Heading").empty();
+    w.open("w:basedOn").attr(xml::W_VAL, "Normal").empty();
+    w.open("w:next").attr(xml::W_VAL, "Normal").empty();
+    w.open("w:uiPriority").attr(xml::W_VAL, "39").empty();
+    w.open("w:unhideWhenUsed").empty();
+    w.open("w:qFormat").empty();
+    if let Some(spacing) = toc_heading.and_then(|style| style.spacing.as_ref()) {
+        w.open(xml::W_PPR).start_children();
+        w.leaf("w:keepNext");
+        write_spacing(&mut w, spacing);
+        w.close();
+    }
+    if let Some(style) = toc_heading {
+        style.rpr.write_rpr(&mut w);
+    } else {
+        RunProps {
+            bold: true,
+            size_half_pt: Some(28),
+            ..RunProps::default()
+        }
+        .write_rpr(&mut w);
+    }
+    w.close();
+
     // The standard gallery styles Word always offers — Title/Subtitle (paired
     // with their linked character styles), the Strong/Emphasis character styles
     // (the bold/italic toggles in the ribbon), and the Table Grid table style.
