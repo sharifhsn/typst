@@ -8,7 +8,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use typst_library::diag::{SourceDiagnostic, SourceResult, warning};
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Packed, StyleChain};
-use typst_library::introspection::{Locator, SplitLocator, Tag, TagElem};
+use typst_library::introspection::{
+    CounterDisplayElem, Locator, SplitLocator, Tag, TagElem,
+};
 use typst_library::layout::{Abs, HElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
@@ -30,7 +32,7 @@ use typst_syntax::{FileId, Span};
 
 use crate::dom::{
     Block, BookmarkTable, BreakKind, Field, FieldCacheStatus, FieldDisplay, FieldMode,
-    Footnote, HeadingStyleSample, ListSpec, NumberingTable, ParaProps,
+    Footnote, HeadingStyleSample, Jc, ListSpec, NumberingTable, ParaProps,
     ReviewCandidateKind, ReviewJoinId, ReviewOrigin, Run, RunProps, TocFigure,
     TocHeading, Underline, VertAlign,
 };
@@ -151,6 +153,10 @@ pub struct DocxCtx<'a, 'e> {
     /// The last character emitted into a text run, for smart quoting.
     last_char: Option<char>,
 
+    /// Effective paragraph alignment on a semantic page-counter leaf. Furniture
+    /// lowering transfers it only to the paragraph that owns the PAGE field.
+    page_counter_paragraph_alignment: Option<Jc>,
+
     /// Nesting depth while the DOCX walker is explicitly inside raw/code
     /// content. Used for paths where `RawElem`/`RawLine` survives to this layer.
     raw_depth: usize,
@@ -235,6 +241,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             raster_height: Abs::pt(842.0),
             quoter: SmartQuoter::new(),
             last_char: None,
+            page_counter_paragraph_alignment: None,
             raw_depth: 0,
             raw_ranges: Vec::new(),
             line_numbering_active: false,
@@ -297,6 +304,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     pub(crate) fn page_content_width_dxa(&self) -> i32 {
         ((self.page_content_width.to_pt() * 20.0).round() as i64)
             .clamp(1, i32::MAX as i64) as i32
+    }
+
+    pub(crate) fn reset_page_counter_paragraph_alignment(&mut self) {
+        self.page_counter_paragraph_alignment = None;
+    }
+
+    pub(crate) fn take_page_counter_paragraph_alignment(&mut self) -> Option<Jc> {
+        self.page_counter_paragraph_alignment.take()
     }
 
     /// Runs a nested lowering scope against a narrower width budget, restoring
@@ -1094,7 +1109,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         styles: StyleChain,
     ) -> ParaProps {
         use typst_library::foundations::Resolve;
-        use typst_library::layout::{AlignElem, Em, FixedAlignment};
+        use typst_library::layout::Em;
         use typst_library::model::{ParElem, ParLine};
         use typst_library::text::TextElem;
 
@@ -1108,24 +1123,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         // G3 alignment. Justification (`w:jc="both"`) wins over horizontal
         // alignment; a left/start paragraph stays `None` for byte-identity with
         // the previously emitted output.
-        if styles.get(ParElem::justify) {
-            p.jc = Some(crate::dom::Jc::Both);
-        } else {
-            match styles.resolve(AlignElem::alignment).x {
-                FixedAlignment::Center => p.jc = Some(crate::dom::Jc::Center),
-                // Typst's fixed alignment is physical (Start = global left,
-                // End = global right), while Word's `start`/`end` values are
-                // logical and flip under `w:bidi`. Translate between the two.
-                FixedAlignment::End if rtl => {
-                    p.jc = Some(crate::dom::Jc::Start);
-                }
-                FixedAlignment::End => p.jc = Some(crate::dom::Jc::End),
-                FixedAlignment::Start if rtl => {
-                    p.jc = Some(crate::dom::Jc::End);
-                }
-                FixedAlignment::Start => {}
-            }
-        }
+        p.jc = self.resolve_par_jc(styles);
 
         // G6 paragraph base reading order (the run-level `w:rtl` is Slice C).
         if rtl {
@@ -1183,6 +1181,28 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         }
 
         p
+    }
+
+    fn resolve_par_jc(&self, styles: StyleChain) -> Option<Jc> {
+        use typst_library::layout::{AlignElem, FixedAlignment};
+        use typst_library::model::ParElem;
+        use typst_library::text::TextElem;
+
+        if styles.get(ParElem::justify) {
+            return Some(Jc::Both);
+        }
+
+        let rtl = !styles.resolve(TextElem::dir).is_positive();
+        match styles.resolve(AlignElem::alignment).x {
+            FixedAlignment::Center => Some(Jc::Center),
+            // Typst's fixed alignment is physical (Start = global left,
+            // End = global right), while Word's `start`/`end` values are
+            // logical and flip under `w:bidi`. Translate between the two.
+            FixedAlignment::End if rtl => Some(Jc::Start),
+            FixedAlignment::End => Some(Jc::End),
+            FixedAlignment::Start if rtl => Some(Jc::End),
+            FixedAlignment::Start => None,
+        }
     }
 
     /// The first-line indent (twips) to apply to a paragraph that *follows*
@@ -1519,7 +1539,26 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         props: &RunProps,
         out: &mut Vec<Run>,
     ) -> SourceResult<()> {
-        if let Some(elem) = child.to_packed::<TagElem>() {
+        if let Some(elem) = child.to_packed::<CounterDisplayElem>() {
+            let realized = elem.realize(self.engine, styles)?;
+            if elem.is_page() {
+                if self.page_counter_paragraph_alignment.is_none() {
+                    self.page_counter_paragraph_alignment = self.resolve_par_jc(styles);
+                }
+                let cache = realized.plain_text();
+                let cache = if cache.is_empty() { "1".into() } else { cache };
+                let run_props = self.resolve_text_props(styles, props.clone());
+                out.push(Run::Field(Field {
+                    instr: " PAGE ".into(),
+                    result: vec![Run::Text { props: run_props, text: cache }],
+                    mode: FieldMode::Live,
+                    display: FieldDisplay::Visible,
+                    cache_status: FieldCacheStatus::Resolved,
+                }));
+            } else {
+                out.extend(self.inline_runs(&realized, styles, props.clone())?);
+            }
+        } else if let Some(elem) = child.to_packed::<TagElem>() {
             // Run-only context (table cell / footnote / nested inline body): we
             // can't position the tag among runs, but the introspector still needs
             // it so labels and references inside resolve. Defer it.

@@ -433,18 +433,41 @@ impl Counter {
                 selector.resolve_unique(engine, context, span)?
             }
         };
-        let state = if both {
-            engine.introspect(CounterBothIntrospection(self.clone(), location, span))?
-        } else {
-            engine.introspect(CounterAtIntrospection(self.clone(), location, span))?
-        };
-
         let numbering = numbering
             .custom()
             .or_else(|| {
                 self.matching_numbering(engine, context.styles().ok()?, location, span)
             })
             .unwrap_or_else(|| NumberingPattern::from_str("1.1").unwrap().into());
+
+        // Preserve an automatic current-page display as semantic content for
+        // DOCX. Formatting it here would erase the difference between a page
+        // counter and an ordinary literal "1" before the exporter can create
+        // Word's live PAGE field. Custom-location displays remain resolved
+        // snapshots because they are references to a fixed source position.
+        if self.is_page()
+            && !both
+            && !at.is_custom()
+            && let Some(styles) = context.styles().ok()
+            && styles.get(crate::foundations::TargetElem::target)
+                == crate::foundations::Target::Docx
+        {
+            return Ok(CounterDisplayElem::new(self, Smart::Custom(numbering), false)
+                .pack()
+                .spanned(span)
+                // `context` evaluates outside the normal content traversal. Keep
+                // the complete effective style chain on the semantic marker so
+                // its eventual native lowering sees the same typography and
+                // paragraph alignment as the formatted text would have seen.
+                .styled_with_map(styles.to_map())
+                .into_value());
+        }
+
+        let state = if both {
+            engine.introspect(CounterBothIntrospection(self.clone(), location, span))?
+        } else {
+            engine.introspect(CounterAtIntrospection(self.clone(), location, span))?
+        };
 
         if at.is_custom() {
             let context = Context::new(Some(location), context.styles().ok());
@@ -708,26 +731,54 @@ pub struct CounterDisplayElem {
     both: bool,
 }
 
+impl Packed<CounterDisplayElem> {
+    /// Whether this semantic display represents the current page counter.
+    pub fn is_page(&self) -> bool {
+        self.counter.is_page()
+    }
+
+    /// Resolve this display to ordinary formatted content.
+    pub fn realize(
+        &self,
+        engine: &mut Engine,
+        styles: StyleChain,
+    ) -> SourceResult<Content> {
+        let span = self.span();
+        let Some(location) = self.location() else {
+            bail!(span, "counter display has no location");
+        };
+        let state = if self.both {
+            engine.introspect(CounterBothIntrospection(
+                self.counter.clone(),
+                location,
+                span,
+            ))?
+        } else {
+            engine.introspect(CounterAtIntrospection(
+                self.counter.clone(),
+                location,
+                span,
+            ))?
+        };
+        let context = Context::new(Some(location), Some(styles));
+        let numbering = self
+            .numbering
+            .clone()
+            .custom()
+            .or_else(|| self.counter.matching_numbering(engine, styles, location, span))
+            .unwrap_or_else(|| NumberingPattern::from_str("1.1").unwrap().into());
+        Ok(state.display(engine, context.track(), span, &numbering)?.display())
+    }
+}
+
 impl Construct for CounterDisplayElem {
     fn construct(_: &mut Engine, args: &mut Args) -> SourceResult<Content> {
         bail!(args.span, "cannot be constructed manually");
     }
 }
 
-pub const COUNTER_DISPLAY_RULE: ShowFn<CounterDisplayElem> = |elem, engine, styles| {
-    Ok(elem
-        .counter
-        .clone()
-        .display(
-            engine,
-            Context::new(elem.location(), Some(styles)).track(),
-            elem.span(),
-            elem.numbering.clone(),
-            Smart::Auto,
-            elem.both,
-        )?
-        .display())
-};
+pub const COUNTER_DISPLAY_RULE: ShowFn<CounterDisplayElem> =
+    |elem, engine, styles| elem.realize(engine, styles);
 
 /// A specialized handler of the page counter that tracks both the physical
 /// and the logical page counter.

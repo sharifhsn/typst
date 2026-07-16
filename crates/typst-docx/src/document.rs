@@ -2622,7 +2622,13 @@ fn lower_furniture(
                 }
             }
             .max(typst_library::layout::Abs::pt(6.0));
+            // A contextual page-counter callback is evaluated while its inline
+            // body is lowered, after the paragraph shell has been synthesized.
+            // Capture its effective nested alignment and transfer it onto the
+            // separate-part paragraph that actually owns the PAGE field.
+            ctx.reset_page_counter_paragraph_alignment();
             let lowered = ctx.blocks(content, styles);
+            let page_counter_jc = ctx.take_page_counter_paragraph_alignment();
             ctx.raster_height = saved_h;
             ctx.line_numbering_active = saved_line_numbering;
             let mut lowered = lowered?;
@@ -2630,6 +2636,15 @@ fn lower_furniture(
                 for block in &mut lowered {
                     if let Block::Para(para) = block
                         && para.props.jc.is_none()
+                    {
+                        para.props.jc = Some(jc);
+                    }
+                }
+            } else if let Some(jc) = page_counter_jc {
+                for block in &mut lowered {
+                    if let Block::Para(para) = block
+                        && para.props.jc.is_none()
+                        && para_has_page_field(para)
                     {
                         para.props.jc = Some(jc);
                     }
@@ -2657,6 +2672,16 @@ fn lower_furniture(
             signature,
             emit_empty: source.content.is_some(),
         })
+    })
+}
+
+fn para_has_page_field(para: &Para) -> bool {
+    para.content.iter().any(|child| {
+        matches!(
+            child,
+            ParaChild::Run(Run::Field(field))
+                if field.instr.split_whitespace().next() == Some("PAGE")
+        )
     })
 }
 
@@ -2881,10 +2906,29 @@ fn sig_run(run: &Run, out: &mut String) {
                 field.instr, field.mode, field.display
             );
             for run in &field.result {
-                sig_run(run, out);
+                if field.mode == crate::dom::FieldMode::Live {
+                    sig_live_field_result(run, out);
+                } else {
+                    sig_run(run, out);
+                }
             }
             out.push(')');
         }
+    }
+}
+
+/// A live field's cached glyphs are not part of the furniture identity: PAGE
+/// legitimately carries a different resolved cache on every probe page while
+/// remaining one reusable Word footer. Keep the result's formatting shape in
+/// the signature so genuinely different styled fields still split sections.
+fn sig_live_field_result(run: &Run, out: &mut String) {
+    match run {
+        Run::Text { props, .. } => {
+            out.push_str("r(");
+            sig_run_props(props, out);
+            out.push_str("text=*)");
+        }
+        _ => sig_run(run, out),
     }
 }
 

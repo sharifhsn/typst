@@ -3173,6 +3173,69 @@ fn explicit_header_and_footer_alignment_reaches_paragraphs() {
 }
 
 #[test]
+fn contextual_page_counter_footer_stays_live_and_centered() {
+    let p = parts(
+        "#set page(footer: [\n  #block(width: 100%)[\n    #set align(center)\n    #context { box(counter(page).display()) }\n  ]\n])\nBody.",
+    );
+    let footer = p
+        .iter()
+        .find(|(name, _)| name.starts_with("word/footer"))
+        .map(|(_, xml)| xml.as_str())
+        .expect("an explicit footer part");
+    assert!(footer.contains("PAGE "), "explicit page counter is a live PAGE field");
+    assert!(footer.contains(">1<"), "field carries the resolved page cache");
+    assert!(
+        footer.contains("w:jc w:val=\"center\""),
+        "nested effective alignment reaches the page-counter paragraph: {footer}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn live_page_counter_cache_does_not_split_footer_parts() {
+    let p = parts(
+        "#set page(footer: context { counter(page).display() })\nOne.#pagebreak()Two.#pagebreak()Three.",
+    );
+    let footers: Vec<_> =
+        p.iter().filter(|(name, _)| name.starts_with("word/footer")).collect();
+    assert_eq!(
+        footers.len(),
+        1,
+        "a live PAGE field is one reusable footer despite its per-page cache"
+    );
+    assert!(footers[0].1.contains(" PAGE "));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn contextual_page_alignment_does_not_leak_to_sibling_footer_paragraphs() {
+    let p = parts(
+        "#set page(footer: [\n  #block(width: 100%)[\n    #set align(center)\n    #context counter(page).display()\n  ]\n  #parbreak()\n  Left sibling.\n])\nBody.",
+    );
+    let footer = p
+        .iter()
+        .find(|(name, _)| name.starts_with("word/footer"))
+        .map(|(_, xml)| xml.as_str())
+        .expect("an explicit footer part");
+    assert_eq!(
+        footer.matches("w:jc w:val=\"center\"").count(),
+        1,
+        "only the PAGE field paragraph inherits its nested contextual alignment"
+    );
+    assert!(footer.contains("Left sibling."));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn contextual_non_page_counter_remains_resolved_text() {
+    let p = parts("#let n = counter(\"example\")\n#n.step()\n#context n.display()");
+    let document = &p["word/document.xml"];
+    assert!(!document.contains(" PAGE "), "a named counter is not a page field");
+    assert!(document.contains(">1<"), "the named counter keeps its resolved value");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn single_line_furniture_band_uses_content_start_distance() {
     let p = parts(
         "#set page(margin: 0.5in, header: [Header *bold* _italic_], \

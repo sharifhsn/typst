@@ -437,6 +437,7 @@ pub(crate) fn review_span(content: &Content) -> typst_syntax::Span {
 /// that the block dispatch records introspection tags and routes equations
 /// (which can be inline or block) through the math mapper.
 fn is_inline(child: &Content) -> bool {
+    use typst_library::introspection::CounterDisplayElem;
     use typst_library::layout::HElem;
     use typst_library::model::{EmphElem, LinkElem, RefElem, StrongElem};
     use typst_library::text::{
@@ -445,7 +446,8 @@ fn is_inline(child: &Content) -> bool {
     };
     use typst_library::visualize::ImageElem;
 
-    child.is::<TextElem>()
+    child.is::<CounterDisplayElem>()
+        || child.is::<TextElem>()
         || child.is::<SpaceElem>()
         || child.is::<LinebreakElem>()
         || child.is::<SmartQuoteElem>()

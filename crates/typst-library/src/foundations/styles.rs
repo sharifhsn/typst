@@ -1016,16 +1016,18 @@ impl NativeRuleMap {
             // could, in theory, also be special cased in realization.
             rules.register(target, crate::foundations::CONTEXT_RULE);
 
-            // CounterDisplayElem only exists because the compiler can't
-            // currently express the equivalent of `context
-            // counter(..).display(..)` in native code (no native closures).
-            rules.register(target, crate::introspection::COUNTER_DISPLAY_RULE);
-
             // These are all only for introspection and empty on all targets.
             rules.register(target, empty::<crate::introspection::CounterUpdateElem>());
             rules.register(target, empty::<crate::introspection::StateUpdateElem>());
             rules.register(target, empty::<crate::introspection::MetadataElem>());
             rules.register(target, empty::<crate::model::PrefixInfo>());
+        }
+
+        // DOCX preserves CounterDisplayElem as a semantic native node so its
+        // exporter can emit live PAGE fields. Other targets realize it into
+        // formatted content as before.
+        for target in [Target::Paged, Target::Html, Target::Bundle, Target::Pandoc] {
+            rules.register(target, crate::introspection::COUNTER_DISPLAY_RULE);
         }
 
         for target in [Target::Paged, Target::Html, Target::Docx, Target::Pandoc] {

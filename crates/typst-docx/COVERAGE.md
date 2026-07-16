@@ -2502,3 +2502,42 @@ lanes 6/6 under `target/docx-gb-toc-sentinel-v14-six/`; all 27,038 enrolled
 review regions across the five eligible documents remain unchanged. All 236
 DOCX integration tests, 18 DOCX unit tests, 22 round-trip tests, 65 PPTX tests,
 strict DOCX Clippy, and the focused DOCX/PPTX WASM check pass.
+
+## 62. Contextual page counters remain live in Word furniture
+
+An explicit `context { counter(page).display() }` was previously formatted to
+literal text inside Typst's contextual call, before the DOCX target could
+distinguish it from an authored `1`. The footer signature then saw five
+different literal probes, rejected Word's reusable furniture model, and shipped
+the page-one sample on every page. Automatic current-page displays now survive
+DOCX realization as semantic `CounterDisplayElem` nodes. The exporter lowers
+those nodes to unlocked, resolved `PAGE` fields while named counters and custom
+locations retain Typst-owned text. The semantic node captures its effective
+context style chain so text formatting is unchanged.
+
+Header/footer callbacks are separate OPC stories whose paragraph shell can be
+synthesized before their contextual inline leaf is evaluated. Their lowering
+scope now transfers the first effective nested paragraph alignment onto an
+otherwise unaligned furniture paragraph. Live-field furniture signatures retain
+the cached result's formatting shape but ignore its page-varying glyphs, because
+the consumer owns that value. This prevents a valid `PAGE` cache from being
+misclassified as five incompatible literal footers.
+
+The accepted frozen `gb-ctr` artifact is
+`target/docx-public-corpus-focus-gb-live-footer-v19/`: 169 pages against 164,
+score `0.971303`, package validation, LibreOffice conversion, and the unchanged
+2,513-region review round trip all pass. Delegated visual QA sampled pages 2,
+80, and 160–169 and found sequential, centered footer values throughout; the
+accepted v13 showed a repeated `1` at the same sites. No fully blank tail page
+was found. The five-page gap is localized to register-table and Appendix D
+packing: the DOCX spreads those live tables and three chip diagrams across more
+pages than the Typst reference.
+
+The heterogeneous guard passes package and review lanes 6/6 under
+`target/docx-gb-live-footer-sentinel-v20-six/`, preserving all 27,038 enrolled
+regions. LibreOffice passes five documents in the batch; the slow Xenolay
+calculus document passes when reproduced alone under
+`target/docx-gb-live-footer-calculus-regression-v18/` and is byte-identical to
+its accepted v14 DOCX. All 240 DOCX integration tests, 18 DOCX unit tests, 22
+round-trip tests, 65 PPTX tests, strict DOCX Clippy, and the focused DOCX/PPTX
+WASM check pass.
