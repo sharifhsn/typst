@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Content, Packed, Resolve, Smart, StyleChain};
-use typst_library::layout::resolve::{Cell as ResolvedCell, CellGrid, Entry};
+use typst_library::layout::resolve::{
+    Cell as ResolvedCell, CellGrid, Entry, Line, LinePosition,
+};
 use typst_library::layout::{Abs, Alignment, Sizing, VAlignment};
 use typst_library::layout::{GridCell, GridElem};
 use typst_library::model::{TableCell, TableElem};
@@ -515,7 +517,7 @@ fn cellgrid(
 
                     let v_merge = (rowspan > 1).then_some(VMerge::Restart);
 
-                    cells.push(build_cell(
+                    let mut built = build_cell(
                         ctx,
                         cell,
                         styles,
@@ -527,7 +529,16 @@ fn cellgrid(
                             layout_grid: origin == TableOrigin::LayoutGrid,
                             centered_grid_inset,
                         },
-                    )?);
+                    )?;
+                    apply_explicit_grid_lines(
+                        grid,
+                        x,
+                        y,
+                        colspan,
+                        rowspan,
+                        &mut built.borders,
+                    );
+                    cells.push(built);
 
                     x = span_end;
                 }
@@ -554,7 +565,7 @@ fn cellgrid(
                         // resolved stroke keeps a rowspan cell's box closed in a
                         // bordered table; `CellBorders::default()` (all `nil`)
                         // left the lower rows open on the sides and bottom.
-                        let borders = origin.map_or_else(CellBorders::default, |o| {
+                        let mut borders = origin.map_or_else(CellBorders::default, |o| {
                             let last_row = py + o.rowspan.get().max(1) - 1;
                             CellBorders {
                                 top: None,
@@ -567,6 +578,7 @@ fn cellgrid(
                                 right: side_border(&o.stroke.right),
                             }
                         });
+                        apply_explicit_grid_lines(grid, x, y, colspan, 1, &mut borders);
 
                         cells.push(continuation_cell(
                             (grid_end - grid_start) as u32,
@@ -1089,6 +1101,120 @@ fn parent_cell(grid: &CellGrid, parent: usize) -> Option<&ResolvedCell> {
 fn side_border(side: &Option<Arc<Stroke<Abs>>>) -> Option<Border> {
     let stroke = side.as_ref()?;
     Some(stroke_to_border(stroke))
+}
+
+/// Overlays resolved `table.hline` / `table.vline` instructions onto the cell
+/// edges Word can represent. CellGrid keeps explicit lines separate from the
+/// cells' base stroke, so ignoring these vectors silently drops authored rules.
+/// A line must cover the complete edge of a spanning cell; partial rules inside
+/// one merged Word cell remain outside the native border model.
+fn apply_explicit_grid_lines(
+    grid: &CellGrid,
+    x: usize,
+    y: usize,
+    colspan: usize,
+    rowspan: usize,
+    borders: &mut CellBorders,
+) {
+    let x_end = x.saturating_add(colspan);
+    let y_end = y.saturating_add(rowspan);
+
+    apply_line_override(
+        &mut borders.top,
+        horizontal_line_override(grid, y, x, x_end, true),
+    );
+    // A vertically merged cell's bottom edge is serialized on its final
+    // continuation row, not the restart cell. Its explicit bottom is applied
+    // there by the continuation path.
+    if rowspan == 1 {
+        apply_line_override(
+            &mut borders.bottom,
+            horizontal_line_override(grid, y_end, x, x_end, false),
+        );
+    }
+    apply_line_override(
+        &mut borders.left,
+        vertical_line_override(grid, x, y, y_end, true),
+    );
+    apply_line_override(
+        &mut borders.right,
+        vertical_line_override(grid, x_end, y, y_end, false),
+    );
+}
+
+fn horizontal_line_override(
+    grid: &CellGrid,
+    boundary: usize,
+    start: usize,
+    end: usize,
+    leading: bool,
+) -> Option<Option<Border>> {
+    let (index, position) =
+        line_slot(boundary, grid.non_gutter_row_count(), grid.has_gutter, leading)?;
+    covering_line(
+        grid.hlines.get(index)?,
+        position,
+        start,
+        end,
+        grid.non_gutter_column_count(),
+    )
+}
+
+fn vertical_line_override(
+    grid: &CellGrid,
+    boundary: usize,
+    start: usize,
+    end: usize,
+    leading: bool,
+) -> Option<Option<Border>> {
+    let (index, position) =
+        line_slot(boundary, grid.non_gutter_column_count(), grid.has_gutter, leading)?;
+    covering_line(
+        grid.vlines.get(index)?,
+        position,
+        start,
+        end,
+        grid.non_gutter_row_count(),
+    )
+}
+
+/// Selects the explicit-line slot adjacent to a content track. Without gutters,
+/// `After` lines are normalized by the resolver to `Before` at the next
+/// boundary. With gutters the two faces stay distinct.
+fn line_slot(
+    boundary: usize,
+    track_count: usize,
+    has_gutter: bool,
+    leading: bool,
+) -> Option<(usize, LinePosition)> {
+    if boundary > track_count {
+        return None;
+    }
+    if !has_gutter || leading || boundary == track_count {
+        Some((boundary, LinePosition::Before))
+    } else {
+        Some((boundary.checked_sub(1)?, LinePosition::After))
+    }
+}
+
+fn covering_line(
+    lines: &[Line],
+    position: LinePosition,
+    start: usize,
+    end: usize,
+    track_count: usize,
+) -> Option<Option<Border>> {
+    lines.iter().rev().find_map(|line| {
+        let line_end = line.end.map_or(track_count, |value| value.get());
+        (line.position == position && line.start <= start && line_end >= end)
+            .then(|| line.stroke.as_deref().map(stroke_to_border))
+    })
+}
+
+fn apply_line_override(border: &mut Option<Border>, line: Option<Option<Border>>) {
+    if let Some(line) = line {
+        *border = line;
+    }
 }
 
 /// Converts a resolved [`Stroke`] to a DOCX [`Border`] (thickness in eighths of

@@ -1497,6 +1497,53 @@ fn stroke_none_table_has_no_cell_borders() {
 }
 
 #[test]
+fn explicit_table_lines_override_cell_strokes() {
+    let p = parts(
+        "#table(\n\
+           columns: 2,\n\
+           stroke: (y: none),\n\
+           table.hline(),\n\
+           [alpha], [beta],\n\
+           table.hline(),\n\
+           [gamma], [delta],\n\
+           table.hline(),\n\
+         )",
+    );
+    let cells = element_fragments(&p["word/document.xml"], "tc");
+    for (text, cell) in ["alpha", "beta", "gamma", "delta"].into_iter().map(|text| {
+        let cell = cells
+            .iter()
+            .find(|cell| cell.contains(&format!(">{text}</w:t>")))
+            .unwrap_or_else(|| panic!("cell containing {text:?}"));
+        (text, *cell)
+    }) {
+        assert!(
+            cell.contains("<w:top w:val=\"single\"")
+                && cell.contains("<w:bottom w:val=\"single\""),
+            "explicit horizontal rules reach {text}: {cell}"
+        );
+        assert!(
+            cell.contains("<w:left w:val=\"single\"")
+                && cell.contains("<w:right w:val=\"single\""),
+            "the table's base vertical strokes remain on {text}: {cell}"
+        );
+    }
+
+    let cleared =
+        parts("#table(columns: 1, table.hline(stroke: none), [intentionally clear])");
+    let cell = element_fragments(&cleared["word/document.xml"], "tc")
+        .into_iter()
+        .find(|cell| cell.contains(">intentionally clear</w:t>"))
+        .expect("cleared cell");
+    assert!(
+        cell.contains("<w:top w:val=\"nil\"/>"),
+        "an explicit none line clears the inherited cell edge: {cell}"
+    );
+    assert_all_wellformed(&p);
+    assert_all_wellformed(&cleared);
+}
+
+#[test]
 fn curve_maps_to_a_native_bezier_path() {
     // `#curve` (straight + cubic-Bézier segments) must map to a native
     // `a:custGeom` path with real `a:cubicBezTo` commands — not rasterize —

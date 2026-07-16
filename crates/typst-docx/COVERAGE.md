@@ -2768,3 +2768,42 @@ the same 26,851 regions; LibreOffice passes 5/6 with Xenolay repeating its known
 180-second timeout. The C++ guide remains exact, Tura remains within one page,
 and the thesis/Mathnote retain their pre-existing visual-policy misses. The only
 intentional sentinel delta is `gb-ctr`'s documented trailing page consolidation.
+
+## 68. Explicit table and grid rules reach native Word cell edges
+
+Resolved `CellGrid` keeps authored `table.hline`/`vline` instructions in
+separate `hlines`/`vlines` vectors. DOCX previously serialized only each cell's
+base stroke and ignored those vectors. This was especially visible in
+`gb-ctr`'s address-bit tables: `stroke: (y: none)` intentionally removes the
+base horizontal edges and a sequence of `table.hline()` calls restores selected
+group boundaries. The old DOCX emitted `top/bottom=nil` on every cell, so the
+authored horizontal rules disappeared while vertical edges remained.
+
+Native table lowering now overlays the last fully covering explicit line onto
+each representable cell edge. The mapping preserves resolver order, explicit
+`none` clears an inherited edge, colspan rules apply only when they cover the
+whole merged edge, gutter `Before`/`After` faces stay distinct, and vertical
+merge continuation rows receive their applicable rules. Partial lines inside a
+single merged Word cell remain outside the native border model instead of being
+silently widened. A package regression proves horizontal rules override a
+`y:none` base stroke without disturbing vertical edges and that an explicit
+`hline(stroke: none)` emits `nil`.
+
+The accepted focused authority is
+`target/docx-public-corpus-focus-gb-explicit-table-lines-v49/`: package,
+LibreOffice, visual policy, and all 2,326 round-trip regions pass at 163 pages
+against 164 and score `0.976759`. XML comparison confirms Tables 13.3, 14.1,
+and 14.2 change only their intended top/bottom cell edges; left/right edges and
+all table widths remain unchanged. Delegated visual QA confirms the missing
+horizontal rules are restored without a caption regression. The remaining
+table placement/pagination mismatch is separate and remains open.
+
+All 252 DOCX integration tests, 18 DOCX unit tests, 22 round-trip tests, 65 PPTX
+tests, strict DOCX Clippy, formatting, and `git diff --check` pass. The exact
+release binary (SHA-256
+`786f78f4e9422d662c667bbc5e4fd16801048072b30e5002bc20f772568b2861`)
+passes package and round trip 6/6 under
+`target/docx-gb-explicit-lines-sentinel-v50-six/`, again preserving 26,851
+regions. LibreOffice passes 5/6 with only Xenolay's known 180-second timeout;
+the C++ guide remains exact, Tura remains within one page, and the existing
+thesis/Mathnote visual-policy misses are unchanged.
