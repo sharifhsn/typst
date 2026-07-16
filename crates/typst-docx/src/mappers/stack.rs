@@ -163,7 +163,11 @@ fn horizontal_stack(
     }
 
     Ok(vec![Block::Table(Tbl {
-        props: TblProps { width_dxa: Some(col_dxa.iter().sum()), style: None },
+        props: TblProps {
+            width_dxa: Some(col_dxa.iter().sum()),
+            style: None,
+            jc: None,
+        },
         grid: col_dxa,
         rows: vec![Row {
             header: false,

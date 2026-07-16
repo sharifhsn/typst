@@ -72,7 +72,7 @@ pub(crate) fn columns(
     }
 
     Ok(vec![Block::Table(Tbl {
-        props: TblProps { width_dxa: Some(available), style: None },
+        props: TblProps { width_dxa: Some(available), style: None, jc: None },
         grid,
         rows: vec![Row {
             header: false,

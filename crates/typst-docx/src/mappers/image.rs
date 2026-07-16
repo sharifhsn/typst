@@ -311,10 +311,14 @@ pub fn figure(
         }
         let mut body_blocks = cleaned;
         for block in &mut body_blocks {
-            if let Block::Para(para) = block
-                && para.props.jc.is_none()
-            {
-                para.props.jc = Some(Jc::Center);
+            match block {
+                Block::Para(para) if para.props.jc.is_none() => {
+                    para.props.jc = Some(Jc::Center);
+                }
+                Block::Table(table) if table.props.jc.is_none() => {
+                    table.props.jc = Some(Jc::Center);
+                }
+                _ => {}
             }
         }
         body_blocks
@@ -1176,10 +1180,14 @@ fn float_figure_body(
     let Some(mut drawing) = drawing else {
         // Non-image body (table, multi-paragraph): keep it in flow, centered.
         for block in &mut body_blocks {
-            if let Block::Para(para) = block
-                && para.props.jc.is_none()
-            {
-                para.props.jc = Some(Jc::Center);
+            match block {
+                Block::Para(para) if para.props.jc.is_none() => {
+                    para.props.jc = Some(Jc::Center);
+                }
+                Block::Table(table) if table.props.jc.is_none() => {
+                    table.props.jc = Some(Jc::Center);
+                }
+                _ => {}
             }
         }
         return Ok(body_blocks);

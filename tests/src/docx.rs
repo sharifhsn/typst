@@ -4931,6 +4931,35 @@ fn authored_empty_figure_body_linebreak_is_preserved() {
 }
 
 #[test]
+fn figure_table_is_centered_without_centering_ordinary_tables() {
+    let p = parts(
+        "#figure(\n\
+           table(columns: (40pt, 60pt), [figure left], [figure right]),\n\
+           caption: [Centered table],\n\
+         )\n\n\
+         #table(columns: (40pt, 60pt), [ordinary left], [ordinary right])",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let figure = tables
+        .iter()
+        .find(|table| table.contains("figure left"))
+        .expect("figure table");
+    let ordinary = tables
+        .iter()
+        .find(|table| table.contains("ordinary left"))
+        .expect("ordinary table");
+    assert!(
+        figure.contains("<w:jc w:val=\"center\"/>"),
+        "a direct table figure body uses native table centering: {figure}"
+    );
+    assert!(
+        !ordinary.contains("<w:jc"),
+        "ordinary document tables retain their normal placement: {ordinary}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn figure_emits_seq_field() {
     let p = parts(
         "#figure(rect(width: 20pt, height: 20pt), caption: [A box]) <f>\n\nSee @f.",

@@ -632,7 +632,7 @@ fn cellgrid(
     }
 
     let tbl = Tbl {
-        props: TblProps { width_dxa: Some(width_dxa), style: None },
+        props: TblProps { width_dxa: Some(width_dxa), style: None, jc: None },
         grid: col_dxa,
         rows,
     };

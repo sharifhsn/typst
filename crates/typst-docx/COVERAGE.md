@@ -2807,3 +2807,38 @@ passes package and round trip 6/6 under
 regions. LibreOffice passes 5/6 with only Xenolay's known 180-second timeout;
 the C++ guide remains exact, Tura remains within one page, and the existing
 thesis/Mathnote visual-policy misses are unchanged.
+
+## 69. Direct table figure bodies use native table centering
+
+Typst's figure show rule centers its body. DOCX mirrored that alignment only
+for paragraph blocks, so a direct `Block::Table` figure body retained Word's
+default left table placement. The table widths themselves were already
+internally consistent: `tblW`, `tblGrid`, cell widths, and colspan sums matched
+and used fixed layout. The missing primitive was table justification.
+
+`TblProps` now carries optional justification and the encoder emits schema-order
+`w:jc` in `w:tblPr`. Both in-flow figures and the non-drawing fallback of placed
+figures set `center` only on direct top-level table bodies whose alignment is
+unset. Ordinary tables, nested cell tables, column/layout helper tables, and
+their widths remain unchanged. A package regression proves a figure table gains
+native centering while an otherwise identical ordinary table does not.
+
+The accepted focused authority is
+`target/docx-public-corpus-focus-gb-centered-figure-tables-v51/`: package,
+LibreOffice, visual policy, and all 2,326 round-trip regions pass at 163 pages
+against 164. Fifty-two direct figure tables gain `w:jc=center`; all 351 table
+width vectors and the explicit borders from section 68 remain unchanged. The
+scalar score decreases slightly from `0.976759` to `0.976712`, but delegated
+page-level QA confirms the intended visual result: Tables 13.1 and 14.1 become
+centered and proportionate to the Typst reference, intentionally wide Table
+13.3 stays wide, and Table 14.2 retains its correct split and caption placement.
+No pagination, caption, or page-furniture regression appears on pages 125-145.
+
+All 253 DOCX integration tests, 18 DOCX unit tests, 22 round-trip tests, 65 PPTX
+tests, strict DOCX Clippy, formatting, and `git diff --check` pass. The exact
+release binary (SHA-256
+`19127ae0b32acd1f493c39542a364f26fa00f8052ecf8562f723d51158730e99`)
+passes package and round trip 6/6 under
+`target/docx-gb-centered-figure-table-sentinel-v52-six/`, preserving 26,851
+regions. LibreOffice again passes 5/6 with only Xenolay's known timeout; all
+other heterogeneous sentinel classifications remain unchanged.

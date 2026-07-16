@@ -1282,7 +1282,7 @@ fn handle_block_box(
         let width_dxa = crate::props::abs_to_twip(width).max(1);
         let height_dxa = crate::props::abs_to_twip(height).max(1);
         out.push(Block::Table(Tbl {
-            props: TblProps { width_dxa: Some(width_dxa), style: None },
+            props: TblProps { width_dxa: Some(width_dxa), style: None, jc: None },
             grid: vec![width_dxa],
             rows: vec![Row {
                 header: false,

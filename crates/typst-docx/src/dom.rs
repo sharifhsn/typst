@@ -835,6 +835,7 @@ pub struct Tbl {
 pub struct TblProps {
     pub width_dxa: Option<i32>,
     pub style: Option<EcoString>,
+    pub jc: Option<Jc>,
 }
 
 pub struct Row {

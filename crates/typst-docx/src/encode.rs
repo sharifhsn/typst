@@ -11,7 +11,7 @@ use typst_syntax::Span;
 
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, DocxDocument,
-    Drawing, Field, FieldDisplay, FieldMode, Footnote, GroupSpec, HdrFtrPart, Para,
+    Drawing, Field, FieldDisplay, FieldMode, Footnote, GroupSpec, HdrFtrPart, Jc, Para,
     ParaChild, ParaProps, ReviewJoinId, Row, Run, SectPr, SectType, ShapeFill, ShapeGeom,
     ShapeSpec, Spacing, Tbl, Toc, VAlign, VMerge,
 };
@@ -590,6 +590,17 @@ fn write_table(
             .empty();
     } else {
         w.open("w:tblW").attr("w:w", "0").attr("w:type", "auto").empty();
+    }
+    if let Some(jc) = tbl.props.jc {
+        let value = match jc {
+            Jc::Start => "start",
+            Jc::End => "end",
+            Jc::Center => "center",
+            // `both` is a paragraph-only justification. Table callers never
+            // request it, but degrade safely if a future shared path does.
+            Jc::Both => "start",
+        };
+        w.open("w:jc").attr("w:val", value).empty();
     }
     // A visible single-line border on all edges + insides, so the table is not
     // borderless by default (Word's no-style default is invisible).
