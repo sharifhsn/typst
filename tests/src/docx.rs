@@ -5206,6 +5206,89 @@ fn docx_locations_match_paged_locations_for_source_elements() {
 }
 
 #[test]
+fn appendix_heading_and_figure_counters_use_exact_paged_occurrences() {
+    let p = parts(
+        "#counter(heading).update((0, 3))\n\
+         #set heading(numbering: (..nums) => {\n\
+           if nums.pos().len() == 1 { none } else {\n\
+             numbering(\"A.1.1.1.1\", ..nums.pos().slice(1))\n\
+           }\n\
+         })\n\
+         #set figure(numbering: (..nums) => [\
+           #counter(heading).display((..heading_nums) => \
+             numbering(\"A\", heading_nums.pos().at(1)))\
+           \\.#nums.pos().at(0)\
+         ])\n\
+         #for i in range(10) {\n\
+           figure(rect(width: 1pt, height: 1pt), caption: [Prior #i])\n\
+         }\n\
+         == Chip pinouts\n\
+         #columns(2)[\n\
+           === CPU chips\n\
+           #figure(rect(width: 5pt, height: 5pt), caption: [One])\n\
+           #figure(rect(width: 5pt, height: 5pt), caption: [Two])\n\
+           #colbreak()\n\
+           === Cartridge chips\n\
+           #figure(rect(width: 5pt, height: 5pt), caption: [Three])\n\
+           #figure(rect(width: 5pt, height: 5pt), caption: [Four])\n\
+           #figure(rect(width: 5pt, height: 5pt), caption: [Five])\n\
+         ]",
+    );
+    let text = visible_text(&p["word/document.xml"])
+        .replace('\u{a0}', " ")
+        .replace('\u{200b}', "");
+    for expected in ["D.1", "D.2", "Figure D.11", "Figure D.15"] {
+        assert!(text.contains(expected), "missing {expected:?} in: {text}");
+    }
+    assert!(
+        !text.contains("Figure D.0"),
+        "counter fell back to a page heuristic: {text}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn native_figure_alias_counts_a_prior_rasterized_same_source_occurrence() {
+    let p = parts(
+        "#let shared(caption) = figure(\n\
+           rect(width: 5pt, height: 5pt), caption: caption,\n\
+         )\n\
+         #skew(ax: 10deg)[#block[#shared([Raster])]]\n\
+         #shared([Native])",
+    );
+    let text = visible_text(&p["word/document.xml"])
+        .replace('\u{a0}', " ")
+        .replace('\u{200b}', "");
+    assert!(
+        text.contains("Figure 2: Native"),
+        "the native occurrence must map after the rasterized same-source figure: {text}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn semantic_alias_skips_a_source_reused_in_page_overlay() {
+    let p = parts(
+        "#set heading(numbering: \"1.\")\n\
+         #let shared = [= Shared heading]\n\
+         #set page(background: shared)\n\
+         #shared\n\
+         #pagebreak()\n\
+         #set page(background: none)\n\
+         Middle page.\n\
+         #pagebreak()\n\
+         #set page(background: shared)\n\
+         #shared",
+    );
+    let text = visible_text(&p["word/document.xml"]);
+    assert!(
+        text.contains("2.Shared heading") && text.contains("4.Shared heading"),
+        "body counters must follow both fresh and cached paged overlays: {text}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn auto_page_height_uses_the_true_paged_size_not_a4() {
     // `set page(width: .., height: auto)` is an extremely common ticket/
     // certificate/single-page-diagram idiom (a majority of a large real-world
@@ -5446,6 +5529,44 @@ fn citations_and_bibliography_converge_against_paged_introspection() {
     assert!(text.contains("[2]"), "second citation number is present: {text}");
     assert!(text.contains("Beta Source"), "first cited bibliography entry is present");
     assert!(text.contains("Alpha Source"), "second cited bibliography entry is present");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn rasterized_citation_keeps_its_source_order() {
+    let p = parts_with_files(
+        "#rotate(10deg)[First @beta.]\n\nThen @alpha.\n\n\
+         #bibliography(\"refs.bib\", style: \"ieee\")",
+        &[("refs.bib", REFS_BIB)],
+    );
+    let text = visible_text(&p["word/document.xml"]);
+    assert!(
+        text.contains("First [1]. Then [2]."),
+        "visible citation numbers retain source encounter order: {text}"
+    );
+    let beta = text.find("Beta Source").expect("beta bibliography entry");
+    let alpha = text.find("Alpha Source").expect("alpha bibliography entry");
+    assert!(
+        beta < alpha,
+        "a citation recovered from raster layout keeps its earlier source position: {text}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn block_rasterized_citation_keeps_its_source_order() {
+    let p = parts_with_files(
+        "#skew(ax: 10deg)[#block[First @beta.]]\n\nThen @alpha.\n\n\
+         #bibliography(\"refs.bib\", style: \"ieee\")",
+        &[("refs.bib", REFS_BIB)],
+    );
+    let doc = &p["word/document.xml"];
+    let text = visible_text(doc);
+    assert!(doc.contains("<a:blip"), "the unsupported block is rasterized");
+    assert!(
+        text.contains("First [1]. Then [2]."),
+        "block-raster citation numbers retain source encounter order: {text}"
+    );
     assert_all_wellformed(&p);
 }
 

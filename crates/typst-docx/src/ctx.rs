@@ -110,6 +110,10 @@ pub struct DocxCtx<'a, 'e> {
     /// DOCX locations from page furniture (headers/footers) that may need to be
     /// aliased back to their repeated paged-layout locations.
     pub(crate) real_alias_locations: FxHashSet<Location>,
+    /// Native semantic elements whose DOCX locations need exact counterparts in
+    /// paged layout for counter synthesis. Unlike repeated page furniture,
+    /// these are paired by stable source identity and occurrence ordinal.
+    pub(crate) real_semantic_alias_locations: FxHashSet<Location>,
 
     /// Headings recorded in document order as they are converted, used to
     /// populate any table of contents once each heading's real bookmark exists.
@@ -230,6 +234,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             bookmarks: BookmarkTable::default(),
             deferred_tags: Vec::new(),
             real_alias_locations: FxHashSet::default(),
+            real_semantic_alias_locations: FxHashSet::default(),
             toc_headings: Vec::new(),
             heading_style_samples: Vec::new(),
             toc_figures: Vec::new(),
@@ -1309,6 +1314,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 .then(|| child.location().filter(|_| child.label().is_some()))
                 .flatten();
             let child_out_start = out.len();
+            let deferred_before = self.deferred_tags.len();
             let direct_span = child_styles
                 .get_cloned(LinkElem::direct_span)
                 .unwrap_or_else(|| child.span());
@@ -1493,6 +1499,22 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 self.handle_inline(child, child_styles, &props, &mut runs)?;
                 out.extend(runs.into_iter().map(ParaChild::Run));
             }
+
+            // Run-only lowering paths cannot carry `ParaChild::Tag`, so a
+            // rasterized/nested child temporarily harvests its introspection
+            // tags into `deferred_tags`. Recover only the tags produced while
+            // lowering this child and splice them back at the child's source
+            // position. Appending them after the whole document changes state,
+            // counter, and citation encounter order (an early rasterized
+            // citation otherwise becomes the final bibliography citation).
+            let local_tags: Vec<_> =
+                self.deferred_tags.drain(deferred_before..).collect();
+            let local_tag_count = local_tags.len();
+            out.splice(
+                child_out_start..child_out_start,
+                local_tags.into_iter().map(ParaChild::Tag),
+            );
+            let child_out_start = child_out_start + local_tag_count;
 
             // Bracket a labeled inline child's output with a bookmark so a
             // `#link(<label>)` to it resolves.

@@ -2621,3 +2621,55 @@ visual-policy passes. LibreOffice passes five documents; Xenolay calculus repeat
 the known batch timeout and its DOCX is byte-identical to v28. The non-gb Word
 stories are unchanged from v28 (the only differing parts in Mathnote and the
 thesis are custom fidelity metadata).
+
+## 65. Raster tags keep source order and native counters use exact paged aliases
+
+Raster fallback preserves introspection tags so hidden semantic content remains
+queryable, but the old document-wide deferred queue appended those tags after
+all native content. That changed encounter order: an early citation inside a
+rotated or otherwise rasterized region became the final bibliography citation.
+Block and run-only lowering now drain only the tags produced by the child being
+lowered and splice them at that child's source position. Bookmark ranges start
+after the recovered tags, so the semantic stream is restored without widening a
+visible bookmark or disturbing hidden `SEQ` fields. Regressions cover both an
+inline transform and a true block raster, asserting the visible `[1]`/`[2]`
+citation results rather than bibliography text order alone.
+
+The remaining Appendix D numbering error had a separate cause. DOCX and paged
+realization assign different locations to synthesized headings and figures, so
+`query_count_before` could not resolve the DOCX end location and fell back to a
+page-granularity count. Native heading and figure mappers now register exact
+semantic-alias candidates. `DocxIntrospector` pairs the two realization streams
+by the existing stable source identity (attached source span plus element name)
+and occurrence ordinal, counted across every same-source element rather than
+candidate elements alone. This handles loops, detached/generated content,
+template helpers, and a rasterized occurrence before a native occurrence while
+leaving repeated header/footer locator-key aliases on their existing independent
+path. A source node reused in both page furniture and body is deliberately left
+on the conservative fallback because paged furniture repeats per page while
+DOCX stores one reusable story; skipping that ambiguous identity is safer than
+manufacturing an exact-looking but wrong body alias.
+
+The accepted north-star authority is
+`target/docx-public-corpus-focus-gb-semantic-alias-v37-final/`: exactly 164 pages
+against 164 at score `0.977748`, with package validation, LibreOffice conversion,
+visual policy, and
+the 2,326-region review round trip all passing. Delegated visual QA confirms the
+Appendix D body now reads `D.1` and `D.2`, figures run from `D.11` through the
+final MBC5 `D.15`, and all five diagrams remain sharp and intact on page 163.
+The bibliography remains on page 164 in the gold `[1]` through `[10]` order;
+representative in-body citations also retain their corrected values. Appendix
+B/C sentinels are unchanged, with no clipping, overlap, blank-page loss, or
+pagination shift. All 248 DOCX integration tests, 18 DOCX unit tests, 22
+round-trip tests, 65 PPTX tests, strict DOCX Clippy, and `git diff --check` pass.
+As in section 64, no executable focused Office WASM gate is discoverable in the
+repository, so this increment makes no new WASM claim.
+
+The final heterogeneous guard uses the exact accepted release binary (SHA-256
+`d5299126fd7c727ae93281633fb0fe2874d19b3807a07fcf0bdf74ae159bd21a`)
+under `target/docx-gb-semantic-alias-sentinel-v38-six/`. Package validation,
+LibreOffice conversion, and round-trip review pass 6/6, preserving 26,851
+enrolled regions. `gb-ctr` and the C++ guide retain exact page counts; Tura is
+within one page. The thesis, Xenolay calculus, and Mathnote retain their known
+visual-policy misses rather than acquiring a new compile, package, consumer, or
+round-trip regression.

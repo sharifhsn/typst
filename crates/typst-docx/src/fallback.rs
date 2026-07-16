@@ -222,6 +222,8 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         ));
         if let Some(cached) = self.overlay_cache.get(&key) {
             let cached = Arc::clone(cached);
+            self.real_alias_locations
+                .extend(cached.tags.iter().map(Tag::location));
             self.deferred_tags.extend(cached.tags.iter().cloned());
             self.record_content_decision(
                 content,
@@ -257,6 +259,11 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         }
         let mut tags = Vec::new();
         collect_frame_tags(&frame, &mut tags);
+        // Page overlays become reusable header stories in DOCX but are repeated
+        // once per page in paged layout. Mark their semantic locations as
+        // furniture aliases as well as deferring their tags, so exact body
+        // aliases never count overlay occurrences in source ordinals.
+        self.real_alias_locations.extend(tags.iter().map(Tag::location));
         self.deferred_tags.extend(tags.iter().cloned());
         let frame_text = frame_to_text(&frame);
         let Some(rendered) = raster::render_full_frame_to_png(frame, 2.0) else {

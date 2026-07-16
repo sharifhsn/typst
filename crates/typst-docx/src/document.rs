@@ -55,6 +55,7 @@ struct LoweredDocx {
     uses_math: bool,
     deferred_tags: Vec<Tag>,
     real_alias_locations: rustc_hash::FxHashSet<Location>,
+    real_semantic_alias_locations: rustc_hash::FxHashSet<Location>,
     toc_headings: Vec<TocHeading>,
     toc_figures: Vec<TocFigure>,
     fidelity_report: FidelityReport,
@@ -249,6 +250,7 @@ fn docx_document_impl(
         uses_math,
         deferred_tags,
         real_alias_locations,
+        real_semantic_alias_locations,
         toc_headings,
         toc_figures,
         mut fidelity_report,
@@ -416,6 +418,9 @@ fn docx_document_impl(
                 uses_math: ctx.uses_math,
                 deferred_tags: std::mem::take(&mut ctx.deferred_tags),
                 real_alias_locations: std::mem::take(&mut ctx.real_alias_locations),
+                real_semantic_alias_locations: std::mem::take(
+                    &mut ctx.real_semantic_alias_locations,
+                ),
                 toc_headings: std::mem::take(&mut ctx.toc_headings),
                 toc_figures: std::mem::take(&mut ctx.toc_figures),
                 fidelity_report: std::mem::take(&mut ctx.fidelity_report),
@@ -542,8 +547,12 @@ fn docx_document_impl(
     demote_unrepresentable_heading_booleans(&mut heading_styles, &mut body);
     apply_style_inheritance(&text_defaults, &heading_styles, &mut body);
 
-    let mut introspector =
-        DocxIntrospector::new(&tags, paged_introspector, real_alias_locations);
+    let mut introspector = DocxIntrospector::new(
+        &tags,
+        paged_introspector,
+        real_alias_locations,
+        real_semantic_alias_locations,
+    );
     introspector.set_anchors(crate::bookmark::anchors(&bookmarks));
     introspector.set_page_model(page_model, page, section_numberings);
 

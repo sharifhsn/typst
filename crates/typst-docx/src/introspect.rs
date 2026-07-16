@@ -84,6 +84,7 @@ impl DocxIntrospector {
         tags: &[(Tag, PagedPosition)],
         real: Option<Arc<typst_layout::PagedIntrospector>>,
         real_alias_candidates: FxHashSet<Location>,
+        real_semantic_alias_candidates: FxHashSet<Location>,
     ) -> DocxIntrospector {
         if std::env::var_os("DOCX_DEBUG_INTROSPECT").is_some() {
             let mut hist = std::collections::BTreeMap::new();
@@ -95,9 +96,63 @@ impl DocxIntrospector {
             eprintln!("INTROSPECT TAGS: {hist:?}");
         }
         let mut builder = ElementIntrospectorBuilder::<PagedPosition>::new();
-        let mut real_aliases = FxHashMap::default();
         for (tag, pos) in tags {
             builder.discover_tag(tag, *pos);
+        }
+        let elements = builder.finalize();
+        let mut real_aliases = FxHashMap::default();
+
+        // Target realizations assign different Locations to synthesized native
+        // elements. Pair headings and figures through their attached source
+        // span + element identity, with an occurrence ordinal for loops and
+        // template helpers that realize the same source node repeatedly. The
+        // ordinal advances across the full element stream, not only candidates,
+        // so a rasterized occurrence before a native one cannot shift counters.
+        if let Some(real) = &real {
+            // A source node reused in page furniture and body is ambiguous here:
+            // paged layout repeats furniture per page, while DOCX lowers one
+            // reusable story after the body. Do not manufacture a wrong body
+            // alias in that rare case; its existing conservative heuristic is
+            // safer. Furniture itself still uses the locator-key pass below.
+            let furniture_sources: FxHashSet<u128> = elements
+                .all()
+                .filter(|elem| {
+                    elem.location()
+                        .is_some_and(|loc| real_alias_candidates.contains(&loc))
+                })
+                .map(semantic_alias_source)
+                .collect();
+            let mut real_by_source: FxHashMap<u128, Vec<Location>> = FxHashMap::default();
+            for elem in real.elements().all() {
+                let source = semantic_alias_source(elem);
+                if !furniture_sources.contains(&source)
+                    && let Some(location) = elem.location()
+                {
+                    real_by_source.entry(source).or_default().push(location);
+                }
+            }
+
+            let mut ordinal_by_source: FxHashMap<u128, usize> = FxHashMap::default();
+            for elem in elements.all() {
+                let source = semantic_alias_source(elem);
+                let ordinal = ordinal_by_source.entry(source).or_default();
+                if let Some(location) = elem.location()
+                    && !furniture_sources.contains(&source)
+                    && real_semantic_alias_candidates.contains(&location)
+                    && real.position(location).is_none()
+                    && let Some(real_location) = real_by_source
+                        .get(&source)
+                        .and_then(|locations| locations.get(*ordinal))
+                {
+                    real_aliases.insert(location, *real_location);
+                }
+                *ordinal += 1;
+            }
+        }
+
+        // Repeated header/footer content already carries a locator key designed
+        // for measurement aliases. Retain that separate exact path.
+        for (tag, _) in tags {
             if let Some(real) = &real
                 && let Tag::End(loc, key, flags) = tag
                 && flags.introspectable
@@ -110,7 +165,7 @@ impl DocxIntrospector {
             }
         }
         DocxIntrospector {
-            elements: builder.finalize(),
+            elements,
             real,
             real_aliases,
             anchors: FxHashMap::default(),
@@ -181,6 +236,15 @@ impl DocxIntrospector {
             })
             .count()
     }
+}
+
+/// Cross-realization identity for exact semantic aliases.
+///
+/// Locations are deliberately excluded even for detached/generated content:
+/// they are target-specific, while the element kind plus occurrence ordinal
+/// disambiguates repeated generated headings and figures within one compile.
+fn semantic_alias_source(content: &Content) -> u128 {
+    typst_utils::hash128(&(content.span(), content.elem().name()))
 }
 
 impl Introspector for DocxIntrospector {

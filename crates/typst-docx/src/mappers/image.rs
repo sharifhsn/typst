@@ -210,6 +210,10 @@ pub fn figure(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Vec<Block>> {
+    if let Some(location) = elem.location() {
+        ctx.real_semantic_alias_locations.insert(location);
+    }
+
     let mut blocks: Vec<Block> = Vec::new();
 
     // Register a bookmark so cross-references to this figure resolve. We bracket

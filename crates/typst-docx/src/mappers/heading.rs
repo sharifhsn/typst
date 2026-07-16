@@ -25,6 +25,10 @@ pub fn heading(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Vec<Block>> {
+    if let Some(location) = elem.location() {
+        ctx.real_semantic_alias_locations.insert(location);
+    }
+
     // Absolute nesting level (folds offset + depth). Always correct, even after
     // synthesis sets `level` to `Custom`.
     let level = elem.resolve_level(styles).get();

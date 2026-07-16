@@ -743,7 +743,12 @@ fn handle_block(
     out: &mut Vec<Block>,
 ) -> SourceResult<()> {
     let block_start = out.len();
+    let deferred_before = ctx.deferred_tags.len();
     handle_block_inner(ctx, child, styles, out)?;
+    let local_tags: Vec<_> = ctx.deferred_tags.drain(deferred_before..).collect();
+    let local_tag_count = local_tags.len();
+    out.splice(block_start..block_start, local_tags.into_iter().map(Block::Tag));
+    let block_start = block_start + local_tag_count;
 
     // Bookmark a LABELED block (a numbered equation `$…$ <eq>`, a labeled list,
     // …) so a `@ref`/`#link` to it resolves to a real target. Headings and
