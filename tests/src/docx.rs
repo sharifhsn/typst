@@ -1148,6 +1148,101 @@ fn measured_table_row_height_does_not_double_count_cell_insets() {
 }
 
 #[test]
+fn tight_measured_table_uses_atomic_searchable_fallback() {
+    let compiled = compile_docx(
+        "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
+         #set text(size: 9pt)\n\
+         #set table(inset: (y: 3.5pt))\n\
+         #table(columns: 1, [A], [B], [C], [D], [E], [F])",
+        &[],
+    );
+    let p = text_parts(&compiled);
+    assert!(
+        element_fragments(&p["word/document.xml"], "tbl").is_empty(),
+        "a table that only Typst's tighter text metrics can fit must remain atomic"
+    );
+    assert!(p["word/document.xml"].contains("<w:drawing>"));
+    assert!(p["word/document.xml"].contains("<w:vanish/>"));
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::TightTableTypographyRasterFallback
+            && decision.representation == Representation::Raster
+    }));
+    assert_all_wellformed(&p);
+
+    let inline_text_wrappers = parts(
+        r#"#set page(width: 240pt, height: 110pt, margin: 10pt)
+#set text(size: 9pt)
+#set table(inset: (y: 3.5pt))
+#table(columns: 2, [A], [*Bold*], [B], [`raw`], [C], [#sym.arrow.r],
+  [D], [#box[E]], [E], [], [F], [])"#,
+    );
+    assert!(
+        element_fragments(&inline_text_wrappers["word/document.xml"], "tbl").is_empty(),
+        "single-line semantic text wrappers retain the same proven line-box bound"
+    );
+    assert_all_wellformed(&inline_text_wrappers);
+}
+
+#[test]
+fn tight_table_fallback_requires_proven_cell_metrics_and_single_page_extent() {
+    let local_small_text = parts(
+        "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
+         #set text(size: 9pt)\n\
+         #set table(inset: (y: 3.5pt))\n\
+         #table(columns: 1, ..range(6).map(i => text(5pt, str(i))))",
+    );
+    assert_eq!(element_fragments(&local_small_text["word/document.xml"], "tbl").len(), 1);
+
+    let multiline = parts(
+        "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
+         #set text(size: 9pt)\n\
+         #set table(inset: (y: 3.5pt))\n\
+         #table(columns: 1, [A #linebreak() B], [C], [D], [E], [F])",
+    );
+    assert_eq!(element_fragments(&multiline["word/document.xml"], "tbl").len(), 1);
+
+    let row_gutter = parts(
+        "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
+         #set text(size: 9pt)\n\
+         #table(columns: 1, inset: (y: 3.5pt), row-gutter: 5pt, \
+         [A], [B], [C], [D], [E], [F])",
+    );
+    assert_eq!(element_fragments(&row_gutter["word/document.xml"], "tbl").len(), 1);
+
+    let rich_cell = parts(
+        "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
+         #set text(size: 9pt)\n\
+         #set table(inset: (y: 3.5pt))\n\
+         #table(columns: 2, [A], [#rect(width: 1pt, height: 1pt)], \
+         [B], [], [C], [], [D], [], [E], [], [F], [])",
+    );
+    assert_eq!(element_fragments(&rich_cell["word/document.xml"], "tbl").len(), 1);
+
+    let raw_only = parts(
+        "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
+         #set text(size: 9pt)\n\
+         #set table(inset: (y: 3.5pt))\n\
+         #table(columns: 1, [`A`], [`B`], [`C`], [`D`], [`E`], [`F`])",
+    );
+    assert_eq!(element_fragments(&raw_only["word/document.xml"], "tbl").len(), 1);
+
+    let styled_box = parts(
+        "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
+         #set text(size: 9pt)\n\
+         #set table(inset: (y: 3.5pt))\n\
+         #table(columns: 2, [A], [#box(fill: red)[X]], \
+         [B], [], [C], [], [D], [], [E], [], [F], [])",
+    );
+    assert_eq!(element_fragments(&styled_box["word/document.xml"], "tbl").len(), 1);
+    assert_all_wellformed(&local_small_text);
+    assert_all_wellformed(&multiline);
+    assert_all_wellformed(&row_gutter);
+    assert_all_wellformed(&rich_cell);
+    assert_all_wellformed(&raw_only);
+    assert_all_wellformed(&styled_box);
+}
+
+#[test]
 fn centered_layout_grid_inset_uses_the_measured_row_box() {
     let row_height = |xml: &str| {
         xml.split("<w:trHeight w:val=\"")

@@ -2541,3 +2541,42 @@ calculus document passes when reproduced alone under
 its accepted v14 DOCX. All 240 DOCX integration tests, 18 DOCX unit tests, 22
 round-trip tests, 65 PPTX tests, strict DOCX Clippy, and the focused DOCX/PPTX
 WASM check pass.
+
+## 63. Tight measured semantic tables preserve authored pagination atomically
+
+Typst can fit dense single-line tables more tightly than Word because its row
+frames use the font's measured glyph edges, while Word's native table paragraphs
+reserve at least the nominal font size before adding authored cell insets. The
+previous native `w:tbl` path therefore split the four landscape memory-map tables
+across seven pages. Experiments with exact Word line and row heights retained the
+text layer but visibly clipped register labels, so clipping is not an acceptable
+editability trade.
+
+The table planner now proves this incompatibility before choosing the existing
+whole-region fallback. It requires complete measured row geometry; includes
+physical row gutters in the one-page extent; derives each row's largest effective
+font size through resolved style chains; and accepts only known single-line text
+leaves and layout-neutral wrappers. Multiline or block raw text, locally smaller
+text that Word can fit, images, equations, shapes, styled/clipped/sized boxes,
+unknown rich content, and tables whose measured extent exceeds one page all stay
+native. Inline raw text uses Typst's built-in `0.8em` show-set, and plain boxes
+reuse the same predicate as normal inline lowering. The fidelity manifest records
+the deliberate representation as `TightTableTypographyRasterFallback`; the
+rendered table retains hidden searchable text but intentionally loses native cell
+editing and structure.
+
+The accepted focused authority is
+`target/docx-public-corpus-focus-gb-tight-table-v27/`: 166 pages against 164,
+score `0.972087`, package validation, LibreOffice conversion, and the 2,326-region
+review round trip pass. This removes three pages from the live-footer v19
+authority and leaves the remaining two-page gap in Appendix D's explicit-column
+figure sizing. All 242 DOCX integration tests, 18 DOCX unit tests, 22 round-trip
+tests, 65 PPTX tests, strict DOCX Clippy, and the headless DOCX smoke validator
+pass.
+
+The heterogeneous guard passes package and review lanes 6/6 under
+`target/docx-gb-tight-table-sentinel-v28-six/`, with 26,851 enrolled regions.
+LibreOffice passes five documents in the batch. The slow Xenolay calculus
+document repeats its known batch-only timeout; its DOCX is byte-identical to the
+pre-refinement v23 sentinel, and the unchanged isolated authority documented in
+section 62 passes LibreOffice.

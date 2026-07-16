@@ -112,6 +112,10 @@ pub enum DecisionReason {
     /// A table/grid stayed native and editable, but its cell paint, border
     /// nuance, or track sizing cannot be reproduced exactly by Word.
     TableGeometryApproximation,
+    /// A measured semantic table fits its Typst page, but Word's minimum text
+    /// line boxes plus the authored cell insets cannot fit the same rows
+    /// without splitting or clipping, so the table is preserved atomically.
+    TightTableTypographyRasterFallback,
     /// Block-level layout used inside an inline-only context (commonly a
     /// full-cell hyperlink) was unwrapped to native runs. Text and link
     /// semantics survive, while block width, padding, and hit-area geometry do

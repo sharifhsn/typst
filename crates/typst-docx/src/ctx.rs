@@ -2145,7 +2145,7 @@ fn contains_visible_text(content: &Content) -> bool {
         .is_break()
 }
 
-fn box_is_plain(
+pub(crate) fn box_is_plain(
     elem: &typst_library::foundations::Packed<typst_library::layout::BoxElem>,
     styles: StyleChain,
 ) -> bool {

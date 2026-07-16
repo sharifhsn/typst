@@ -36,7 +36,7 @@ enum TablePlan<'a> {
     Native { grid: &'a CellGrid, measured: Option<MeasuredTableGeometry> },
     Approximate { grid: &'a CellGrid, measured: Option<MeasuredTableGeometry> },
     Empty,
-    Raster,
+    Raster(DecisionReason),
 }
 
 struct MeasuredTableGeometry {
@@ -74,7 +74,13 @@ pub fn table(
     let source = elem.clone().pack();
     execute_table_plan(
         &source,
-        preflight_table(&source, elem.grid.as_deref(), TableOrigin::SemanticTable, ctx),
+        preflight_table(
+            &source,
+            elem.grid.as_deref(),
+            TableOrigin::SemanticTable,
+            styles,
+            ctx,
+        ),
         TableOrigin::SemanticTable,
         styles,
         ctx,
@@ -94,7 +100,13 @@ pub fn grid(
     let source = elem.clone().pack();
     execute_table_plan(
         &source,
-        preflight_table(&source, elem.grid.as_deref(), TableOrigin::LayoutGrid, ctx),
+        preflight_table(
+            &source,
+            elem.grid.as_deref(),
+            TableOrigin::LayoutGrid,
+            styles,
+            ctx,
+        ),
         TableOrigin::LayoutGrid,
         styles,
         ctx,
@@ -105,18 +117,181 @@ fn preflight_table<'a>(
     source: &Content,
     grid: Option<&'a CellGrid>,
     origin: TableOrigin,
+    styles: StyleChain,
     ctx: &DocxCtx,
 ) -> TablePlan<'a> {
-    let Some(grid) = grid else { return TablePlan::Raster };
+    let Some(grid) = grid else {
+        return TablePlan::Raster(DecisionReason::RasterFallback);
+    };
     if grid.non_gutter_column_count() == 0 || grid.entries.is_empty() {
         return TablePlan::Empty;
     }
     let measured = measured_table_geometry(source, grid, origin, ctx);
+    if origin == TableOrigin::SemanticTable
+        && measured.as_ref().is_some_and(|geometry| {
+            measured_table_needs_tight_typography_fallback(grid, geometry, styles, ctx)
+        })
+    {
+        return TablePlan::Raster(DecisionReason::TightTableTypographyRasterFallback);
+    }
     if table_geometry_is_approximate(grid, measured.as_ref()) {
         TablePlan::Approximate { grid, measured }
     } else {
         TablePlan::Native { grid, measured }
     }
+}
+
+/// Whether Typst's measured table fits the page but Word's native text model
+/// provably cannot retain that height without clipping or shrinking glyphs.
+///
+/// Typst measures a text row from the font's actual frame edges. Word gives an
+/// unconfigured table paragraph at least the nominal font size, then adds the
+/// authored cell margins. Dense register/opcode maps can therefore fit exactly
+/// in Typst while a native `w:tbl` must either split across pages or use an
+/// `exact` row/line height that clips glyphs. Preserve those tables atomically
+/// with the existing rendered fallback (and hidden searchable text) only when
+/// the measured whole fits one page and this lower bound exceeds it.
+fn measured_table_needs_tight_typography_fallback(
+    grid: &CellGrid,
+    measured: &MeasuredTableGeometry,
+    styles: StyleChain,
+    ctx: &DocxCtx,
+) -> bool {
+    let ncols = grid.non_gutter_column_count();
+    if ncols == 0 || measured.row_heights.len() * ncols != grid.entries.len() {
+        return false;
+    }
+    let Some(mut measured_total) = measured
+        .row_heights
+        .iter()
+        .try_fold(0_i32, |sum, height| Some(sum.saturating_add(height.as_ref()?.val)))
+    else {
+        return false;
+    };
+    for y in 0..measured.row_heights.len().saturating_sub(1) {
+        if let Some(gutter) = row_gutter_height(grid, y, ctx.raster_height) {
+            measured_total = measured_total.saturating_add(gutter.val);
+        }
+    }
+    let page_height = crate::props::abs_to_twip(ctx.available_height).max(1);
+    if measured_total > page_height {
+        return false;
+    }
+
+    let has_column_gutter = has_nonzero_column_gutter(grid);
+    let mut native_minimum = 0_i32;
+    for (y, height) in measured.row_heights.iter().enumerate() {
+        let height = height.unwrap();
+        let Some(nominal_line) = grid.entries[y * ncols..(y + 1) * ncols]
+            .iter()
+            .filter_map(Entry::as_cell)
+            .map(|cell| single_line_nominal_text_dxa(&cell.body, styles))
+            .try_fold(0_i32, |maximum, size| Some(maximum.max(size?)))
+        else {
+            return false;
+        };
+        let minimum = if nominal_line > 0 {
+            nominal_line.saturating_add(row_vertical_inset(
+                grid,
+                y,
+                &measured.columns_dxa,
+                has_column_gutter,
+                styles,
+                height.val,
+            ))
+        } else {
+            height.val
+        };
+        native_minimum = native_minimum.saturating_add(height.val.max(minimum));
+        if y + 1 < measured.row_heights.len()
+            && let Some(gutter) = row_gutter_height(grid, y, ctx.raster_height)
+        {
+            native_minimum = native_minimum.saturating_add(gutter.val);
+        }
+    }
+
+    native_minimum > page_height
+}
+
+/// Returns the largest effective nominal font size in a cell whose material
+/// text is provably single-line. Unknown rich containers deliberately return
+/// `None`: the compatibility fallback is an optimization, never permission to
+/// flatten a table whose Word line-box lower bound is uncertain.
+fn single_line_nominal_text_dxa(content: &Content, styles: StyleChain) -> Option<i32> {
+    use typst_library::foundations::{
+        SequenceElem, ShowSet, Smart, StyledElem, SymbolElem,
+    };
+    use typst_library::introspection::TagElem;
+    use typst_library::layout::{BoxElem, Sizing};
+    use typst_library::model::StrongElem;
+    use typst_library::text::{RawElem, SpaceElem, TextElem};
+
+    if let Some(cell) = content.to_packed::<TableCell>() {
+        return single_line_nominal_text_dxa(&cell.body, styles);
+    }
+    if let Some(cell) = content.to_packed::<GridCell>() {
+        return single_line_nominal_text_dxa(&cell.body, styles);
+    }
+    if let Some(styled) = content.to_packed::<StyledElem>() {
+        return single_line_nominal_text_dxa(&styled.child, styles.chain(&styled.styles));
+    }
+    if let Some(sequence) = content.to_packed::<SequenceElem>() {
+        return sequence.children.iter().try_fold(0_i32, |maximum, child| {
+            Some(maximum.max(single_line_nominal_text_dxa(child, styles)?))
+        });
+    }
+    if let Some(strong) = content.to_packed::<StrongElem>() {
+        return single_line_nominal_text_dxa(&strong.body, styles);
+    }
+    if let Some(text) = content.to_packed::<TextElem>() {
+        if text.text.contains('\n') {
+            return None;
+        }
+        return Some(if text.text.is_empty() {
+            0
+        } else {
+            crate::props::abs_to_twip(styles.resolve(TextElem::size)).max(1)
+        });
+    }
+    if let Some(symbol) = content.to_packed::<SymbolElem>() {
+        if symbol.text.contains('\n') {
+            return None;
+        }
+        return Some(if symbol.text.is_empty() {
+            0
+        } else {
+            crate::props::abs_to_twip(styles.resolve(TextElem::size)).max(1)
+        });
+    }
+    if let Some(raw) = content.to_packed::<RawElem>() {
+        if raw.block.get(styles) || content.plain_text().contains('\n') {
+            return None;
+        }
+        let raw_styles = raw.show_set(styles);
+        let raw_styles = styles.chain(&raw_styles);
+        return Some(if content.plain_text().is_empty() {
+            0
+        } else {
+            crate::props::abs_to_twip(raw_styles.resolve(TextElem::size)).max(1)
+        });
+    }
+    if let Some(boxed) = content.to_packed::<BoxElem>() {
+        if boxed.width.get(styles) != Sizing::Auto
+            || boxed.height.get(styles) != Smart::Auto
+            || !boxed.inset.resolve(styles).unwrap_or_default().is_zero()
+            || !crate::ctx::box_is_plain(boxed, styles)
+        {
+            return None;
+        }
+        return single_line_nominal_text_dxa(
+            boxed.body.get_ref(styles).as_ref()?,
+            styles,
+        );
+    }
+    if content.is::<SpaceElem>() || content.is::<TagElem>() {
+        return Some(0);
+    }
+    None
 }
 
 fn execute_table_plan(
@@ -148,8 +323,10 @@ fn execute_table_plan(
             cellgrid(grid, styles, ctx, measured.as_ref(), origin)
         }
         TablePlan::Empty => Ok(Vec::new()),
-        TablePlan::Raster => {
-            let runs = crate::mappers::image::laid_out_fallback(source, styles, ctx)?;
+        TablePlan::Raster(reason) => {
+            let runs = crate::mappers::image::laid_out_fallback_with_reason(
+                source, styles, ctx, reason,
+            )?;
             if runs.is_empty() {
                 ctx.record_content_decision(
                     source,
