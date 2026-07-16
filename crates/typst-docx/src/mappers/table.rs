@@ -298,7 +298,7 @@ fn cellgrid(
                     height.val,
                 )
             });
-        let emitted_row_height = measured_row_height
+        let mut emitted_row_height = measured_row_height
             .map(|height| RowHeight {
                 // Typst's physical cell region already includes its vertical
                 // inset. Word adds `w:tcMar` outside the `w:trHeight` minimum,
@@ -415,6 +415,19 @@ fn cellgrid(
             }
         }
 
+        // A physically measured row with no layout-bearing content cannot clip
+        // text, math, drawings, fields, or authored breaks. Preserve its exact
+        // Typst height instead of letting Word grow the mandatory empty cell
+        // paragraphs to the consumer's default line box. This is especially
+        // important for dense maps with intentionally blank/shaded rows, but is
+        // provenance- and content-based rather than tied to any document.
+        if measured_row_height.is_some()
+            && row_is_layout_empty(&cells)
+            && let Some(height) = emitted_row_height.as_mut()
+        {
+            height.exact = true;
+        }
+
         rows.push(Row {
             header: is_header_row(y),
             cant_split: row_cant_split(grid, y),
@@ -436,6 +449,35 @@ fn cellgrid(
     };
 
     Ok(vec![Block::Table(tbl)])
+}
+
+fn row_is_layout_empty(cells: &[Cell]) -> bool {
+    cells.iter().all(|cell| {
+        cell.blocks.iter().all(|block| match block {
+            Block::Para(para) => para.content.iter().all(para_child_is_layout_empty),
+            Block::Tag(_) => true,
+            Block::FlowSpace { dxa } => *dxa == 0,
+            Block::Table(_) | Block::Toc(_) | Block::SectionBreak(_) => false,
+        })
+    })
+}
+
+fn para_child_is_layout_empty(child: &ParaChild) -> bool {
+    match child {
+        ParaChild::Run(Run::Text { props, text }) => {
+            props.vanish || text.trim().is_empty()
+        }
+        ParaChild::Hyperlink { runs, .. } => runs.iter().all(|run| {
+            matches!(
+                run,
+                Run::Text { props, text } if props.vanish || text.trim().is_empty()
+            )
+        }),
+        ParaChild::BookmarkStart { .. }
+        | ParaChild::BookmarkEnd { .. }
+        | ParaChild::Tag(_) => true,
+        ParaChild::Run(_) | ParaChild::OmmlPara(_) => false,
+    }
 }
 
 /// A centered layout-grid cell already encodes equal top and bottom inset in
@@ -1427,5 +1469,24 @@ mod tests {
         trim_trailing_structural_breaks(&mut authored_tail);
         let Block::Para(para) = &authored_tail[0] else { unreachable!() };
         assert_eq!(para.content.len(), 3);
+    }
+
+    #[test]
+    fn exact_empty_rows_exclude_every_layout_bearing_child() {
+        assert!(para_child_is_layout_empty(&text_run("   ")));
+
+        let hidden = RunProps { vanish: true, ..RunProps::default() };
+        assert!(para_child_is_layout_empty(&ParaChild::Run(Run::Text {
+            props: hidden,
+            text: "searchable fallback".into(),
+        })));
+
+        assert!(!para_child_is_layout_empty(&text_run("visible")));
+        assert!(!para_child_is_layout_empty(&ParaChild::Run(Run::Break {
+            kind: BreakKind::Authored,
+        })));
+        assert!(!para_child_is_layout_empty(&ParaChild::OmmlPara(
+            "<m:oMathPara/>".into(),
+        )));
     }
 }

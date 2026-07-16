@@ -227,6 +227,13 @@ pub fn figure(
             let props = ParaProps {
                 style: Some(CAPTION_STYLE.into()),
                 jc: Some(Jc::Center),
+                // A caption above its figure must not be stranded at the foot
+                // of a page. Word has no figure-group primitive for flowing
+                // content, but `keepNext` gives the same first-line guarantee:
+                // the caption and the first paragraph/row of the body move as
+                // a unit. Bottom captions naturally follow the body and must
+                // not pull whatever comes after the figure onto the page.
+                keep_next: position == OuterVAlignment::Top,
                 ..Default::default()
             };
             let para = Para {

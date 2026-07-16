@@ -171,11 +171,38 @@ pub fn build(
     // are available when editing, matching a Word-authored package.
     w.raw(r#"<w:style w:type="character" w:styleId="FollowedHyperlink"><w:name w:val="FollowedHyperlink"/><w:basedOn w:val="DefaultParagraphFont"/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/><w:rPr><w:color w:val="954F72"/><w:u w:val="single"/></w:rPr></w:style>"#);
     w.raw(r#"<w:style w:type="character" w:styleId="PageNumber"><w:name w:val="page number"/><w:basedOn w:val="DefaultParagraphFont"/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/></w:style>"#);
-    // TOC1..9.
+    // TOC1..9. Word's TOC is a hierarchy, not nine aliases for Normal: indent
+    // each nested level by one em at the 10pt document default, emphasize the
+    // two structural levels, and give top-level groups breathing room. Entry
+    // paragraphs carry their own right-aligned leader tab because its position
+    // depends on section geometry.
     for level in 1..=9 {
         let id = format!("TOC{level}");
         let name = format!("toc {level}");
-        style(&mut w, &id, &name, Some("Normal"), false, false);
+        w.open("w:style")
+            .attr("w:type", "paragraph")
+            .attr("w:styleId", &id)
+            .start_children();
+        w.open("w:name").attr(xml::W_VAL, &name).empty();
+        w.open("w:basedOn").attr(xml::W_VAL, "Normal").empty();
+        w.open("w:uiPriority").attr(xml::W_VAL, "39").empty();
+        w.open("w:unhideWhenUsed").empty();
+        w.open(xml::W_PPR).start_children();
+        if level == 1 {
+            w.open(xml::W_SPACING).attr("w:before", "400").empty();
+        } else {
+            w.open("w:ind")
+                .attr("w:left", &((level - 1) * 200).to_string())
+                .empty();
+        }
+        w.close();
+        if level <= 2 {
+            w.open(xml::W_RPR).start_children();
+            w.open("w:b").empty();
+            w.open("w:bCs").empty();
+            w.close();
+        }
+        w.close();
     }
     // Bibliography.
     style(&mut w, "Bibliography", "Bibliography", Some("Normal"), false, false);

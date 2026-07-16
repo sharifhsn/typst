@@ -2458,3 +2458,47 @@ delegated comparison found all 263 aligned pages text-identical after footer
 normalization, with unchanged drawing/hidden-run counts and no merge or clip.
 Its score rises from `0.975850` to `0.975886` and semantic coverage remains
 `0.996455`.
+
+## 61. Measured empty rows and semantic outlines preserve document structure
+
+Word requires a paragraph in every table cell and normally gives that paragraph
+the consumer's default line box. In physically measured grids, wholly empty or
+shaded separator rows therefore grew beyond their Typst height and amplified
+pagination drift. Measured rows now become exact only when every cell is proven
+free of visible text, math, drawings, fields, authored breaks, nested tables, and
+nonzero flow space. Hidden fallback text and bookmarks remain layout-neutral.
+Content-bearing rows retain the safer minimum-height policy: delegated QA
+rejected exact 14pt and 15pt experiments because LibreOffice visually clipped
+`WAV00`–`WAV15` and `HDMA1`–`HDMA5` despite retaining them in the text layer.
+
+Top-position figure captions also carry Word's `keepNext` property so they
+cannot be stranded from the first row or paragraph of their body during later
+editing. This is a structural reflow guarantee; the accepted render is
+pixel-identical at the known PPU and MBC1 register sites.
+
+The previous TOC fallback was all-or-nothing: as soon as one heading reached the
+native mapper, custom-shown Part and Chapter headings disappeared. Each outline
+now retains the exact semantic entry stream selected by Typst, merges native
+bookmark anchors back by source identity, and treats `depth: none` as all nine
+OOXML outline levels. Physical page caches are captured before DOCX lowering
+assigns new locations. TOC styles now expose the hierarchy with bold structural
+levels, one-em nested indentation, top-level spacing, dot leaders, and a common
+right-aligned page column.
+
+The accepted frozen `gb-ctr` artifact is
+`target/docx-public-corpus-focus-gb-toc-final-v13/`: 169 pages against 164,
+score `0.971398`, package validation, LibreOffice conversion, and the unchanged
+2,513-region review round trip all pass. Delegated visual QA counted exactly 187
+TOC rows across pages 5–8 and matched all 187 visible page values to the Typst
+reference, including Parts I–IV, Chapters 1–23, Appendices A–D, both D.1/D.2
+chip entries, and the bibliography. Every non-TOC page remains pixel-identical
+to the preceding accepted body, and memory-table separators and caption sites
+remain unclipped and attached. The contextual footer still repeats its sampled
+page-1 value; live explicit `counter(page).display()` furniture remains a
+separate architecture gap.
+
+The established heterogeneous guard passes package, LibreOffice, and review
+lanes 6/6 under `target/docx-gb-toc-sentinel-v14-six/`; all 27,038 enrolled
+review regions across the five eligible documents remain unchanged. All 236
+DOCX integration tests, 18 DOCX unit tests, 22 round-trip tests, 65 PPTX tests,
+strict DOCX Clippy, and the focused DOCX/PPTX WASM check pass.

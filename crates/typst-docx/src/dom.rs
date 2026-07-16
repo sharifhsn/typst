@@ -244,6 +244,10 @@ pub struct Toc {
     /// Caption category (`\c "Figure"` / `"Table"` / …) to populate from. `Some`
     /// marks a list of figures/tables.
     pub caption_category: Option<EcoString>,
+    /// The exact semantic entries selected by this Typst outline. These are
+    /// merged with native heading records after conversion so custom show
+    /// rules cannot remove entries or broaden a filtered outline.
+    pub semantic_headings: Vec<TocHeading>,
     /// Right tab position (twips) for the dot leader + page number.
     pub tab_pos: i32,
     /// Baked entries, filled in a post-conversion pass from the headings/figures
@@ -254,9 +258,16 @@ pub struct Toc {
 
 /// A heading recorded during conversion, used to populate the table of contents
 /// once every heading's real bookmark is known.
+#[derive(Clone)]
 pub struct TocHeading {
     pub level: usize,
     pub location: Option<Location>,
+    /// Stable source identity across semantic introspection and native
+    /// conversion, whose locators may assign different runtime locations.
+    pub source_span: Span,
+    /// Physical page captured from the semantic outline target before DOCX
+    /// lowering assigns its own locations.
+    pub page_text: Option<EcoString>,
     /// The heading's bookmark name, when it emitted one (else a plain entry).
     pub anchor: Option<EcoString>,
     pub text: EcoString,

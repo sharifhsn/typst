@@ -37,9 +37,10 @@ use crate::report::{
     SuppressedKind,
 };
 
-/// The default outline depth used for the `\o "1-N"` switch when the outline
-/// does not constrain `depth`. Word's "Automatic Table" uses `1-3`; we match it.
-const DEFAULT_TOC_DEPTH: usize = 3;
+/// The OOXML maximum used for the `\o "1-N"` switch when Typst's outline does
+/// not constrain `depth`. Typst's `depth: none` includes every level, so Word's
+/// UI default of three is not an equivalent fallback.
+const DEFAULT_TOC_DEPTH: usize = 9;
 
 pub fn outline(
     elem: &Packed<OutlineElem>,
@@ -86,6 +87,38 @@ pub fn outline(
     let instr = toc_instruction(elem, styles);
 
     let caption_category = toc_category(elem, styles);
+    let semantic_headings = if caption_category.is_none() {
+        elem.realize_flat(ctx.engine(), styles)?
+            .into_iter()
+            .filter_map(|entry| {
+                let heading = entry.element.to_packed::<HeadingElem>()?;
+                let mut text = String::new();
+                if let Some(numbers) = &heading.numbers
+                    && !numbers.is_empty()
+                {
+                    text.push_str(numbers);
+                    text.push(' ');
+                }
+                text.push_str(&heading.body.plain_text());
+                (!text.is_empty()).then(|| TocHeading {
+                    level: entry.level.get(),
+                    location: heading.location(),
+                    source_span: heading.span(),
+                    page_text: heading.location().map(|location| {
+                        location
+                            .page(ctx.engine(), heading.span())
+                            .get()
+                            .to_string()
+                            .into()
+                    }),
+                    anchor: None,
+                    text: text.into(),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let depth = caption_category.is_none().then(|| toc_depth(elem, styles));
     // Right-tab position (page content width, in twips) for the dot leader.
     let tab_pos = ctx.available_width_dxa();
@@ -102,6 +135,7 @@ pub fn outline(
         mode: FieldMode::Live,
         depth,
         caption_category,
+        semantic_headings,
         tab_pos,
         entries: Vec::new(),
         fallback,
@@ -126,14 +160,13 @@ pub(crate) struct TocPlanning<'a, 'e> {
 pub(crate) fn fill_tocs(
     blocks: &mut [Block],
     recorded: &[TocHeading],
-    fallback: &[TocHeading],
     figures: &[TocFigure],
     planning: &mut TocPlanning<'_, '_>,
 ) {
-    let headings = if recorded.is_empty() { fallback } else { recorded };
     for block in blocks.iter_mut() {
         let Block::Toc(toc) = block else { continue };
         if let Some(depth) = toc.depth {
+            let headings = merge_toc_headings(recorded, &toc.semantic_headings);
             let selected: Vec<_> = headings.iter().filter(|h| h.level <= depth).collect();
             toc.mode = if selected.iter().all(|h| h.anchor.is_some()) {
                 FieldMode::Live
@@ -143,12 +176,17 @@ pub(crate) fn fill_tocs(
             toc.entries = selected
                 .iter()
                 .map(|h| {
-                    let (page_text, cache_status) = cached_page_text(
-                        planning.engine,
-                        planning.styles,
-                        h.location,
-                        planning.fidelity_report,
-                        planning.snapshot,
+                    let (page_text, cache_status) = h.page_text.clone().map_or_else(
+                        || {
+                            cached_page_text(
+                                planning.engine,
+                                planning.styles,
+                                h.location,
+                                planning.fidelity_report,
+                                planning.snapshot,
+                            )
+                        },
+                        |text| (text, FieldCacheStatus::Resolved),
                     );
                     entry_para(
                         h.level,
@@ -192,6 +230,48 @@ pub(crate) fn fill_tocs(
     }
 }
 
+/// Merges the introspector's complete, document-ordered semantic heading stream
+/// with headings that reached the native mapper. Native records contribute live
+/// bookmark anchors; introspected records retain headings transformed away by
+/// custom show rules. Matching by location avoids duplicating native headings.
+fn merge_toc_headings(
+    recorded: &[TocHeading],
+    introspected: &[TocHeading],
+) -> Vec<TocHeading> {
+    let mut native: Vec<Option<TocHeading>> =
+        recorded.iter().cloned().map(Some).collect();
+    let mut merged = Vec::with_capacity(recorded.len().max(introspected.len()));
+
+    for semantic in introspected {
+        let matching = native.iter().position(|candidate| {
+            let Some(candidate) = candidate else { return false };
+            (!semantic.source_span.is_detached()
+                && semantic.source_span == candidate.source_span)
+                || match semantic.location {
+                    Some(location) => candidate.location == Some(location),
+                    None => {
+                        candidate.location.is_none()
+                            && candidate.level == semantic.level
+                            && candidate.text == semantic.text
+                    }
+                }
+        });
+        if let Some(index) = matching {
+            let native = native[index].take().expect("matched native heading");
+            let mut semantic = semantic.clone();
+            semantic.anchor = native.anchor;
+            merged.push(semantic);
+        } else {
+            merged.push(semantic.clone());
+        }
+    }
+
+    // A native record should normally also be introspectable. Preserve any
+    // exceptional records rather than dropping a live heading from the TOC.
+    merged.extend(native.into_iter().flatten());
+    merged
+}
+
 /// Builds one `TOC{level}` entry paragraph: the text as a hyperlink to its
 /// bookmark (when it has one), a right tab with a dot leader, and a `PAGEREF`
 /// field whose page number the consumer fills in.
@@ -222,6 +302,15 @@ fn entry_para(
             display: FieldDisplay::Visible,
             cache_status,
         })));
+    } else {
+        // Custom show rules can consume the visible heading paragraph, leaving
+        // no Word bookmark for a live PAGEREF. The semantic outline still has
+        // a resolved Typst page counter: bake that value so the cached TOC is
+        // complete instead of ending the leader with a blank page column.
+        content.push(ParaChild::Run(Run::Text {
+            props: RunProps::default(),
+            text: page_text,
+        }));
     }
     Para {
         props: ParaProps {
@@ -424,5 +513,48 @@ fn capitalize(name: &str) -> EcoString {
             out.into()
         }
         None => EcoString::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_toc_headings;
+    use crate::dom::TocHeading;
+    use typst_library::introspection::Location;
+
+    fn heading(
+        level: usize,
+        location: u128,
+        anchor: Option<&str>,
+        text: &str,
+    ) -> TocHeading {
+        TocHeading {
+            level,
+            location: Some(Location::new(location)),
+            source_span: typst_syntax::Span::detached(),
+            page_text: None,
+            anchor: anchor.map(Into::into),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn semantic_toc_stream_fills_custom_shown_gaps_without_native_duplicates() {
+        let recorded = vec![heading(2, 2, Some("native_b"), "B")];
+        let introspected = vec![
+            heading(1, 1, None, "A"),
+            heading(2, 2, None, "B"),
+            heading(3, 3, None, "C"),
+        ];
+
+        let merged = merge_toc_headings(&recorded, &introspected);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(
+            merged.iter().map(|h| h.text.as_str()).collect::<Vec<_>>(),
+            ["A", "B", "C"]
+        );
+        assert_eq!(merged[1].anchor.as_deref(), Some("native_b"));
+        assert!(merged[0].anchor.is_none());
+        assert!(merged[2].anchor.is_none());
     }
 }

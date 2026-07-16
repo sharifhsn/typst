@@ -110,6 +110,8 @@ pub fn heading(
             ctx.toc_headings.push(crate::dom::TocHeading {
                 level,
                 location: elem.location(),
+                source_span: elem.span(),
+                page_text: None,
                 anchor: bookmark.map(|(_, name)| name),
                 text: text.into(),
             });

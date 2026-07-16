@@ -7,10 +7,10 @@ use std::sync::Arc;
 use typst_library::World;
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
-use typst_library::foundations::{Content, NativeElement, Selector, StyleChain};
+use typst_library::foundations::{Content, StyleChain};
 use typst_library::introspection::{Introspector, Location, Locator, PagedPosition, Tag};
 use typst_library::layout::Abs;
-use typst_library::model::{DocumentInfo, HeadingElem};
+use typst_library::model::DocumentInfo;
 use typst_library::routines::{Arenas, RealizationKind};
 use typst_library::text::{
     FontBook, FontInfo, FontStretch, FontStyle, FontVariant, FontWeight,
@@ -455,41 +455,6 @@ fn docx_document_impl(
     let word_sources =
         crate::bibliography::map_entries(&export_snapshot.bibliography_source_entries());
 
-    // Fallback heading list, for documents whose headings are show-ruled or
-    // rasterized and so never reach the heading mapper (nothing recorded): query
-    // the introspector, which still holds every heading. These entries have no
-    // bookmark to link to, so they are plain text (but the titles still show).
-    let toc_fallback: Vec<TocHeading> = if toc_headings.is_empty() {
-        let introspector = *engine.introspector.access(
-            "list headings for a table of contents whose headings were not natively converted",
-        );
-        introspector
-            .query(&Selector::Elem(HeadingElem::ELEM, None))
-            .iter()
-            .filter_map(|c| c.to_packed::<HeadingElem>())
-            .filter(|h| h.outlined.get(styles))
-            .filter_map(|h| {
-                let level = h.resolve_level(styles).get();
-                let mut text = String::new();
-                if let Some(numbers) = &h.numbers
-                    && !numbers.is_empty()
-                {
-                    text.push_str(numbers);
-                    text.push(' ');
-                }
-                text.push_str(&h.body.plain_text());
-                (!text.is_empty()).then(|| TocHeading {
-                    level,
-                    location: h.location(),
-                    anchor: None,
-                    text: text.into(),
-                })
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
     // Now that every heading/figure's real bookmark is known, populate the
     // table(s) of contents and list(s) of figures in document order, across all
     // sections.
@@ -502,7 +467,6 @@ fn docx_document_impl(
     crate::mappers::outline::fill_tocs(
         &mut body,
         &toc_headings,
-        &toc_fallback,
         &toc_figures,
         &mut toc_planning,
     );
