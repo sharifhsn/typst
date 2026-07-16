@@ -44,8 +44,8 @@ use typst_ooxml_core::media;
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Anchor, AnchorPos, AnchorWrap, Block, Drawing, Field, FieldCacheStatus, FieldDisplay,
-    FieldMode, Jc, Para, ParaChild, ParaProps, Run, RunProps, TextBoxWrap,
+    Anchor, AnchorPos, AnchorWrap, Block, BreakKind, Drawing, Field, FieldCacheStatus,
+    FieldDisplay, FieldMode, Jc, Para, ParaChild, ParaProps, Run, RunProps, TextBoxWrap,
 };
 use crate::report::{DecisionReason, LossSet, Representation};
 
@@ -285,7 +285,31 @@ pub fn figure(
         ctx.suppress_text_box = true;
         let blocks = ctx.blocks(&elem.body, styles);
         ctx.suppress_text_box = saved;
-        let mut body_blocks = blocks?;
+        let body_blocks = blocks?;
+        // An unshapeable body (for example block raw text whose explicitly
+        // requested font is unavailable with fallback disabled) can lower to a
+        // default paragraph containing only generated structural breaks. Paged
+        // layout gives that absent body zero height; retaining those Word line
+        // breaks can orphan a bottom caption on an otherwise blank page.
+        // Preserve any visible content, authored line break, or authored
+        // formatting, but remove this pure lowering placeholder before
+        // figure/caption assembly.
+        let mut cleaned = Vec::with_capacity(body_blocks.len());
+        for block in body_blocks {
+            match block {
+                Block::Para(para) if figure_body_para_is_placeholder(&para) => {
+                    cleaned.extend(para.content.into_iter().filter_map(|child| {
+                        if let ParaChild::Tag(tag) = child {
+                            Some(Block::Tag(tag))
+                        } else {
+                            None
+                        }
+                    }));
+                }
+                block => cleaned.push(block),
+            }
+        }
+        let mut body_blocks = cleaned;
         for block in &mut body_blocks {
             if let Block::Para(para) = block
                 && para.props.jc.is_none()
@@ -316,6 +340,35 @@ pub fn figure(
     }
 
     Ok(blocks)
+}
+
+/// Whether a figure-body paragraph carries only non-visual introspection tags
+/// and alignment/provenance scaffolding, with no authored layout to preserve.
+fn figure_body_para_is_placeholder(para: &Para) -> bool {
+    if !para.content.iter().all(|child| {
+        matches!(
+            child,
+            ParaChild::Tag(_)
+                | ParaChild::Run(Run::Break { kind: BreakKind::Structural })
+        )
+    }) {
+        return false;
+    }
+    let props = &para.props;
+    props.style.is_none()
+        && !props.keep_next
+        && !props.page_break_before
+        && !props.keep_lines
+        && props.num.is_none()
+        && !props.suppress_line_numbers
+        && !props.bidi
+        && props.spacing.is_none()
+        && props.ind.is_none()
+        && !props.contextual_spacing
+        && props.outline_lvl.is_none()
+        && props.tabs.is_empty()
+        && props.shd_fill.is_none()
+        && props.pbdr.is_none()
 }
 
 /// Lowers a STANDALONE [`FigureCaption`] — one that reached the dispatch

@@ -2721,3 +2721,50 @@ LibreOffice passes five documents; Xenolay calculus repeats its known batch-only
 164/164 at `0.977892`; Tura remains within one page and the C++ guide exact. The
 thesis and Mathnote retain their pre-existing visual-policy misses, with no new
 compile, package, or review regression.
+
+## 67. Generated figure-body scaffolding no longer orphans bottom captions
+
+The next full-book visual pass found two near-empty caption pages: Listings 13.1
+and 14.2 followed block `raw` bodies whose explicitly requested font was missing
+with fallback disabled. The absent glyphs left paragraphs containing only 14
+and 6 detached, exporter-generated structural line breaks plus introspection
+tags. Word gave those fallback breaks physical height and stranded each bottom
+caption on the next page, even though the corresponding Typst layout had no
+visible body.
+
+Figure lowering now removes a body paragraph only when every child is either an
+introspection tag or a `BreakKind::Structural` fallback and the paragraph has no
+meaningful authored layout properties. Tags are preserved in order as block
+tags, so the figure bookmark relocates onto the surviving caption. Visible
+runs, authored `#linebreak()` (`BreakKind::Authored`), page/keep properties,
+numbering, spacing, indentation, tabs, shading, and borders all retain the
+paragraph. Two package regressions cover both sides: a multiline unshapeable raw
+body loses its phantom paragraph without losing the caption/bookmark, while an
+authored empty figure-body line break remains present.
+
+A keep-with-next alternative was tested and rejected under
+`target/docx-public-corpus-focus-gb-bottom-caption-keep-v46/`. It retained the
+164-page count and scored `0.977886`, but delegated visual QA still found
+Listing 13.1 isolated on page 139 and Listing 14.2 orphaned on page 142. Exact
+page count and the scalar score were therefore not accepted as authority.
+
+The accepted focused authority is
+`target/docx-public-corpus-focus-gb-caption-structural-v45/`: package,
+LibreOffice, visual-policy, and the unchanged 2,326-region round trip pass.
+Delegated visual QA confirms both captions now appear on the same pages as the
+Typst reference (Listing 13.1 on page 138 and Listing 14.2 on page 141), Chapters
+14 and 15 begin on pages 139 and 142 in both, and no content is lost. The DOCX
+has 163 pages versus the reference's 164 because the complete Appendix D and
+bibliography occupy pages 162-163 instead of 163-164; this trailing one-page
+shift is recorded rather than hidden. The score is `0.976756`.
+
+The exact final release binary (SHA-256
+`fcc691f2db378fd915c75ec3cde0e4f377be846e92c7b2eb9684594d15aee1aa`)
+passes all 251 DOCX integration tests, 18 DOCX unit tests, 22 round-trip tests,
+65 PPTX tests, strict DOCX Clippy, formatting, and `git diff --check`. Its
+heterogeneous sentinel is retained under
+`target/docx-gb-caption-sentinel-v47-six/`: package and round trip pass 6/6 with
+the same 26,851 regions; LibreOffice passes 5/6 with Xenolay repeating its known
+180-second timeout. The C++ guide remains exact, Tura remains within one page,
+and the thesis/Mathnote retain their pre-existing visual-policy misses. The only
+intentional sentinel delta is `gb-ctr`'s documented trailing page consolidation.

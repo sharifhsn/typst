@@ -4808,6 +4808,82 @@ fn footnote_only_table_cell_does_not_gain_an_empty_paragraph() {
 }
 
 #[test]
+fn empty_unshapeable_figure_body_does_not_orphan_its_caption() {
+    let p = parts(
+        "#show raw: set text(\n\
+           font: \"Definitely Missing Test Font\", fallback: false,\n\
+         )\n\
+         #figure(\n\
+           raw(\"first line\\nsecond line\\nthird line\", lang: \"python\", block: true),\n\
+           caption: [Python pseudo-code],\n\
+         )",
+    );
+    let document = roxmltree::Document::parse(&p["word/document.xml"]).unwrap();
+    let paragraphs: Vec<_> = document
+        .descendants()
+        .filter(|node| node.tag_name().name() == "p")
+        .collect();
+    assert_eq!(
+        paragraphs.len(),
+        2,
+        "an absent figure body must not leave a phantom paragraph before its caption: {paragraphs:?}"
+    );
+    assert!(
+        paragraphs[0]
+            .descendants()
+            .filter_map(|node| node.text())
+            .any(|text| text.contains("Python pseudo-code"))
+    );
+    assert_eq!(
+        paragraphs[0]
+            .descendants()
+            .filter(|node| node.tag_name().name() == "bookmarkStart")
+            .count(),
+        1,
+        "the figure bookmark moves onto the surviving caption"
+    );
+    assert_eq!(
+        paragraphs[0]
+            .descendants()
+            .filter(|node| node.tag_name().name() == "bookmarkEnd")
+            .count(),
+        1,
+        "the figure bookmark closes on the surviving caption"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn authored_empty_figure_body_linebreak_is_preserved() {
+    let p = parts("#figure([#linebreak()], caption: [Intentional empty line])");
+    let document = roxmltree::Document::parse(&p["word/document.xml"]).unwrap();
+    let paragraphs: Vec<_> = document
+        .descendants()
+        .filter(|node| node.tag_name().name() == "p")
+        .collect();
+    assert_eq!(
+        paragraphs.len(),
+        3,
+        "the authored body, caption, and mandatory terminal paragraph remain distinct"
+    );
+    assert_eq!(
+        paragraphs[0]
+            .descendants()
+            .filter(|node| node.tag_name().name() == "br")
+            .count(),
+        1,
+        "an authored line break must not be mistaken for generated scaffolding"
+    );
+    assert!(
+        paragraphs[1]
+            .descendants()
+            .filter_map(|node| node.text())
+            .any(|text| text.contains("Intentional empty line"))
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn figure_emits_seq_field() {
     let p = parts(
         "#figure(rect(width: 20pt, height: 20pt), caption: [A box]) <f>\n\nSee @f.",
