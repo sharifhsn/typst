@@ -1378,7 +1378,7 @@ fn fallback_runs_tiled(
 /// Appends the frame-recovered `text` as hidden (`w:vanish`) runs — the words
 /// stay searchable/selectable but take no visual space beside the image.
 /// Line separators become ordinary spaces inside the vanished run because
-/// `Run::Break` has no run properties and therefore still consumes layout.
+/// `Run::Break { .. }` has no run properties and therefore still consumes layout.
 /// Leading/trailing spaces keep a boundary against adjacent visible runs
 /// (otherwise a consumer concatenating run text — pandoc, Word's Find,
 /// copy-paste — would glue e.g. `urbane` + `Stoicos` into one token).

@@ -26,9 +26,9 @@ use typst_utils::Numeric;
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, Border, Cell, CellBorders, CellMargins, Jc, Para, ParaChild, ParaProps,
-    ReviewCandidateKind, Row, RowHeight, Run, RunProps, Spacing, Tbl, TblProps, VAlign,
-    VMerge,
+    Block, Border, BreakKind, Cell, CellBorders, CellMargins, Jc, Para, ParaChild,
+    ParaProps, ReviewCandidateKind, Row, RowHeight, Run, RunProps, Spacing, Tbl,
+    TblProps, VAlign, VMerge,
 };
 use crate::report::{DecisionReason, LossSet, Representation};
 
@@ -549,6 +549,10 @@ fn build_cell(
     });
     let mut blocks = cell_blocks(ctx, cell, styles, jc, content_width)?;
 
+    if geometry.height_dxa.is_some() {
+        trim_trailing_structural_breaks(&mut blocks);
+    }
+
     // §0/§2: every `w:tc` must contain ≥1 block and END in a `w:p`.
     ensure_ends_in_para(&mut blocks);
 
@@ -562,6 +566,38 @@ fn build_cell(
         valign,
         blocks,
     })
+}
+
+/// Removes only trailing run-only spacing fallbacks from a physically measured
+/// cell. Its measured row height already includes the authored paragraph/VElem
+/// space, so serializing those fallbacks again as line breaks double-counts the
+/// bottom of the cell. Authored linebreaks and all interior structural breaks
+/// remain intact.
+fn trim_trailing_structural_breaks(blocks: &mut [Block]) {
+    let Some(Block::Para(para)) =
+        blocks.iter_mut().rev().find(|block| !matches!(block, Block::Tag(_)))
+    else {
+        return;
+    };
+
+    let last_semantic = para.content.iter().rposition(|child| {
+        !matches!(
+            child,
+            ParaChild::Tag(_)
+                | ParaChild::Run(Run::Break { kind: BreakKind::Structural })
+        )
+    });
+    let mut index = 0usize;
+    para.content.retain(|child| {
+        let keep = !matches!(
+            child,
+            ParaChild::Run(Run::Break {
+                kind: BreakKind::Structural
+            }) if last_semantic.is_none_or(|last| index > last)
+        );
+        index += 1;
+        keep
+    });
 }
 
 /// A vertical-merge continuation placeholder cell (§7b): real `w:tc` carrying
@@ -1356,4 +1392,40 @@ fn empty_para_block() -> Block {
             text: "".into(),
         })],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_run(text: &str) -> ParaChild {
+        ParaChild::Run(Run::Text { props: RunProps::default(), text: text.into() })
+    }
+
+    #[test]
+    fn measured_cells_trim_only_trailing_structural_breaks() {
+        let mut blocks = vec![Block::Para(Para {
+            props: ParaProps::default(),
+            content: vec![
+                text_run("body"),
+                ParaChild::Run(Run::Break { kind: BreakKind::Structural }),
+                ParaChild::Run(Run::Break { kind: BreakKind::Structural }),
+            ],
+        })];
+        trim_trailing_structural_breaks(&mut blocks);
+        let Block::Para(para) = &blocks[0] else { unreachable!() };
+        assert_eq!(para.content.len(), 1);
+
+        let mut authored_tail = vec![Block::Para(Para {
+            props: ParaProps::default(),
+            content: vec![
+                text_run("body"),
+                ParaChild::Run(Run::Break { kind: BreakKind::Structural }),
+                ParaChild::Run(Run::Break { kind: BreakKind::Authored }),
+            ],
+        })];
+        trim_trailing_structural_breaks(&mut authored_tail);
+        let Block::Para(para) = &authored_tail[0] else { unreachable!() };
+        assert_eq!(para.content.len(), 3);
+    }
 }

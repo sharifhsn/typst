@@ -4339,8 +4339,9 @@ fn short_block_rect_stays_a_text_box() {
 #[test]
 fn leading_page_setup_does_not_emit_a_blank_first_page() {
     // A document that opens with `#set page(..)` gets a synthetic leading
-    // pagebreak; emitting it as `<w:br w:type="page"/>` would add a blank first
-    // page. It must be dropped — but a real `#pagebreak()` after content is kept.
+    // pagebreak; emitting it as a boundary would add a blank first page. It must
+    // be dropped — but a real `#pagebreak()` after content is kept idempotently
+    // on the following paragraph.
     let p = parts("#set page(\"a5\")\n= Heading\n\nBody.");
     let doc = &p["word/document.xml"];
     assert!(
@@ -4349,11 +4350,7 @@ fn leading_page_setup_does_not_emit_a_blank_first_page() {
     );
 
     let q = parts("First.\n\n#pagebreak()\n\nSecond.");
-    assert_eq!(
-        q["word/document.xml"].matches("w:type=\"page\"").count(),
-        1,
-        "a real mid-document pagebreak is preserved"
-    );
+    assert!(q["word/document.xml"].contains("<w:pageBreakBefore/>"));
     assert_all_wellformed(&p);
 }
 
@@ -4439,17 +4436,36 @@ fn whole_page_vertical_alignment_maps_to_section_vertical_alignment() {
 }
 
 #[test]
-fn plain_pagebreak_stays_a_page_break() {
+fn plain_pagebreak_moves_before_the_following_paragraph() {
     let p = parts("Before.\n#pagebreak()\nAfter.");
     let doc = &p["word/document.xml"];
-    assert_eq!(
-        doc.matches("w:type=\"page\"").count(),
-        1,
-        "plain pagebreak remains a run-level page break"
-    );
+    assert!(doc.contains("<w:pageBreakBefore/>"));
+    assert!(!doc.contains("<w:br w:type=\"page\"/>"));
     assert!(
         !doc.contains("oddPage") && !doc.contains("evenPage"),
         "plain pagebreak does not become a parity section"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn consecutive_plain_pagebreaks_preserve_intentional_blank_pages() {
+    let p = parts("Before.\n#pagebreak()\n#pagebreak()\nAfter.");
+    let doc = &p["word/document.xml"];
+    assert_eq!(doc.matches("<w:br w:type=\"page\"/>").count(), 2);
+    assert_eq!(doc.matches("<w:pageBreakBefore/>").count(), 1);
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn pagebreak_keeps_following_vertical_space_on_the_new_page() {
+    let p = parts("Before.\n#pagebreak()\n#v(12pt)\nAfter.");
+    let doc = &p["word/document.xml"];
+    assert_eq!(doc.matches("<w:pageBreakBefore/>").count(), 1);
+    assert!(!doc.contains("<w:br w:type=\"page\"/>"));
+    assert!(
+        doc.contains("<w:pageBreakBefore/><w:spacing w:before=\"504\"/>"),
+        "the post-break vertical space belongs to the following paragraph"
     );
     assert_all_wellformed(&p);
 }
@@ -4539,6 +4555,23 @@ fn footnote_has_in_text_reference_and_body_mark() {
         p["word/footnotes.xml"].contains("w:footnoteRef"),
         "the footnote body should carry the in-body number mark w:footnoteRef"
     );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn repeated_footnote_uses_one_native_note_and_linked_noterefs() {
+    let p = parts(
+        "A#footnote[The shared note.]<shared-note> \
+         B#footnote(<shared-note>) C#footnote(<shared-note>)",
+    );
+    let doc = &p["word/document.xml"];
+    let notes = &p["word/footnotes.xml"];
+
+    assert_eq!(doc.matches("<w:footnoteReference").count(), 1);
+    assert_eq!(doc.matches("NOTEREF _FootnoteRef1").count(), 2);
+    assert_eq!(doc.matches("w:name=\"_FootnoteRef1\"").count(), 1);
+    assert_eq!(notes.matches("<w:footnote w:id=\"1\"").count(), 1);
+    assert_eq!(notes.matches("The shared note.").count(), 1);
     assert_all_wellformed(&p);
 }
 

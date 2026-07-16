@@ -10,12 +10,11 @@
 //!  2. the **body** — `<w:footnote w:id="N">…</w:footnote>` — lives in
 //!     `footnotes.xml` and holds the realized block content.
 //!
-//! `N` is allocated by [`DocxCtx::add_footnote`], keyed on the footnote's
-//! *declaration* `Location` so a re-referenced footnote (`#footnote(<lbl>)`)
-//! reuses the same id and the body is emitted only once. Word renders the
-//! displayed number automatically (via the in-body `<w:footnoteRef/>` mark and
-//! document order of the reference marks), so Typst's footnote counter / style
-//! is intentionally discarded in favor of Word's auto-numbering.
+//! `N` is allocated by [`DocxCtx::add_footnote`], keyed on the declaration's
+//! source-stable semantic identity. The first occurrence is native; a
+//! re-reference (`#footnote(<lbl>)`) becomes a bookmarked `NOTEREF` field so it
+//! retains the same visible number without creating a second Word footnote
+//! occurrence. The body is emitted only once.
 
 use typst_library::diag::{At, SourceResult};
 use typst_library::foundations::{Content, Packed, StyleChain};
@@ -23,7 +22,11 @@ use typst_library::introspection::QueryFirstIntrospection;
 use typst_library::model::FootnoteElem;
 
 use crate::ctx::DocxCtx;
-use crate::dom::{Block, ParaChild, ReviewCandidateKind, Run, RunProps};
+use crate::dom::{
+    Block, Field, FieldCacheStatus, FieldDisplay, FieldMode, ParaChild,
+    ReviewCandidateKind, Run, RunProps,
+};
+use crate::report::ExportSource;
 
 /// The conventional Word character-style id for the superscript footnote mark.
 /// It is defined in `styles_part.rs` and applied to BOTH the inline
@@ -42,31 +45,28 @@ pub fn footnote(
 ) -> SourceResult<Run> {
     let span = elem.span();
 
-    // The canonical declaration location is the linking + dedup key. For a
-    // content footnote this is the element's own location; for a reference
-    // footnote (`#footnote(<lbl>)`) it resolves to the declaring footnote, so
-    // both sites share one `w:id` and one body in `footnotes.xml`.
-    // For a reference footnote the declaration may be unresolvable during an
-    // early introspection-stabilization pass; fall back to the element's own
-    // location so the pass does not error (the final pass resolves correctly).
-    let decl = elem
-        .declaration_location(ctx.engine())
-        .ok()
-        .or_else(|| elem.location())
-        .ok_or("footnote has no location")
+    // Resolve the declaration element itself and key it by its authored source
+    // identity. Locations from the converged paged introspector and the DOCX
+    // realization are not interchangeable; the source span is. Using the raw
+    // Location here split one logical note into duplicate bodies in gb-ctr.
+    let declaration = resolve_declaration(elem, ctx)
+        .ok_or("footnote has no declaration")
         .at(span)?;
+    let declaration_content = declaration.clone().pack();
+    let declaration_id = ExportSource::from_content(&declaration_content).logical_id;
 
     // Lower the declaration's body into block content. `add_footnote` dedups by
-    // `decl`: for a re-reference it returns the existing id and discards these
-    // blocks, so the body is serialized exactly once.
+    // stable declaration id: for a re-reference it returns the existing id and
+    // discards these blocks, so the body is serialized exactly once.
     //
     // INTEGRATION-NEEDED (minor perf): `add_footnote` takes the body eagerly,
     // so a re-referenced footnote re-realizes + re-lowers its body only to throw
     // it away. A `DocxCtx::footnote_id(decl) -> Option<i32>` probe (or a closure
     // taking the body lazily) would let us skip that work. Correctness is
     // unaffected — the duplicate body is dropped by the existing dedup map.
-    let body_blocks = self::body_blocks(elem, styles, ctx)?;
-    let id = ctx.add_footnote(decl, body_blocks);
+    let body_blocks = self::body_blocks(&declaration, styles, ctx)?;
+    let (id, bookmark_id, bookmark_name, is_first) =
+        ctx.add_footnote(declaration_id, body_blocks);
 
     // The inline reference mark: a run styled `FootnoteReference` (superscript)
     // carrying `<w:footnoteReference w:id="N"/>`. The encoder emits the
@@ -75,7 +75,25 @@ pub fn footnote(
         style: Some(FOOTNOTE_REFERENCE_STYLE.into()),
         ..RunProps::default()
     };
-    Ok(Run::FootnoteRef { props, id })
+    if is_first {
+        Ok(Run::FootnoteRef {
+            props,
+            id,
+            bookmark: Some((bookmark_id, bookmark_name)),
+        })
+    } else {
+        // A second native w:footnoteReference is a second occurrence to Word
+        // and LibreOffice, even when it reuses the same w:id; both consumers
+        // renumber those occurrences. NOTEREF preserves the Typst meaning: the
+        // same visible mark, linked back to the one native footnote.
+        Ok(Run::Field(Field {
+            instr: ecow::eco_format!(" NOTEREF {bookmark_name} \\h "),
+            result: vec![Run::Text { props, text: id.to_string().into() }],
+            mode: FieldMode::Static,
+            display: FieldDisplay::Visible,
+            cache_status: FieldCacheStatus::Resolved,
+        }))
+    }
 }
 
 /// Lowers a footnote that appears *inside another footnote's body*. Word forbids
@@ -196,4 +214,23 @@ fn resolve_body(
         .and_then(|c| c.to_packed::<FootnoteElem>())
         .and_then(|note| note.body_content().cloned());
     Ok(body)
+}
+
+/// Returns the authored declaration element for either a content footnote or a
+/// `#footnote(<label>)` re-reference.
+fn resolve_declaration(
+    elem: &Packed<FootnoteElem>,
+    ctx: &mut DocxCtx,
+) -> Option<Packed<FootnoteElem>> {
+    if elem.body_content().is_some() {
+        return Some(elem.clone());
+    }
+
+    let decl = elem.declaration_location(ctx.engine()).ok()?;
+    let selector = typst_library::foundations::Selector::Location(decl);
+    ctx.engine()
+        .introspect(QueryFirstIntrospection(selector, elem.span()))
+        .as_ref()
+        .and_then(|content| content.to_packed::<FootnoteElem>())
+        .cloned()
 }

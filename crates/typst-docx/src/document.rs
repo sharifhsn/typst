@@ -882,7 +882,7 @@ fn record_run_fields(report: &mut FidelityReport, snapshot_id: u128, run: &Run) 
             }
         }
         Run::Text { .. }
-        | Run::Break
+        | Run::Break { .. }
         | Run::PageBreak
         | Run::ColumnBreak
         | Run::Tab
@@ -1011,7 +1011,7 @@ fn record_run_fonts(
                 }
             }
         }
-        Run::Break
+        Run::Break { .. }
         | Run::PageBreak
         | Run::ColumnBreak
         | Run::Tab
@@ -1213,7 +1213,7 @@ fn record_run_drawings(report: &mut FidelityReport, snapshot_id: u128, run: &Run
             }
         }
         Run::Text { .. }
-        | Run::Break
+        | Run::Break { .. }
         | Run::PageBreak
         | Run::ColumnBreak
         | Run::Tab
@@ -2415,7 +2415,7 @@ fn accumulate_single_line_run_size(run: &Run, maximum: &mut u32) -> Option<()> {
             *maximum = (*maximum).max(props.size_half_pt.unwrap_or(0));
         }
         Run::Tab | Run::FillTab => {}
-        Run::Break
+        Run::Break { .. }
         | Run::PageBreak
         | Run::ColumnBreak
         | Run::FootnoteRefMark
@@ -2600,7 +2600,7 @@ fn run_text_chars(run: &Run) -> usize {
             });
             shape + group
         }
-        Run::Break
+        Run::Break { .. }
         | Run::PageBreak
         | Run::ColumnBreak
         | Run::Tab
@@ -2892,12 +2892,15 @@ fn sig_run(run: &Run, out: &mut String) {
             sig_run_props(props, out);
             let _ = write!(out, "text={text})");
         }
-        Run::Break => out.push_str("br;"),
+        Run::Break { kind } => match kind {
+            crate::dom::BreakKind::Authored => out.push_str("br;"),
+            crate::dom::BreakKind::Structural => out.push_str("sbr;"),
+        },
         Run::PageBreak => out.push_str("pagebr;"),
         Run::ColumnBreak => out.push_str("colbr;"),
         Run::Tab => out.push_str("tab;"),
         Run::FillTab => out.push_str("filltab;"),
-        Run::FootnoteRef { props, id } => {
+        Run::FootnoteRef { props, id, .. } => {
             out.push_str("fnref(");
             sig_run_props(props, out);
             let _ = write!(out, "{id})");

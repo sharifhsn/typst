@@ -314,7 +314,9 @@ pub enum Run {
         props: RunProps,
         text: EcoString,
     },
-    Break,
+    Break {
+        kind: BreakKind,
+    },
     PageBreak,
     /// A `#colbreak()` → `<w:br w:type="column"/>`: moves the following content to
     /// the next column in a multi-column section.
@@ -327,6 +329,10 @@ pub enum Run {
     FootnoteRef {
         props: RunProps,
         id: i32,
+        /// Bookmark around the first native reference mark. Later Typst
+        /// re-references target this with a NOTEREF field instead of creating a
+        /// second native Word footnote occurrence (which Word would renumber).
+        bookmark: Option<(u32, EcoString)>,
     },
     /// The in-body footnote number mark (`<w:footnoteRef/>`, styled
     /// `FootnoteReference`). Prepended to a footnote body's first paragraph so
@@ -336,6 +342,16 @@ pub enum Run {
     /// An inline equation `<m:oMath>` (serialized XML).
     OmmlInline(String),
     Field(Field),
+}
+
+/// Why a run-level line break exists.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum BreakKind {
+    /// An authored `#linebreak()` whose trailing position is meaningful.
+    Authored,
+    /// A fallback for paragraph/vertical separation in a run-only context.
+    /// A measured container may already account for this space physically.
+    Structural,
 }
 
 /// The document's root text properties, resolved once from the root style chain

@@ -230,15 +230,14 @@ pub fn convert_children(
         }
     }
 
-    // A run-level page break emitted after fixed-height, page-filling content
-    // lands on the next physical page and advances once more, producing a blank
-    // page between every slide. On landscape/slide-shaped pages, move each
-    // boundary onto the following paragraph as Word's semantic
-    // `<w:pageBreakBefore/>`. The property is idempotent if auto-pagination has
-    // already placed that paragraph at the top of a new page.
-    if ctx.page_content_width > ctx.raster_height {
-        move_page_breaks_before_following_blocks(&mut blocks);
-    }
+    // A run-level page break is relative to the preceding content. If a tall
+    // block or table has already auto-paginated, the break lands at the top of
+    // the next physical page and advances once more, manufacturing a blank
+    // page. Move a single boundary onto the following paragraph as Word's
+    // semantic `<w:pageBreakBefore/>`, which is idempotent when that paragraph
+    // already starts a page. Preserve additional consecutive breaks as explicit
+    // runs so intentionally requested blank pages survive.
+    move_page_breaks_before_following_blocks(&mut blocks);
 
     // A paragraph using a fractional `#h(1fr)` (a fill-tab) gets a right-aligned
     // tab stop at the content width, so the tab pushes the following content to
@@ -265,7 +264,8 @@ pub fn convert_children(
 
 fn move_page_breaks_before_following_blocks(blocks: &mut Vec<Block>) {
     let mut out = Vec::with_capacity(blocks.len());
-    let mut pending = false;
+    let mut pending = 0usize;
+    let mut pending_flow_dxa = 0i32;
     for mut block in std::mem::take(blocks) {
         let is_break = matches!(
             &block,
@@ -276,37 +276,66 @@ fn move_page_breaks_before_following_blocks(blocks: &mut Vec<Block>) {
                     })
         );
         if is_break {
-            pending = true;
+            pending += 1;
             continue;
         }
-        if pending {
+        if pending > 0 {
             if matches!(block, Block::Tag(_)) {
                 out.push(block);
                 continue;
             }
-            if let Block::Para(para) = &mut block {
-                para.props.page_break_before = true;
-            } else {
-                out.push(Block::Para(Para {
-                    props: ParaProps {
-                        page_break_before: true,
-                        spacing: Some(Spacing {
-                            before: Some(0),
-                            after: Some(0),
-                            line: Some(1),
-                            line_rule_auto: false,
-                            line_rule_at_least: false,
-                        }),
-                        ..Default::default()
-                    },
-                    content: Vec::new(),
-                }));
+            if let Block::FlowSpace { dxa } = block {
+                pending_flow_dxa = pending_flow_dxa.saturating_add(dxa);
+                continue;
             }
-            pending = false;
+            if let Block::Para(para) = &mut block {
+                // A single break becomes idempotent pageBreakBefore. For two or
+                // more authored breaks, keep every explicit break as well: an
+                // explicit break followed by pageBreakBefore is idempotent at
+                // the top of a page, so N explicit breaks preserve N-1 blank
+                // pages while the paragraph property protects auto-pagination.
+                if pending > 1 {
+                    for _ in 0..pending {
+                        out.push(page_break_block());
+                    }
+                }
+                para.props.page_break_before = true;
+                if pending_flow_dxa != 0 {
+                    let spacing = para.props.spacing.get_or_insert_with(Spacing::default);
+                    spacing.before = Some(
+                        spacing.before.unwrap_or(0).saturating_add(pending_flow_dxa),
+                    );
+                }
+            } else {
+                // Tables and section boundaries have no paragraph property on
+                // which to carry the break without adding an empty line. Keep
+                // their boundaries explicit rather than changing flow height.
+                for _ in 0..pending {
+                    out.push(page_break_block());
+                }
+                if pending_flow_dxa != 0 {
+                    out.push(Block::FlowSpace { dxa: pending_flow_dxa });
+                }
+            }
+            pending = 0;
+            pending_flow_dxa = 0;
         }
         out.push(block);
     }
+    for _ in 0..pending {
+        out.push(page_break_block());
+    }
+    if pending_flow_dxa != 0 {
+        out.push(Block::FlowSpace { dxa: pending_flow_dxa });
+    }
     *blocks = out;
+}
+
+fn page_break_block() -> Block {
+    Block::Para(Para {
+        props: ParaProps::default(),
+        content: vec![ParaChild::Run(Run::PageBreak)],
+    })
 }
 
 /// Folds an accumulated `#v(..)` spacing into the `before` of the first

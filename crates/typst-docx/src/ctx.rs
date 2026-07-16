@@ -29,10 +29,10 @@ use typst_ooxml_core::ns;
 use typst_syntax::{FileId, Span};
 
 use crate::dom::{
-    Block, BookmarkTable, Field, FieldCacheStatus, FieldDisplay, FieldMode, Footnote,
-    HeadingStyleSample, ListSpec, NumberingTable, ParaProps, ReviewCandidateKind,
-    ReviewJoinId, ReviewOrigin, Run, RunProps, TocFigure, TocHeading, Underline,
-    VertAlign,
+    Block, BookmarkTable, BreakKind, Field, FieldCacheStatus, FieldDisplay, FieldMode,
+    Footnote, HeadingStyleSample, ListSpec, NumberingTable, ParaProps,
+    ReviewCandidateKind, ReviewJoinId, ReviewOrigin, Run, RunProps, TocFigure,
+    TocHeading, Underline, VertAlign,
 };
 use crate::fallback::CachedOverlay;
 use crate::mappers;
@@ -66,7 +66,7 @@ pub struct DocxCtx<'a, 'e> {
     pub(crate) locator: &'a mut SplitLocator<'e>,
 
     pub(crate) footnotes: Vec<Footnote>,
-    footnote_ids: FxHashMap<Location, i32>,
+    footnote_ids: FxHashMap<u128, (i32, u32, EcoString)>,
     next_footnote_id: i32,
 
     pub(crate) numbering: NumberingTable,
@@ -519,16 +519,30 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
 
     // -- Allocators ---------------------------------------------------------
 
-    /// Registers a footnote body, returning its `w:id` (>= 1).
-    pub fn add_footnote(&mut self, decl: Location, body_blocks: Vec<Block>) -> i32 {
-        if let Some(&id) = self.footnote_ids.get(&decl) {
-            return id;
+    /// Registers a footnote body by source-stable declaration identity.
+    ///
+    /// The returned boolean is true only at the declaration's first occurrence.
+    /// Word permits one native footnote reference per logical note; later Typst
+    /// re-references must point back to its bookmarked mark with NOTEREF or Word
+    /// will assign each occurrence a new displayed number.
+    pub fn add_footnote(
+        &mut self,
+        declaration_id: u128,
+        body_blocks: Vec<Block>,
+    ) -> (i32, u32, EcoString, bool) {
+        if let Some(&(id, bookmark_id, ref name)) = self.footnote_ids.get(&declaration_id)
+        {
+            return (id, bookmark_id, name.clone(), false);
         }
         let id = self.next_footnote_id;
         self.next_footnote_id += 1;
-        self.footnote_ids.insert(decl, id);
+        let bookmark_id = self.next_bookmark_id;
+        self.next_bookmark_id += 1;
+        let bookmark_name = eco_format!("_FootnoteRef{id}");
+        self.footnote_ids
+            .insert(declaration_id, (id, bookmark_id, bookmark_name.clone()));
         self.footnotes.push(Footnote { id, blocks: body_blocks });
-        id
+        (id, bookmark_id, bookmark_name, true)
     }
 
     /// The relationships table the *current* content lowers into: a header/footer
@@ -1552,7 +1566,15 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 self.push_text(out, props.clone(), " ".repeat(n).into());
             }
         } else if child.is::<LinebreakElem>() {
-            out.push(Run::Break);
+            // Realized/generated linebreak elements have detached spans. They
+            // are layout structure, not an authored `#linebreak()` that must
+            // survive at the trailing edge of a measured container.
+            let kind = if child.span().is_detached() {
+                BreakKind::Structural
+            } else {
+                BreakKind::Authored
+            };
+            out.push(Run::Break { kind });
             self.last_char = None;
         } else if child.is::<typst_library::model::ParbreakElem>() {
             // A paragraph break that reached a run-only context (a footnote, a
@@ -1560,7 +1582,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // must not silently merge the two paragraphs — emit a line break so
             // the visual separation survives. (Block contexts split into real
             // paragraphs upstream and never reach here.)
-            out.push(Run::Break);
+            out.push(Run::Break { kind: BreakKind::Structural });
             self.last_char = None;
         } else if let Some(elem) = child.to_packed::<typst_library::layout::VElem>() {
             // Vertical spacing that reached a run-only context (a plain box's
@@ -1571,7 +1593,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // all — worse than an imprecise break). Zero amount → genuinely
             // nothing to preserve.
             if !elem.amount.is_zero() {
-                out.push(Run::Break);
+                out.push(Run::Break { kind: BreakKind::Structural });
                 self.last_char = None;
             }
         } else if let Some(elem) = child.to_packed::<SmartQuoteElem>() {

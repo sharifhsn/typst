@@ -394,7 +394,7 @@ impl State {
                 }
             }
             Run::Text { .. }
-            | Run::Break
+            | Run::Break { .. }
             | Run::PageBreak
             | Run::ColumnBreak
             | Run::Tab

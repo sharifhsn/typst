@@ -2399,3 +2399,62 @@ remain stable except Tura, whose newly coherent placed diagrams improve it from
 253 to 264 pages against a 265-page reference, visual score from `0.975358` to
 `0.975850`, and semantic coverage from `0.991067` to `0.996455`. The thesis
 stays 129 pages, Mathnote 168, Xenolay 163, and the C++ guide one.
+
+## 60. Page boundaries, measured-cell tails, and shared footnotes retain intent
+
+The coherent-canvas result exposed two independent Word-flow defects. First,
+every plain Typst page break was serialized as a standalone paragraph ending in
+`w:br type="page"`. When a preceding instruction table naturally exhausted its
+page, LibreOffice placed that break paragraph on a fresh page and advanced once
+more. Second, raw pseudocode lowered inside the same physically measured cells
+left detached, generated line separators in a break-only terminal paragraph.
+Those separators repeated vertical layout already represented by the measured
+row and made the exact-boundary failure more frequent.
+
+The block normalizer now moves a single plain break to the following
+paragraph's idempotent `w:pageBreakBefore` property. Consecutive authored breaks
+retain every explicit break in addition to that property, preserving their
+intentional blank pages rather than treating all adjacent boundaries as one.
+Parity and section breaks remain section semantics. Run-only line breaks also
+carry provenance: authored `#linebreak()` elements remain authored, while
+detached realized separators and paragraph/vertical-space approximations are
+structural. At the trailing edge of a physically measured table cell only,
+structural breaks are removed because the measured height already owns their
+space; authored and interior breaks are untouched.
+
+Delegated QA proved the result by exact rendered-page comparison. All 169
+retained LibreOffice pages are byte-identical and in order relative to the
+172-page corrected-boundary predecessor; the only unmatched predecessor pages
+are the footer-only blanks after RLC (HL), RRC (HL), and CALL cc,nn. The three
+source-authored blanks after ADD SP,e, SET b,(HL), and NOP remain and correspond
+to the same landmarks in the 164-page Typst reference. Structurally, 884 bare
+breaks disappeared from 100 measured-cell, break-only terminal paragraphs; no
+paragraph containing text, a drawing, a field, or math lost a break.
+
+The external-bus appendix also used three native `w:footnoteReference`
+occurrences for one labeled Typst footnote. Word consumers number native
+occurrences, not logical ids, so the export displayed 1, 2, 3 and repeated the
+body. Footnotes are now registered by the declaration's source-stable semantic
+identity. The first occurrence owns one native footnote and a bookmark; later
+Typst re-references become locked, linked `NOTEREF` fields with the exact cached
+marker. The final package contains one native reference, two NOTEREF fields,
+and one body. LibreOffice visibly renders marker 1 at all three sites and the
+body exactly once.
+
+The accepted frozen `gb-ctr` artifact is
+`target/docx-public-corpus-focus-gb-boundary-footnote-v5/`: 169 pages against
+164, score `0.969123`, semantic text coverage `0.955315`, package validation,
+LibreOffice conversion, and the 2,513-region review round trip all pass. The
+lower scalar score is page-index sensitivity, not a retained-page regression;
+every retained rendered page is pixel-identical to its predecessor. All 236
+DOCX integration tests, 16 DOCX unit tests, 22 round-trip tests, 65 PPTX tests,
+strict Clippy, and DOCX/PPTX WASM checks pass.
+
+The same-consumer six-document sentinel passes package, LibreOffice 26.2.4.2,
+and review lanes 6/6 under `target/docx-gb-structural-sentinel-v4-six/`. The
+thesis remains 129 pages, Mathnote 168, Xenolay 163, and the C++ guide one.
+Tura improves from 264 to 263 pages by removing one footer-only break artifact;
+delegated comparison found all 263 aligned pages text-identical after footer
+normalization, with unchanged drawing/hidden-run counts and no merge or clip.
+Its score rises from `0.975850` to `0.975886` and semantic coverage remains
+`0.996455`.

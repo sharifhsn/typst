@@ -1418,7 +1418,7 @@ fn write_run(w: &mut XmlWriter, run: &Run) {
             w.close(); // w:t
             w.close(); // w:r
         }
-        Run::Break => {
+        Run::Break { .. } => {
             w.open(xml::W_R).start_children();
             w.leaf(xml::W_BR);
             w.close();
@@ -1438,11 +1438,22 @@ fn write_run(w: &mut XmlWriter, run: &Run) {
             w.leaf(xml::W_TAB);
             w.close();
         }
-        Run::FootnoteRef { props, id } => {
+        Run::FootnoteRef { props, id, bookmark } => {
+            if let Some((bookmark_id, name)) = bookmark {
+                w.open(xml::W_BOOKMARK_START)
+                    .attr("w:id", &bookmark_id.to_string())
+                    .attr("w:name", name)
+                    .empty();
+            }
             w.open(xml::W_R).start_children();
             props.write_rpr(w);
             w.open(xml::W_FOOTNOTE_REF).attr("w:id", &id.to_string()).empty();
             w.close();
+            if let Some((bookmark_id, _)) = bookmark {
+                w.open(xml::W_BOOKMARK_END)
+                    .attr("w:id", &bookmark_id.to_string())
+                    .empty();
+            }
         }
         Run::FootnoteRefMark => {
             w.open(xml::W_R).start_children();
