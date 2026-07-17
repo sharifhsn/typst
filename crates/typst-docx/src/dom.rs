@@ -765,6 +765,9 @@ pub struct TextBox {
     pub ins: [i64; 4],
     pub blocks: Vec<Block>,
     pub wrap: TextBoxWrap,
+    /// Let Office resize the shape to its text. Authored standalone text boxes
+    /// want this; positioned canvas labels must retain their measured extent.
+    pub autofit: bool,
 }
 
 #[derive(Copy, Clone)]

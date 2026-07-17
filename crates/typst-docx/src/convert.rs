@@ -1,12 +1,12 @@
 //! The top-level recursion entry and the native-element block dispatch.
 
-use typst_library::diag::SourceResult;
+use typst_library::diag::{At, SourceResult};
 use typst_library::foundations::{Content, StyleChain};
 use typst_library::introspection::TagElem;
 use typst_library::math::EquationElem;
 use typst_library::model::{
     EnumElem, FigureElem, HeadingElem, ListElem, OutlineElem, ParElem, ParbreakElem,
-    QuoteElem, TableCell, TableElem, TermsElem,
+    QuoteElem, TableCell, TableElem, TermsElem, TitleElem,
 };
 use typst_library::routines::Pair;
 
@@ -41,6 +41,7 @@ pub fn convert_children(
     // Buffered paragraph children currently being assembled, plus its
     // resolved paragraph properties (from the first `ParElem` seen).
     let mut pending: Vec<ParaChild> = Vec::new();
+    let mut pending_page_markers: Vec<ParaChild> = Vec::new();
     let mut pending_props: Option<ParaProps> = None;
     let mut have_pending = false;
     // Accumulated `#v(..)` spacing (twips) waiting to be folded into the
@@ -132,6 +133,9 @@ pub fn convert_children(
             }
             let par_start = pending.len();
             inline_children(ctx, &par.body, *styles, &mut pending)?;
+            if !pending_page_markers.is_empty() {
+                pending.splice(par_start..par_start, pending_page_markers.drain(..));
+            }
             // A labeled paragraph (`text … <spot>`) is a valid `#link(<spot>)`
             // target, so bracket its content with a bookmark (otherwise the link
             // anchor is dangling).
@@ -148,8 +152,24 @@ pub fn convert_children(
             // Introspection tag: record as a block-level tag (kept for the
             // introspector). Transparent — does not change paragraph structure.
             if !have_pending {
+                if let typst_library::introspection::Tag::Start(content, _) = &elem.tag
+                    && !content.is::<typst_library::model::LinkElem>()
+                    && let Some(loc) = content.location()
+                    && let Some((id, name)) = ctx.page_bookmark_for_emission(loc)
+                {
+                    pending_page_markers.push(ParaChild::BookmarkStart { id, name });
+                    pending_page_markers.push(ParaChild::BookmarkEnd { id });
+                }
                 blocks.push(Block::Tag(elem.tag.clone()));
             } else {
+                if let typst_library::introspection::Tag::Start(content, _) = &elem.tag
+                    && !content.is::<typst_library::model::LinkElem>()
+                    && let Some(loc) = content.location()
+                    && let Some((id, name)) = ctx.page_bookmark_for_emission(loc)
+                {
+                    pending.push(ParaChild::BookmarkStart { id, name });
+                    pending.push(ParaChild::BookmarkEnd { id });
+                }
                 pending.push(ParaChild::Tag(elem.tag.clone()));
             }
         } else if let Some(elem) = child.to_packed::<VElem>() {
@@ -847,6 +867,43 @@ fn handle_block_inner(
         // Paragraph boundary; no-op marker.
     } else if let Some(elem) = child.to_packed::<HeadingElem>() {
         out.extend(mappers::heading::heading(elem, styles, ctx)?);
+    } else if let Some(elem) = child.to_packed::<TitleElem>() {
+        use typst_library::foundations::Resolve;
+        use typst_library::layout::{BlockElem, Spacing as TSpacing};
+
+        let body = elem.resolve_body(styles).at(elem.span())?;
+        let mut props = ParaProps {
+            style: Some("Title".into()),
+            keep_next: true,
+            jc: ctx.resolve_par_jc(styles),
+            review_origin: Some(
+                ctx.review_origin(review_span(&body), ReviewCandidateKind::Paragraph),
+            ),
+            ..Default::default()
+        };
+        let before = match styles.get(BlockElem::above) {
+            typst_library::foundations::Smart::Custom(TSpacing::Rel(rel)) => {
+                Some(crate::props::abs_to_twip(rel.abs.resolve(styles)))
+            }
+            _ => None,
+        };
+        let after = match styles.get(BlockElem::below) {
+            typst_library::foundations::Smart::Custom(TSpacing::Rel(rel)) => {
+                Some(crate::props::abs_to_twip(rel.abs.resolve(styles)))
+            }
+            _ => None,
+        };
+        if before.is_some() || after.is_some() {
+            props.spacing = Some(Spacing { before, after, ..Default::default() });
+        }
+        let mut content = ctx.inline_pchildren(&body, styles, RunProps::default())?;
+        if let Some(loc) = elem.location()
+            && let Some((id, name)) = ctx.bookmark_for_emission(loc)
+        {
+            content.insert(0, ParaChild::BookmarkStart { id, name });
+            content.push(ParaChild::BookmarkEnd { id });
+        }
+        out.push(Block::Para(Para { props, content }));
     } else if let Some(elem) = child.to_packed::<ListElem>() {
         out.extend(mappers::list::list(elem, styles, ctx)?);
     } else if let Some(elem) = child.to_packed::<EnumElem>() {
@@ -1029,18 +1086,17 @@ fn handle_block_inner(
         out.extend(mappers::image::place(elem, styles, ctx)?);
     } else if (child.is::<typst_library::layout::BlockElem>()
         || is_framed_container(child))
-        && structurally_owned_placed_canvas(child, styles)
         && let Some(frame) = coherent_mixed_placed_canvas(child, styles, ctx)?
     {
-        // A finite canvas whose material content is entirely positioned, with
-        // shapes interleaved with labels, is one authored visual composition.
-        // Lowering its placements independently loses their shared coordinate
-        // system even when the canvas is small; large canvases also cross a
-        // reproducible cumulative LibreOffice layout-hang threshold. Preserve
-        // the nearest owning canvas atomically as one raster plus hidden
-        // searchable text. Ordinary flow, nested roots, text-only placement,
-        // and pure-shape compositions retain their editable/native paths.
-        if let Some(para) = fallback_para(
+        // Keep the nearest owning canvas atomic, but prefer a native grouped
+        // DrawingML composition with editable positioned labels. Unsupported
+        // clips/images/transforms retain the consumer-safe raster fallback.
+        if let Some(run) = mappers::shape::mixed_canvas(ctx, &frame, child.span())? {
+            out.push(Block::Para(Para {
+                props: ParaProps::default(),
+                content: vec![ParaChild::Run(run)],
+            }));
+        } else if let Some(para) = fallback_para(
             mappers::image::coherent_placed_canvas_fallback(child, frame, ctx)?,
         ) {
             out.push(para);
@@ -1466,7 +1522,7 @@ pub(crate) fn contains_place(child: &Content) -> bool {
 /// must mix at least one native-shape placement with one rich/text placement.
 /// Nested block/framed roots are deliberately not traversed, so an outer prose
 /// block cannot aggregate unrelated annotations or absorb a smaller canvas.
-fn coherent_mixed_placed_canvas(
+pub(crate) fn coherent_mixed_placed_canvas(
     child: &Content,
     styles: StyleChain,
     ctx: &mut DocxCtx,
@@ -1480,7 +1536,8 @@ fn coherent_mixed_placed_canvas(
         places: usize,
         saw_shape: bool,
         saw_rich: bool,
-        visual_outside_place: bool,
+        saw_shape_outside_place: bool,
+        saw_text_outside_place: bool,
         invalid_tag: bool,
     }
 
@@ -1504,24 +1561,40 @@ fn coherent_mixed_placed_canvas(
                         composition.active_places.remove(index);
                     }
                 }
-                FrameItem::Tag(_) | FrameItem::Link(_, _) => {}
+                FrameItem::Tag(_) => {}
                 FrameItem::Group(group) => visit(&group.frame, composition),
                 FrameItem::Shape(_, _) => {
                     if composition.active_places.is_empty() {
-                        composition.visual_outside_place = true;
+                        composition.saw_shape_outside_place = true;
                     } else {
                         composition.saw_shape = true;
                     }
                 }
-                FrameItem::Text(_) | FrameItem::Image(_, _, _) => {
+                FrameItem::Text(_) => {
                     if composition.active_places.is_empty() {
-                        composition.visual_outside_place = true;
+                        composition.saw_text_outside_place = true;
                     } else {
                         composition.saw_rich = true;
                     }
                 }
+                // The native mixed-canvas collector deliberately rejects images
+                // and link overlays. Do not route a finite live layout through
+                // the atomic raster fallback merely because it contains either.
+                FrameItem::Image(_, _, _) | FrameItem::Link(_, _) => {
+                    composition.invalid_tag = true;
+                }
             }
         }
+    }
+
+    // Source-visible `#place` nodes are the conservative ownership proof for
+    // ordinary containers. A fixed-height inline box containing `#layout` is a
+    // second safe root: its callback material exists only after layout, but the
+    // explicit box bounds still own the complete composition. This covers
+    // procedural headers/backgrounds without aggregating a flowing prose block.
+    let finite_layout_root = finite_layout_canvas_candidate(child, styles);
+    if !structurally_owned_placed_canvas(child, styles) && !finite_layout_root {
+        return Ok(None);
     }
 
     let (frame, failed) =
@@ -1533,12 +1606,42 @@ fn coherent_mixed_placed_canvas(
 
     let mut composition = Composition::default();
     visit(&frame, &mut composition);
-    let coherent = !composition.invalid_tag
-        && !composition.visual_outside_place
-        && composition.places >= 2
+    let source_owned = !composition.saw_shape_outside_place
+        && !composition.saw_text_outside_place
         && composition.saw_shape
         && composition.saw_rich;
+    let finite_layout_owned = finite_layout_root
+        && composition.saw_shape
+        && (composition.saw_rich || composition.saw_text_outside_place);
+    let coherent = !composition.invalid_tag
+        && composition.places >= 2
+        && (source_owned || finite_layout_owned);
     Ok(coherent.then_some(frame))
+}
+
+/// Whether an explicitly bounded inline box owns a procedural `#layout`
+/// composition. The callback's generated placements are not present in the
+/// source tree, so the frame probe supplies the final ownership evidence.
+pub(crate) fn finite_layout_canvas_candidate(
+    child: &Content,
+    styles: StyleChain,
+) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::foundations::Smart;
+    use typst_library::layout::{BoxElem, LayoutElem};
+
+    let fixed_height = child
+        .to_packed::<BoxElem>()
+        .is_some_and(|boxed| !matches!(boxed.height.get(styles), Smart::Auto));
+    let contains_layout = matches!(
+        child.traverse(&mut |content: Content| if content.is::<LayoutElem>() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }),
+        ControlFlow::Break(())
+    );
+    fixed_height && contains_layout
 }
 
 /// Cheap ownership partition before the authoritative frame probe. It ensures
@@ -1813,6 +1916,27 @@ fn handle_block_framed(
     let pbdr = block_borders(&stroke_sides, styles);
     // No visible frame → not a callout.
     if shd_fill.is_none() && pbdr.is_none() {
+        // A frameless box around one inline label is spacing, not artwork. This
+        // is common in table headers (`box(inset: ..)[x0]`): flatten the body to
+        // live text and carry the inset into paragraph spacing/indentation.
+        // Restrict this to non-flowing, text-box-safe bodies so designed layout
+        // canvases and nested structures still take their specialized paths.
+        if !body_is_flowing(&body, styles)
+            && !body_has_footnote(&body)
+            && body_textbox_safe(&body)
+        {
+            let mut inner = ctx.blocks(&body, styles)?;
+            crate::document::collect_tags(&inner, &mut ctx.deferred_tags);
+            let insets = Insets {
+                left: inset.left.and_then(|r| nonzero_twip(r, styles)),
+                right: inset.right.and_then(|r| nonzero_twip(r, styles)),
+                top: inset.top.and_then(|r| nonzero_twip(r, styles)),
+                bottom: inset.bottom.and_then(|r| nonzero_twip(r, styles)),
+            };
+            stamp_box_decorations(&mut inner, None, &None, insets, None, None);
+            out.extend(inner);
+            return Ok(true);
+        }
         // The specific recoverable case: a *frameless* block box wrapping a
         // `#grid` that holds a `#figure` — i.e. a wrap-content figure, which
         // lowers to `box(grid(figure, text))`. Rasterizing the whole box drops

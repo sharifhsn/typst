@@ -731,7 +731,7 @@ fn highlight_default_uses_word_highlight_yellow() {
     let doc = &p["word/document.xml"];
     assert!(
         doc.contains("<w:highlight w:val=\"yellow\"/>"),
-        "default Typst highlight should map to Word's yellow highlighter"
+        "default Typst highlight should map to Word's yellow highlighter: {doc}"
     );
     assert_all_wellformed(&p);
 }
@@ -764,6 +764,23 @@ fn highlight_arbitrary_color_keeps_exact_shading() {
         !doc.contains("<w:highlight"),
         "arbitrary highlight colors should not be forced into Word's named palette"
     );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn translucent_wordprocessing_colors_are_composited_on_white() {
+    let p = parts(
+        "#highlight(fill: rgb(\"#ff00004c\"))[highlight]\n\
+         #box(fill: rgb(\"#0000ff4c\"))[inline]\n\
+         #rect(fill: rgb(\"#00ff004c\"))[block\n\nsecond block paragraph]",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("w:fill=\"FFB3B3\""));
+    assert!(doc.contains("w:fill=\"B3B3FF\""));
+    assert!(doc.contains("w:fill=\"B3FFB3\""));
+    assert!(!doc.contains("w:fill=\"0000FF\""));
+    assert!(!doc.contains("w:fill=\"FF0000\""));
+    assert!(!doc.contains("w:fill=\"00FF00\""));
     assert_all_wellformed(&p);
 }
 
@@ -832,11 +849,11 @@ fn paragraph_spacing_is_preserved_as_native_collapsing_spacing() {
     // 11pt, so the Word line pitch is 7.25pt + 1.8em = 27.05pt (541 twips),
     // not the nominal 11pt + 1.8em.
     assert!(paragraphs[0].contains("w:line=\"541\""), "{}", paragraphs[0]);
-    assert!(!paragraphs[0].contains("w:before=\"400\""), "{}", paragraphs[0]);
-    assert!(!paragraphs[0].contains("w:after=\"400\""), "{}", paragraphs[0]);
-    assert!(paragraphs[1].contains("w:before=\"400\""), "{}", paragraphs[1]);
+    assert!(!paragraphs[0].contains("w:before=\"4\""), "{}", paragraphs[0]);
+    assert!(!paragraphs[0].contains("w:after=\"4\""), "{}", paragraphs[0]);
+    assert!(paragraphs[1].contains("w:before=\"4\""), "{}", paragraphs[1]);
     assert!(paragraphs[1].contains("w:line=\"541\""), "{}", paragraphs[1]);
-    assert!(!paragraphs[1].contains("w:after=\"400\""), "{}", paragraphs[1]);
+    assert!(!paragraphs[1].contains("w:after=\"4\""), "{}", paragraphs[1]);
     assert_all_wellformed(&p);
 }
 
@@ -915,19 +932,23 @@ fn inline_block_inside_link_keeps_text_and_link_semantics() {
                link(\"https://example.com/op\", \
                  block(width: 100%, inset: 5pt)[Mnemonic]))";
     let compiled = compile_docx(src, &[]);
-    let decision = compiled
-        .fidelity_report()
-        .decisions()
-        .iter()
-        .find(|decision| decision.reason == DecisionReason::InlineBlockFlowApproximation)
-        .expect("inline block geometry must be reported as an approximation");
-    assert_eq!(decision.representation, Representation::Approximate);
-    assert_eq!(decision.losses, typst_docx::LossSet::VISUAL_ONLY);
+    let decision =
+        compiled.fidelity_report().decisions().iter().find(|decision| {
+            decision.reason == DecisionReason::InlineBlockFlowApproximation
+        });
+    assert!(decision.is_none(), "cell-owned block geometry is native: {decision:?}");
 
     let p = parts(src);
     let document = &p["word/document.xml"];
     assert!(document.contains("Mnemonic"), "linked cell text remains editable");
     assert!(document.contains("<w:hyperlink r:id="), "external link remains live");
+    assert!(
+        document.contains("<w:tcMar><w:top w:w=\"100\" w:type=\"dxa\"/>")
+            && document.contains("<w:left w:w=\"100\" w:type=\"dxa\"/>")
+            && document.contains("<w:bottom w:w=\"100\" w:type=\"dxa\"/>")
+            && document.contains("<w:right w:w=\"100\" w:type=\"dxa\"/></w:tcMar>"),
+        "the block's 5pt inset must become native cell padding: {document}"
+    );
     assert!(
         !document.contains("<w:drawing>"),
         "plain inline block must not become a raster fallback"
@@ -945,9 +966,9 @@ fn paragraph_spacing_uses_the_larger_adjacent_value_once() {
     );
     let paragraphs = element_fragments(&p["word/document.xml"], "p");
     assert_eq!(paragraphs.len(), 2);
-    assert!(!paragraphs[0].contains("w:before=\"400\""), "{}", paragraphs[0]);
-    assert!(!paragraphs[0].contains("w:after=\"400\""), "{}", paragraphs[0]);
-    assert!(paragraphs[1].contains("w:before=\"400\""), "{}", paragraphs[1]);
+    assert!(!paragraphs[0].contains("w:before=\"257\""), "{}", paragraphs[0]);
+    assert!(!paragraphs[0].contains("w:after=\"257\""), "{}", paragraphs[0]);
+    assert!(paragraphs[1].contains("w:before=\"257\""), "{}", paragraphs[1]);
     assert!(!paragraphs[1].contains("w:after="), "{}", paragraphs[1]);
     assert_all_wellformed(&p);
 }
@@ -964,9 +985,9 @@ fn paragraph_spacing_collapses_in_auxiliary_stories() {
             .iter()
             .find(|paragraph| paragraph.contains(second))
             .unwrap_or_else(|| panic!("missing paragraph containing {second}"));
-        assert!(!first.contains("w:before=\"400\""), "{first}");
-        assert!(!first.contains("w:after=\"400\""), "{first}");
-        assert!(second.contains("w:before=\"400\""), "{second}");
+        assert!(!first.contains("w:before=\"257\""), "{first}");
+        assert!(!first.contains("w:after=\"257\""), "{first}");
+        assert!(second.contains("w:before=\"257\""), "{second}");
         assert!(!second.contains("w:after=\"400\""), "{second}");
     };
 
@@ -1148,7 +1169,7 @@ fn measured_table_row_height_does_not_double_count_cell_insets() {
 }
 
 #[test]
-fn tight_measured_table_uses_atomic_searchable_fallback() {
+fn tight_measured_table_remains_native_and_editable() {
     let compiled = compile_docx(
         "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
          #set text(size: 9pt)\n\
@@ -1157,15 +1178,12 @@ fn tight_measured_table_uses_atomic_searchable_fallback() {
         &[],
     );
     let p = text_parts(&compiled);
-    assert!(
-        element_fragments(&p["word/document.xml"], "tbl").is_empty(),
-        "a table that only Typst's tighter text metrics can fit must remain atomic"
-    );
-    assert!(p["word/document.xml"].contains("<w:drawing>"));
-    assert!(p["word/document.xml"].contains("<w:vanish/>"));
+    assert_eq!(element_fragments(&p["word/document.xml"], "tbl").len(), 1);
+    assert!(!p["word/document.xml"].contains("<w:drawing>"));
+    assert!(!p["word/document.xml"].contains("<w:vanish/>"));
     assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
-        decision.reason == DecisionReason::TightTableTypographyRasterFallback
-            && decision.representation == Representation::Raster
+        decision.reason == DecisionReason::NativeTable
+            && decision.representation == Representation::Native
     }));
     assert_all_wellformed(&p);
 
@@ -1176,70 +1194,12 @@ fn tight_measured_table_uses_atomic_searchable_fallback() {
 #table(columns: 2, [A], [*Bold*], [B], [`raw`], [C], [#sym.arrow.r],
   [D], [#box[E]], [E], [], [F], [])"#,
     );
-    assert!(
-        element_fragments(&inline_text_wrappers["word/document.xml"], "tbl").is_empty(),
-        "single-line semantic text wrappers retain the same proven line-box bound"
+    assert_eq!(
+        element_fragments(&inline_text_wrappers["word/document.xml"], "tbl").len(),
+        1,
+        "tight wrapped text stays editable even when Word reflows the table"
     );
     assert_all_wellformed(&inline_text_wrappers);
-}
-
-#[test]
-fn tight_table_fallback_requires_proven_cell_metrics_and_single_page_extent() {
-    let local_small_text = parts(
-        "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
-         #set text(size: 9pt)\n\
-         #set table(inset: (y: 3.5pt))\n\
-         #table(columns: 1, ..range(6).map(i => text(5pt, str(i))))",
-    );
-    assert_eq!(element_fragments(&local_small_text["word/document.xml"], "tbl").len(), 1);
-
-    let multiline = parts(
-        "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
-         #set text(size: 9pt)\n\
-         #set table(inset: (y: 3.5pt))\n\
-         #table(columns: 1, [A #linebreak() B], [C], [D], [E], [F])",
-    );
-    assert_eq!(element_fragments(&multiline["word/document.xml"], "tbl").len(), 1);
-
-    let row_gutter = parts(
-        "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
-         #set text(size: 9pt)\n\
-         #table(columns: 1, inset: (y: 3.5pt), row-gutter: 5pt, \
-         [A], [B], [C], [D], [E], [F])",
-    );
-    assert_eq!(element_fragments(&row_gutter["word/document.xml"], "tbl").len(), 1);
-
-    let rich_cell = parts(
-        "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
-         #set text(size: 9pt)\n\
-         #set table(inset: (y: 3.5pt))\n\
-         #table(columns: 2, [A], [#rect(width: 1pt, height: 1pt)], \
-         [B], [], [C], [], [D], [], [E], [], [F], [])",
-    );
-    assert_eq!(element_fragments(&rich_cell["word/document.xml"], "tbl").len(), 1);
-
-    let raw_only = parts(
-        "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
-         #set text(size: 9pt)\n\
-         #set table(inset: (y: 3.5pt))\n\
-         #table(columns: 1, [`A`], [`B`], [`C`], [`D`], [`E`], [`F`])",
-    );
-    assert_eq!(element_fragments(&raw_only["word/document.xml"], "tbl").len(), 1);
-
-    let styled_box = parts(
-        "#set page(width: 240pt, height: 110pt, margin: 10pt)\n\
-         #set text(size: 9pt)\n\
-         #set table(inset: (y: 3.5pt))\n\
-         #table(columns: 2, [A], [#box(fill: red)[X]], \
-         [B], [], [C], [], [D], [], [E], [], [F], [])",
-    );
-    assert_eq!(element_fragments(&styled_box["word/document.xml"], "tbl").len(), 1);
-    assert_all_wellformed(&local_small_text);
-    assert_all_wellformed(&multiline);
-    assert_all_wellformed(&row_gutter);
-    assert_all_wellformed(&rich_cell);
-    assert_all_wellformed(&raw_only);
-    assert_all_wellformed(&styled_box);
 }
 
 #[test]
@@ -1447,12 +1407,12 @@ fn table_cell_emits_each_internal_paragraph_gap_once() {
     let cells = element_fragments(&p["word/document.xml"], "tc");
     assert_eq!(cells.len(), 2);
     assert_eq!(
-        cells[0].matches("<w:spacing w:before=\"264\"/>").count(),
+        cells[0].matches("<w:spacing w:before=\"121\"/>").count(),
         2,
         "each of the two internal boundaries carries one collapsed gap"
     );
     assert!(
-        !cells[0].contains("w:after=\"264\""),
+        !cells[0].contains("w:after=\"121\""),
         "the same gap must not be repeated on the preceding paragraph"
     );
     assert_all_wellformed(&p);
@@ -1894,6 +1854,26 @@ fn positional_link_reports_approximation_not_content_drop() {
 }
 
 #[test]
+fn positional_page_link_targets_an_emitted_source_page_bookmark() {
+    let src =
+        "Page target <spot>\n\n#pagebreak()\n#link((page: 1, x: 0pt, y: 0pt))[Back]";
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("<w:bookmarkStart"));
+    assert!(document.contains("<w:hyperlink w:anchor="));
+    assert!(document.contains("Back"));
+    assert!(
+        !compiled
+            .fidelity_report()
+            .decisions()
+            .iter()
+            .any(|decision| { decision.reason == DecisionReason::PositionalLinkTarget })
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn placed_text_is_an_editable_anchored_text_box() {
     let src = "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
                #place(top + left, dx: 10pt, dy: 20pt)[Placed live text]";
@@ -1994,7 +1974,7 @@ fn dense_visual_page_budget_keeps_nine_hundred_shapes_native() {
 }
 
 #[test]
-fn coherent_mixed_placed_canvas_uses_atomic_raster_with_hidden_text() {
+fn coherent_mixed_placed_canvas_uses_native_group_with_editable_text() {
     let src = r#"#block(width: 80pt, height: 30pt)[
   #place(dx: 2pt, dy: 2pt, rect(width: 28pt, height: 14pt, fill: luma(230)))
   #place(dx: 25pt, dy: 10pt)[Canvas label]
@@ -2004,13 +1984,146 @@ fn coherent_mixed_placed_canvas_uses_atomic_raster_with_hidden_text() {
     let compiled = compile_docx(src, &[]);
     let p = text_parts(&compiled);
     let document = &p["word/document.xml"];
-    assert_eq!(document.matches("<a:blip ").count(), 1);
-    assert!(!document.contains("<wps:wsp"));
+    assert_eq!(document.matches("<a:blip ").count(), 0);
+    assert!(document.contains("<wpg:wgp"));
+    assert!(document.matches("<wps:txbx>").count() >= 2);
     assert!(document.contains("Canvas label"));
-    assert!(document.contains("Canvas label Second label"));
-    assert!(document.contains("<w:vanish/>"));
-    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+    assert!(document.contains("Second label"));
+    assert!(!document.contains("<w:vanish/>"));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
         decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn bounded_layout_generated_canvas_is_one_native_group() {
+    let src = r#"#box(width: 100pt, height: 20pt, fill: luma(240))[#layout(size => {
+  for i in range(24) {
+    place(top + left, dx: i * 4pt, polygon(
+      (0pt, 0pt), (3pt, 0pt), (1.5pt, 6pt),
+      fill: rgb(i * 8, 40, 120),
+    ))
+  }
+  [Procedural heading]
+})]"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<wpg:wgp").count(), 1, "{document}");
+    assert_eq!(document.matches("<wp:anchor ").count(), 0);
+    assert!(document.contains("Procedural heading"));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.representation == Representation::Drop
+            || decision.representation == Representation::Raster
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn placed_procedural_vector_background_is_one_anchored_group() {
+    let src = r#"#place(top, box(width: 100pt, height: 30pt, clip: true)[
+  #layout(size => {
+    for i in range(40) {
+      place(top + left, dx: i * 2pt,
+        polygon((0pt, 0pt), (4pt, 0pt), (2pt, 8pt), fill: navy))
+    }
+  })
+])"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<wpg:wgp").count(), 1, "{document}");
+    assert_eq!(document.matches("<wp:anchor ").count(), 1, "{document}");
+    assert!(!document.contains("<a:blip "));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.representation == Representation::Drop
+            || decision.representation == Representation::Raster
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn moved_box_inside_place_is_an_editable_positioned_text_box() {
+    let src = r#"#place(top + left, move(dx: 12pt, dy: 7pt,
+  box(width: 70pt, align(right)[Margin author])))"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("Margin author"));
+    assert!(document.contains("<wps:txbx>"));
+    assert!(document.contains("<wp:anchor "));
+    assert!(!document.contains("<a:blip "));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.representation == Representation::Drop
+            || decision.representation == Representation::Raster
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn document_title_remains_live_heading_text() {
+    let src = "#show title: set text(size: 21pt)\n\
+               #show title: set align(center)\n\
+               #title[Live document title]";
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("Live document title"));
+    assert!(!document.contains("<a:blip "), "{document}");
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.representation == Representation::Drop
+            || decision.representation == Representation::Raster
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn inline_clipped_rotated_glyph_canvas_uses_native_group() {
+    let src = r#"#align(center, context {
+  box(width: 80pt, height: 30pt, inset: 2pt, clip: true)[
+    #place(dx: 2pt, dy: 15pt, line(length: 50pt, stroke: 0.5pt))
+    #place(dx: 52pt, dy: 15pt,
+      rotate(90deg, origin: top + left,
+        box(clip: true, height: 0.3em, $arrow.t$)))
+    #place(dx: 20pt, dy: 4pt)[Editable label]
+  ]
+})"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<a:blip ").count(), 0);
+    assert!(document.contains("<wpg:wgp"));
+    assert!(document.contains("Editable label"));
+    assert!(document.contains("<wps:txbx>"));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::RasterFallback
+            && decision.representation == Representation::Raster
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn frameless_inset_table_header_box_remains_native_text() {
+    let src = r#"#let border = content => box(inset: 5pt, content)
+#figure(
+  table(
+    inset: 0pt,
+    columns: (auto, 1fr, 1fr),
+    border([]), border([x0]), border([x1]),
+    border([0x]), [NOP], [LD],
+  ),
+  kind: table,
+)"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert!(!document.contains("<a:blip "));
+    assert!(document.contains("x0"));
+    assert!(document.contains("x1"));
+    assert!(document.contains("0x"));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::RasterFallback
             && decision.representation == Representation::Raster
     }));
     assert_all_wellformed(&p);
@@ -2035,11 +2148,11 @@ fn coherent_mixed_curve_canvas_counts_curve_commands_as_shapes() {
     let compiled = compile_docx(src, &[]);
     let p = text_parts(&compiled);
     let document = &p["word/document.xml"];
-    assert_eq!(document.matches("<a:blip ").count(), 1);
-    assert!(!document.contains("<wps:wsp"));
-    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+    assert_eq!(document.matches("<a:blip ").count(), 0);
+    assert!(document.contains("<wpg:wgp"));
+    assert!(document.contains("Canvas label"));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
         decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
-            && decision.representation == Representation::Raster
     }));
     assert_all_wellformed(&p);
 }
@@ -2053,12 +2166,12 @@ fn sparse_single_root_mixed_canvas_is_still_coherent() {
     let compiled = compile_docx(src, &[]);
     let p = text_parts(&compiled);
     let document = &p["word/document.xml"];
-    assert_eq!(document.matches("<a:blip ").count(), 1);
+    assert_eq!(document.matches("<a:blip ").count(), 0);
+    assert!(document.contains("<wpg:wgp"));
     assert!(document.contains("Far label"));
-    assert!(document.contains("<w:vanish/>"));
-    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+    assert!(!document.contains("<w:vanish/>"));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
         decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
-            && decision.representation == Representation::Raster
     }));
     assert_all_wellformed(&p);
 }
@@ -2112,7 +2225,8 @@ fn nested_coherent_canvas_does_not_absorb_outer_flow() {
     let compiled = compile_docx(src, &[]);
     let p = text_parts(&compiled);
     let document = &p["word/document.xml"];
-    assert_eq!(document.matches("<a:blip ").count(), 1);
+    assert_eq!(document.matches("<a:blip ").count(), 0);
+    assert!(document.contains("<wpg:wgp"));
     assert!(document.contains("Inner label"));
     assert!(document.contains("Outer prefix."));
     assert!(document.contains("Outer suffix."));
@@ -2125,13 +2239,13 @@ fn nested_coherent_canvas_does_not_absorb_outer_flow() {
                 decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
             })
             .count(),
-        1
+        0
     );
     assert_all_wellformed(&p);
 }
 
 #[test]
-fn wrapper_only_canvas_rasterizes_at_the_nearest_inner_root() {
+fn wrapper_only_canvas_stays_native_at_the_nearest_inner_root() {
     let src = r#"#block(width: 120pt)[
   #block(width: 55pt, height: 24pt)[
     #place(dx: 1pt, rect(width: 30pt, height: 12pt, fill: aqua))
@@ -2141,7 +2255,8 @@ fn wrapper_only_canvas_rasterizes_at_the_nearest_inner_root() {
     let compiled = compile_docx(src, &[]);
     let p = text_parts(&compiled);
     let document = &p["word/document.xml"];
-    assert_eq!(document.matches("<a:blip ").count(), 1);
+    assert_eq!(document.matches("<a:blip ").count(), 0);
+    assert!(document.contains("<wpg:wgp"));
     assert!(document.contains("cx=\"698500\" cy=\"304800\""));
     assert_eq!(
         compiled
@@ -2152,7 +2267,7 @@ fn wrapper_only_canvas_rasterizes_at_the_nearest_inner_root() {
                 decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
             })
             .count(),
-        1
+        0
     );
     assert_all_wellformed(&p);
 }
@@ -2172,7 +2287,8 @@ fn sibling_coherent_canvases_keep_separate_ownership_roots() {
     let compiled = compile_docx(src, &[]);
     let p = text_parts(&compiled);
     let document = &p["word/document.xml"];
-    assert_eq!(document.matches("<a:blip ").count(), 2);
+    assert_eq!(document.matches("<a:blip ").count(), 0);
+    assert_eq!(document.matches("<wpg:wgp").count(), 2);
     assert_eq!(
         compiled
             .fidelity_report()
@@ -2182,7 +2298,7 @@ fn sibling_coherent_canvases_keep_separate_ownership_roots() {
                 decision.reason == DecisionReason::DensePlacedCanvasRasterFallback
             })
             .count(),
-        2
+        0
     );
     assert_all_wellformed(&p);
 }
@@ -2682,13 +2798,13 @@ fn list_spacing_stays_on_group_boundaries() {
         );
     }
     assert!(
-        !para("Second item").contains("w:after=\"264\"")
-            && para("Ordered one").contains("w:before=\"264\""),
+        !para("Second item").contains("w:after=\"121\"")
+            && para("Ordered one").contains("w:before=\"121\""),
         "the gap between adjacent lists is stored once on the following list"
     );
     assert!(
-        !para("Ordered two").contains("w:after=\"264\"")
-            && para("After.").contains("w:before=\"264\""),
+        !para("Ordered two").contains("w:after=\"121\"")
+            && para("After.").contains("w:before=\"121\""),
         "the gap after a list is stored once on the following paragraph"
     );
     assert_all_wellformed(&p);
@@ -2835,6 +2951,27 @@ fn unsupported_math_child_rasterizes_the_whole_equation_atomically() {
         !document.contains("<m:oMath"),
         "no plausible-looking partial OMML subtree is emitted"
     );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn externally_composed_stretchy_arrow_stays_native_omml() {
+    let src = r#"#let xarrow(body) = math.class("relation", math.attach(
+  math.limits(block(width: 24pt, height: 8pt, clip: true,
+    place(dx: -4pt, $arrow.long$))),
+  t: body,
+))
+$ A xarrow(f) B $"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert!(!document.contains("<a:blip"));
+    assert!(document.contains("<m:groupChr>"));
+    assert!(document.contains("<m:phant>"));
+    assert!(document.contains("f"));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::UnsupportedMathRasterFallback
+    }));
     assert_all_wellformed(&p);
 }
 
@@ -3064,13 +3201,11 @@ fn cross_reference_is_a_clickable_hyperlink() {
         "#set heading(numbering: \"1.\")\n= Intro <intro>\n\n= Methods\n\nAs in @intro.",
     );
     let doc = &p["word/document.xml"];
-    // The ref paragraph carries a hyperlink, not bare text.
+    // The live REF field's `\\h` switch makes the displayed number clickable.
     let para = doc.split("<w:p>").find(|p| p.contains("As in")).expect("ref para");
-    assert!(para.contains("<w:hyperlink"), "the cross-reference is a hyperlink");
-    let anchor = {
-        let i = para.find("w:anchor=\"").expect("anchor") + 10;
-        &para[i..][..para[i..].find('"').unwrap()]
-    };
+    assert!(para.contains(" REF ") && para.contains(" \\h "));
+    let i = para.find(" REF ").expect("REF instruction") + 5;
+    let anchor = para[i..].split_whitespace().next().expect("REF bookmark");
     // …and it targets a bookmark that actually exists.
     assert!(
         doc.contains(&format!("w:name=\"{anchor}\"")),
@@ -4098,12 +4233,18 @@ fn labeled_targets_get_bookmarks_so_refs_resolve() {
     };
     let anchors = collect("w:anchor=\"", 10);
     let bookmarks = collect("w:name=\"", 8);
-    assert!(anchors.len() >= 2, "an equation ref and a label link, got {anchors:?}");
+    assert!(!anchors.is_empty(), "the explicit label link remains: {anchors:?}");
     let dangling: Vec<_> = anchors.difference(&bookmarks).collect();
     assert!(
         dangling.is_empty(),
         "every link anchor resolves to a bookmark: {dangling:?}"
     );
+    let ref_target = doc
+        .split(" REF ")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .expect("equation REF target");
+    assert!(bookmarks.contains(ref_target), "equation REF resolves: {ref_target}");
     assert_all_wellformed(&p);
 }
 
@@ -4116,8 +4257,17 @@ fn repeated_located_heading_emits_one_bookmark_pair() {
          #context { let it = query(<repeated>).first(); (it, it) }",
     );
     let doc = &p["word/document.xml"];
-    assert_eq!(doc.matches("<w:bookmarkStart ").count(), 1);
-    assert_eq!(doc.matches("<w:bookmarkEnd ").count(), 1);
+    let located = doc
+        .split("<w:bookmarkStart ")
+        .skip(1)
+        .filter(|tail| !tail.contains("w:name=\"_TypstPage"))
+        .count();
+    assert_eq!(located, 1, "the repeated source location has one marker pair");
+    assert_eq!(
+        doc.matches("<w:bookmarkStart ").count(),
+        doc.matches("<w:bookmarkEnd ").count(),
+        "page and source bookmarks are balanced"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -4761,7 +4911,7 @@ fn pagebreak_keeps_following_vertical_space_on_the_new_page() {
     assert_eq!(doc.matches("<w:pageBreakBefore/>").count(), 1);
     assert!(!doc.contains("<w:br w:type=\"page\"/>"));
     assert!(
-        doc.contains("<w:pageBreakBefore/><w:spacing w:before=\"504\"/>"),
+        doc.contains("<w:pageBreakBefore/><w:spacing w:before=\"361\"/>"),
         "the post-break vertical space belongs to the following paragraph"
     );
     assert_all_wellformed(&p);
@@ -4925,16 +5075,16 @@ fn empty_unshapeable_figure_body_does_not_orphan_its_caption() {
             .descendants()
             .filter(|node| node.tag_name().name() == "bookmarkStart")
             .count(),
-        1,
-        "the figure bookmark moves onto the surviving caption"
+        2,
+        "the surviving caption carries whole-figure and number-only bookmarks"
     );
     assert_eq!(
         paragraphs[0]
             .descendants()
             .filter(|node| node.tag_name().name() == "bookmarkEnd")
             .count(),
-        1,
-        "the figure bookmark closes on the surviving caption"
+        2,
+        "both caption bookmarks close on the surviving caption"
     );
     assert_all_wellformed(&p);
 }
@@ -5020,26 +5170,26 @@ fn figure_emits_seq_field() {
 }
 
 #[test]
-fn typst_owned_reference_text_stays_static_beside_a_live_toc() {
-    // A native TOC remains manually updateable. The normal reference in the
-    // same document nevertheless stays Typst-owned: Word's REF evaluator would
-    // return bookmarked figure content instead of the supplement + number.
+fn number_only_reference_stays_live_beside_a_live_toc() {
+    // Both the TOC and a normal reference remain live. The reference targets a
+    // narrow bookmark around the caption number, never the whole figure body.
     let src = "#outline()\n\n= Heading\n\n\
                #figure(rect(width: 20pt, height: 20pt), caption: [A box]) <f>\n\n\
                See #ref(<f>).";
     let p = parts(src);
     assert!(!p["word/settings.xml"].contains("w:updateFields"));
     let doc = &p["word/document.xml"];
-    assert!(!doc.contains(" REF "), "normal refs must not become Word REF fields");
+    assert!(doc.contains(" REF "), "normal refs use a live number-only REF field");
     let para = doc.split("<w:p>").find(|p| p.contains("See")).expect("ref para");
-    assert!(para.contains("<w:hyperlink"), "the static result stays navigable");
+    assert!(para.contains("Number") && para.contains(" \\h "));
     assert!(visible_text(doc).contains("Figure\u{a0}1"));
 
     let compiled = compile_docx(src, &[]);
-    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
-        decision.reason == DecisionReason::TypstOwnedReferenceText
-            && decision.representation == Representation::Approximate
-    }));
+    assert!(
+        !compiled.fidelity_report().decisions().iter().any(|decision| {
+            decision.reason == DecisionReason::TypstOwnedReferenceText
+        })
+    );
     assert_all_wellformed(&p);
 }
 
@@ -5311,6 +5461,39 @@ fn non_equivalent_figure_numbering_keeps_typst_text_and_hidden_counter() {
     assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
         decision.reason == DecisionReason::TypstOwnedFigureNumber
             && decision.representation == Representation::Approximate
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn chapter_prefixed_caption_and_reference_stay_live() {
+    let src = "#set heading(numbering: \"1\")\n\
+               #set figure(numbering: (..nums) => [#counter(heading).display((..heads) => heads.pos().at(0))\\.#nums.pos().at(0)])\n\
+               = Chapter\n\
+               See @fig.\n\n\
+               #figure(rect(width: 20pt, height: 20pt), caption: [Composite]) <fig>";
+    let p = parts(src);
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("STYLEREF TypstHeadingNumber1")
+            || doc.contains("SEQ TypstCaptionScope_1"),
+        "the chapter prefix follows the current heading: {doc}"
+    );
+    assert!(
+        doc.contains("SEQ Figure_TypstScope_1 \\* ARABIC"),
+        "the local figure sequence restarts at the owning heading: {doc}"
+    );
+    assert!(
+        doc.contains("Number") && doc.contains(" REF ") && doc.contains(" \\h "),
+        "the reference targets a live number-only bookmark: {doc}"
+    );
+    let compiled = compile_docx(src, &[]);
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        matches!(
+            decision.reason,
+            DecisionReason::TypstOwnedFigureNumber
+                | DecisionReason::TypstOwnedReferenceText
+        )
     }));
     assert_all_wellformed(&p);
 }
@@ -5736,15 +5919,20 @@ fn per_page_literal_header_does_not_fake_an_odd_even_split() {
 
 #[test]
 fn citations_and_bibliography_converge_against_paged_introspection() {
-    let p = parts_with_files(
-        "First @beta and then @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")",
-        &[("refs.bib", REFS_BIB)],
-    );
+    let src =
+        "First @beta and then @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")";
+    let compiled = compile_docx(src, &[("refs.bib", REFS_BIB)]);
+    let p = text_parts(&compiled);
     let text = visible_text(&p["word/document.xml"]);
     assert!(text.contains("[1]"), "first citation number is present: {text}");
     assert!(text.contains("[2]"), "second citation number is present: {text}");
     assert!(text.contains("Beta Source"), "first cited bibliography entry is present");
     assert!(text.contains("Alpha Source"), "second cited bibliography entry is present");
+    let raster = compiled.fidelity_report().decisions().iter().find(|decision| {
+        decision.reason == DecisionReason::RasterFallback
+            && decision.representation == Representation::Raster
+    });
+    assert!(raster.is_none(), "bibliography rasterized as: {raster:#?}");
     assert_all_wellformed(&p);
 }
 

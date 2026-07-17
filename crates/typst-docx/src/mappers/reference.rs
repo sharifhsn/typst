@@ -16,17 +16,15 @@
 //! - Bibliography citations (a `RefElem` whose target is not a locatable
 //!   element) → the realized citation text, inline, with no field.
 
-use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Packed, StyleChain};
 use typst_library::introspection::Location;
+use typst_library::layout::Abs;
 use typst_library::model::{Destination, LinkElem, RefElem, RefForm};
 
 use crate::ctx::DocxCtx;
-use crate::dom::{
-    Field, FieldCacheStatus, FieldDisplay, FieldMode, ParaChild, Run, RunProps,
-};
-use crate::report::{DecisionReason, LossSet, Representation};
+use crate::dom::{ParaChild, Run, RunProps};
+use crate::report::{DecisionReason, LossSet};
 
 /// Lowers a [`LinkElem`] into paragraph children.
 ///
@@ -69,17 +67,25 @@ pub fn link(
             let runs = ctx.inline_runs(&elem.body, styles, props.clone())?;
             Ok(vec![ParaChild::Hyperlink { rel: None, anchor: Some(name), runs }])
         }
-        Destination::Position(_) => {
-            // Positional (page + x/y) links have no DOCX equivalent; emit the
-            // body without a hyperlink wrapper so the text is preserved.
-            ctx.warn_approximate(
-                "positional link",
-                span,
-                DecisionReason::PositionalLinkTarget,
-                LossSet::LINK_TARGET,
-            );
+        Destination::Position(position) => {
             let runs = ctx.inline_runs(&elem.body, styles, props)?;
-            Ok(runs.into_iter().map(ParaChild::Run).collect())
+            let source_page =
+                elem.location().map(|loc| loc.page(ctx.engine(), span).get());
+            let page_origin =
+                position.point.x == Abs::zero() && position.point.y == Abs::zero();
+            if (source_page != Some(position.page.get()) || page_origin)
+                && let Some(anchor) = ctx.page_bookmark(position.page.get(), None)
+            {
+                Ok(vec![ParaChild::Hyperlink { rel: None, anchor: Some(anchor), runs }])
+            } else {
+                ctx.warn_approximate(
+                    &format!("positional link to source page {}", position.page.get()),
+                    span,
+                    DecisionReason::PositionalLinkTarget,
+                    LossSet::LINK_TARGET,
+                );
+                Ok(runs.into_iter().map(ParaChild::Run).collect())
+            }
         }
     }
 }
@@ -142,27 +148,5 @@ pub fn reference(
 
     // In-document reference → REF (text) or PAGEREF (page number) complex
     // field targeting the element's bookmark.
-    let (_id, name) = ctx.add_bookmark(loc);
-    // Word's REF evaluator returns bookmarked content; it cannot reproduce
-    // Typst's supplement + numbering rules. Keep the native field/link UX, but
-    // lock the exact Typst-computed cached result against global update.
-    let content = elem.clone().pack();
-    ctx.record_content_decision(
-        &content,
-        Representation::Approximate,
-        DecisionReason::TypstOwnedReferenceText,
-        LossSet::DYNAMIC_BEHAVIOR,
-        0,
-    );
-    // ` REF _Ref7 \h ` — `\h` makes the field result a hyperlink to the
-    // bookmark. Leading/trailing spaces match every real-world emitter.
-    let instr: EcoString = ecow::eco_format!(" REF {name} \\h ");
-
-    Ok(vec![Run::Field(Field {
-        instr,
-        result: result_runs,
-        mode: FieldMode::Static,
-        display: FieldDisplay::Visible,
-        cache_status: FieldCacheStatus::Resolved,
-    })])
+    Ok(ctx.live_number_reference_runs(loc, result_runs))
 }

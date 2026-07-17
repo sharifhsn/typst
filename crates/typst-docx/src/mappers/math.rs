@@ -39,9 +39,9 @@ use typst_library::foundations::{NativeElement, Packed, StyleChain};
 use typst_library::introspection::{Counter, Locator};
 use typst_library::math::EquationElem;
 use typst_library::math::ir::{
-    AccentItem, FencedItem, FractionItem, GlyphItem, MathComponent, MathItem, MathKind,
-    MultilineItem, NumberItem, Position, RadicalItem, ScriptsItem, SkewedFractionItem,
-    TableItem, TextItem, resolve_equation,
+    AccentItem, ExternalItem, FencedItem, FractionItem, GlyphItem, MathComponent,
+    MathItem, MathKind, MultilineItem, NumberItem, Position, RadicalItem, ScriptsItem,
+    SkewedFractionItem, TableItem, TextItem, resolve_equation,
 };
 use typst_library::routines::Arenas;
 
@@ -129,7 +129,14 @@ pub fn equation(
     let mut props = ParaProps::default();
     if let Some(number) = equation_number(elem, styles, ctx)? {
         content.push(ParaChild::Run(Run::Tab));
+        let number_bookmark = ctx.number_bookmark_for_emission(loc);
+        if let Some((id, name)) = &number_bookmark {
+            content.push(ParaChild::BookmarkStart { id: *id, name: name.clone() });
+        }
         content.extend(number.into_iter().map(ParaChild::Run));
+        if let Some((id, _)) = number_bookmark {
+            content.push(ParaChild::BookmarkEnd { id });
+        }
         props.tabs.push(TabStop {
             val: TabAlign::End,
             leader: None,
@@ -275,9 +282,10 @@ fn first_unsupported_math(item: &MathItem) -> Option<UnsupportedMath> {
         MathKind::Box(_) => {
             Some(UnsupportedMath { kind: UnsupportedMathKind::Box, span })
         }
-        MathKind::External(_) => {
+        MathKind::External(item) if external_arrow_char(item).is_none() => {
             Some(UnsupportedMath { kind: UnsupportedMathKind::External, span })
         }
+        MathKind::External(_) => None,
         MathKind::Group(group) => group.items.iter().find_map(first_unsupported_math),
         MathKind::Multiline(multi) => multi
             .rows
@@ -333,6 +341,23 @@ fn first_unsupported_math(item: &MathItem) -> Option<UnsupportedMath> {
         | MathKind::Text(_)
         | MathKind::Primes(_) => None,
     }
+}
+
+fn math_item_external_arrow_char(item: &MathItem) -> Option<char> {
+    let MathItem::Component(comp) = item else { return None };
+    let MathKind::External(item) = &comp.kind else { return None };
+    external_arrow_char(item)
+}
+
+fn external_arrow_char(item: &ExternalItem) -> Option<char> {
+    let text = item.content.plain_text();
+    let mut chars = text.chars();
+    let chr = chars.next()?;
+    (chars.next().is_none() && is_arrow_char(chr)).then_some(chr)
+}
+
+fn is_arrow_char(chr: char) -> bool {
+    matches!(chr as u32, 0x2190..=0x21FF | 0x27F0..=0x27FF | 0x2900..=0x297F)
 }
 
 pub use typst_ooxml_core::omml::equation_omml_fragment;
@@ -470,7 +495,13 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
             // strike but still show the base). This is a faithful mapping, not a
             // degradation, so it does not warn.
             MathKind::Cancel(item) => self.emit_borderbox(&item.base, item.cross),
-            MathKind::Box(_) | MathKind::External(_) => {
+            MathKind::External(item) => {
+                if let Some(chr) = external_arrow_char(item) {
+                    self.text_run(&chr.to_string(), true);
+                }
+                Ok(())
+            }
+            MathKind::Box(_) => {
                 unreachable!("unsupported math must be caught by equation preflight")
             }
             MathKind::Mathml(item) => {
@@ -600,6 +631,19 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
     // -- Scripts / n-ary ----------------------------------------------------
 
     fn emit_scripts(&mut self, scripts: &ScriptsItem) -> SourceResult<()> {
+        if let Some(chr) = math_item_external_arrow_char(&scripts.base)
+            && scripts.top_left.is_none()
+            && scripts.bottom_left.is_none()
+            && scripts.top_right.is_none()
+            && scripts.bottom_right.is_none()
+        {
+            return self.emit_stretchy_arrow(
+                chr,
+                scripts.top.as_ref(),
+                scripts.bottom.as_ref(),
+            );
+        }
+
         // If the base is a single large operator (∑ ∫ ∏ ⋃ …) carrying only
         // top/bottom or sub/sup limits, this is an n-ary, not a scripted box.
         if let Some(chr) = nary_operator_char(&scripts.base)
@@ -619,6 +663,66 @@ impl<'c, 'a, 'e> Emitter<'c, 'a, 'e> {
         // MathML backend does.
         let base = self.scripts_attach_horizontal(scripts)?;
         self.scripts_attach_vertical(scripts, base)
+    }
+
+    /// Emits a package-built extensible arrow as native OMML. A hidden phantom
+    /// carrying the wider limit gives `m:groupChr` the authored arrow width;
+    /// the visible limits are then attached above/below in the usual way.
+    fn emit_stretchy_arrow(
+        &mut self,
+        chr: char,
+        upper: Option<&MathItem>,
+        lower: Option<&MathItem>,
+    ) -> SourceResult<()> {
+        let upper = self.render_opt(upper)?;
+        let lower = self.render_opt(lower)?;
+        let seed = upper.as_deref().or(lower.as_deref()).unwrap_or("");
+
+        let mut base = Omml::new();
+        base.open("m:groupChr").children();
+        base.open("m:groupChrPr").children();
+        base.open("m:chr").attr("m:val", &chr.to_string()).empty();
+        base.open("m:pos").attr("m:val", "top").empty();
+        base.open("m:vertJc").attr("m:val", "bot").empty();
+        base.close();
+        base.open("m:e").children();
+        base.open("m:phant").children();
+        base.open("m:phantPr").children();
+        base.open("m:show").attr("m:val", "0").empty();
+        base.close();
+        base.wrap_raw("m:e", seed);
+        base.close();
+        base.close();
+        base.close();
+        let base = base.into_string();
+
+        match (upper, lower) {
+            (None, None) => self.buf.raw(&base),
+            (Some(upper), None) => {
+                self.buf.open("m:limUpp").children();
+                self.buf.wrap_raw("m:e", &base);
+                self.buf.wrap_raw("m:lim", &upper);
+                self.buf.close();
+            }
+            (None, Some(lower)) => {
+                self.buf.open("m:limLow").children();
+                self.buf.wrap_raw("m:e", &base);
+                self.buf.wrap_raw("m:lim", &lower);
+                self.buf.close();
+            }
+            (Some(upper), Some(lower)) => {
+                let mut inner = Omml::new();
+                inner.open("m:limLow").children();
+                inner.wrap_raw("m:e", &base);
+                inner.wrap_raw("m:lim", &lower);
+                inner.close();
+                self.buf.open("m:limUpp").children();
+                self.buf.wrap_raw("m:e", &inner.into_string());
+                self.buf.wrap_raw("m:lim", &upper);
+                self.buf.close();
+            }
+        }
+        Ok(())
     }
 
     /// Emits the base with its left (pre) and right (post) sub/superscripts,

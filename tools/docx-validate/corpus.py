@@ -35,6 +35,7 @@ DRAWING_COORDINATE = re.compile(
     rb'|<wp:posOffset>(?P<offset>-?\d+)</wp:posOffset>'
 )
 SUSPICIOUS_DRAWING_COORDINATE_EMU = 125_000_000
+FONT_FIXTURE_ROOT = Path(__file__).resolve().parent / "font-fixtures"
 
 
 def bounded_output(value: str | None, limit: int = 12000) -> str:
@@ -114,6 +115,35 @@ def require_same_resume_tools(
 
 def safe_component(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or "document"
+
+
+def document_font_paths(frozen: dict[str, Any]) -> list[Path]:
+    """Return checked-in fonts for a public-corpus document, when available."""
+    name = frozen.get("name")
+    if not isinstance(name, str) or not name:
+        return []
+    candidate = FONT_FIXTURE_ROOT / safe_component(name)
+    return [candidate.resolve()] if candidate.is_dir() else []
+
+
+def font_path_args(paths: list[Path]) -> list[str]:
+    return [argument for path in paths for argument in ("--font-path", str(path))]
+
+
+def font_fixture_evidence(paths: list[Path]) -> list[dict[str, Any]]:
+    evidence = []
+    for path in paths:
+        digest = hashlib.sha256()
+        files = sorted(candidate for candidate in path.rglob("*") if candidate.is_file())
+        for candidate in files:
+            digest.update(candidate.relative_to(path).as_posix().encode())
+            digest.update(candidate.read_bytes())
+        evidence.append({
+            "path": str(path),
+            "sha256": digest.hexdigest(),
+            "files": [candidate.name for candidate in files],
+        })
+    return evidence
 
 
 def command(
@@ -585,7 +615,9 @@ def roundtrip_probe(
     root: Path,
     artifact: Path,
     args: argparse.Namespace,
+    font_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
+    font_paths = font_paths or []
     review_docx = artifact / "review.docx"
     state_path = artifact / "review.typst-review.json"
     report_path = artifact / "review-report.json"
@@ -595,6 +627,7 @@ def roundtrip_probe(
             "compile",
             "--root",
             str(root),
+            *font_path_args(font_paths),
             "--format",
             "docx",
             str(source),
@@ -733,11 +766,24 @@ def roundtrip_probe(
 def validate_document(
     frozen: dict[str, Any], args: argparse.Namespace, corpus_root: Path
 ) -> dict[str, Any]:
+    font_paths = document_font_paths(frozen)
     artifact = args.out / "artifacts" / safe_component(frozen["id"])
     artifact.mkdir(parents=True, exist_ok=True)
     result_file = artifact / "result.json"
     if args.resume and result_file.is_file():
         record = json.loads(result_file.read_text(encoding="utf-8"))
+        # Never mix newly introduced or changed fonts into retries of an
+        # already-compiled authority. Start a fresh run so the PDF, DOCX,
+        # review export, and consumer render share one font input.
+        recorded_font_fixtures = record.get("font_fixtures")
+        current_font_fixtures = font_fixture_evidence(font_paths)
+        if recorded_font_fixtures is None:
+            font_paths = []
+        elif recorded_font_fixtures != current_font_fixtures:
+            raise ValueError(
+                "cannot resume a DOCX authority with changed font fixtures; "
+                "choose a new --out directory"
+            )
         # A resumed record normally reuses its already compiled DOCX. Preserve
         # the source fingerprint that produced that artifact instead of falsely
         # relabeling it with whatever dirty tree happens to invoke the retry.
@@ -780,7 +826,9 @@ def validate_document(
             docx = Path(record["artifacts"]["docx"])
             pdf = Path(record["artifacts"]["pdf"])
             if docx.is_file() and pdf.is_file():
-                visual = validator.visual_check(pdf, docx, artifact)
+                visual = validator.visual_check(
+                    pdf, docx, artifact, font_paths=font_paths
+                )
                 if visual.get("status") == "ok":
                     visual["page_delta"] = abs(visual["gold_pages"] - visual["docx_pages"])
                     visual["ok"] = (
@@ -806,7 +854,9 @@ def validate_document(
         if args.roundtrip and should_run_roundtrip:
             root = corpus_root / frozen["root"]
             source = corpus_root / frozen["entry"]
-            record["round_trip"] = roundtrip_probe(source, root, artifact, args)
+            record["round_trip"] = roundtrip_probe(
+                source, root, artifact, args, font_paths
+            )
         primary, reasons, unverified = classify(record)
         record["primary_class"] = primary
         record["reason_codes"] = reasons
@@ -820,11 +870,13 @@ def validate_document(
     docx = artifact / "document.docx"
     pdf = artifact / "reference.pdf"
     docx_compile = command(
-        [args.typst, "compile", "--root", str(root), "--format", "docx", str(source), str(docx)],
+        [args.typst, "compile", "--root", str(root), *font_path_args(font_paths),
+         "--format", "docx", str(source), str(docx)],
         timeout=args.timeout,
     )
     pdf_compile = command(
-        [args.typst, "compile", "--root", str(root), "--format", "pdf", str(source), str(pdf)],
+        [args.typst, "compile", "--root", str(root), *font_path_args(font_paths),
+         "--format", "pdf", str(source), str(pdf)],
         timeout=args.timeout,
     )
     (artifact / "docx.stderr.log").write_text(docx_compile["stderr"], encoding="utf-8")
@@ -846,7 +898,7 @@ def validate_document(
     libreoffice: dict[str, Any] = {"status": "not_run"}
     visual: dict[str, Any] = {"status": "not_run"}
     if args.libreoffice and docx.is_file() and pdf.is_file():
-        visual = validator.visual_check(pdf, docx, artifact)
+        visual = validator.visual_check(pdf, docx, artifact, font_paths=font_paths)
         if visual.get("status") == "ok":
             visual["page_delta"] = abs(visual["gold_pages"] - visual["docx_pages"])
             visual["ok"] = visual["score"] >= args.minimum_visual_score and visual["page_delta"] <= args.max_page_delta
@@ -889,7 +941,8 @@ def validate_document(
         },
         "visual": visual,
         "missing_fonts": missing_fonts,
-        "round_trip": roundtrip_probe(source, root, artifact, args) if args.roundtrip else {
+        "font_fixtures": font_fixture_evidence(font_paths),
+        "round_trip": roundtrip_probe(source, root, artifact, args, font_paths) if args.roundtrip else {
             "enrollment": fidelity.get("enrollment"),
             "content_controls": sdt_count,
             "unsupported_or_conflicting_regions": None,

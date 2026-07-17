@@ -53,28 +53,24 @@ pub fn abs_to_emu(abs: Abs) -> i64 {
     units::abs_to_emu(abs)
 }
 
-/// A color → `RRGGBB` hex.
+/// A color → opaque `RRGGBB` for WordprocessingML.
+///
+/// WordprocessingML color properties have no alpha channel, so translucent
+/// colors are composited onto Word's default white background instead of
+/// silently becoming fully saturated.
 pub fn color_to_hex(color: &Color) -> [u8; 3] {
-    ooxml_color::raw_rgb(color)
+    ooxml_color::composite_rgb_on_white(color)
 }
 
 /// A gradient approximated by a single solid colour — its first stop — for a
 /// flat `w:shd` shade (see `handle_block_box` / `inline_frame`). A gradient's
 /// stops are stored in its own interpolation space (Oklab by default);
-/// `color_to_hex` reads a colour's components verbatim, so the stop MUST be
-/// converted to sRGB first (exactly as `linear_gradient_fill` and the SVG
-/// exporter do) — otherwise the Oklab L/a/b triple is reinterpreted as RGB,
-/// yielding a plausible-looking but wrong colour (a pale lilac read as bright
-/// red). `None` for a stopless gradient.
+/// `color_to_hex` converts to sRGB before flattening, matching DrawingML and
+/// SVG color conversion. `None` for a stopless gradient.
 pub fn gradient_shade_hex(
     gradient: &typst_library::visualize::Gradient,
 ) -> Option<[u8; 3]> {
-    use typst_library::visualize::{ColorSpace, ProcessColorSpace};
-    let srgb = ColorSpace::Process(ProcessColorSpace::Srgb);
-    gradient
-        .stops_ref()
-        .first()
-        .map(|(c, _)| color_to_hex(&c.to_space(&srgb).unwrap_or_else(|_| c.clone())))
+    gradient.stops_ref().first().map(|(c, _)| color_to_hex(c))
 }
 
 /// Formats an `RRGGBB` byte triple as uppercase hex.

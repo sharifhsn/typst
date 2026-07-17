@@ -175,7 +175,12 @@ pub fn text_box(
             geom,
             fill,
             stroke,
-            txbx: Some(TextBox { ins, blocks, wrap: TextBoxWrap::Square }),
+            txbx: Some(TextBox {
+                ins,
+                blocks,
+                wrap: TextBoxWrap::Square,
+                autofit: true,
+            }),
         }),
         group: None,
     })))
@@ -230,7 +235,7 @@ pub fn unframed_text_box(
             geom: ShapeGeom::Rect,
             fill: None,
             stroke: None,
-            txbx: Some(TextBox { ins: [0; 4], blocks, wrap }),
+            txbx: Some(TextBox { ins: [0; 4], blocks, wrap, autofit: true }),
         }),
         group: None,
     })))
@@ -839,6 +844,19 @@ struct ExtractedShape {
     stroke: Option<ShapeStroke>,
 }
 
+enum ExtractedCanvasChild {
+    Shape(ExtractedShape),
+    Text {
+        x: Abs,
+        y: Abs,
+        width: Abs,
+        height: Abs,
+        text: EcoString,
+        props: crate::dom::RunProps,
+        rtl: bool,
+    },
+}
+
 /// Word's DrawingML reader rejects otherwise schema-valid coordinates outside
 /// its signed 32-bit implementation range.
 // The schema permits larger values, but current desktop Word rejects documents
@@ -970,6 +988,345 @@ fn collect_shapes(
         }
     }
     true
+}
+
+/// Recovers a bounded frame containing both vector geometry and positioned
+/// text as one native WordprocessingGroup. Shapes and labels retain the shared
+/// coordinate system of the authored canvas; labels become editable text-box
+/// children rather than hidden text beside a raster image.
+///
+/// This deliberately accepts only transformations Word can reproduce without
+/// changing glyph layout. Shapes retain the broader similarity-transform path,
+/// while text requires a positive, axis-aligned uniform scale. Clips, images,
+/// link overlays, text strokes, and non-solid glyph paints make the whole
+/// composition fall back atomically.
+pub fn mixed_canvas(
+    ctx: &mut DocxCtx,
+    frame: &typst_library::layout::Frame,
+    span: typst_syntax::Span,
+) -> SourceResult<Option<Run>> {
+    use typst_library::layout::Transform;
+
+    let mut extracted = Vec::new();
+    if !collect_canvas_children(ctx, frame, Transform::identity(), 1.0, &mut extracted)
+        || extracted.len() < 2
+    {
+        return Ok(None);
+    }
+
+    let size = frame.size();
+    let (w_emu, h_emu) = (abs_to_emu(size.x).max(1), abs_to_emu(size.y).max(1));
+    if !word_safe_coordinates([w_emu, h_emu]) {
+        return Ok(None);
+    }
+
+    let mut fitted = false;
+    let mut children = Vec::with_capacity(extracted.len());
+    for child in extracted {
+        let group_child = match child {
+            ExtractedCanvasChild::Shape(shape) => {
+                let (raw, changed) = fit_raw_to_word_coordinates(shape.raw);
+                fitted |= changed;
+                let Some(normalized) = dml::normalize_segments(raw) else { continue };
+                let x_emu = abs_to_emu(normalized.min_x);
+                let y_emu = abs_to_emu(normalized.min_y);
+                let child_w_emu = abs_to_emu(normalized.w).max(1);
+                let child_h_emu = abs_to_emu(normalized.h).max(1);
+                if !word_safe_coordinates([x_emu, y_emu, child_w_emu, child_h_emu]) {
+                    return Ok(None);
+                }
+                GroupChild {
+                    x_emu,
+                    y_emu,
+                    w_emu: child_w_emu,
+                    h_emu: child_h_emu,
+                    shape: ShapeSpec {
+                        geom: ShapeGeom::Path(normalized.segments),
+                        fill: shape.fill,
+                        stroke: shape.stroke,
+                        txbx: None,
+                    },
+                }
+            }
+            ExtractedCanvasChild::Text { x, y, width, height, text, props, rtl } => {
+                let x_emu = abs_to_emu(x);
+                let y_emu = abs_to_emu(y);
+                let child_w_emu = abs_to_emu(width).max(1);
+                let child_h_emu = abs_to_emu(height).max(1);
+                if !word_safe_coordinates([x_emu, y_emu, child_w_emu, child_h_emu]) {
+                    return Ok(None);
+                }
+                let line = crate::props::abs_to_twip(height).max(1);
+                GroupChild {
+                    x_emu,
+                    y_emu,
+                    w_emu: child_w_emu,
+                    h_emu: child_h_emu,
+                    shape: ShapeSpec {
+                        geom: ShapeGeom::Rect,
+                        fill: None,
+                        stroke: None,
+                        txbx: Some(TextBox {
+                            ins: [0; 4],
+                            blocks: vec![crate::dom::Block::Para(crate::dom::Para {
+                                props: crate::dom::ParaProps {
+                                    bidi: rtl,
+                                    spacing: Some(crate::dom::Spacing {
+                                        before: Some(0),
+                                        after: Some(0),
+                                        line: Some(line),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                },
+                                content: vec![crate::dom::ParaChild::Run(Run::Text {
+                                    props,
+                                    text,
+                                })],
+                            })],
+                            wrap: TextBoxWrap::None,
+                            autofit: false,
+                        }),
+                    },
+                }
+            }
+        };
+        children.push(group_child);
+    }
+    if children.len() < 2 {
+        return Ok(None);
+    }
+
+    if fitted {
+        ctx.record_span_decision(
+            "Word-bounded mixed vector group geometry",
+            span,
+            Representation::Approximate,
+            DecisionReason::WordCoordinateBound,
+            LossSet::VISUAL_ONLY,
+        );
+    }
+    ctx.defer_frame_tags(frame);
+    let docpr_id = ctx.next_drawing_id();
+    Ok(Some(Run::Drawing(Drawing {
+        rel: EcoString::new(),
+        svg_rel: None,
+        compatibility_split_ids: None,
+        w_emu,
+        h_emu,
+        source_offset_emu: [0, 0],
+        alt: None,
+        decorative: false,
+        docpr_id,
+        name: ecow::eco_format!("Canvas {docpr_id}"),
+        anchor: None,
+        shape: None,
+        group: Some(GroupSpec { children }),
+    })))
+}
+
+fn collect_canvas_children(
+    ctx: &mut DocxCtx,
+    frame: &typst_library::layout::Frame,
+    acc: typst_library::layout::Transform,
+    stroke_scale: f64,
+    out: &mut Vec<ExtractedCanvasChild>,
+) -> bool {
+    use typst_library::layout::{Dir, FrameItem, Point, Transform};
+    use typst_library::text::FontStyle;
+
+    for (pos, item) in frame.items() {
+        let item_transform = acc.pre_concat(Transform::translate(pos.x, pos.y));
+        match item {
+            FrameItem::Shape(shape, _) => {
+                let Some(fill) = resolved_fill(ctx, &shape.fill) else { return false };
+                let Some(stroke) = resolved_stroke(&shape.stroke, stroke_scale) else {
+                    return false;
+                };
+                out.push(ExtractedCanvasChild::Shape(ExtractedShape {
+                    raw: dml::geometry_to_raw(&shape.geometry, item_transform),
+                    fill,
+                    stroke,
+                }));
+            }
+            FrameItem::Text(text) if !text.text.is_empty() => {
+                let (sx, sy) = (item_transform.sx.get(), item_transform.sy.get());
+                let text_box_safe = text.stroke.is_none()
+                    && item_transform.kx.get().abs() <= 1e-9
+                    && item_transform.ky.get().abs() <= 1e-9
+                    && sx > 0.0
+                    && (sx - sy).abs() <= 1e-9;
+                if !text_box_safe {
+                    if outline_text_item(ctx, text, item_transform, out) {
+                        continue;
+                    }
+                    return false;
+                }
+                let Paint::Solid(color) = &text.fill else { return false };
+                let baseline = Point::zero().transform(item_transform);
+                let size = text.size * sx;
+                let ascent = text.font.metrics().ascender.at(size);
+                let descent = (-text.font.metrics().descender).at(size);
+                let height = (ascent + descent).max(size);
+                // A small right-side allowance prevents consumer font metrics
+                // from wrapping a label that fits exactly in Typst.
+                let width = (text.width() * sx + Abs::pt(0.5)).max(Abs::pt(0.5));
+                let variant = text.font.font().info().variant;
+                let rtl = matches!(text.lang.dir(), Dir::RTL);
+                out.push(ExtractedCanvasChild::Text {
+                    x: baseline.x,
+                    y: baseline.y - ascent,
+                    width,
+                    height,
+                    text: text.text.clone(),
+                    props: crate::dom::RunProps {
+                        font: Some(text.font.font().info().family.clone().into()),
+                        bold: variant.weight.to_number() >= 600,
+                        italic: matches!(
+                            variant.style,
+                            FontStyle::Italic | FontStyle::Oblique
+                        ),
+                        color: Some(color_to_hex(color)),
+                        size_half_pt: Some(crate::props::pt_to_half_pt(size.to_pt())),
+                        rtl,
+                        cs: rtl,
+                        ..Default::default()
+                    },
+                    rtl,
+                });
+            }
+            FrameItem::Text(_) | FrameItem::Image(_, _, _) | FrameItem::Link(_, _) => {
+                return false;
+            }
+            FrameItem::Group(group) => {
+                let Some(scale) = dml::similarity_scale(&group.transform) else {
+                    return false;
+                };
+                let new_acc = item_transform.pre_concat(group.transform);
+                if !collect_canvas_children(
+                    ctx,
+                    &group.frame,
+                    new_acc,
+                    stroke_scale * scale,
+                    out,
+                ) {
+                    return false;
+                }
+            }
+            FrameItem::Tag(_) => {}
+        }
+    }
+    true
+}
+
+/// Converts a text item whose transform cannot be represented by an editable
+/// DrawingML text box (most commonly a rotated mathematical arrowhead) into
+/// native vector paths. Ordinary labels remain editable text boxes; only the
+/// transformed glyphs become geometry.
+fn outline_text_item(
+    ctx: &mut DocxCtx,
+    text: &typst_library::text::TextItem,
+    transform: typst_library::layout::Transform,
+    out: &mut Vec<ExtractedCanvasChild>,
+) -> bool {
+    let Some(fill) = resolved_fill(ctx, &Some(text.fill.clone())) else {
+        return false;
+    };
+    let scale = text.size.to_pt() / text.font.units_per_em();
+    let mut cursor = typst_library::layout::Point::zero();
+    for glyph in &text.glyphs {
+        let origin = cursor
+            + typst_library::layout::Point::new(
+                glyph.x_offset.at(text.size),
+                -glyph.y_offset.at(text.size),
+            );
+        let mut builder = GlyphOutlineBuilder::new(origin, scale, transform);
+        let outlined = text
+            .font
+            .ttf()
+            .outline_glyph(ttf_parser::GlyphId(glyph.id), &mut builder);
+        if outlined.is_some() && !builder.raw.is_empty() {
+            out.push(ExtractedCanvasChild::Shape(ExtractedShape {
+                raw: builder.raw,
+                fill: fill.clone(),
+                stroke: None,
+            }));
+        }
+        cursor += typst_library::layout::Point::new(
+            glyph.x_advance.at(text.size),
+            -glyph.y_advance.at(text.size),
+        );
+    }
+    true
+}
+
+struct GlyphOutlineBuilder {
+    raw: Vec<dml::RawSeg>,
+    current: typst_library::layout::Point,
+    origin: typst_library::layout::Point,
+    scale: f64,
+    transform: typst_library::layout::Transform,
+}
+
+impl GlyphOutlineBuilder {
+    fn new(
+        origin: typst_library::layout::Point,
+        scale: f64,
+        transform: typst_library::layout::Transform,
+    ) -> Self {
+        Self {
+            raw: Vec::new(),
+            current: typst_library::layout::Point::zero(),
+            origin,
+            scale,
+            transform,
+        }
+    }
+
+    fn point(&self, x: f32, y: f32) -> typst_library::layout::Point {
+        use typst_library::layout::{Abs, Point};
+        (self.origin
+            + Point::new(
+                Abs::pt(f64::from(x) * self.scale),
+                Abs::pt(-f64::from(y) * self.scale),
+            ))
+        .transform(self.transform)
+    }
+}
+
+impl ttf_parser::OutlineBuilder for GlyphOutlineBuilder {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let point = self.point(x, y);
+        self.current = point;
+        self.raw.push(dml::RawSeg::Move(point));
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let point = self.point(x, y);
+        self.current = point;
+        self.raw.push(dml::RawSeg::Line(point));
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let control = self.point(x1, y1);
+        let end = self.point(x, y);
+        let c1 = self.current + (control - self.current) * (2.0 / 3.0);
+        let c2 = end + (control - end) * (2.0 / 3.0);
+        self.raw.push(dml::RawSeg::Cubic(c1, c2, end));
+        self.current = end;
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let c1 = self.point(x1, y1);
+        let c2 = self.point(x2, y2);
+        let end = self.point(x, y);
+        self.raw.push(dml::RawSeg::Cubic(c1, c2, end));
+        self.current = end;
+    }
+
+    fn close(&mut self) {
+        self.raw.push(dml::RawSeg::Close);
+    }
 }
 
 /// Builds the final [`Run::Drawing`] from every shape found in `frame`: `None`

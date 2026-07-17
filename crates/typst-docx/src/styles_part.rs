@@ -120,6 +120,16 @@ pub fn build(
         w.open("w:link").attr(xml::W_VAL, &id).empty();
         rpr.write_rpr(&mut w);
         w.close(); // style
+
+        // A stable character style around the emitted heading number lets
+        // composite caption fields retrieve the nearest current prefix with a
+        // live STYLEREF, including alphabetic appendix numbers.
+        char_style(
+            &mut w,
+            &format!("TypstHeadingNumber{level}"),
+            &format!("Typst Heading Number {level}"),
+            false,
+        );
     }
 
     // Define TOCHeading explicitly instead of relying on a consumer's latent

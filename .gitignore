@@ -28,3 +28,7 @@ package-lock.json
 # Nix
 /result
 .direnv/
+
+# Local Microsoft Office fonts used for consumer-authority QA. These are
+# licensed with the local Office installation and must never be redistributed.
+/tools/docx-validate/font-fixtures/**/Cambria.ttc

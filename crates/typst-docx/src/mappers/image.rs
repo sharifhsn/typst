@@ -227,7 +227,7 @@ pub fn figure(
     let (position, caption_blocks) = match &caption {
         Some(cap) => {
             let position = cap.position.get(styles);
-            let runs = caption_runs(elem, cap, styles, ctx)?;
+            let caption = caption_runs(elem, cap, styles, ctx)?;
             let props = ParaProps {
                 style: Some(CAPTION_STYLE.into()),
                 jc: Some(Jc::Center),
@@ -240,10 +240,30 @@ pub fn figure(
                 keep_next: position == OuterVAlignment::Top,
                 ..Default::default()
             };
-            let para = Para {
-                props,
-                content: runs.into_iter().map(ParaChild::Run).collect(),
-            };
+            let mut content = Vec::new();
+            let number_bookmark =
+                elem.location().and_then(|loc| ctx.number_bookmark_for_emission(loc));
+            for (index, run) in caption.runs.into_iter().enumerate() {
+                if caption
+                    .number_range
+                    .as_ref()
+                    .is_some_and(|range| range.start == index)
+                    && let Some((id, name)) = &number_bookmark
+                {
+                    content
+                        .push(ParaChild::BookmarkStart { id: *id, name: name.clone() });
+                }
+                content.push(ParaChild::Run(run));
+                if caption
+                    .number_range
+                    .as_ref()
+                    .is_some_and(|range| range.end == index + 1)
+                    && let Some((id, _)) = &number_bookmark
+                {
+                    content.push(ParaChild::BookmarkEnd { id: *id });
+                }
+            }
+            let para = Para { props, content };
             (position, vec![Block::Para(para)])
         }
         None => (OuterVAlignment::Bottom, Vec::new()),
@@ -489,6 +509,61 @@ pub fn place(
         return ctx.blocks(body, styles);
     }
     let plan = preflight_place(body, styles);
+
+    // A `place(box(layout(..)))` body is already atomically owned by this
+    // placement, even though the callback-generated polygons do not exist in
+    // the source tree. Recover the converged finite frame as one grouped
+    // DrawingML canvas. This keeps thousands of vector children rich while
+    // exposing only one graphical object to the Word document flow.
+    if crate::convert::finite_layout_canvas_candidate(body, styles) {
+        let (frame, failed) =
+            ctx.layout_export_frame(body, styles, body.span(), ctx.available_height)?;
+        if !failed
+            && let Some(frame) = frame
+            && let Some(Run::Drawing(mut drawing)) =
+                crate::mappers::shape::mixed_canvas(ctx, &frame, body.span())?
+        {
+            set_place_anchor(&mut drawing, elem, styles, ctx);
+            let flow_line = top_floating_text_box_line(&mut drawing, elem, styles);
+            ctx.record_content_decision(
+                &placed,
+                Representation::Native,
+                DecisionReason::PositionedDrawing,
+                LossSet::default(),
+                0,
+            );
+            return Ok(vec![para_drawing_with_line(drawing, flow_line)]);
+        }
+    }
+
+    // A common margin-label idiom is `place(move(box[..]))`: `place` owns the
+    // page-relative anchor, `move` adds a local displacement, and the finite
+    // box owns editable text. Fold the move into the anchor source offset and
+    // keep the box as a real DrawingML text box instead of rasterizing it.
+    if let Some(moved) = body.to_packed::<typst_library::layout::MoveElem>()
+        && let Some(Run::Drawing(mut drawing)) = crate::mappers::shape::unframed_text_box(
+            &moved.body,
+            styles,
+            TextBoxWrap::None,
+            ctx,
+        )?
+    {
+        use typst_library::foundations::Resolve;
+        let dx = moved.dx.get(styles).resolve(styles).relative_to(ctx.available_width);
+        let dy = moved.dy.get(styles).resolve(styles).relative_to(ctx.available_height);
+        drawing.source_offset_emu[0] += crate::props::abs_to_emu(dx);
+        drawing.source_offset_emu[1] += crate::props::abs_to_emu(dy);
+        set_place_anchor(&mut drawing, elem, styles, ctx);
+        let flow_line = top_floating_text_box_line(&mut drawing, elem, styles);
+        ctx.record_content_decision(
+            &placed,
+            Representation::Native,
+            DecisionReason::PositionedTextBox,
+            LossSet::default(),
+            0,
+        );
+        return Ok(vec![para_drawing_with_line(drawing, flow_line)]);
+    }
 
     // A placed body whose ENTIRE content is a composition of native shapes —
     // e.g. a decorative background pattern built from many `#polygon`s in a
@@ -950,12 +1025,17 @@ fn anchor_axis(
 /// visible number only when its format is provably equivalent to Typst's
 /// numbering pattern. Otherwise the exact Typst number stays as text and a
 /// hidden `SEQ \h` advances Word's per-kind counter for list-of-figures support.
+struct CaptionRuns {
+    runs: Vec<Run>,
+    number_range: Option<std::ops::Range<usize>>,
+}
+
 fn caption_runs(
     elem: &Packed<FigureElem>,
     cap: &Packed<typst_library::model::FigureCaption>,
     styles: StyleChain,
     ctx: &mut DocxCtx,
-) -> SourceResult<Vec<Run>> {
+) -> SourceResult<CaptionRuns> {
     // Only emit SEQ for actually-numbered figures; otherwise plain realized text
     // (byte-identical to the previous behaviour for unnumbered captions).
     let Some(numbering) = elem.numbering.get_ref(styles) else {
@@ -967,7 +1047,10 @@ fn caption_runs(
             )),
             ..Default::default()
         };
-        return ctx.inline_runs(&realized, styles, props);
+        return Ok(CaptionRuns {
+            runs: ctx.inline_runs(&realized, styles, props)?,
+            number_range: None,
+        });
     };
 
     let mut runs: Vec<Run> = Vec::new();
@@ -984,7 +1067,7 @@ fn caption_runs(
     // The realized number, used as the SEQ field's cached result so the caption
     // is readable before Word updates fields.
     let mut cache_unavailable = false;
-    let number_runs =
+    let (number_runs, number_text) =
         match (cap.counter.clone(), cap.numbering.clone(), cap.figure_location) {
             (Some(Some(counter)), Some(Some(numbering)), Some(Some(location))) => {
                 // Best-effort: this number is only the SEQ field's *cached* result —
@@ -1003,9 +1086,10 @@ fn caption_runs(
                     &numbering,
                     cap.span(),
                 ) {
-                    Ok(number) => {
-                        ctx.inline_runs(&number, styles, RunProps::default())?
-                    }
+                    Ok(number) => (
+                        ctx.inline_runs(&number, styles, RunProps::default())?,
+                        number.plain_text(),
+                    ),
                     Err(errors) => {
                         cache_unavailable = true;
                         let content = elem.clone().pack();
@@ -1023,11 +1107,11 @@ fn caption_runs(
                             LossSet::DYNAMIC_BEHAVIOR,
                             0,
                         );
-                        Vec::new()
+                        (Vec::new(), EcoString::new())
                     }
                 }
             }
-            _ => Vec::new(),
+            _ => (Vec::new(), EcoString::new()),
         };
 
     let number_cache_status = if cache_unavailable {
@@ -1038,6 +1122,7 @@ fn caption_runs(
         FieldCacheStatus::Resolved
     };
     let seq = seq_name(elem, styles);
+    let number_start = runs.len();
     if let Some(format) = word_seq_format(numbering, ctx, cap.span()) {
         // Word can exactly reproduce this single-component numeral system, so
         // preserve a genuinely live, editable caption sequence.
@@ -1057,6 +1142,46 @@ fn caption_runs(
             mode: FieldMode::Live,
             display: FieldDisplay::Visible,
             cache_status: number_cache_status,
+        }));
+    } else if let Some((prefix, separator, suffix, heading_level)) =
+        composite_caption_number(&number_text, ctx)
+    {
+        // A chapter/appendix prefix plus a decimal local counter maps to native
+        // Word fields. STYLEREF follows the nearest heading prefix when that
+        // semantic heading survived show-rule lowering; otherwise a scoped SEQ
+        // owns the exact numeric/alphabetic prefix. A distinct per-scope SEQ
+        // makes the local number independently editable and reorderable.
+        let scope = word_field_identifier(prefix);
+        let prefix_instr = if let Some(heading_level) = heading_level {
+            ecow::eco_format!(" STYLEREF TypstHeadingNumber{heading_level} ")
+        } else if let Ok(value) = prefix.parse::<u32>() {
+            ecow::eco_format!(" SEQ TypstCaptionScope_{scope} \\r {value} \\* ARABIC ")
+        } else {
+            let value = prefix
+                .chars()
+                .next()
+                .expect("composite prefix was validated")
+                .to_ascii_uppercase() as u32
+                - 'A' as u32
+                + 1;
+            ecow::eco_format!(
+                " SEQ TypstCaptionScope_{scope} \\r {value} \\* ALPHABETIC "
+            )
+        };
+        runs.push(Run::Field(Field {
+            instr: prefix_instr,
+            result: vec![Run::Text { props: RunProps::default(), text: prefix.into() }],
+            mode: FieldMode::Live,
+            display: FieldDisplay::Visible,
+            cache_status: FieldCacheStatus::Resolved,
+        }));
+        runs.push(Run::Text { props: RunProps::default(), text: separator.into() });
+        runs.push(Run::Field(Field {
+            instr: ecow::eco_format!(" SEQ {seq}_TypstScope_{scope} \\* ARABIC "),
+            result: vec![Run::Text { props: RunProps::default(), text: suffix.into() }],
+            mode: FieldMode::Live,
+            display: FieldDisplay::Visible,
+            cache_status: FieldCacheStatus::Resolved,
         }));
     } else {
         // Prefixes/suffixes, multi-component patterns, and functions have no
@@ -1080,6 +1205,7 @@ fn caption_runs(
             0,
         );
     }
+    let number_end = runs.len();
 
     // Separator (e.g. ": "). Synthesized into the `separator` field by
     // `FigureCaption`'s `Synthesize` impl, so read it off the chain.
@@ -1098,7 +1224,44 @@ fn caption_runs(
     };
     runs.extend(ctx.inline_runs(&cap.body, styles, body_props)?);
 
-    Ok(runs)
+    Ok(CaptionRuns {
+        runs,
+        number_range: (number_end > number_start).then_some(number_start..number_end),
+    })
+}
+
+/// Recognizes the common custom numbering shape `<heading>.<decimal>` and
+/// identifies the live heading level that supplied the prefix. The separator is
+/// retained verbatim, so this works for chapter and alphabetic appendix numbers
+/// without hard-coding either numeral system.
+fn composite_caption_number<'a>(
+    number: &'a str,
+    ctx: &DocxCtx,
+) -> Option<(&'a str, &'a str, &'a str, Option<usize>)> {
+    let split = number.rfind(['.', '-', ':'])?;
+    let (prefix, tail) = number.split_at(split);
+    let (separator, suffix) = tail.split_at(1);
+    if prefix.is_empty()
+        || suffix.is_empty()
+        || !suffix.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    if prefix.parse::<u32>().is_err()
+        && !(prefix.len() == 1 && prefix.chars().all(|c| c.is_ascii_alphabetic()))
+    {
+        return None;
+    }
+    let level = ctx.heading_level_for_number(prefix);
+    Some((prefix, separator, suffix, level))
+}
+
+fn word_field_identifier(value: &str) -> EcoString {
+    let id: EcoString = value
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    if id.is_empty() { "Scope".into() } else { id }
 }
 
 /// A Word `SEQ` numeric-format switch when one field can exactly reproduce the

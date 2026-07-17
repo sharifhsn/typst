@@ -1345,7 +1345,11 @@ fn write_wsp(
                 .attr("bIns", &tb.ins[3].to_string())
                 .attr("anchor", "t")
                 .start_children();
-            w.leaf("a:spAutoFit");
+            if tb.autofit {
+                w.leaf("a:spAutoFit");
+            } else {
+                w.leaf("a:noAutofit");
+            }
             w.close(); // wps:bodyPr
         }
         None => {

@@ -76,6 +76,36 @@ class ExporterIdentityTests(unittest.TestCase):
             self.assertEqual(metadata["exporter_revision"], "captured-revision")
             self.assertEqual(metadata["exporter_state"], state)
 
+
+class FontFixtureTests(unittest.TestCase):
+    def test_document_font_paths_resolves_named_checked_in_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "gb-ctr"
+            fixture.mkdir()
+            with mock.patch.object(corpus, "FONT_FIXTURE_ROOT", root):
+                self.assertEqual(
+                    corpus.document_font_paths({"name": "gb-ctr"}),
+                    [fixture.resolve()],
+                )
+
+    def test_document_font_paths_is_empty_without_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(corpus, "FONT_FIXTURE_ROOT", Path(directory)):
+                self.assertEqual(corpus.document_font_paths({"name": "other"}), [])
+
+    def test_font_fixture_evidence_changes_with_font_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            font = root / "Example.ttf"
+            font.write_bytes(b"first")
+            first = corpus.font_fixture_evidence([root])
+            font.write_bytes(b"second")
+            second = corpus.font_fixture_evidence([root])
+
+        self.assertNotEqual(first[0]["sha256"], second[0]["sha256"])
+        self.assertEqual(first[0]["files"], ["Example.ttf"])
+
     def test_frozen_identity_never_reloads_git_state(self) -> None:
         state = {
             "revision": "captured-revision",

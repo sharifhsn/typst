@@ -81,6 +81,13 @@ consumer failure without rerunning unrelated documents. Filtered resume runs
 still regenerate authority-wide summaries from every retained result, so a
 serial retry cannot replace the aggregate report with its selected subset.
 
+Documents with redistributable font dependencies can use a checked-in
+`font-fixtures/<document-name>/` directory. The corpus runner discovers it
+automatically, supplies it to PDF/DOCX/review compilation, exposes it to the
+LibreOffice renderer, and records its file list and content digest in each
+fresh result. This keeps font-sensitive gold PDFs reproducible instead of
+silently accepting a reference that omitted unavailable glyphs.
+
 The exporter revision, dirty-tree fingerprint, and binary hash are captured once
 when a campaign starts and reused by every worker. A commit or checkout while a
 long run is still processing therefore cannot silently give later records a
@@ -100,6 +107,39 @@ It recomputes DOCX/PDF word evidence from retained artifacts without compiling
 the corpus again. This currently counts both ordinary Word text and native OMML
 math text; missing or timed-out PDF extraction remains explicit `unverified`
 evidence rather than aborting the run.
+
+`text_coverage` is the historical multiset-token Jaccard score, not literal
+content recall. For a low score, decompose the retained evidence before treating
+it as content loss:
+
+```sh
+uv run tools/docx-validate/semantic_diff.py \
+  target/<run>/artifacts/<document>/reference.pdf \
+  target/<run>/artifacts/<document>/document.docx \
+  > target/<run>/artifacts/<document>/semantic-diff.json
+```
+
+The report separates PDF mathematical-alphanumeric tokenization, last-line
+page furniture, token-boundary differences, and normalized letter-character
+recall. Keep the JSON beside the authority artifact so the diagnosis remains
+reproducible.
+
+For a document whose consumer rendering gains or loses pages, retain a
+text-position and flow-spacing report as well:
+
+```sh
+uv run tools/docx-validate/pagination_diff.py \
+  target/<run>/artifacts/<document>/reference.pdf \
+  target/<run>/artifacts/<document>/libreoffice.pdf \
+  --docx target/<run>/artifacts/<document>/document.docx \
+  --anchor 'Chapter title' \
+  --output target/<run>/artifacts/<document>/pagination-diff.json
+```
+
+The analyzer maps unique text n-grams between pages, reports cumulative drift
+and page density, resolves named anchors in both renderings, and inventories
+display-math spacing and explicit page-break mechanisms in the DOCX. It does
+not compare page images, so it is suitable for deterministic headless triage.
 
 Each result also contains a `diagnoses` object. Compiler timeouts, non-zero
 exits, and terminating signals receive stable reason codes (for example,

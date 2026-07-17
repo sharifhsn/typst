@@ -2542,7 +2542,13 @@ its accepted v14 DOCX. All 240 DOCX integration tests, 18 DOCX unit tests, 22
 round-trip tests, 65 PPTX tests, strict DOCX Clippy, and the focused DOCX/PPTX
 WASM check pass.
 
-## 63. Tight measured semantic tables preserve authored pagination atomically
+## 63. Historical: tight measured semantic-table raster fallback
+
+> **Superseded.** Semantic tables now remain native even when Word's line-box
+> model makes them reflow or split differently from Typst. Pagination fidelity
+> alone is not sufficient reason to discard editable cells, table structure,
+> and accessibility. The history below records why the raster policy existed;
+> it is intentionally no longer selected by the table planner.
 
 Typst can fit dense single-line tables more tightly than Word because its row
 frames use the font's measured glyph edges, while Word's native table paragraphs
@@ -2886,3 +2892,290 @@ passes package and round trip 6/6 under
 `target/docx-gb-outline-style-indent-sentinel-v56-six/`, preserving 26,851
 regions. LibreOffice passes 5/6 with only Xenolay's known timeout; the two
 existing visual-policy misses remain unchanged.
+
+## 71. Mixed placed canvases and inset labels remain native
+
+The coherent-canvas safeguard in section 59 originally preserved CeTZ timing
+diagrams as one raster image with hidden searchable text. That fixed placement,
+but left `gb-ctr` with 224 large raster fallbacks and made every diagram label
+uneditable. The native group model already supported text-bearing `wps:wsp`
+children; the missing layer was a frame extractor that could recover shapes and
+positioned text together.
+
+`mappers::shape::mixed_canvas` now walks the converged owning frame once and
+builds one `wpg:wgp` in the authored frame coordinate system. Vector geometry
+retains the existing similarity-transform and Word-coordinate safeguards.
+Solid-fill, unstroked text under a positive axis-aligned uniform transform
+becomes a fixed-extent, zero-inset `wps:txbx` child with its resolved font,
+weight, style, size, colour, and direction. Transformed text that cannot remain
+an editable DrawingML text box is converted from the actual font glyphs into
+vector paths; this keeps clipped or rotated arrowheads inside the same native
+group while ordinary labels remain editable. Images, link overlays, non-solid
+or stroked text, and geometry that cannot be represented safely still fall
+back atomically instead of being partially lowered. The text-box IR
+distinguishes authored auto-fitting boxes from fixed positioned labels so Word
+cannot resize the latter out of their shared coordinate system.
+
+The remaining 64 generic fallbacks were the `x0`/`0x` labels in the two opcode
+tables. Each label was a frameless `box(inset: 5pt)[..]` inside a direct table
+figure. Figure lowering suppresses standalone text boxes for LibreOffice
+compatibility, so these harmless spacing wrappers had been rasterized.
+Non-flowing, text-safe frameless boxes now flatten to live paragraphs while
+mapping their inset to indentation and paragraph spacing. Designed canvases,
+nested structures, footnotes, and flowing boxes remain on their existing paths.
+
+The accepted focused authority is
+`target/docx-public-corpus-focus-gb-native-canvases-v61/`. The fidelity manifest
+reports zero raster fallbacks and zero dropped content, down from 288 rasters in
+v60. It contains 224 native groups and 4,570 editable text-box labels; all 355
+tables remain native. Package validation, LibreOffice without repair, and all
+3,110 round-trip regions pass. Semantic coverage rises from `0.988702` to
+`0.989200`; the LibreOffice visual score changes only from `0.964505` to
+`0.964069`, with the same 186 rendered pages against the 175-page Typst PDF.
+
+Microsoft Word for Mac 16.111 also opens the exact v61 artifact read-only
+without repair and reports 219 pages, versus 218 for the preceding raster v60;
+the native conversion therefore adds only one page to Word's already different
+pagination. Persistent checked-in gb-ctr fonts were used for compilation and
+LibreOffice rendering, with no missing runtime fonts. All 256 DOCX integration
+tests, 32 affected crate tests, nine harness tests, strict Clippy, formatting,
+and `git diff --check` pass.
+
+## 72. gb-ctr has no declared approximations, rasters, or drops
+
+The v61 native-canvas authority still declared 588 approximations: 512 linked
+full-width blocks inside opcode-table cells lost their inset and hit-area box,
+53 chapter-prefixed figure numbers were static Typst text beside a hidden Word
+counter, and 23 realized references were clickable but did not update.
+
+Plain full-width blocks nested in a table-cell link now transfer their inset to
+the owning cell's `w:tcMar`. Word retains the editable hyperlink runs and the
+cell owns the same four-sided geometry, so no illegal paragraph-in-hyperlink
+structure or document-specific table special case is required. Other inline
+blocks continue to report the approximation unless their containing cell has
+actually adopted that geometry.
+
+Numbered headings, figures, and block equations now expose a second, narrow
+bookmark around only their displayed number. Normal references keep their
+Typst-realized supplement outside a live `REF ... \\h` field pointed at that
+number bookmark; updating a field can therefore change `2.4` without replacing
+the result with an entire figure body. Single-component figure numbering still
+uses the existing `SEQ` mapping. Custom `<scope>.<decimal>` numbering uses a
+live heading `STYLEREF` when the exact heading number survives lowering, and
+otherwise uses Word-owned numeric/alphabetic scope and per-scope `SEQ` fields.
+This preserves chapter and appendix caches while allowing native reordering and
+insertion within each counter scope.
+
+The accepted focused authority is
+`target/docx-public-corpus-focus-gb-zero-approx-v65/`. Its manifest reports zero
+approximations, zero raster fallbacks, and zero dropped content, with 285 live
+fields. Package validation, LibreOffice open/render, and all 3,106 round-trip
+regions pass; semantic text coverage is `0.989200` and the visual score is
+`0.963335`. LibreOffice renders 187 pages against the 175-page Typst PDF; this
+known pagination difference is outside the approximation-removal scope and the
+document remains consumer-open. Microsoft Word for Mac 16.111 also opens the
+exact v65 artifact read-only without repair. Its page-statistics cache was not
+accepted as authority because the current Word session returned the same stale
+three-page value for the previously verified 219-page v61 control. All 257 DOCX
+integration tests, strict DOCX Clippy, formatting, and `git diff --check` pass.
+
+## 73. Mathnote diagrams, extensible arrows, and page-index links stay native
+
+The frozen `alex222222222222-mathnote` authority exposed three general gaps
+that gb-ctr did not: clipped and rotated mathematical glyphs inside `commute`
+diagrams, externally composed extensible arrows, and the page-position links
+generated by `in-dexter`. Its baseline authority contained 38 raster fallbacks
+and 293 approximations: 32 complete commutative diagrams were images, six
+equations containing extensible arrows were images, and 290 page-index links
+had no destination.
+
+Mixed-canvas lowering now accepts clipped groups and outlines only transformed
+glyphs that DrawingML cannot express as editable text. Thus `commute` node and
+edge labels remain editable text boxes while rotated/clipped arrowheads are
+native vector geometry. The OMML mapper recognizes a deliberately narrow
+external-math case: a single Unicode arrow. It emits a stretchy `m:groupChr`
+over a phantom sized from the authored limit, then attaches live upper and
+lower limits; arbitrary external math continues to use the existing atomic
+fallback. Source-page bookmarks are emitted independently of ordinary location
+bookmarks, and position links at page origin target those bookmarks. This
+recovers 286 of 290 index links without pretending that an arbitrary x/y
+coordinate can be preserved in Word.
+
+The checked-in document fixture supplies official Iosevka Regular and Fira Mono
+Regular files (with their licenses) to both Typst compilation and consumer
+rendering, so the authority is reproducible across restarts rather than relying
+on a temporary font directory. A local `Cambria.ttc` copied from Microsoft Word
+may also live in the fixture, but is precisely gitignored because its Office
+license does not permit redistribution. With that local file, Typst discovers
+both Cambria and Cambria Math and the manifest reports zero missing fonts.
+
+The accepted focused authority is
+`target/docx-public-corpus-focus-mathnote-cambria-v6/`. Its manifest reports zero
+raster fallbacks, zero dropped content, and seven approximations, down from 38,
+zero, and 293 respectively. The seven are honest residuals: three occurrences
+of a page-varying ILM footer that exceeds Word's first/even/default footer
+model, plus four index links whose source pages (18, 22, and 112) have no
+locatable element on which to place a bookmark. Package validation,
+LibreOffice open/render, and all 11,184 round-trip regions pass. LibreOffice
+renders 171 pages against the 145-page Typst PDF, with visual score `0.976447`.
+The historical `text_coverage` value remains `0.889514`, but it is a multiset
+token Jaccard score rather than literal content recall. The retained
+`semantic-diff.json` accounts for all 3,176 PDF-only token occurrences: 2,862
+are PDF mathematical-alphanumeric tokens split into live OMML runs, 292 are on
+the PDF's final page lines (the sampled running footer), and the remaining 22
+are boundary variants such as `homab` versus `hom` plus `ab`. After NFKC and
+letter-level comparison, the DOCX contains 152,976 of 155,026 PDF letters with
+no DOCX-only excess; 2,047 of the 2,050 missing letters are footer text and the
+last three are accent-encoding variants in math. There is therefore no evidence
+of missing body prose or mathematical operands; the large pagination delta and
+dynamic footer remain the actual open fidelity concerns.
+
+All 260 DOCX integration tests, 18 DOCX unit tests, eight corpus-harness tests,
+strict DOCX/library Clippy, formatting, and `git diff --check` pass.
+
+## 74. Pagination expansion is cumulative paragraph-boundary spacing
+
+The 145-page Mathnote reference renders as 171 pages in LibreOffice even though
+both use the same A4 media size. Text-position analysis maps 140 reference pages
+and shows steadily increasing drift: General Topology begins on page 5 in both,
+Ring Theory moves from 27 to 32, Homological Algebra from 55 to 64,
+Differentialble Manifold from 96 to 112, and the Index from 141 to 165. The
+consumer median is 166 tokens per page against the reference's 218. Only ten
+paragraphs request `pageBreakBefore`, there are no explicit page-break runs, and
+the apparent seven-token page 31 is the end of a long equation and paragraph,
+not an inserted blank page. The difference is therefore cumulative density,
+not a catastrophic section or break error.
+
+The persistent `pagination-math.typ` fixture isolates the cause. With the ILM
+style's `par(leading: 0.7em, spacing: 1.35em)` at 12pt, Typst baselines are
+16.3pt apart within a paragraph and 24.1pt apart across a paragraph boundary.
+LibreOffice preserves the 16.3pt line pitch but places paragraph-boundary
+baselines 32.5pt apart: exactly one 8.4pt Typst leading too much. Typst paragraph
+spacing replaces the ordinary leading at a boundary, while Word's
+`w:spacing/@w:before` is added on top of the line pitch. The exporter currently
+records the complete 1.35em as 324 twips of space before. For this style, the
+equivalent Word component is `1.35em - 0.7em`, or 156 twips.
+
+A retained diagnostic rewrite changes every 324-twip `before` value to 156 in
+the generated package. It reduces Mathnote from 171 pages to 142 against the
+145-page reference, and the prose-only fixture from 11 pages to 10 against 9.
+That proves the paragraph-spacing component explains essentially the entire
+expansion, but also proves that a blanket XML rewrite is not a production fix:
+it shrinks explicit block, heading, and vertical spacing that is independently
+legitimate. The architectural fix is to subtract resolved line leading only
+from the recorded Typst paragraph-spacing component before that component is
+collapsed with explicit block gaps. Display math is not the primary cause: the
+isolated fixture expands from 10 to 12 pages with math and from 9 to 11 without
+it.
+
+Corrected pagination will also improve source-page bookmarks. The existing
+Mathnote destinations for source pages 18 and 22 currently land on consumer
+pages 20 and 25; the diagnostic spacing package moves the same text to pages 17
+and 21. It cannot manufacture the four residual destinations, however. Source
+pages 18, 22, and 112 begin inside continuing paragraphs or list items, so the
+current first-locatable-element policy sees no new location at those boundaries.
+OOXML bookmarks target a flow position rather than an arbitrary rendered page.
+Exact completion therefore requires propagating Typst page-boundary fragments
+through paragraph/list lowering and inserting a bookmark inside the owning flow.
+Forcing a Word page break at every Typst boundary would make links exact at the
+cost of editable reflow and is not an acceptable general solution.
+
+The durable headless analyzer is `tools/docx-validate/pagination_diff.py`; the
+diagnostic artifacts are under `target/docx-pagination-spacing-probe/`. No core
+spacing change is accepted by this section: it records the reproduced cause,
+the unsafe broad experiment, and the narrower implementation boundary.
+
+## 75. Current-head stubborn-candidate triage replaces historical counts
+
+Five compact documents with large historical fallback counts were rerun from
+the frozen public corpus against the same current exporter binary under
+`target/docx-stubborn-small-five-current-v1/`. Four of the five historical
+failure profiles are now mostly or completely stale:
+
+- `gczuri1886-swen_cheatsheet` has zero approximations, rasters, or drops. It
+  package-validates and round-trips, but renders as seven pages against five and
+  scores `0.937084` with one unavailable font.
+- `elpelado619-typstfiniteautomatasolver` has no rasters or drops. Its three
+  approximations are sampled page furniture, not body content. It renders 18
+  pages against 16 and scores `0.972043`, again with one unavailable font.
+- `amsterdammetje-article` has one 21-character raster and two approximations:
+  one positioned-flow fallback and one sampled page-furniture value. It keeps
+  exact one-page pagination, scores `0.962312`, and has no missing fonts.
+- `radoman2-pmf-spa3-seminarski` has one 15-character raster and no declared
+  approximations or drops. It renders 14 pages against 10 and scores `0.956694`
+  with one unavailable font.
+
+`calligraphics` remains a real architectural outlier. Its heading background
+generates 1,030 repeated `place(top + left, polygon(...))` nodes from
+`@preview/calligraphics:1.0.0/lib.typ:473`. The exporter records all 1,030 as
+drops while also emitting 3,191 native drawings on a single-page CV;
+LibreOffice then times out after 180 seconds. This is not primarily missing
+text—the extracted token score is `0.931655`—but an unbounded positioned-canvas
+lowering and consumer-complexity problem. The next general completion target is
+to recognize the converged layout-owned background as one coherent positioned
+canvas, preserve its polygons in grouped or compact vector form, and ensure the
+consumer sees bounded DrawingML complexity. A document-specific suppression or
+thousands of independent anchors would leave the underlying defect intact.
+
+After `calligraphics`, the two isolated text-bearing rasters are the next
+smallest semantic-fidelity targets. The pagination misses across three otherwise
+native documents should be reevaluated after the paragraph-boundary correction
+from section 74, because their consistent expansion is compatible with that
+same general density defect. Sampled page furniture is lower priority: it is an
+honest limitation of Word's first/even/default header and footer model rather
+than missing body content.
+
+## 76. Paragraph density, procedural canvases, titles, and margin labels close
+
+The paragraph-boundary model from section 74 is now implemented. The exporter
+records Word's paragraph spacing component as `Typst par.spacing - par.leading`
+(clamped at zero), because Word adds `space-before` to its line pitch while
+Typst replaces the ordinary leading at a paragraph boundary. That adjusted
+component retains its provenance through paragraph, list, table-cell, text-box,
+header, footer, and footnote spacing collapse, so explicit vertical space and
+block/heading gaps remain independent.
+
+The persistent fixture's native-math form now renders as exactly 10 pages in
+both Typst and LibreOffice; its prose form is 9 versus 10. The accepted combined
+authority is `target/docx-office-completion-current-v4/`: LibreOffice renders
+Mathnote as 140 pages against the 145-page reference, down from 171. Its visual
+score is `0.975775`; package validation, zero rasters, zero drops, zero missing
+fonts, and all 11,184 round-trip regions remain intact. The remaining five-page
+difference is bounded consumer reflow rather than cumulative expansion.
+
+The source-page bookmark extension was deliberately rejected. The missing
+pages begin inside continued paragraphs/list items, but the DOCX lowering sees
+semantic content locations rather than layout line fragments. Assigning a
+bookmark to the nearest preceding/following tag would merely hide an
+approximation, while retaining page fragments through every paragraph/list
+path would couple editable flow to paged layout and create a broad regression
+surface. The existing four honest positional-link approximations remain until
+Typst exposes a stable fragment-level boundary abstraction.
+
+The same combined current-head authority covers the stubborn candidates. Three
+general native paths replace the remaining failures:
+
+- A placed, explicitly bounded `box(layout(..))` is laid out once and emitted
+  as one anchored `wpg:wgp`. Thousands of vector children remain vector-rich,
+  but Word's flow sees one object rather than thousands of independent anchors.
+- `place(move(box[text]))` folds the move displacement into the anchor and
+  emits an editable DrawingML text box. This removes Amsterdam's rasterized
+  margin author without changing its exact one-page pagination.
+- `TitleElem` maps to a bookmarked paragraph using Word's real `Title` style,
+  resolved Typst run formatting, alignment, sticky behavior, and block spacing.
+  This removes Radoman's rasterized document title.
+
+`calligraphics` now has zero rasters and zero drops, and LibreOffice completes
+instead of timing out. Independent anchors fall from 3,191 to 16; the document
+contains four groups and retains 4,227 grouped vector/text-box children. Its
+fidelity inventory is 17 native decisions, three visual-only positioned-flow
+approximations, 19 drawings, and one unlabeled decorative drawing. It renders
+as two pages against one with score `0.905524`; 147 repeated missing-font
+references remain the dominant reproducibility warning. The package validates
+and its six enrolled table-cell regions round-trip unchanged.
+
+`amsterdammetje-article` now has zero rasters and zero drops; its sole remaining
+approximation is sampled page furniture. It remains one page against one with
+score `0.960150`. `radoman2-pmf-spa3-seminarski` now has zero approximations,
+rasters, or drops and renders 12 pages against 10 with score `0.957011`. All
+three packages validate, round-trip, and render successfully in LibreOffice.

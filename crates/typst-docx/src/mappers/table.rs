@@ -76,13 +76,7 @@ pub fn table(
     let source = elem.clone().pack();
     execute_table_plan(
         &source,
-        preflight_table(
-            &source,
-            elem.grid.as_deref(),
-            TableOrigin::SemanticTable,
-            styles,
-            ctx,
-        ),
+        preflight_table(&source, elem.grid.as_deref(), TableOrigin::SemanticTable, ctx),
         TableOrigin::SemanticTable,
         styles,
         ctx,
@@ -102,13 +96,7 @@ pub fn grid(
     let source = elem.clone().pack();
     execute_table_plan(
         &source,
-        preflight_table(
-            &source,
-            elem.grid.as_deref(),
-            TableOrigin::LayoutGrid,
-            styles,
-            ctx,
-        ),
+        preflight_table(&source, elem.grid.as_deref(), TableOrigin::LayoutGrid, ctx),
         TableOrigin::LayoutGrid,
         styles,
         ctx,
@@ -119,7 +107,6 @@ fn preflight_table<'a>(
     source: &Content,
     grid: Option<&'a CellGrid>,
     origin: TableOrigin,
-    styles: StyleChain,
     ctx: &DocxCtx,
 ) -> TablePlan<'a> {
     let Some(grid) = grid else {
@@ -129,171 +116,11 @@ fn preflight_table<'a>(
         return TablePlan::Empty;
     }
     let measured = measured_table_geometry(source, grid, origin, ctx);
-    if origin == TableOrigin::SemanticTable
-        && measured.as_ref().is_some_and(|geometry| {
-            measured_table_needs_tight_typography_fallback(grid, geometry, styles, ctx)
-        })
-    {
-        return TablePlan::Raster(DecisionReason::TightTableTypographyRasterFallback);
-    }
     if table_geometry_is_approximate(grid, measured.as_ref()) {
         TablePlan::Approximate { grid, measured }
     } else {
         TablePlan::Native { grid, measured }
     }
-}
-
-/// Whether Typst's measured table fits the page but Word's native text model
-/// provably cannot retain that height without clipping or shrinking glyphs.
-///
-/// Typst measures a text row from the font's actual frame edges. Word gives an
-/// unconfigured table paragraph at least the nominal font size, then adds the
-/// authored cell margins. Dense register/opcode maps can therefore fit exactly
-/// in Typst while a native `w:tbl` must either split across pages or use an
-/// `exact` row/line height that clips glyphs. Preserve those tables atomically
-/// with the existing rendered fallback (and hidden searchable text) only when
-/// the measured whole fits one page and this lower bound exceeds it.
-fn measured_table_needs_tight_typography_fallback(
-    grid: &CellGrid,
-    measured: &MeasuredTableGeometry,
-    styles: StyleChain,
-    ctx: &DocxCtx,
-) -> bool {
-    let ncols = grid.non_gutter_column_count();
-    if ncols == 0 || measured.row_heights.len() * ncols != grid.entries.len() {
-        return false;
-    }
-    let Some(mut measured_total) = measured
-        .row_heights
-        .iter()
-        .try_fold(0_i32, |sum, height| Some(sum.saturating_add(height.as_ref()?.val)))
-    else {
-        return false;
-    };
-    for y in 0..measured.row_heights.len().saturating_sub(1) {
-        if let Some(gutter) = row_gutter_height(grid, y, ctx.raster_height) {
-            measured_total = measured_total.saturating_add(gutter.val);
-        }
-    }
-    let page_height = crate::props::abs_to_twip(ctx.available_height).max(1);
-    if measured_total > page_height {
-        return false;
-    }
-
-    let has_column_gutter = has_nonzero_column_gutter(grid);
-    let mut native_minimum = 0_i32;
-    for (y, height) in measured.row_heights.iter().enumerate() {
-        let height = height.unwrap();
-        let Some(nominal_line) = grid.entries[y * ncols..(y + 1) * ncols]
-            .iter()
-            .filter_map(Entry::as_cell)
-            .map(|cell| single_line_nominal_text_dxa(&cell.body, styles))
-            .try_fold(0_i32, |maximum, size| Some(maximum.max(size?)))
-        else {
-            return false;
-        };
-        let minimum = if nominal_line > 0 {
-            nominal_line.saturating_add(row_vertical_inset(
-                grid,
-                y,
-                &measured.columns_dxa,
-                has_column_gutter,
-                styles,
-                height.val,
-            ))
-        } else {
-            height.val
-        };
-        native_minimum = native_minimum.saturating_add(height.val.max(minimum));
-        if y + 1 < measured.row_heights.len()
-            && let Some(gutter) = row_gutter_height(grid, y, ctx.raster_height)
-        {
-            native_minimum = native_minimum.saturating_add(gutter.val);
-        }
-    }
-
-    native_minimum > page_height
-}
-
-/// Returns the largest effective nominal font size in a cell whose material
-/// text is provably single-line. Unknown rich containers deliberately return
-/// `None`: the compatibility fallback is an optimization, never permission to
-/// flatten a table whose Word line-box lower bound is uncertain.
-fn single_line_nominal_text_dxa(content: &Content, styles: StyleChain) -> Option<i32> {
-    use typst_library::foundations::{
-        SequenceElem, ShowSet, Smart, StyledElem, SymbolElem,
-    };
-    use typst_library::introspection::TagElem;
-    use typst_library::layout::{BoxElem, Sizing};
-    use typst_library::model::StrongElem;
-    use typst_library::text::{RawElem, SpaceElem, TextElem};
-
-    if let Some(cell) = content.to_packed::<TableCell>() {
-        return single_line_nominal_text_dxa(&cell.body, styles);
-    }
-    if let Some(cell) = content.to_packed::<GridCell>() {
-        return single_line_nominal_text_dxa(&cell.body, styles);
-    }
-    if let Some(styled) = content.to_packed::<StyledElem>() {
-        return single_line_nominal_text_dxa(&styled.child, styles.chain(&styled.styles));
-    }
-    if let Some(sequence) = content.to_packed::<SequenceElem>() {
-        return sequence.children.iter().try_fold(0_i32, |maximum, child| {
-            Some(maximum.max(single_line_nominal_text_dxa(child, styles)?))
-        });
-    }
-    if let Some(strong) = content.to_packed::<StrongElem>() {
-        return single_line_nominal_text_dxa(&strong.body, styles);
-    }
-    if let Some(text) = content.to_packed::<TextElem>() {
-        if text.text.contains('\n') {
-            return None;
-        }
-        return Some(if text.text.is_empty() {
-            0
-        } else {
-            crate::props::abs_to_twip(styles.resolve(TextElem::size)).max(1)
-        });
-    }
-    if let Some(symbol) = content.to_packed::<SymbolElem>() {
-        if symbol.text.contains('\n') {
-            return None;
-        }
-        return Some(if symbol.text.is_empty() {
-            0
-        } else {
-            crate::props::abs_to_twip(styles.resolve(TextElem::size)).max(1)
-        });
-    }
-    if let Some(raw) = content.to_packed::<RawElem>() {
-        if raw.block.get(styles) || content.plain_text().contains('\n') {
-            return None;
-        }
-        let raw_styles = raw.show_set(styles);
-        let raw_styles = styles.chain(&raw_styles);
-        return Some(if content.plain_text().is_empty() {
-            0
-        } else {
-            crate::props::abs_to_twip(raw_styles.resolve(TextElem::size)).max(1)
-        });
-    }
-    if let Some(boxed) = content.to_packed::<BoxElem>() {
-        if boxed.width.get(styles) != Sizing::Auto
-            || boxed.height.get(styles) != Smart::Auto
-            || !boxed.inset.resolve(styles).unwrap_or_default().is_zero()
-            || !crate::ctx::box_is_plain(boxed, styles)
-        {
-            return None;
-        }
-        return single_line_nominal_text_dxa(
-            boxed.body.get_ref(styles).as_ref()?,
-            styles,
-        );
-    }
-    if content.is::<SpaceElem>() || content.is::<TagElem>() {
-        return Some(0);
-    }
-    None
 }
 
 fn execute_table_plan(
@@ -757,6 +584,18 @@ fn build_cell(
     // `TableCell` body, so read it from there.
     let (jc, valign) = cell_alignment(cell, styles);
     let mut margins = cell_margins(cell, styles, geometry.width_dxa, geometry.height_dxa);
+    let inline_block_margins = cell_owned_inline_block_margins(
+        cell,
+        styles,
+        geometry.width_dxa,
+        geometry.height_dxa,
+    );
+    if let Some(block) = inline_block_margins {
+        margins.top = margins.top.saturating_add(block.top);
+        margins.right = margins.right.saturating_add(block.right);
+        margins.bottom = margins.bottom.saturating_add(block.bottom);
+        margins.left = margins.left.saturating_add(block.left);
+    }
     if geometry.centered_grid_inset && valign == Some(VAlign::Center) {
         margins.top = 0;
         margins.bottom = 0;
@@ -778,7 +617,11 @@ fn build_cell(
             .saturating_sub(margins.right)
             .max(1)
     });
-    let mut blocks = cell_blocks(ctx, cell, styles, jc, content_width)?;
+    let previous_cell_geometry = ctx.cell_owns_inline_block_geometry;
+    ctx.cell_owns_inline_block_geometry = inline_block_margins.is_some();
+    let blocks_result = cell_blocks(ctx, cell, styles, jc, content_width);
+    ctx.cell_owns_inline_block_geometry = previous_cell_geometry;
+    let mut blocks = blocks_result?;
 
     if geometry.height_dxa.is_some() {
         trim_trailing_structural_breaks(&mut blocks);
@@ -1061,6 +904,85 @@ fn cell_margins(
     }
 }
 
+/// Recognizes a plain, full-width block nested in a table cell (most commonly
+/// `link(.., block(width: 100%, inset: ..)[..])`) whose only block geometry is
+/// padding. Word cannot place a paragraph inside a hyperlink, but the enclosing
+/// `w:tc` is exactly the same containing box: transferring the inset to
+/// `w:tcMar` preserves the native geometry, editable text, and full-cell link
+/// without manufacturing invalid nested paragraphs.
+///
+/// This is deliberately conservative: multiple blocks, non-full widths,
+/// paint/stroke/clip, or any nonzero outset remain on the ordinary approximation
+/// path because a single set of cell margins would not represent them exactly.
+fn cell_owned_inline_block_margins(
+    cell: &ResolvedCell,
+    styles: StyleChain,
+    width_dxa: Option<i32>,
+    height_dxa: Option<i32>,
+) -> Option<CellMargins> {
+    use std::ops::ControlFlow;
+    use typst_library::foundations::Smart;
+    use typst_library::layout::{BlockElem, Sides};
+
+    let content = cell
+        .body
+        .to_packed::<TableCell>()
+        .map(|tc| tc.body.clone())
+        .or_else(|| cell.body.to_packed::<GridCell>().map(|gc| gc.body.clone()))
+        .unwrap_or_else(|| cell.body.clone());
+
+    let mut found: Option<Packed<BlockElem>> = None;
+    let invalid = content
+        .traverse(&mut |element: Content| {
+            let Some(block) = element.to_packed::<BlockElem>() else {
+                return ControlFlow::Continue(());
+            };
+            if found.is_some() {
+                return ControlFlow::Break(());
+            }
+            found = Some(block.clone());
+            ControlFlow::Continue(())
+        })
+        .is_break();
+    if invalid {
+        return None;
+    }
+    let block = found?;
+
+    let Smart::Custom(width) = block.width.get(styles) else { return None };
+    if !width.resolve(styles).is_one()
+        || !super::super::ctx::block_is_plain(&block, styles)
+    {
+        return None;
+    }
+    let outset = block.outset.get_cloned(styles);
+    if outset.top.is_some_and(|v| !v.resolve(styles).is_zero())
+        || outset.right.is_some_and(|v| !v.resolve(styles).is_zero())
+        || outset.bottom.is_some_and(|v| !v.resolve(styles).is_zero())
+        || outset.left.is_some_and(|v| !v.resolve(styles).is_zero())
+    {
+        return None;
+    }
+
+    let inset: Sides<Option<_>> = block.inset.get_cloned(styles);
+    let width = Abs::pt(width_dxa.unwrap_or(0).max(0) as f64 / 20.0);
+    let height = Abs::pt(height_dxa.unwrap_or(0).max(0) as f64 / 20.0);
+    let margin = |value: Option<
+        typst_library::layout::Rel<typst_library::layout::Length>,
+    >,
+                  reference: Abs| {
+        value.map_or(0, |value| {
+            crate::props::abs_to_twip(value.resolve(styles).relative_to(reference)).max(0)
+        })
+    };
+    Some(CellMargins {
+        top: margin(inset.top, height),
+        right: margin(inset.right, width),
+        bottom: margin(inset.bottom, height),
+        left: margin(inset.left, width),
+    })
+}
+
 /// Maps a Typst [`Alignment`] to (`w:jc`, `w:vAlign`).
 fn align_to_docx(align: Alignment) -> (Option<Jc>, Option<VAlign>) {
     use typst_library::layout::HAlignment;
@@ -1238,8 +1160,8 @@ fn stroke_to_border(stroke: &Stroke<Abs>) -> Border {
     Border { sz, color }
 }
 
-/// A solid [`Paint`] → its `RRGGBB` bytes, dropping alpha. Gradients/patterns
-/// (which Word cannot represent on a cell background) are dropped.
+/// A solid [`Paint`] → opaque `RRGGBB` bytes. Gradients/patterns (which Word
+/// cannot represent on a cell background) are dropped.
 fn paint_to_rgb(paint: &Paint) -> Option<[u8; 3]> {
     match paint {
         Paint::Solid(color) => Some(color_to_rgb(color)),
@@ -1268,15 +1190,7 @@ fn representative_gradient_rgb(
 }
 
 fn color_to_rgb(color: &Color) -> [u8; 3] {
-    let (r, g, b, a) = color.to_rgb().into_format::<u8, u8>().into_components();
-    // `w:shd` and table borders have no alpha. Composite over Word's default
-    // white page/cell background rather than dropping alpha or making a
-    // translucent color unexpectedly opaque and too dark.
-    let composite = |channel: u8| -> u8 {
-        let value = channel as u32 * a as u32 + 255 * (255 - a as u32);
-        ((value + 127) / 255) as u8
-    };
-    [composite(r), composite(g), composite(b)]
+    typst_ooxml_core::color::composite_rgb_on_white(color)
 }
 
 /// Resolves Word's table grid from the final paged cell regions rather than

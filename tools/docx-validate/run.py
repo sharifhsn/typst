@@ -61,9 +61,14 @@ def git_revision() -> str | None:
         return None
 
 
-def run_command(command: list[str], *, cwd: Path | None = None, timeout: int = 180) -> dict[str, Any]:
+def run_command(
+    command: list[str], *, cwd: Path | None = None, timeout: int = 180,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
     env = dict(os.environ, SOURCE_DATE_EPOCH="0")
+    if extra_env:
+        env.update(extra_env)
     try:
         process = subprocess.Popen(
             command,
@@ -217,7 +222,10 @@ def rasterize_pages(
     return pages, None
 
 
-def visual_check(pdf_path: Path, docx_path: Path, directory: Path) -> dict[str, Any]:
+def visual_check(
+    pdf_path: Path, docx_path: Path, directory: Path, *,
+    font_paths: list[Path] | None = None,
+) -> dict[str, Any]:
     soffice = shutil.which("soffice")
     if not soffice:
         return {"status": "unavailable", "reason": "soffice unavailable"}
@@ -239,6 +247,9 @@ def visual_check(pdf_path: Path, docx_path: Path, directory: Path) -> dict[str, 
                 str(docx_path),
             ],
             timeout=180,
+            extra_env={
+                "SAL_FONTPATH": os.pathsep.join(str(path) for path in font_paths or [])
+            } if font_paths else None,
         )
         if conversion["exit_code"] == 0 and converted.is_file():
             shutil.move(converted, rendered)

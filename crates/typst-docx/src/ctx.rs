@@ -89,6 +89,9 @@ pub struct DocxCtx<'a, 'e> {
     next_bookmark_id: u32,
     snapshot_bookmark_names: FxHashMap<Location, EcoString>,
     emitted_bookmarks: FxHashSet<Location>,
+    number_bookmarks: FxHashMap<Location, (EcoString, u32)>,
+    emitted_number_bookmarks: FxHashSet<Location>,
+    page_bookmarks: FxHashMap<usize, (EcoString, Location)>,
     next_docpr_id: u32,
     /// Monotonic id for unique header/footer part names across sections.
     next_hdrftr_id: u32,
@@ -122,6 +125,11 @@ pub struct DocxCtx<'a, 'e> {
     /// Resolved heading style samples by emitted heading. The document pass
     /// majority-votes these into `HeadingN` style definitions.
     pub(crate) heading_style_samples: Vec<HeadingStyleSample>,
+
+    /// Most recent visible number at each Word heading level. Composite caption
+    /// numbering uses this to bind a live STYLEREF to the same heading level
+    /// that supplied Typst's prefix.
+    current_heading_numbers: Vec<Option<EcoString>>,
 
     /// Captioned figures/tables recorded in document order, used to populate any
     /// list of figures/tables once each figure's real bookmark exists.
@@ -188,6 +196,11 @@ pub struct DocxCtx<'a, 'e> {
     /// rasterized to a centered image instead.
     pub(crate) suppress_text_box: bool,
 
+    /// A table cell has transferred a nested, plain full-width block's inset to
+    /// `w:tcMar`. In that scope the inline walker may safely unwrap the block:
+    /// its box geometry is owned by the cell rather than being discarded.
+    pub(crate) cell_owns_inline_block_geometry: bool,
+
     /// Cache for page-overlay rasterization (`Self::rasterize_page_overlay`),
     /// keyed by a hash of the content, styles, and target box. A page
     /// background/foreground is lowered up to 5 times per section (to detect
@@ -224,6 +237,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             next_bookmark_id: 1,
             snapshot_bookmark_names: FxHashMap::default(),
             emitted_bookmarks: FxHashSet::default(),
+            number_bookmarks: FxHashMap::default(),
+            emitted_number_bookmarks: FxHashSet::default(),
+            page_bookmarks: FxHashMap::default(),
             next_docpr_id: 1,
             next_hdrftr_id: 1,
             next_z: 1,
@@ -237,6 +253,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             real_semantic_alias_locations: FxHashSet::default(),
             toc_headings: Vec::new(),
             heading_style_samples: Vec::new(),
+            current_heading_numbers: Vec::new(),
             toc_figures: Vec::new(),
             // A sane finite default (~A4 text width); overridden from the real
             // page geometry by `docx_document` before any conversion happens.
@@ -252,6 +269,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             line_numbering_active: false,
             in_footnote: false,
             suppress_text_box: false,
+            cell_owns_inline_block_geometry: false,
             overlay_cache: FxHashMap::default(),
         }
     }
@@ -682,6 +700,128 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         self.emitted_bookmarks.insert(loc).then(|| self.add_bookmark(loc))
     }
 
+    /// Uses the first inline locatable element encountered on each source page
+    /// as that page's hyperlink anchor. This keeps generated index page links
+    /// interactive even though OOXML has no raw page/x/y hyperlink target.
+    pub(crate) fn page_bookmark_for_emission(
+        &mut self,
+        loc: Location,
+    ) -> Option<(u32, EcoString)> {
+        let position = loc.position(self.engine, Span::detached());
+        let page = position.page.get();
+        if self.page_bookmarks.contains_key(&page) {
+            return None;
+        }
+        let id = self.next_bookmark_id;
+        self.next_bookmark_id += 1;
+        let name = eco_format!("_TypstPage{page}");
+        self.page_bookmarks.insert(page, (name.clone(), loc));
+        Some((id, name))
+    }
+
+    pub(crate) fn page_bookmark(
+        &self,
+        page: usize,
+        exclude: Option<Location>,
+    ) -> Option<EcoString> {
+        self.page_bookmarks
+            .get(&page)
+            .filter(|(_, location)| Some(*location) != exclude)
+            .map(|(name, _)| name.clone())
+    }
+
+    /// Allocates a bookmark that encloses only a target's displayed number.
+    /// References use this instead of the whole-figure bookmark so a live REF
+    /// returns `2.4`, not the figure body and caption.
+    pub(crate) fn add_number_bookmark(&mut self, loc: Location) -> (u32, EcoString) {
+        if let Some((name, id)) = self.number_bookmarks.get(&loc) {
+            return (*id, name.clone());
+        }
+        let (_, base) = self.add_bookmark(loc);
+        let id = self.next_bookmark_id;
+        self.next_bookmark_id += 1;
+        let name = eco_format!("{base}Number");
+        self.number_bookmarks.insert(loc, (name.clone(), id));
+        (id, name)
+    }
+
+    pub(crate) fn number_bookmark_for_emission(
+        &mut self,
+        loc: Location,
+    ) -> Option<(u32, EcoString)> {
+        self.emitted_number_bookmarks
+            .insert(loc)
+            .then(|| self.add_number_bookmark(loc))
+    }
+
+    pub(crate) fn note_heading_number(&mut self, level: usize, number: EcoString) {
+        if self.current_heading_numbers.len() <= level {
+            self.current_heading_numbers.resize(level + 1, None);
+        }
+        self.current_heading_numbers[level] = Some(number);
+        for nested in self.current_heading_numbers.iter_mut().skip(level + 1) {
+            *nested = None;
+        }
+    }
+
+    pub(crate) fn heading_level_for_number(&self, number: &str) -> Option<usize> {
+        self.current_heading_numbers.iter().enumerate().rev().find_map(
+            |(level, current)| (current.as_deref() == Some(number)).then_some(level),
+        )
+    }
+
+    /// Rebuilds a normal textual reference as a static supplement followed by
+    /// a live REF to the target's number-only bookmark. The cached realized
+    /// text is split at its final word boundary (`Figure 2.4` -> `Figure ` +
+    /// `2.4`); formatting is retained from the corresponding source runs.
+    pub(crate) fn live_number_reference_runs(
+        &mut self,
+        loc: Location,
+        runs: Vec<Run>,
+    ) -> Vec<Run> {
+        let mut text = EcoString::new();
+        let mut fallback_props = RunProps::default();
+        for run in &runs {
+            if let Run::Text { props, text: part } = run {
+                if text.is_empty() {
+                    fallback_props = props.clone();
+                }
+                text.push_str(part);
+            }
+        }
+        if text.is_empty() {
+            return runs;
+        }
+
+        let split = text
+            .char_indices()
+            .rev()
+            .find_map(|(index, ch)| {
+                (ch == ' ' || ch == '\u{a0}').then_some(index + ch.len_utf8())
+            })
+            .unwrap_or(0);
+        let (supplement, number) = text.split_at(split);
+        if number.is_empty() {
+            return runs;
+        }
+        let (_id, name) = self.add_number_bookmark(loc);
+        let mut out = Vec::new();
+        if !supplement.is_empty() {
+            out.push(Run::Text {
+                props: fallback_props.clone(),
+                text: supplement.into(),
+            });
+        }
+        out.push(Run::Field(Field {
+            instr: eco_format!(" REF {name} \\h "),
+            result: vec![Run::Text { props: fallback_props, text: number.into() }],
+            mode: FieldMode::Live,
+            display: FieldDisplay::Visible,
+            cache_status: FieldCacheStatus::Resolved,
+        }));
+        out
+    }
+
     /// Allocates (or reuses) an external hyperlink relationship in the active
     /// part's relationships (document / footnote / header-footer); returns the rId.
     pub fn add_external_rel(&mut self, url: &str) -> EcoString {
@@ -1107,6 +1247,15 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             .unwrap_or(font_size)
     }
 
+    /// Computes the Word space-before component for a Typst paragraph boundary.
+    pub(crate) fn word_paragraph_boundary_spacing(&self, styles: StyleChain) -> i32 {
+        use typst_library::model::ParElem;
+
+        props::abs_to_twip(styles.resolve(ParElem::spacing))
+            .saturating_sub(props::abs_to_twip(styles.resolve(ParElem::leading)))
+            .max(0)
+    }
+
     /// Resolves a `ParElem`'s paragraph properties.
     pub fn resolve_par_props(
         &self,
@@ -1137,12 +1286,15 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
 
         let font_size = styles.resolve(TextElem::size);
 
-        // G4 paragraph spacing. Record the Typst component symmetrically while
-        // lowering so explicit `#v()` additions remain distinguishable. Once a
-        // complete block sequence is known, `collapse_par_spacing` removes the
-        // outer values and stores each adjacent maximum once on the following
-        // paragraph. This avoids relying on consumer-specific Word collapsing.
-        let paragraph_spacing = props::abs_to_twip(styles.resolve(ParElem::spacing));
+        let leading = styles.resolve(ParElem::leading);
+
+        // G4 paragraph spacing. Typst's `par.spacing` replaces the ordinary
+        // leading at a paragraph boundary; Word's `space-before` is added on
+        // top of the paragraph's line pitch. Store only the excess over leading
+        // as the Word boundary component. Keeping that adjusted component
+        // separate still lets `collapse_par_spacing` preserve explicit `#v()`
+        // additions and store each adjacent maximum exactly once.
+        let paragraph_spacing = self.word_paragraph_boundary_spacing(styles);
         if paragraph_spacing != 0 {
             p.typst_par_spacing_before = Some(paragraph_spacing);
             p.typst_par_spacing_after = Some(paragraph_spacing);
@@ -1158,7 +1310,6 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         // the nominal font size is only a fallback when those metrics cannot be
         // resolved. Using `font_size + leading` overstates the line pitch for
         // the default cap-height-to-baseline frame.
-        let leading = styles.resolve(ParElem::leading);
         let default_leading = Em::new(0.65).at(font_size);
         if (leading - default_leading).to_pt().abs() > 1e-3 {
             let line =
@@ -1188,7 +1339,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         p
     }
 
-    fn resolve_par_jc(&self, styles: StyleChain) -> Option<Jc> {
+    pub(crate) fn resolve_par_jc(&self, styles: StyleChain) -> Option<Jc> {
         use typst_library::layout::{AlignElem, FixedAlignment};
         use typst_library::model::ParElem;
         use typst_library::text::TextElem;
@@ -1283,6 +1434,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     ) -> SourceResult<Vec<crate::dom::ParaChild>> {
         use crate::dom::ParaChild;
         self.record_raw_ranges(body);
+        if (body.is::<typst_library::layout::BlockElem>()
+            || crate::convert::is_framed_container(body))
+            && let Some(frame) =
+                crate::convert::coherent_mixed_placed_canvas(body, styles, self)?
+            && let Some(run) = mappers::shape::mixed_canvas(self, &frame, body.span())?
+        {
+            return Ok(vec![ParaChild::Run(run)]);
+        }
         // See the identical check in `inline_runs`.
         if crate::convert::contains_place(body)
             && crate::convert::placed_bodies_shape_only(body, styles)
@@ -1346,20 +1505,18 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                     | DirectLinkKind::PageReferenceSupplement
                     | DirectLinkKind::Other => {
                         if elem.kind == DirectLinkKind::Reference {
-                            let content = elem.clone().pack();
-                            self.record_content_decision(
-                                &content,
-                                Representation::Approximate,
-                                DecisionReason::TypstOwnedReferenceText,
-                                LossSet::DYNAMIC_BEHAVIOR,
-                                0,
+                            out.extend(
+                                self.live_number_reference_runs(elem.loc, runs)
+                                    .into_iter()
+                                    .map(ParaChild::Run),
                             );
+                        } else {
+                            out.push(ParaChild::Hyperlink {
+                                rel: None,
+                                anchor: Some(name),
+                                runs,
+                            });
                         }
-                        out.push(ParaChild::Hyperlink {
-                            rel: None,
-                            anchor: Some(name),
-                            runs,
-                        });
                     }
                 }
             } else if let Some((fbody, fill, bdr)) =
@@ -1422,18 +1579,11 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                                 }
                             }
                             DirectLinkKind::Reference => {
-                                self.record_content_decision(
-                                    child,
-                                    Representation::Approximate,
-                                    DecisionReason::TypstOwnedReferenceText,
-                                    LossSet::DYNAMIC_BEHAVIOR,
-                                    0,
+                                out.extend(
+                                    self.live_number_reference_runs(loc, runs)
+                                        .into_iter()
+                                        .map(ParaChild::Run),
                                 );
-                                out.push(ParaChild::Hyperlink {
-                                    rel: None,
-                                    anchor: Some(name),
-                                    runs,
-                                });
                             }
                             DirectLinkKind::PageReferenceSupplement
                             | DirectLinkKind::Other => {
@@ -1453,10 +1603,18 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                             runs,
                         });
                     }
-                    // A page/coordinate destination has no DOCX equivalent: emit
-                    // the text without a link.
-                    Destination::Position(_) => {
-                        out.extend(runs.into_iter().map(ParaChild::Run));
+                    Destination::Position(position) => {
+                        if let Some(anchor) =
+                            self.page_bookmark(position.page.get(), child.location())
+                        {
+                            out.push(ParaChild::Hyperlink {
+                                rel: None,
+                                anchor: Some(anchor),
+                                runs,
+                            });
+                        } else {
+                            out.extend(runs.into_iter().map(ParaChild::Run));
+                        }
                     }
                 }
             } else if child.is::<typst_library::layout::PlaceElem>()
@@ -1561,7 +1719,18 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         props: &RunProps,
         out: &mut Vec<Run>,
     ) -> SourceResult<()> {
-        if let Some(elem) = child.to_packed::<CounterDisplayElem>() {
+        if (child.is::<typst_library::layout::BlockElem>()
+            || crate::convert::is_framed_container(child))
+            && let Some(frame) =
+                crate::convert::coherent_mixed_placed_canvas(child, styles, self)?
+            && let Some(run) = mappers::shape::mixed_canvas(self, &frame, child.span())?
+        {
+            // Inline finite canvases need the same atomic grouped lowering as
+            // block canvases. In particular, `#layout` can generate placement
+            // nodes only after realization, so source-tree `contains_place`
+            // checks cannot discover a procedural header/background.
+            out.push(run);
+        } else if let Some(elem) = child.to_packed::<CounterDisplayElem>() {
             let realized = elem.realize(self.engine, styles)?;
             if elem.is_page() {
                 if self.page_counter_paragraph_alignment.is_none() {
@@ -1767,14 +1936,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                     }));
                 }
                 DirectLinkKind::Reference => {
-                    let (_id, name) = self.add_bookmark(elem.loc);
-                    out.push(Run::Field(Field {
-                        instr: eco_format!(" REF {name} \\h "),
-                        result: runs,
-                        mode: FieldMode::Static,
-                        display: FieldDisplay::Visible,
-                        cache_status: FieldCacheStatus::Resolved,
-                    }));
+                    out.extend(self.live_number_reference_runs(elem.loc, runs));
                 }
                 DirectLinkKind::PageReferenceSupplement | DirectLinkKind::Other => {
                     out.extend(runs)
@@ -1835,13 +1997,15 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // manufacturing an illegal nested paragraph. Preserve its content
             // and hyperlink as ordinary editable runs and report only the lost
             // width/inset/hit-area geometry.
-            self.record_content_decision(
-                child,
-                Representation::Approximate,
-                DecisionReason::InlineBlockFlowApproximation,
-                LossSet::VISUAL_ONLY,
-                body.plain_text().chars().count(),
-            );
+            if !self.cell_owns_inline_block_geometry {
+                self.record_content_decision(
+                    child,
+                    Representation::Approximate,
+                    DecisionReason::InlineBlockFlowApproximation,
+                    LossSet::VISUAL_ONLY,
+                    body.plain_text().chars().count(),
+                );
+            }
             out.extend(self.inline_runs(body, styles, props.clone())?);
         } else if let Some(elem) = child.to_packed::<typst_library::layout::BoxElem>() {
             // A non-text-box `#box` (no visible frame, or a body that must
@@ -1896,6 +2060,26 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                         // equivalent. `body_extractable` still guards the one
                         // layout-bound case (a per-line equation label inside).
                         out.extend(self.inline_runs(&body, styles, props.clone())?);
+                    } else if crate::convert::contains_place(&body)
+                        && let Some(frame) = crate::convert::coherent_mixed_placed_canvas(
+                            child, styles, self,
+                        )?
+                    {
+                        // Context-driven diagram packages often realize to a
+                        // non-plain inline box whose body is a sequence of
+                        // placements. Classify the converged frame atomically:
+                        // if every visual belongs to that canvas, retain its
+                        // geometry and positioned labels as one editable
+                        // DrawingML group.
+                        if let Some(run) =
+                            mappers::shape::mixed_canvas(self, &frame, child.span())?
+                        {
+                            out.push(run);
+                        } else {
+                            out.extend(mappers::image::coherent_placed_canvas_fallback(
+                                child, frame, self,
+                            )?);
+                        }
                     } else {
                         // Rasterize the box (this keeps a styled box's visual
                         // and, for a box that lays out real content, its labels
@@ -2178,7 +2362,7 @@ pub(crate) fn box_is_plain(
     s.top.is_none() && s.bottom.is_none() && s.left.is_none() && s.right.is_none()
 }
 
-fn block_is_plain(
+pub(crate) fn block_is_plain(
     elem: &typst_library::foundations::Packed<typst_library::layout::BlockElem>,
     styles: StyleChain,
 ) -> bool {
@@ -2239,7 +2423,17 @@ fn style_owned_heading_props(props: RunProps) -> RunProps {
 
 fn highlight_rgb(fill: Option<Paint>) -> [u8; 3] {
     match fill {
-        Some(Paint::Solid(color)) => props::color_to_hex(&color),
+        Some(Paint::Solid(color)) => {
+            // Typst's default highlight paint is translucent, while Word's
+            // named `yellow` highlight carries the intended marker semantics
+            // itself. Keep that canonical mapping; custom translucent paints
+            // use run shading and therefore must be composited explicitly.
+            if typst_ooxml_core::color::srgb_rgb(&color) == TYPST_DEFAULT_HIGHLIGHT {
+                TYPST_DEFAULT_HIGHLIGHT
+            } else {
+                props::color_to_hex(&color)
+            }
+        }
         Some(Paint::Gradient(gradient)) => {
             props::gradient_shade_hex(&gradient).unwrap_or(TYPST_DEFAULT_HIGHLIGHT)
         }

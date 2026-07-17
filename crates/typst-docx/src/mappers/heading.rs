@@ -83,10 +83,22 @@ pub fn heading(
     if let Some(numbers) = &elem.numbers
         && !numbers.is_empty()
     {
+        ctx.note_heading_number(level, numbers.clone());
+        let number_bookmark =
+            elem.location().and_then(|loc| ctx.number_bookmark_for_emission(loc));
+        if let Some((id, name)) = &number_bookmark {
+            content.push(ParaChild::BookmarkStart { id: *id, name: name.clone() });
+        }
         content.push(ParaChild::Run(Run::Text {
-            props: RunProps::default(),
+            props: RunProps {
+                style: Some(ecow::eco_format!("TypstHeadingNumber{level}")),
+                ..RunProps::default()
+            },
             text: numbers.clone(),
         }));
+        if let Some((id, _)) = number_bookmark {
+            content.push(ParaChild::BookmarkEnd { id });
+        }
         content.push(ParaChild::Run(Run::Tab));
     }
 

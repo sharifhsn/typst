@@ -28,7 +28,7 @@ use typst_library::foundations::{Content, Context, Depth, Packed, Resolve, Style
 use typst_library::layout::Abs;
 use typst_library::model::{
     EnumElem, EnumItem, ListElem, NamedNumeralSystem, Numbering, NumberingPattern,
-    ParElem, TermsElem,
+    TermsElem,
 };
 
 use crate::ctx::DocxCtx;
@@ -65,7 +65,7 @@ pub fn list(
     // outermost list, +1 per enclosing list item body.
     let Depth(depth) = styles.get(ListElem::depth);
     let ilvl = depth.min(8) as u8;
-    let paragraph_spacing = crate::props::abs_to_twip(styles.resolve(ParElem::spacing));
+    let paragraph_spacing = ctx.word_paragraph_boundary_spacing(styles);
 
     let num_id = ctx.register_list(bullet_spec());
 
@@ -113,7 +113,7 @@ pub fn enum_(
     // Nesting depth: the number of parent enum numbers folded in so far.
     let parents = styles.get_cloned(EnumElem::parents);
     let ilvl = parents.len().min(8) as u8;
-    let paragraph_spacing = crate::props::abs_to_twip(styles.resolve(ParElem::spacing));
+    let paragraph_spacing = ctx.word_paragraph_boundary_spacing(styles);
 
     let numbering = elem.numbering.get_ref(styles);
     let reversed = elem.reversed.get(styles);

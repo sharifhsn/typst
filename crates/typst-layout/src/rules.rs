@@ -555,18 +555,15 @@ const BIBLIOGRAPHY_RULE: ShowFn<BibliographyElem> = |elem, engine, styles| {
     let works = Works::generate(engine, elem.span())?;
     let bibliography = works.bibliography(loc, span)?;
 
-    // The Pandoc target has no native two-column grid node and rasterizes any
-    // grid wholesale — which would turn the reference list into one opaque image
-    // and, fatally, drop the per-entry backlink anchors that in-text citations
-    // resolve to (`ref-<location>`), leaving every cite Link dangling. So for
-    // Pandoc we always take the linear-block path (even for numbered styles whose
-    // `prefix` would normally build a grid), prepending the `[1]` marker inline
-    // and locating each entry's body with its backlink. This keeps the reference
-    // list selectable text and the cite anchors live. `Works::generate` above is
-    // unchanged, so citation lookup / convergence is unaffected.
-    let pandoc = styles.get(TargetElem::target) == Target::Pandoc;
+    // Pandoc has no native two-column grid node, while DOCX cannot inspect the
+    // opaque multi-layouter block constructed by the paged grid path below.
+    // Both targets therefore take the structured linear-block path, prepending
+    // the `[1]` marker inline and locating each entry body with its backlink.
+    // This keeps references selectable/editable and cite anchors live without
+    // changing paged output or bibliography convergence.
+    let linear = matches!(styles.get(TargetElem::target), Target::Pandoc | Target::Docx);
 
-    if !pandoc && bibliography.entries.iter().any(|entry| entry.prefix.is_some()) {
+    if !linear && bibliography.entries.iter().any(|entry| entry.prefix.is_some()) {
         let row_gutter = styles.get(ParElem::spacing);
 
         let mut cells = vec![];
@@ -599,11 +596,11 @@ const BIBLIOGRAPHY_RULE: ShowFn<BibliographyElem> = |elem, engine, styles| {
     } else {
         let mut body = vec![];
         for entry in &bibliography.entries {
-            // For Pandoc, a numbered/prefixed style (`[1]`, `[Smith 2020]`)
-            // lands here too (the grid path is skipped above). Prepend the
-            // prefix marker inline so the reference reads `[1] Author, …`. The
-            // whole entry is wrapped in a single `BibEntry` located with the
-            // backlink so the converter can read the anchor off it.
+            // For linear targets, a numbered/prefixed style (`[1]`,
+            // `[Smith 2020]`) lands here too. Prepend the prefix marker inline
+            // so the reference reads `[1] Author, …`. The whole entry is
+            // wrapped in a single `BibEntry` located with the backlink so the
+            // converter can read the anchor off it.
             let inner = match entry.prefix.clone() {
                 Some(prefix) => {
                     PdfMarkerTag::ListItemLabel(prefix)
