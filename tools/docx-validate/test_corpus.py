@@ -12,6 +12,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import corpus
 
 
+class FidelityManifestTests(unittest.TestCase):
+    def test_parse_fidelity_groups_occurrences_by_element_and_reason(self) -> None:
+        xml = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<typst:fidelity xmlns:typst="https://typst.app/schema/2026/fidelity"
+  enrollment="complete" snapshotId="test">
+  <typst:counts native="0" nativeWithFallback="0" approximate="0"
+    raster="0" drop="3" dynamicFields="0" referencedFonts="0"
+    missingFonts="0" drawings="0" unlabeledDrawings="0" measuredTables="0"/>
+  <typst:decisions>
+    <typst:decision sourceId="a" element="box" representation="Drop"
+      reason="UnsupportedContent" occurrences="2" affectedTextChars="0"
+      affectedSemanticNodes="2" visual="true" semantic="true"
+      editability="true" dynamic="true" accessibility="true" portability="true"/>
+    <typst:decision sourceId="b" element="place" representation="Drop"
+      reason="UnsupportedContent" occurrences="1" affectedTextChars="0"
+      affectedSemanticNodes="1" visual="true" semantic="true"
+      editability="true" dynamic="true" accessibility="true" portability="true"/>
+  </typst:decisions>
+</typst:fidelity>"""
+
+        parsed = corpus.parse_fidelity({"customXml/typstFidelity.xml": xml})
+
+        self.assertEqual(parsed["occurrences_by_element"], {"box": 2, "place": 1})
+        self.assertEqual(
+            parsed["occurrences_by_reason_and_element"],
+            {"UnsupportedContent:box": 2, "UnsupportedContent:place": 1},
+        )
+
+
 class ExporterIdentityTests(unittest.TestCase):
     def test_main_captures_one_identity_for_all_workers(self) -> None:
         state = {

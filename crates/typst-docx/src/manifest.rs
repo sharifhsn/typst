@@ -147,8 +147,9 @@ pub fn build(document: &DocxDocument) -> String {
         let losses = decision.losses;
         let _ = write!(
             out,
-            "<typst:decision sourceId=\"{:032x}\" representation=\"{:?}\" reason=\"{:?}\" occurrences=\"{}\" affectedTextChars=\"{}\" affectedSemanticNodes=\"{}\" visual=\"{}\" semantic=\"{}\" editability=\"{}\" dynamic=\"{}\" accessibility=\"{}\" portability=\"{}\"/>",
+            "<typst:decision sourceId=\"{:032x}\" element=\"{}\" representation=\"{:?}\" reason=\"{:?}\" occurrences=\"{}\" affectedTextChars=\"{}\" affectedSemanticNodes=\"{}\" visual=\"{}\" semantic=\"{}\" editability=\"{}\" dynamic=\"{}\" accessibility=\"{}\" portability=\"{}\"/>",
             decision.source.logical_id,
+            escape_attr(&decision.source.element),
             decision.representation,
             decision.reason,
             decision.occurrences,

@@ -161,16 +161,18 @@ fn equation_number(
     let Some(loc) = elem.location() else { return Ok(None) };
 
     let span = elem.span();
-    let number = {
-        let result = Counter::of(EquationElem::ELEM).display_at(
-            ctx.engine(),
-            loc,
-            styles,
-            &numbering,
-            span,
-        );
-        ctx.engine().delay(result).spanned(span)
-    };
+    let number =
+        ctx.paged_equation_number(elem, styles, &numbering)
+            .unwrap_or_else(|| {
+                let result = Counter::of(EquationElem::ELEM).display_at(
+                    ctx.engine(),
+                    loc,
+                    styles,
+                    &numbering,
+                    span,
+                );
+                ctx.engine().delay(result).spanned(span)
+            });
 
     // Lower the number content (ordinary inline content) to runs.
     let runs = ctx.inline_runs(&number, styles, RunProps::default())?;

@@ -278,6 +278,7 @@ fn docx_document_impl(
                 route: typst_library::engine::Route::extend(engine.route.track()),
             };
             let mut ctx = DocxCtx::new(&mut sub, &mut locator);
+            ctx.set_paged_introspector(paged_introspector.clone());
             ctx.set_snapshot_bookmarks(&export_snapshot);
             if let Some(geometry) = &paged_geometry {
                 ctx.set_paged_geometry(Arc::clone(geometry));
@@ -570,6 +571,30 @@ fn docx_document_impl(
         &mut footer_parts,
         &mut footnotes,
     );
+    crate::invariants::resolve_leading_background_layers(
+        &mut body,
+        &mut header_parts,
+        &mut footer_parts,
+        &mut footnotes,
+    );
+    for target in crate::invariants::fallback_dangling_internal_fields(
+        &mut body,
+        &mut header_parts,
+        &mut footer_parts,
+        &mut footnotes,
+    ) {
+        fidelity_report.record_span(
+            crate::report::ExportSource::new(
+                format!("reference target {target}"),
+                typst_syntax::Span::detached(),
+                None,
+            ),
+            crate::report::Representation::Approximate,
+            crate::report::DecisionReason::DanglingReferenceTextFallback,
+            crate::report::LossSet::DYNAMIC_BEHAVIOR,
+            0,
+        );
+    }
 
     record_dynamic_field_inventory(
         &mut fidelity_report,

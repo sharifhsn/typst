@@ -53,11 +53,19 @@ pub enum DecisionReason {
     SvgWithPngFallback,
     /// The target format cannot express the source feature.
     UnsupportedContent,
+    /// An empty, unpainted box contributes only inline layout geometry. DOCX
+    /// retains the surrounding content but cannot reproduce that zero-content
+    /// strut as an independent semantic object.
+    EmptyBoxGeometryApproximation,
     /// A positional link kept its text but lost the interactive target.
     PositionalLinkTarget,
     /// A semantic reference keeps Typst's computed text because Word's `REF`
     /// evaluator cannot reproduce Typst supplements and numbering semantics.
     TypstOwnedReferenceText,
+    /// A live internal field had no emitted target bookmark in the finalized
+    /// document, so its trustworthy Typst-computed cache was kept as static
+    /// editable text instead of shipping a broken Word field.
+    DanglingReferenceTextFallback,
     /// A figure number keeps Typst's computed value because its numbering
     /// pattern or function has no equivalent Word `SEQ` format.
     TypstOwnedFigureNumber,

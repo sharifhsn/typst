@@ -10,13 +10,13 @@ use typst_library::model::{
 };
 use typst_library::routines::Pair;
 
-use crate::ctx::DocxCtx;
+use crate::ctx::{DocxCtx, box_is_plain};
 use crate::dom::{
     Block, Cell, CellBorders, Para, ParaChild, ParaProps, ReviewCandidateKind, Row,
     RowHeight, Run, RunProps, Spacing, Tbl, TblProps, VAlign,
 };
 use crate::mappers;
-use crate::report::DecisionReason;
+use crate::report::{DecisionReason, LossSet, Representation};
 
 /// Lowers the top-level realized children into the document body blocks.
 pub fn run(ctx: &mut DocxCtx, children: &[Pair]) -> SourceResult<Vec<Block>> {
@@ -264,6 +264,7 @@ pub fn convert_children(
     // the right margin (the "Left … Right" header idiom) instead of stopping at
     // the next default tab stop.
     let content_twips = ctx.available_width_dxa();
+    fold_right_aligned_heading_overlays(&mut blocks, content_twips);
     if content_twips > 0 {
         use crate::dom::{TabAlign, TabStop};
         for block in &mut blocks {
@@ -1103,6 +1104,27 @@ fn handle_block_inner(
         } else {
             ctx.warn_ignored(child.elem().name(), child.span());
         }
+    } else if finite_layout_canvas_candidate(child, styles) {
+        // A fixed-size `box(layout(..))` is an atomic procedural canvas even
+        // when its final frame cannot satisfy the narrower mixed-canvas
+        // classifier. This path is especially important in table cells: if we
+        // let ordinary framed-block lowering unwrap the box first, the layout
+        // callback's generated `place` children lose their shared coordinate
+        // system and become unrelated Word anchors (or false content drops).
+        // Keep the owning box intact, prefer one editable DrawingML group, and
+        // otherwise rasterize exactly that bounded region once.
+        if let Some(run) = mappers::shape::placed_shape_canvas(child, styles, ctx)? {
+            out.push(Block::Para(Para {
+                props: ParaProps::default(),
+                content: vec![ParaChild::Run(run)],
+            }));
+        } else if let Some(para) =
+            fallback_para(mappers::image::laid_out_block_fallback(child, styles, ctx)?)
+        {
+            out.push(para);
+        } else {
+            ctx.warn_ignored(child.elem().name(), child.span());
+        }
     } else if (child.is::<typst_library::layout::BlockElem>()
         || is_framed_container(child))
         && contains_place(child)
@@ -1126,6 +1148,18 @@ fn handle_block_inner(
             props: ParaProps::default(),
             content: vec![ParaChild::Run(run)],
         }));
+    } else if is_empty_plain_box(child, styles) {
+        // Empty boxes are layout struts/spacers, not lost content. They can
+        // reach block dispatch after realization (for example Codly's
+        // zero-width per-line height strut), where the framed-container path
+        // would otherwise attempt a text box and report a false content drop.
+        ctx.record_content_decision(
+            child,
+            Representation::Approximate,
+            DecisionReason::EmptyBoxGeometryApproximation,
+            LossSet::VISUAL_ONLY,
+            0,
+        );
     } else if let Some(elem) = child.to_packed::<typst_library::layout::BlockElem>() {
         handle_block_box(ctx, elem, styles, out)?;
     } else if is_framed_container(child) && handle_block_framed(ctx, child, styles, out)?
@@ -1184,6 +1218,14 @@ fn handle_block_inner(
             // survives instead of being silently dropped (with the frame's
             // recovered text appended as hidden searchable runs).
             out.push(para);
+        } else if is_empty_plain_box(child, styles) {
+            ctx.record_content_decision(
+                child,
+                Representation::Approximate,
+                DecisionReason::EmptyBoxGeometryApproximation,
+                LossSet::VISUAL_ONLY,
+                0,
+            );
         } else if !is_invisible_noop(child) {
             ctx.warn_ignored(child.elem().name(), child.span());
         }
@@ -1205,7 +1247,30 @@ fn handle_layout(
 ) -> SourceResult<()> {
     match ctx.eval_layout_content(elem, styles) {
         Some(content) => {
-            out.extend(ctx.blocks(&content, styles)?);
+            // A layout callback that returns one framed placement canvas owns
+            // the generated coordinates. Preserve that root atomically even
+            // when its internals exceed the native group mapper's capability;
+            // recursively lowering the callback result first destroys the
+            // only boundary at which an honest whole-region raster is
+            // possible (notably Fletcher/CeTZ diagrams inside table cells).
+            if is_framed_container(&content) && contains_place(&content) {
+                if let Some(run) =
+                    mappers::shape::placed_shape_canvas(&content, styles, ctx)?
+                {
+                    out.push(Block::Para(Para {
+                        props: ParaProps::default(),
+                        content: vec![ParaChild::Run(run)],
+                    }));
+                } else if let Some(para) = fallback_para(
+                    mappers::image::laid_out_block_fallback(&content, styles, ctx)?,
+                ) {
+                    out.push(para);
+                } else {
+                    ctx.warn_ignored(content.elem().name(), content.span());
+                }
+            } else {
+                out.extend(ctx.blocks(&content, styles)?);
+            }
         }
         None => {
             if let Some(para) = fallback_para(mappers::image::laid_out_block_fallback(
@@ -1258,6 +1323,21 @@ pub(crate) fn is_invisible_noop(child: &Content) -> bool {
         || child.is::<typst_library::layout::FlushElem>()
         // A tagged-PDF accessibility delimiter (unwrapped to its body elsewhere).
         || child.is::<typst_library::pdf::PdfMarkerTag>()
+}
+
+/// Whether `child` is an empty, unpainted box used solely as an inline layout
+/// strut or spacer. Its lack of body means there is no semantic content to
+/// drop; if a whole-region fallback produces no pixels, report only the lost
+/// geometry instead of claiming content loss.
+pub(crate) fn is_empty_plain_box(
+    child: &Content,
+    styles: typst_library::foundations::StyleChain,
+) -> bool {
+    child
+        .to_packed::<typst_library::layout::BoxElem>()
+        .is_some_and(|elem| {
+            elem.body.get_ref(styles).is_none() && box_is_plain(elem, styles)
+        })
 }
 
 /// Lowers a raw [`BlockElem`] (`#block(..)` / `#rect(..)`-via-block), mapping
@@ -1406,6 +1486,113 @@ fn handle_block_box(
 
     out.extend(inner);
     Ok(())
+}
+
+/// Folds a paragraph followed by `place(bottom + right)[heading]` into one line
+/// with a right-aligned tab stop. The semantic heading inside the placement is
+/// the key signal: this is a heading-row label (location/date/status), not page
+/// furniture. A page-relative floating text box is not an honest
+/// representation: Word's page/paragraph anchors either send it to the margin
+/// or destabilize flow in LibreOffice. A right tab stays native, editable, and
+/// reflow-safe.
+fn fold_right_aligned_heading_overlays(blocks: &mut Vec<Block>, width_dxa: i32) {
+    use crate::dom::{TabAlign, TabStop};
+
+    let mut index = 1usize;
+    while index < blocks.len() {
+        let owner_index = (0..index)
+            .rev()
+            .find(|candidate| !matches!(blocks[*candidate], Block::Tag(_)));
+        let owner_is_para = owner_index
+            .is_some_and(|candidate| matches!(blocks[candidate], Block::Para(_)));
+        if !owner_is_para || !is_right_bottom_heading_overlay(&blocks[index]) {
+            index += 1;
+            continue;
+        }
+        let owner_index = owner_index.unwrap();
+
+        let mut overlay = Vec::new();
+        let Block::Para(anchor_para) = blocks.remove(index) else { unreachable!() };
+        for child in anchor_para.content {
+            match child {
+                ParaChild::Run(Run::Drawing(drawing)) => {
+                    let text_box = drawing.shape.unwrap().txbx.unwrap();
+                    for block in text_box.blocks {
+                        match block {
+                            Block::Para(para) => overlay.extend(para.content),
+                            Block::Tag(tag) => overlay.push(ParaChild::Tag(tag)),
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+                marker @ (ParaChild::BookmarkStart { .. }
+                | ParaChild::BookmarkEnd { .. }
+                | ParaChild::Tag(_)) => overlay.push(marker),
+                _ => unreachable!(),
+            }
+        }
+
+        let Block::Para(owner) = &mut blocks[owner_index] else { unreachable!() };
+        owner.content.push(ParaChild::Run(Run::FillTab));
+        owner.content.extend(overlay);
+        if width_dxa > 0
+            && !owner.props.tabs.iter().any(|tab| matches!(tab.val, TabAlign::End))
+        {
+            owner.props.tabs.push(TabStop {
+                val: TabAlign::End,
+                leader: None,
+                pos: width_dxa,
+            });
+        }
+
+        // Keep looking at the same index: another local overlay may follow the
+        // same owner after removal.
+    }
+}
+
+fn is_right_bottom_heading_overlay(block: &Block) -> bool {
+    use crate::dom::AnchorWrap;
+
+    let Block::Para(para) = block else { return false };
+    let mut drawing = None;
+    for child in &para.content {
+        match child {
+            ParaChild::Run(Run::Drawing(candidate)) if drawing.is_none() => {
+                drawing = Some(candidate);
+            }
+            ParaChild::BookmarkStart { .. }
+            | ParaChild::BookmarkEnd { .. }
+            | ParaChild::Tag(_) => {}
+            _ => return false,
+        }
+    }
+    let Some(drawing) = drawing else { return false };
+    let Some(anchor) = &drawing.anchor else { return false };
+    if anchor.behind
+        || !matches!(anchor.wrap, AnchorWrap::None)
+        || anchor.pos_h.align != Some("right")
+        || anchor.pos_h.offset.is_some()
+        || anchor.pos_v.align != Some("bottom")
+        || anchor.pos_v.offset.is_some()
+        || drawing.group.is_some()
+    {
+        return false;
+    }
+    let Some(shape) = &drawing.shape else { return false };
+    if shape.fill.is_some() || shape.stroke.is_some() {
+        return false;
+    }
+    let Some(text_box) = &shape.txbx else { return false };
+    let mut paragraphs = 0usize;
+    text_box.blocks.iter().all(|block| match block {
+        Block::Para(_) => {
+            paragraphs += 1;
+            paragraphs == 1
+                && matches!(block, Block::Para(para) if para.props.outline_lvl.is_some())
+        }
+        Block::Tag(_) => true,
+        _ => false,
+    }) && paragraphs == 1
 }
 
 /// Resolved box insets in twips (each `None` when zero/absent).

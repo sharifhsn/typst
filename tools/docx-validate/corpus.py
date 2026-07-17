@@ -525,6 +525,15 @@ def parse_fidelity(parts: dict[str, bytes]) -> dict[str, Any]:
     counts = dict(counts_node.attrib) if counts_node is not None else {}
     decisions = [dict(node.attrib) for node in root.findall("typst:decisions/typst:decision", NS)]
     grouped = Counter(decision.get("representation", "Unknown") for decision in decisions)
+    grouped_by_element = Counter()
+    grouped_by_reason_and_element = Counter()
+    for decision in decisions:
+        occurrences = int(decision.get("occurrences", "0"))
+        element = decision.get("element", "Unknown")
+        grouped_by_element[element] += occurrences
+        grouped_by_reason_and_element[
+            f"{decision.get('reason', 'Unknown')}:{element}"
+        ] += occurrences
     losses = {
         key: sum(
             int(decision.get("occurrences", "0"))
@@ -539,6 +548,10 @@ def parse_fidelity(parts: dict[str, bytes]) -> dict[str, Any]:
         "snapshot_id": root.attrib.get("snapshotId"),
         "counts": counts,
         "decisions_by_representation": dict(sorted(grouped.items())),
+        "occurrences_by_element": dict(sorted(grouped_by_element.items())),
+        "occurrences_by_reason_and_element": dict(
+            sorted(grouped_by_reason_and_element.items())
+        ),
         "loss_occurrences": losses,
         "decisions": decisions,
     }

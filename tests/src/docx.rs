@@ -576,6 +576,7 @@ fn fidelity_manifest_is_persisted_and_related() {
     assert!(manifest.contains("<typst:nodes>"));
     assert!(manifest.contains("<typst:decisions>"));
     assert!(manifest.contains("reason=\"PositionedContentFlowFallback\""));
+    assert!(manifest.contains("element=\"place\""));
     assert!(manifest.contains("affectedTextChars="));
     assert!(manifest.contains("affectedSemanticNodes=\"1\""));
 
@@ -602,6 +603,18 @@ fn fidelity_manifest_is_persisted_and_related() {
     assert!(root_rels.contains("docProps/custom.xml"));
     assert!(root_rels.contains("relationships/custom-properties"));
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn empty_plain_box_is_geometry_approximation_not_content_drop() {
+    let compiled = compile_docx(
+        "#box(width: 0pt, height: 1em)\n\nBefore #box(width: 0pt, height: 1em) after",
+        &[],
+    );
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.source.element == "box"
+            && decision.representation == Representation::Drop
+    }));
 }
 
 #[test]
@@ -1906,6 +1919,108 @@ fn placed_text_is_an_editable_anchored_text_box() {
 }
 
 #[test]
+fn positioned_page_counter_is_a_live_field_in_an_editable_text_box() {
+    let src = "#place(center + horizon, dy: -0.6cm,\n\
+                 text(size: 12pt, weight: \"bold\", fill: white)[\n\
+                   #context counter(page).display()\n\
+                 ])\nBody.";
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+
+    assert!(document.contains("<wp:anchor"), "placed field stays positioned");
+    assert!(document.contains("<wps:txbx>"), "placed field remains editable");
+    assert!(document.contains(" PAGE "), "page counter remains a live PAGE field");
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedTextBox
+            && decision.representation == Representation::Native
+    }));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.source.element == "place"
+            && decision.representation == Representation::Drop
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn inline_nested_positioned_page_counter_falls_back_to_a_live_field() {
+    let src = "#box(width: 1cm)[\n\
+                 Shield\n\
+                 #place(center + horizon, dy: -0.6cm)[\n\
+                   #context counter(page).display()\n\
+                 ]\n\
+               ]";
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+
+    assert!(document.contains("Shield"));
+    assert!(document.contains(" PAGE "), "nested page counter remains live");
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.source.element == "place"
+            && decision.reason == DecisionReason::PositionedContentFlowFallback
+            && decision.representation == Representation::Approximate
+    }));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.source.element == "place"
+            && decision.representation == Representation::Drop
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn inline_nested_positioned_wrapped_text_is_not_dropped() {
+    let src = "#box(width: 2cm)[\n\
+                 #place()[#text(fill: red)[TEX]]\n\
+                 #place()[#move(dx: 3pt)[open(path)]]\n\
+               ]";
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+
+    assert!(document.contains("TEX"));
+    assert!(document.contains("open(path)"));
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.source.element == "place"
+            && decision.representation == Representation::Drop
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn block_local_bottom_right_text_uses_a_right_tab() {
+    let src = "#block(width: 100%)[\n\
+                 == Entry title\n\
+                 #place(bottom + right)[#heading(level: 4)[Other Place]]\n\
+               ]";
+    let p = parts(src);
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("Entry title") && doc.contains("Other Place"));
+    assert!(doc.contains("<w:tab w:val=\"end\""));
+    assert!(doc.contains("<w:tab/>"));
+    assert!(
+        !doc.contains("<wp:anchor"),
+        "a block-local line overlay must not become page-relative furniture"
+    );
+    assert!(
+        !doc.contains("<wps:txbx>"),
+        "the right-side label stays in the owning editable paragraph"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn leading_placed_art_is_behind_later_flow_text() {
+    let p = parts(
+        "#place(top + left, rect(width: 40pt, height: 20pt, fill: blue))\nLater text",
+    );
+    let document = &p["word/document.xml"];
+    assert!(document.contains("behindDoc=\"1\""));
+    assert!(visible_text(document).contains("Later text"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn placed_percentage_offset_resolves_against_the_column() {
     let p = parts(
         "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
@@ -2017,6 +2132,52 @@ fn bounded_layout_generated_canvas_is_one_native_group() {
         decision.representation == Representation::Drop
             || decision.representation == Representation::Raster
     }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn table_cell_finite_layout_canvas_keeps_its_atomic_owner() {
+    let src = r#"#table(columns: 1, box(width: 100pt, height: 20pt)[#layout(size => {
+  for i in range(12) {
+    place(top + left, dx: i * 5pt,
+      rect(width: 4pt, height: 4pt, fill: rgb(i * 12, 40, 120)))
+  }
+  place(top + left, dx: 5pt, dy: 8pt)[Canvas label]
+})])"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<wpg:wgp").count(), 1, "{document}");
+    assert!(document.contains("Canvas label"));
+    assert!(
+        !compiled
+            .fidelity_report()
+            .decisions()
+            .iter()
+            .any(|decision| { decision.representation == Representation::Drop })
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn table_cell_layout_returning_canvas_keeps_its_atomic_owner() {
+    let src = r#"#table(columns: 1, layout(size => box(width: 100pt, height: 20pt)[
+  #place(top + left, dx: 2pt, rect(width: 12pt, height: 5pt, fill: red))
+  #place(top + left, dx: 18pt, line(length: 20pt, stroke: blue + 1pt))
+  #place(top + left, dx: 5pt, dy: 8pt)[Canvas label]
+]))"#;
+    let compiled = compile_docx(src, &[]);
+    let p = text_parts(&compiled);
+    let document = &p["word/document.xml"];
+    assert_eq!(document.matches("<wpg:wgp").count(), 1, "{document}");
+    assert!(document.contains("Canvas label"));
+    assert!(
+        !compiled
+            .fidelity_report()
+            .decisions()
+            .iter()
+            .any(|decision| { decision.representation == Representation::Drop })
+    );
     assert_all_wellformed(&p);
 }
 
@@ -4929,6 +5090,25 @@ fn bodyless_rect_stays_a_vector_shape() {
 }
 
 #[test]
+fn painted_bodyless_box_stays_a_vector_shape() {
+    // Small painted boxes are commonly authored as swatches/list markers. They
+    // carry no text but do carry visual ink, so preserve them as editable
+    // DrawingML instead of classifying them as unsupported content.
+    let p = parts_with_manifest("#box(width: 4pt, height: 4pt, fill: rgb(20, 80, 180))");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("wps:wsp"), "the painted box is a vector shape");
+    assert!(doc.contains("prst=\"rect\""), "with rectangle preset geometry");
+    assert!(!doc.contains("a:blip"), "and is not an embedded raster image");
+    if let Some(manifest) = p.get("customXml/item1.xml") {
+        assert!(
+            !manifest.contains("representation=\"drop\""),
+            "the painted box is not reported as dropped"
+        );
+    }
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn polygon_becomes_a_custom_geometry_shape() {
     let p = parts("#polygon((0pt, 0pt), (2cm, 0pt), (1cm, 1cm), fill: green)");
     let doc = &p["word/document.xml"];
@@ -6549,6 +6729,27 @@ fn intentionally_hidden_placed_text_is_not_reported_as_dropped() {
     assert!(p["word/document.xml"].contains("After"));
     assert!(!p["word/document.xml"].contains("SECRET HEADING"));
     assert!(!p["customXml/typstFidelity.xml"].contains("PositionedContentUnavailable"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn intentionally_hidden_placed_shape_is_not_reported_as_dropped() {
+    let compiled = compile_docx(
+        "Before #place(hide(rect(width: 12pt, height: 8pt, fill: red))) After",
+        &[],
+    );
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::PositionedContentUnavailable
+            || decision.representation == Representation::Drop
+    }));
+
+    let p = parts("Before #place(hide(rect(width: 12pt, height: 8pt, fill: red))) After");
+    assert!(p["word/document.xml"].contains("Before"));
+    assert!(p["word/document.xml"].contains("After"));
+    assert!(
+        !p["word/document.xml"].contains("wps:wsp"),
+        "hidden visual art is not emitted"
+    );
     assert_all_wellformed(&p);
 }
 

@@ -18,8 +18,8 @@ use typst_ooxml_core::dml::{self, TileImage};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Drawing, GroupChild, GroupSpec, Run, ShapeFill, ShapeGeom, ShapeSpec, ShapeStroke,
-    TextBox, TextBoxWrap,
+    Block, Drawing, GroupChild, GroupSpec, Para, ParaChild, ParaProps, Run, RunProps,
+    ShapeFill, ShapeGeom, ShapeSpec, ShapeStroke, TextBox, TextBoxWrap,
 };
 use crate::props::{abs_to_emu, color_to_hex};
 use crate::report::{DecisionReason, LossSet, Representation};
@@ -211,8 +211,23 @@ pub fn unframed_text_box(
     }
 
     let mut blocks = ctx.blocks(body, styles)?;
+    // Some positioned bodies are intrinsically inline-only. In particular,
+    // `text(..)[counter(page).display()]` realizes to a live PAGE field but
+    // does not manufacture a block paragraph. Keep using the block pipeline
+    // first (it preserves real multi-paragraph structure), then synthesize a
+    // single text-box paragraph from the shared inline mapper when there was
+    // no block-level output. This is a general extraction boundary, not a
+    // page-counter special case: links, styled text, and other legal inline
+    // fields follow the same path.
     if blocks.is_empty() {
-        return Ok(None);
+        let runs = ctx.inline_runs(body, styles, RunProps::default())?;
+        if runs.is_empty() {
+            return Ok(None);
+        }
+        blocks.push(Block::Para(Para {
+            props: ParaProps::default(),
+            content: runs.into_iter().map(ParaChild::Run).collect(),
+        }));
     }
     crate::mappers::table::collapse_par_spacing(&mut blocks);
     crate::document::collect_tags(&blocks, &mut ctx.deferred_tags);
@@ -401,16 +416,45 @@ fn resolve_insets(
     ]
 }
 
-/// Builds `(width, height, spec)` for a representable decorative shape. The
-/// `size`/`radius` constructor args of `#square`/`#circle` fold into
-/// `width`/`height`, so all four read the same two fields.
+/// Builds `(width, height, spec)` for a representable decorative shape. A
+/// bodyless painted `#box` is a rectangle too: packages commonly use a tiny
+/// fixed-size box as a colour swatch or list marker, and dropping it loses real
+/// visual ink even though it has no semantic text. The `size`/`radius`
+/// constructor args of `#square`/`#circle` fold into `width`/`height`, so all
+/// shape variants read the same two fields.
 fn build(
     ctx: &mut DocxCtx,
     child: &Content,
     styles: StyleChain,
     reference: typst_library::layout::Size,
 ) -> Option<(Abs, Abs, ShapeSpec)> {
-    if let Some(e) = child.to_packed::<RectElem>() {
+    if let Some(e) = child.to_packed::<BoxElem>() {
+        if e.body.get_ref(styles).is_some() {
+            return None;
+        }
+        let fill_paint = e.fill.get_cloned(styles);
+        let raw_stroke = e.stroke.get_cloned(styles);
+        // A completely unpainted box is layout geometry, not a decorative
+        // drawing. Leave it to the empty-box approximation path so fixed-size
+        // spacers do not acquire a selectable Word object.
+        if fill_paint.is_none() && raw_stroke.iter().all(|side| side.is_none()) {
+            return None;
+        }
+        let (w, h) = explicit_box_size(
+            e.width.get(styles),
+            e.height.get(styles),
+            styles,
+            reference,
+        )?;
+        let fill = fill_color(ctx, &fill_paint)?;
+        let stroke = sides_stroke_first(&raw_stroke, styles);
+        let geom = if any_radius(&e.radius.get_cloned(styles)) {
+            ShapeGeom::RoundRect
+        } else {
+            ShapeGeom::Rect
+        };
+        Some((w, h, ShapeSpec { geom, fill, stroke, txbx: None }))
+    } else if let Some(e) = child.to_packed::<RectElem>() {
         if e.body.get_ref(styles).is_some() {
             return None;
         }
@@ -522,6 +566,26 @@ fn explicit_size(
     };
     let h = match height {
         Sizing::Rel(r) => r.resolve(styles).relative_to(reference.y),
+        _ => return None,
+    };
+    Some((w, h))
+}
+
+/// Resolves a `#box`'s explicit size. Unlike block shapes, Typst stores the
+/// inline box width as [`Sizing`] and its height as [`Smart<Rel<Length>>`].
+fn explicit_box_size(
+    width: Sizing,
+    height: Smart<Rel<Length>>,
+    styles: StyleChain,
+    reference: typst_library::layout::Size,
+) -> Option<(Abs, Abs)> {
+    use typst_library::foundations::Resolve;
+    let w = match width {
+        Sizing::Rel(r) => r.resolve(styles).relative_to(reference.x),
+        _ => return None,
+    };
+    let h = match height {
+        Smart::Custom(r) => r.resolve(styles).relative_to(reference.y),
         _ => return None,
     };
     Some((w, h))
@@ -719,6 +783,28 @@ pub fn transformed(
     let Some(frame) = frame else {
         return Ok(None);
     };
+    let run = build_shapes_drawing(ctx, &frame, child.span())?;
+    if run.is_some() {
+        ctx.defer_frame_tags(&frame);
+    }
+    Ok(run)
+}
+
+/// Recovers a finite source-proven shape-only placement canvas as one shared
+/// DrawingML coordinate space. Layout can leave harmless glyph items in an
+/// otherwise visual box (for example alignment/baseline scaffolding), so try
+/// the richer canvas collector before the strict shape-only extractor.
+pub fn placed_shape_canvas(
+    child: &Content,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Option<Run>> {
+    let height = ctx.raster_height;
+    let (frame, _) = ctx.layout_export_frame(child, styles, child.span(), height)?;
+    let Some(frame) = frame else { return Ok(None) };
+    if let Some(run) = mixed_canvas(ctx, &frame, child.span())? {
+        return Ok(Some(run));
+    }
     let run = build_shapes_drawing(ctx, &frame, child.span())?;
     if run.is_some() {
         ctx.defer_frame_tags(&frame);

@@ -744,6 +744,15 @@ fn content_is_intentionally_hidden(content: &Content) -> bool {
     use std::ops::ControlFlow;
     use typst_library::layout::HideElem;
 
+    // Visual-only hidden content has no plain text to count. The direct-root
+    // case is especially important for measurement canvases such as
+    // `place(hide(cetz.canvas(..)))`: lowering that hidden canvas would walk
+    // every internal placement and falsely report each invisible drawable as
+    // lost content.
+    if content.is::<HideElem>() {
+        return true;
+    }
+
     let total = content.plain_text().chars().count();
     if total == 0 {
         return false;

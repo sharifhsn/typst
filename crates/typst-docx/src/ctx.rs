@@ -3,13 +3,16 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use comemo::Track;
 use ecow::{EcoString, eco_format};
 use rustc_hash::{FxHashMap, FxHashSet};
 use typst_library::diag::{SourceDiagnostic, SourceResult, warning};
 use typst_library::engine::Engine;
-use typst_library::foundations::{Content, Packed, StyleChain};
+use typst_library::foundations::{
+    Content, NativeElement, Packed, StyleChain, Target, TargetElem,
+};
 use typst_library::introspection::{
-    CounterDisplayElem, Locator, SplitLocator, Tag, TagElem,
+    Counter, CounterDisplayElem, Introspector, Locator, SplitLocator, Tag, TagElem,
 };
 use typst_library::layout::{Abs, HElem};
 use typst_library::math::EquationElem;
@@ -103,6 +106,11 @@ pub struct DocxCtx<'a, 'e> {
     pub(crate) fidelity_report: FidelityReport,
     /// Final physical regions recovered from the converged paged frames.
     pub(crate) paged_geometry: Arc<typst_export_common::paged::PagedGeometry>,
+    /// The converged paged authority used for source-stable counter values.
+    /// DOCX realization locations are target-specific and cannot safely be
+    /// queried against this introspector directly; callers match the source
+    /// span to its paged counterpart first.
+    paged_introspector: Option<Arc<typst_layout::PagedIntrospector>>,
 
     pub(crate) bookmarks: BookmarkTable,
 
@@ -247,6 +255,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             uses_math: false,
             fidelity_report: FidelityReport::default(),
             paged_geometry: Arc::new(typst_export_common::paged::PagedGeometry::default()),
+            paged_introspector: None,
             bookmarks: BookmarkTable::default(),
             deferred_tags: Vec::new(),
             real_alias_locations: FxHashSet::default(),
@@ -272,6 +281,47 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             cell_owns_inline_block_geometry: false,
             overlay_cache: FxHashMap::default(),
         }
+    }
+
+    pub(crate) fn set_paged_introspector(
+        &mut self,
+        paged: Option<Arc<typst_layout::PagedIntrospector>>,
+    ) {
+        self.paged_introspector = paged;
+    }
+
+    /// Computes an equation number at the source-matched location in the
+    /// converged paged document. This avoids querying a DOCX-realization
+    /// location against the paged seed, which returns the counter initial value
+    /// (`0`) for otherwise correctly numbered equations.
+    pub(crate) fn paged_equation_number(
+        &mut self,
+        elem: &Packed<EquationElem>,
+        styles: StyleChain,
+        numbering: &typst_library::model::Numbering,
+    ) -> Option<Content> {
+        let paged = Arc::clone(self.paged_introspector.as_ref()?);
+        let location = paged
+            .query(&EquationElem::ELEM.select())
+            .iter()
+            .find(|candidate| candidate.span() == elem.span())?
+            .location()?;
+        let mut sink = typst_library::engine::Sink::new();
+        let mut sub = Engine {
+            world: self.engine.world,
+            library: self.engine.library,
+            introspector: typst_utils::Protected::new(
+                (paged.as_ref() as &dyn Introspector).track(),
+            ),
+            traced: self.engine.traced,
+            sink: sink.track_mut(),
+            route: typst_library::engine::Route::extend(self.engine.route.track()),
+        };
+        let target = TargetElem::target.set(Target::Paged).wrap();
+        let paged_styles = styles.chain(&target);
+        Counter::of(EquationElem::ELEM)
+            .display_at(&mut sub, location, paged_styles, numbering, elem.span())
+            .ok()
     }
 
     pub(crate) fn review_origin(
@@ -1719,7 +1769,63 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         props: &RunProps,
         out: &mut Vec<Run>,
     ) -> SourceResult<()> {
-        if (child.is::<typst_library::layout::BlockElem>()
+        if let Some(elem) = child.to_packed::<typst_library::layout::PlaceElem>() {
+            // A placement nested in inline flow has no independent Word story
+            // in which a page/column-relative anchor can reproduce its local
+            // coordinate system. Preserve its legal inline content in source
+            // order instead of sending it through a whole-region raster probe
+            // that can produce no frame in page furniture. This keeps fields
+            // (notably PAGE), links, and styled text live and reports the one
+            // honest loss: exact overlay position. Bounded shape/text canvases
+            // are claimed atomically by the mixed-canvas paths before their
+            // children reach this routine.
+            let runs = self.inline_runs(&elem.body, styles, props.clone())?;
+            if !runs.is_empty() {
+                let source = elem.clone().pack();
+                self.record_content_decision(
+                    &source,
+                    Representation::Approximate,
+                    DecisionReason::PositionedContentFlowFallback,
+                    LossSet::VISUAL_ONLY,
+                    0,
+                );
+                out.extend(runs);
+            } else {
+                // Some procedural canvases wrap their positioned label in a
+                // move/rotate/style stack that cannot be re-realized as legal
+                // Word runs outside the owning layout callback. Prefer an
+                // exact local raster when a finite frame still exists; if it
+                // does not, retain the body's recovered text with an explicit
+                // plain-text loss instead of reporting the label as absent.
+                let raster = mappers::image::laid_out_fallback(child, styles, self)?;
+                if !raster.is_empty() {
+                    out.extend(raster);
+                } else {
+                    let text = elem.body.plain_text();
+                    if !text.trim().is_empty() {
+                        let affected_text_chars = text.chars().count();
+                        let source = elem.clone().pack();
+                        self.record_content_decision(
+                            &source,
+                            Representation::Approximate,
+                            DecisionReason::PositionedContentPlainTextFallback,
+                            LossSet::PLAIN_TEXT_FALLBACK,
+                            affected_text_chars,
+                        );
+                        out.push(Run::Text {
+                            props: self.resolve_text_props(styles, props.clone()),
+                            text,
+                        });
+                    } else {
+                        self.record_content_drop(
+                            child,
+                            DecisionReason::InlinePositionedContentUnavailable,
+                            "inline placed content and whole-region fallback produced no output",
+                        );
+                    }
+                }
+            }
+        } else if (child.is::<typst_library::layout::BlockElem>()
             || crate::convert::is_framed_container(child))
             && let Some(frame) =
                 crate::convert::coherent_mixed_placed_canvas(child, styles, self)?
@@ -2011,8 +2117,15 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // A non-text-box `#box` (no visible frame, or a body that must
             // rasterize): keep the existing rasterize/extract handling.
             match elem.body.get_cloned(styles) {
-                // An empty `#box` (`#box(width: 1em)` spacer): nothing to render.
-                None => {}
+                // A bodyless painted box is visible art (commonly a tiny colour
+                // swatch or bullet), while an unpainted one is only layout
+                // geometry. The shared shape mapper distinguishes the two and
+                // keeps the former as native DrawingML.
+                None => {
+                    if let Some(run) = mappers::shape::shape(child, styles, self)? {
+                        out.push(run);
+                    }
+                }
                 Some(body) => {
                     // A box whose sole body is a bare image with no size of its
                     // own (the common icon idiom — `box(height: 10pt,
@@ -2241,6 +2354,14 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         self.emit_rasterized_figure_seqs(before, styles, out);
         if !runs.is_empty() {
             out.extend(runs);
+        } else if crate::convert::is_empty_plain_box(child, styles) {
+            self.record_content_decision(
+                child,
+                Representation::Approximate,
+                DecisionReason::EmptyBoxGeometryApproximation,
+                LossSet::VISUAL_ONLY,
+                0,
+            );
         } else if !crate::convert::is_invisible_noop(child) {
             // Only warn about a genuine drop. Invisible no-ops (spacing, a
             // hidden body, layout scaffolding) render nothing in the PDF
