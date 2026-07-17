@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -39,6 +40,60 @@ class FidelityManifestTests(unittest.TestCase):
             parsed["occurrences_by_reason_and_element"],
             {"UnsupportedContent:box": 2, "UnsupportedContent:place": 1},
         )
+
+
+class OfficeFormatTests(unittest.TestCase):
+    def test_presentation_category_routes_to_pptx(self) -> None:
+        self.assertEqual(corpus.target_format({"category": "presentation"}), "pptx")
+        self.assertEqual(corpus.target_format({"category": "report"}), "docx")
+
+    def test_explicit_target_format_overrides_category(self) -> None:
+        self.assertEqual(
+            corpus.target_format({"category": "report", "target_format": "pptx"}),
+            "pptx",
+        )
+
+    def test_curated_entry_override_repairs_mislabeled_category(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            overrides = Path(directory) / "overrides.json"
+            overrides.write_text('{"repos/deck/main.typ":"pptx"}', encoding="utf-8")
+            with mock.patch.object(corpus, "FORMAT_OVERRIDES_PATH", overrides):
+                self.assertEqual(
+                    corpus.target_format({
+                        "category": "uncategorized",
+                        "entry": "repos/deck/main.typ",
+                    }),
+                    "pptx",
+                )
+
+    def test_pptx_package_text_metrics_and_raster_audit(self) -> None:
+        slide = b"""<?xml version="1.0"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+ <p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Hello deck</a:t></a:r></a:p>
+ </p:txBody></p:sp><p:pic/><a:tbl/></p:spTree></p:cSld></p:sld>"""
+        presentation = b"""<?xml version="1.0"?>
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>"""
+        content_types = b"""<?xml version="1.0"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "deck.pptx"
+            with zipfile.ZipFile(path, "w") as package:
+                package.writestr("[Content_Types].xml", content_types)
+                package.writestr("ppt/presentation.xml", presentation)
+                package.writestr("ppt/slides/slide1.xml", slide)
+            result, parts = corpus.pptx_package_check(path)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(corpus.pptx_text(parts), "Hello deck")
+        metrics = corpus.pptx_editability_metrics(parts)
+        self.assertEqual(metrics["slides"], 1)
+        self.assertEqual(metrics["pictures"], 1)
+        fidelity = corpus.pptx_fidelity({
+            "stderr": "RASTERIZE kind=group reason=clip text_chars=12\n"
+        })
+        self.assertEqual(fidelity["raster_events"], 1)
+        self.assertEqual(fidelity["rasterized_text_chars"], 12)
 
 
 class ExporterIdentityTests(unittest.TestCase):

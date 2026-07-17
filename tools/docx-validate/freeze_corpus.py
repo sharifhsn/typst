@@ -15,6 +15,19 @@ from typing import Any
 
 IGNORED_PARTS = {".git", "target", "node_modules", "__pycache__"}
 LICENSE_NAMES = ("LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", "COPYING.md")
+FORMAT_OVERRIDES_PATH = Path(__file__).resolve().parent / "format-overrides.json"
+
+
+def format_overrides() -> dict[str, str]:
+    if not FORMAT_OVERRIDES_PATH.is_file():
+        return {}
+    values = json.loads(FORMAT_OVERRIDES_PATH.read_text(encoding="utf-8"))
+    invalid = {
+        key: value for key, value in values.items() if value not in {"docx", "pptx"}
+    }
+    if invalid:
+        raise ValueError(f"invalid Office format overrides: {invalid}")
+    return values
 
 
 def sha256(path: Path) -> str:
@@ -155,6 +168,7 @@ def main() -> int:
 
     root_cache: dict[Path, dict[str, Any]] = {}
     repository_cache: dict[Path, dict[str, Any]] = {}
+    target_overrides = format_overrides()
     documents = []
     for row in rows:
         root = (corpus / row["root"]).resolve()
@@ -174,6 +188,10 @@ def main() -> int:
             {
                 "id": document_id(row),
                 "category": row["category"],
+                "target_format": (
+                    target_overrides.get(row["entry"])
+                    or ("pptx" if row["category"] == "presentation" else "docx")
+                ),
                 "name": row["name"],
                 "root": row["root"],
                 "entry": row["entry"],

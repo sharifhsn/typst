@@ -54,8 +54,15 @@ uv run tools/docx-validate/freeze_corpus.py \
   --out target/docx-public-corpus-freeze
 ```
 
-Then compile and classify the frozen records. Results are durable per document,
-so `--resume` skips completed compilation and can add consumer evidence later:
+Then compile and classify the frozen records. The freezer records an explicit
+Office target: corpus entries categorized as `presentation` go to PPTX; all
+other categories go to DOCX unless a frozen record explicitly overrides
+`target_format`. Known category mistakes are curated by exact entry path in
+`format-overrides.json`; this avoids guessing from geometry and counting a
+poster or landscape document as a deck, while keeping slide decks out of the
+degraded Word-document denominator.
+Results are durable per source, so `--resume` skips completed compilation and
+can add consumer evidence later:
 
 ```sh
 cargo build -p typst-cli --release && \
@@ -80,6 +87,18 @@ licenses, fonts, consumers, text extraction, or visual evidence produce
 consumer failure without rerunning unrelated documents. Filtered resume runs
 still regenerate authority-wide summaries from every retained result, so a
 serial retry cannot replace the aggregate report with its selected subset.
+
+DOCX and PPTX use separate fidelity evidence. DOCX retains its exporter
+manifest and Word review round trip. PPTX records live DrawingML text and shape
+metrics, slide count, LibreOffice Impress visual comparison, and raster-fallback
+events emitted under `PPTX_DEBUG_RASTER=1`; DOCX-only fields are marked not
+applicable rather than counted as failures. `summary.json.formats` keeps the
+two denominators separate.
+
+PPTX's `live_to_pdf_word_ratio` is a diagnostic ratio, not bounded recall: it
+can exceed 1.0 when the editable slide contains searchable compatibility text
+that the PDF text layer omits. Use multiset `text_coverage`, raster events, and
+the visual score together rather than treating that ratio alone as fidelity.
 
 Documents with redistributable font dependencies can use a checked-in
 `font-fixtures/<document-name>/` directory. The corpus runner discovers it

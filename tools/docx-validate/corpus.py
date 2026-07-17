@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+import zipfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -36,6 +37,20 @@ DRAWING_COORDINATE = re.compile(
 )
 SUSPICIOUS_DRAWING_COORDINATE_EMU = 125_000_000
 FONT_FIXTURE_ROOT = Path(__file__).resolve().parent / "font-fixtures"
+FORMAT_OVERRIDES_PATH = Path(__file__).resolve().parent / "format-overrides.json"
+
+
+def format_overrides(path: Path | None = None) -> dict[str, str]:
+    path = path or FORMAT_OVERRIDES_PATH
+    if not path.is_file():
+        return {}
+    values = json.loads(path.read_text(encoding="utf-8"))
+    invalid = {
+        key: value for key, value in values.items() if value not in {"docx", "pptx"}
+    }
+    if invalid:
+        raise ValueError(f"invalid Office format overrides: {invalid}")
+    return values
 
 
 def bounded_output(value: str | None, limit: int = 12000) -> str:
@@ -147,11 +162,16 @@ def font_fixture_evidence(paths: list[Path]) -> list[dict[str, Any]]:
 
 
 def command(
-    argv: list[str], *, timeout: int, cwd: Path | None = None
+    argv: list[str],
+    *,
+    timeout: int,
+    cwd: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
     before = time.monotonic()
     env = dict(os.environ, SOURCE_DATE_EPOCH="0")
+    env.update(extra_env or {})
     try:
         result = subprocess.run(
             argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout
@@ -234,6 +254,113 @@ def format_advisories(result: dict[str, Any]) -> list[str]:
     """Classify source/export mode mismatches that skew readiness metrics."""
     stderr = result.get("stderr") or ""
     return ["slide_shaped_docx"] if SLIDE_SHAPED_WARNING in stderr else []
+
+
+def target_format(frozen: dict[str, Any]) -> str:
+    """Select the Office container from durable corpus metadata.
+
+    Frozen manifests may override the category-derived default. This makes the
+    choice reviewable and reproducible without guessing from page geometry.
+    """
+    explicit = frozen.get("target_format")
+    if explicit in {"docx", "pptx"}:
+        return explicit
+    override = format_overrides().get(frozen.get("entry", ""))
+    if override:
+        return override
+    return "pptx" if frozen.get("category") == "presentation" else "docx"
+
+
+PPTX_RASTER_EVENT = re.compile(
+    r"RASTERIZE kind=(\S+) reason=(\S+) text_chars=(\d+)"
+)
+
+
+def pptx_package_check(path: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
+    """Validate ZIP integrity, required PresentationML parts, and XML syntax."""
+    result: dict[str, Any] = {"ok": False, "errors": [], "parts": 0}
+    try:
+        with zipfile.ZipFile(path) as package:
+            corrupt = package.testzip()
+            if corrupt:
+                result["errors"].append(f"corrupt ZIP entry: {corrupt}")
+            names = package.namelist()
+            for required in ("[Content_Types].xml", "ppt/presentation.xml"):
+                if required not in names:
+                    result["errors"].append(f"missing {required}")
+            parts = {name: package.read(name) for name in names}
+    except (OSError, zipfile.BadZipFile) as error:
+        result["errors"].append(f"not a readable ZIP: {error}")
+        return result, {}
+
+    for name, data in parts.items():
+        if not (name.endswith(".xml") or name.endswith(".rels")):
+            continue
+        try:
+            ElementTree.fromstring(data)
+        except ElementTree.ParseError as error:
+            result["errors"].append(f"invalid XML {name}: {error}")
+    result["parts"] = len(parts)
+    result["ok"] = not result["errors"]
+    return result, parts
+
+
+def pptx_slide_parts(parts: dict[str, bytes]) -> list[tuple[str, bytes]]:
+    return sorted(
+        (
+            (name, data)
+            for name, data in parts.items()
+            if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)
+        ),
+        key=lambda item: int(re.search(r"\d+", item[0]).group()),
+    )
+
+
+def pptx_text(parts: dict[str, bytes]) -> str:
+    texts: list[str] = []
+    for _, data in pptx_slide_parts(parts):
+        try:
+            root = ElementTree.fromstring(data)
+        except ElementTree.ParseError:
+            continue
+        texts.extend(
+            node.text or "" for node in root.iter() if node.tag.endswith("}t")
+        )
+    return " ".join(texts)
+
+
+def pptx_editability_metrics(parts: dict[str, bytes]) -> dict[str, int]:
+    slides = pptx_slide_parts(parts)
+    xml = b"\n".join(data for _, data in slides).decode("utf-8", "replace")
+    return {
+        "slides": len(slides),
+        "shapes": len(re.findall(r"<p:sp(?:[ />])", xml)),
+        "text_shapes": len(re.findall(r"<p:txBody(?:[ />])", xml)),
+        "text_runs": len(re.findall(r"<a:t(?:[ />])", xml)),
+        "pictures": len(re.findall(r"<p:pic(?:[ />])", xml)),
+        "group_shapes": len(re.findall(r"<p:grpSp(?:[ />])", xml)),
+        "tables": len(re.findall(r"<a:tbl(?:[ />])", xml)),
+        "charts": sum(name.startswith("ppt/charts/chart") for name in parts),
+        "notes": sum(
+            bool(re.fullmatch(r"ppt/notesSlides/notesSlide\d+\.xml", name))
+            for name in parts
+        ),
+        "embedded_fonts": sum(
+            name.startswith("ppt/fonts/") and name.endswith(".fntdata")
+            for name in parts
+        ),
+    }
+
+
+def pptx_fidelity(compile_result: dict[str, Any]) -> dict[str, Any]:
+    events = PPTX_RASTER_EVENT.findall(compile_result.get("stderr") or "")
+    by_reason = Counter(f"{kind}/{reason}" for kind, reason, _ in events)
+    return {
+        "status": "ok",
+        "raster_events": len(events),
+        "rasterized_text_chars": sum(int(chars) for _, _, chars in events),
+        "raster_events_by_reason": dict(sorted(by_reason.items())),
+    }
 
 
 def compile_diagnosis(result: dict[str, Any]) -> dict[str, Any]:
@@ -776,7 +903,7 @@ def roundtrip_probe(
     }
 
 
-def validate_document(
+def validate_docx_document(
     frozen: dict[str, Any], args: argparse.Namespace, corpus_root: Path
 ) -> dict[str, Any]:
     font_paths = document_font_paths(frozen)
@@ -972,6 +1099,207 @@ def validate_document(
     return record
 
 
+def classify_pptx(record: dict[str, Any]) -> tuple[str, list[str], list[str]]:
+    compile_result = record["compile"]["pptx"]
+    if compile_result.get("exit_code") is None:
+        return "unverified", [], ["pptx_compile_timeout"]
+    if compile_result.get("exit_code") != 0:
+        return "export_error", ["pptx_compile_failed"], []
+    if not record["package"].get("ok"):
+        return "package_error", ["invalid_ooxml_package"], []
+
+    reasons: list[str] = []
+    unverified: list[str] = []
+    coverage = record.get("semantic", {}).get("text_coverage")
+    if coverage is not None and coverage < 0.5:
+        reasons.append("text_coverage_below_threshold")
+    if not record.get("license", {}).get("verified"):
+        unverified.append("license_unverified")
+    if record["compile"]["pdf"].get("exit_code") != 0:
+        unverified.append("reference_pdf_unavailable")
+    if coverage is None:
+        unverified.append("text_coverage_unavailable")
+    if record.get("missing_fonts"):
+        unverified.append("fonts_unavailable")
+    libreoffice = record.get("consumers", {}).get("libreoffice", {})
+    if libreoffice.get("status") == "failed":
+        return "consumer_error", ["libreoffice_consumer_failed"], unverified
+    if libreoffice.get("status") != "ok":
+        unverified.append("libreoffice_consumer_unavailable")
+    if record.get("visual", {}).get("status") != "ok":
+        unverified.append("visual_comparison_unavailable")
+    if unverified:
+        return "unverified", reasons, sorted(set(unverified))
+
+    visual_ok = bool(record["visual"].get("ok"))
+    if record.get("fidelity", {}).get("raster_events", 0):
+        return (
+            "fallback_visual" if visual_ok else "fallback_degraded",
+            reasons + ["fidelity_fallback_present"],
+            [],
+        )
+    return ("native_good" if visual_ok else "native_degraded", reasons, [])
+
+
+def validate_pptx_document(
+    frozen: dict[str, Any], args: argparse.Namespace, corpus_root: Path
+) -> dict[str, Any]:
+    font_paths = document_font_paths(frozen)
+    artifact = args.out / "artifacts" / safe_component(frozen["id"])
+    artifact.mkdir(parents=True, exist_ok=True)
+    result_file = artifact / "result.json"
+    if args.resume and result_file.is_file():
+        record = json.loads(result_file.read_text(encoding="utf-8"))
+        if record.get("target_format") != "pptx":
+            raise ValueError(
+                "cannot resume an authority after changing its target format; "
+                "choose a new --out directory"
+            )
+        return record
+
+    root = corpus_root / frozen["root"]
+    source = corpus_root / frozen["entry"]
+    pptx = artifact / "presentation.pptx"
+    pdf = artifact / "reference.pdf"
+    pptx_compile = command(
+        [
+            args.typst,
+            "compile",
+            "--root",
+            str(root),
+            *font_path_args(font_paths),
+            "--format",
+            "pptx",
+            str(source),
+            str(pptx),
+        ],
+        timeout=args.timeout,
+        extra_env={"PPTX_DEBUG_RASTER": "1"},
+    )
+    pdf_compile = command(
+        [
+            args.typst,
+            "compile",
+            "--root",
+            str(root),
+            *font_path_args(font_paths),
+            "--format",
+            "pdf",
+            str(source),
+            str(pdf),
+        ],
+        timeout=args.timeout,
+    )
+    (artifact / "pptx.stderr.log").write_text(
+        pptx_compile.get("stderr", ""), encoding="utf-8"
+    )
+    (artifact / "pdf.stderr.log").write_text(
+        pdf_compile.get("stderr", ""), encoding="utf-8"
+    )
+
+    package, parts = (
+        pptx_package_check(pptx)
+        if pptx.is_file()
+        else ({"ok": False, "errors": ["PPTX compilation produced no package"], "parts": 0}, {})
+    )
+    live_text = pptx_text(parts)
+    pdf_text, pdf_text_error = (
+        extract_pdf_text(pdf) if pdf.is_file() else (None, "PDF unavailable")
+    )
+    pdf_words = len(validator.TEXT_RE.findall(pdf_text or ""))
+    live_words = len(validator.TEXT_RE.findall(live_text))
+    metrics = pptx_editability_metrics(parts)
+    pdf_pages, pdf_page_error = (
+        pdf_page_count(pdf) if pdf.is_file() else (None, "PDF unavailable")
+    )
+    missing_fonts = sorted(
+        set(FONT_WARNING.findall(pptx_compile["stderr"] + pdf_compile["stderr"]))
+    )
+
+    libreoffice: dict[str, Any] = {"status": "not_run"}
+    visual: dict[str, Any] = {"status": "not_run"}
+    if args.libreoffice and pptx.is_file() and pdf.is_file():
+        visual = validator.visual_check(pdf, pptx, artifact, font_paths=font_paths)
+        if visual.get("status") == "ok":
+            rendered_pages = visual.pop("docx_pages")
+            visual["pptx_pages"] = rendered_pages
+            visual["page_delta"] = abs(visual["gold_pages"] - rendered_pages)
+            visual["ok"] = (
+                visual["score"] >= args.minimum_visual_score
+                and visual["page_delta"] <= args.max_page_delta
+            )
+            libreoffice = {"status": "ok", "repair_reported": False, "rendered": True}
+        else:
+            libreoffice = {
+                "status": visual.get("status", "failed"),
+                "reason": visual.get("reason"),
+            }
+
+    fidelity = pptx_fidelity(pptx_compile)
+    record: dict[str, Any] = {
+        **frozen,
+        **frozen_exporter_identity(args),
+        "target_format": "pptx",
+        "compile": {"pptx": pptx_compile, "pdf": pdf_compile},
+        "normalized_diagnostic": normalized_diagnostic(pptx_compile),
+        "format_advisories": [],
+        "diagnoses": {"pptx_compile": compile_diagnosis(pptx_compile)},
+        "package": package,
+        "semantic": {
+            "pptx_word_count": live_words,
+            "pdf_word_count": pdf_words,
+            "live_to_pdf_word_ratio": live_words / pdf_words if pdf_words else None,
+            "text_coverage": (
+                validator.token_jaccard(pdf_text, live_text)
+                if pdf_text is not None
+                else None
+            ),
+            "pdf_text_error": pdf_text_error,
+        },
+        "pages": {
+            "pdf": pdf_pages,
+            "pdf_error": pdf_page_error,
+            "pptx_slides": metrics["slides"],
+            "libreoffice_render": visual.get("pptx_pages"),
+        },
+        "editability": metrics,
+        "fidelity": fidelity,
+        "consumers": {
+            "powerpoint": {"status": "not_run", "repair_reported": None},
+            "libreoffice": libreoffice,
+        },
+        "visual": visual,
+        "missing_fonts": missing_fonts,
+        "font_fixtures": font_fixture_evidence(font_paths),
+        "round_trip": {"status": "not_applicable", "reason": "DOCX review protocol"},
+        "artifacts": {
+            "directory": str(artifact),
+            "pptx": str(pptx),
+            "pdf": str(pdf),
+        },
+        "errors": [],
+    }
+    primary, reasons, unverified = classify_pptx(record)
+    record["primary_class"] = primary
+    record["reason_codes"] = reasons
+    record["unverified_reasons"] = unverified
+    result_file.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+    return record
+
+
+def validate_document(
+    frozen: dict[str, Any], args: argparse.Namespace, corpus_root: Path
+) -> dict[str, Any]:
+    if target_format(frozen) == "pptx":
+        return validate_pptx_document(frozen, args, corpus_root)
+    record = validate_docx_document(frozen, args, corpus_root)
+    record.setdefault("target_format", "docx")
+    Path(record["artifacts"]["directory"], "result.json").write_text(
+        json.dumps(record, ensure_ascii=False, indent=2) + "\n"
+    )
+    return record
+
+
 def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
     with (out / "documents.jsonl").open("w", encoding="utf-8") as stream:
         for record in records:
@@ -983,11 +1311,21 @@ def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
         error["code"] for record in records for error in record.get("errors", [])
     )
     total = len(records)
+    records_by_format = {
+        office_format: [
+            record
+            for record in records
+            if record.get("target_format", "docx") == office_format
+        ]
+        for office_format in ("docx", "pptx")
+    }
     consumer_statuses = {
         consumer: dict(sorted(Counter(
-            record["consumers"][consumer].get("status", "missing") for record in records
+            record["consumers"][consumer].get("status", "missing")
+            for record in records
+            if consumer in record.get("consumers", {})
         ).items()))
-        for consumer in ("word", "libreoffice")
+        for consumer in ("word", "powerpoint", "libreoffice")
     }
     visual_ok = [record for record in records if record["visual"].get("status") == "ok"]
     slide_shaped = [
@@ -996,20 +1334,30 @@ def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
         if "slide_shaped_docx" in record.get("format_advisories", [])
     ]
     slide_ids = {record["id"] for record in slide_shaped}
-    non_slide_visual_ok = [record for record in visual_ok if record["id"] not in slide_ids]
+    docx_visual_ok = [
+        record
+        for record in visual_ok
+        if record.get("target_format", "docx") == "docx"
+    ]
+    non_slide_visual_ok = [
+        record for record in docx_visual_ok if record["id"] not in slide_ids
+    ]
     slide_visual_ok = [record for record in visual_ok if record["id"] in slide_ids]
     advisory_counts = Counter(
         advisory for record in records for advisory in record.get("format_advisories", [])
     )
+    docx_records = records_by_format["docx"]
+    pptx_records = records_by_format["pptx"]
     roundtrip_statuses = Counter(
-        record.get("round_trip", {}).get("status", "missing") for record in records
+        record.get("round_trip", {}).get("status", "missing")
+        for record in docx_records
     )
     roundtrip_kinds: Counter[str] = Counter()
     roundtrip_regions = 0
     roundtrip_files = 0
     roundtrip_stories = 0
     roundtrip_enrolled_documents = 0
-    for record in records:
+    for record in docx_records:
         enrollment = record.get("round_trip", {}).get("enrollment", {})
         if not isinstance(enrollment, dict):
             continue
@@ -1021,16 +1369,64 @@ def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
         roundtrip_kinds.update(enrollment.get("by_kind", {}))
     fidelity_counts: Counter[str] = Counter()
     editability_totals: Counter[str] = Counter()
+    editability_by_format: dict[str, Counter[str]] = {
+        "docx": Counter(),
+        "pptx": Counter(),
+    }
     for record in records:
+        office_format = record.get("target_format", "docx")
+        editability_by_format[office_format].update(record.get("editability", {}))
+    for record in docx_records:
         fidelity_counts.update({
             key: int(value)
             for key, value in record.get("fidelity", {}).get("counts", {}).items()
             if str(value).isdigit()
         })
         editability_totals.update(record.get("editability", {}))
+    format_summaries = {}
+    for office_format, format_records in records_by_format.items():
+        rendered = [
+            record
+            for record in format_records
+            if record.get("visual", {}).get("status") == "ok"
+        ]
+        format_summaries[office_format] = {
+            "documents": len(format_records),
+            "primary_classes": dict(sorted(Counter(
+                record["primary_class"] for record in format_records
+            ).items())),
+            "package_ok": sum(
+                record.get("package", {}).get("ok", False)
+                for record in format_records
+            ),
+            "visual_rendered": len(rendered),
+            "visual_policy_pass": sum(
+                bool(record.get("visual", {}).get("ok")) for record in rendered
+            ),
+            "missing_font_documents": sum(
+                bool(record.get("missing_fonts")) for record in format_records
+            ),
+            "editability_totals": dict(sorted(editability_by_format[office_format].items())),
+        }
+    pptx_fidelity = {
+        "raster_events": sum(
+            int(record.get("fidelity", {}).get("raster_events", 0))
+            for record in pptx_records
+        ),
+        "rasterized_text_chars": sum(
+            int(record.get("fidelity", {}).get("rasterized_text_chars", 0))
+            for record in pptx_records
+        ),
+        "live_to_pdf_word_ratio_available": sum(
+            record.get("semantic", {}).get("live_to_pdf_word_ratio") is not None
+            for record in pptx_records
+        ),
+    }
+    format_summaries["pptx"]["fidelity"] = pptx_fidelity
     summary = {
         "schema_version": 1,
         "total": total,
+        "formats": format_summaries,
         "primary_classes": dict(sorted(classes.items())),
         "primary_class_rates": {key: {"count": value, "denominator": total, "rate": value / total if total else 0.0} for key, value in sorted(classes.items())},
         "reason_codes": dict(reasons.most_common()),
@@ -1085,7 +1481,14 @@ def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
         },
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    lines = ["# DOCX public corpus results", "", f"Denominator: **{total} documents**", "", "## Primary classes", ""]
+    lines = ["# Office public corpus results", "", f"Denominator: **{total} sources**", "", "## Format routing", ""]
+    for office_format, format_summary in format_summaries.items():
+        lines.append(
+            f"- `{office_format}`: {format_summary['documents']} sources; "
+            f"{format_summary['package_ok']} valid packages; "
+            f"{format_summary['visual_policy_pass']}/{format_summary['visual_rendered']} visual passes"
+        )
+    lines.extend(["", "## Primary classes", ""])
     lines.extend(f"- `{key}`: {value}/{total} ({value / total:.2%})" for key, value in sorted(classes.items()))
     lines.extend(["", "## Top reason codes", ""])
     lines.extend(f"- `{key}`: {value}" for key, value in reasons.most_common(20))
@@ -1123,7 +1526,9 @@ def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
     lines.extend(["", "## Round-trip evidence", ""])
     round_trip = summary["evidence"]["round_trip"]
     lines.append(f"- Statuses: `{json.dumps(round_trip['statuses'], sort_keys=True)}`")
-    lines.append(f"- Enrolled documents: {round_trip['enrolled_documents']}/{total}")
+    lines.append(
+        f"- Enrolled documents: {round_trip['enrolled_documents']}/{len(docx_records)} DOCX sources"
+    )
     lines.append(f"- Regions: {round_trip['regions']} across {round_trip['files']} source files and {round_trip['stories']} Word stories")
     lines.append(f"- Region kinds: `{json.dumps(round_trip['by_kind'], sort_keys=True)}`")
     (out / "summary.md").write_text("\n".join(lines) + "\n")
