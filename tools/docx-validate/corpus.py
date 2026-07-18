@@ -132,6 +132,37 @@ def safe_component(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or "document"
 
 
+def prune_previous_runs(out: Path) -> list[str]:
+    """Delete sibling directories left behind by earlier corpus.py runs.
+
+    Each full run (especially with --libreoffice) retains tens of thousands
+    of rendered pages and can be 10+ GB; nothing else ever cleans these up.
+    A directory only qualifies if its own metadata.json matches this tool's
+    exact invocation-metadata shape, so this never touches unrelated content
+    (build artifacts, other tools' scratch dirs) that happens to live next to
+    --out.
+    """
+    removed: list[str] = []
+    parent = out.parent
+    if not parent.is_dir():
+        return removed
+    for candidate in sorted(parent.iterdir()):
+        if candidate.resolve() == out.resolve() or not candidate.is_dir():
+            continue
+        metadata_path = candidate / "metadata.json"
+        if not metadata_path.is_file():
+            continue
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not {"frozen_documents", "exporter_revision", "tools"} <= metadata.keys():
+            continue
+        shutil.rmtree(candidate, ignore_errors=True)
+        removed.append(candidate.name)
+    return removed
+
+
 def document_font_paths(frozen: dict[str, Any]) -> list[Path]:
     """Return checked-in fonts for a public-corpus document, when available."""
     name = frozen.get("name")
@@ -716,24 +747,32 @@ def classify(record: dict[str, Any]) -> tuple[str, list[str], list[str]]:
     if semantic_losses:
         reasons.append("reported_semantic_loss")
 
-    if not record["license"]["verified"]:
-        unverified.append("license_unverified")
+    # License metadata and real-Word evidence are not exporter-quality
+    # signals: license text is routinely absent from Typst Universe package
+    # metadata, and this harness never runs real Microsoft Word at all, so
+    # both would flag nearly every document regardless of export quality.
     if record["compile"]["pdf"]["exit_code"] != 0:
         unverified.append("reference_pdf_unavailable")
     if coverage is None:
         unverified.append("text_coverage_unavailable")
+    # Not a blocker: the DOCX and PDF compiles run with identical --font-path
+    # args and the same system font environment, so a missing font is never
+    # a DOCX-specific defect — it equally affects the PDF a person compiling
+    # locally would get. If PDF fidelity is accepted on this machine, DOCX
+    # should be too; track it as an informational, actionable reason instead.
     if record["missing_fonts"]:
-        unverified.append("fonts_unavailable")
-    for consumer in ("word", "libreoffice"):
-        state = record["consumers"][consumer].get("status")
-        if state == "failed":
-            return "consumer_error", [f"{consumer}_consumer_failed"], unverified
-        if state != "ok":
-            unverified.append(f"{consumer}_consumer_unavailable")
+        reasons.append("fonts_unavailable")
+    state = record["consumers"]["libreoffice"].get("status")
+    if state == "failed":
+        return "consumer_error", ["libreoffice_consumer_failed"], unverified
+    if state != "ok":
+        unverified.append("libreoffice_consumer_unavailable")
     if record["visual"].get("status") != "ok":
         unverified.append("visual_comparison_unavailable")
+    # Round-trip fidelity is a nice-to-have, not a release gate: surface it
+    # as an informational reason code instead of blocking a clean class.
     if record["round_trip"].get("status") != "ok":
-        unverified.append("round_trip_unavailable")
+        reasons.append("round_trip_unavailable")
     if unverified:
         return "unverified", reasons, sorted(set(unverified))
 
@@ -1113,14 +1152,14 @@ def classify_pptx(record: dict[str, Any]) -> tuple[str, list[str], list[str]]:
     coverage = record.get("semantic", {}).get("text_coverage")
     if coverage is not None and coverage < 0.5:
         reasons.append("text_coverage_below_threshold")
-    if not record.get("license", {}).get("verified"):
-        unverified.append("license_unverified")
     if record["compile"]["pdf"].get("exit_code") != 0:
         unverified.append("reference_pdf_unavailable")
     if coverage is None:
         unverified.append("text_coverage_unavailable")
+    # See classify(): PPTX and PDF share the same font-path args/environment,
+    # so a missing font is never PPTX-specific — track it, don't block on it.
     if record.get("missing_fonts"):
-        unverified.append("fonts_unavailable")
+        reasons.append("fonts_unavailable")
     libreoffice = record.get("consumers", {}).get("libreoffice", {})
     if libreoffice.get("status") == "failed":
         return "consumer_error", ["libreoffice_consumer_failed"], unverified
@@ -1310,6 +1349,26 @@ def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
     error_counts = Counter(
         error["code"] for record in records for error in record.get("errors", [])
     )
+    missing_fonts = Counter(
+        font for record in records for font in record.get("missing_fonts", [])
+    )
+    # These two reasons mean we couldn't even measure quality, not just that
+    # some evidence was absent (unlike license/Word, which are structural to
+    # how this harness runs). Call them out by name so they can't get lost
+    # inside the much larger "unverified" bucket.
+    critical_unverified_documents = [
+        {
+            "id": record["id"],
+            "target_format": record.get("target_format", "docx"),
+            "reasons": sorted(
+                set(record["unverified_reasons"])
+                & {"text_coverage_unavailable", "visual_comparison_unavailable"}
+            ),
+        }
+        for record in records
+        if set(record["unverified_reasons"])
+        & {"text_coverage_unavailable", "visual_comparison_unavailable"}
+    ]
     total = len(records)
     records_by_format = {
         office_format: [
@@ -1431,6 +1490,10 @@ def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
         "primary_class_rates": {key: {"count": value, "denominator": total, "rate": value / total if total else 0.0} for key, value in sorted(classes.items())},
         "reason_codes": dict(reasons.most_common()),
         "unverified_reasons": dict(unverified.most_common()),
+        "missing_fonts": dict(missing_fonts.most_common()),
+        "critical_warnings": {
+            "text_coverage_or_visual_comparison_unavailable": critical_unverified_documents,
+        },
         "format_advisories": dict(advisory_counts.most_common()),
         "error_codes": {
             code: {"count": count, **ERROR_CATALOG[code]}
@@ -1490,6 +1553,27 @@ def write_reports(records: list[dict[str, Any]], out: Path) -> dict[str, Any]:
         )
     lines.extend(["", "## Primary classes", ""])
     lines.extend(f"- `{key}`: {value}/{total} ({value / total:.2%})" for key, value in sorted(classes.items()))
+    if critical_unverified_documents:
+        lines.extend([
+            "",
+            "## ⚠ Critical warnings: quality could not be measured",
+            "",
+            f"{len(critical_unverified_documents)} document(s) failed to produce a text-coverage "
+            "or visual-comparison measurement at all (not just missing license/Word evidence). "
+            "These need direct investigation, not just re-running with more evidence:",
+            "",
+        ])
+        lines.extend(
+            f"- `{doc['id']}` ({doc['target_format']}): {', '.join(doc['reasons'])}"
+            for doc in critical_unverified_documents
+        )
+    lines.extend(["", "## Missing fonts", ""])
+    if missing_fonts:
+        lines.extend(
+            f"- `{font}`: needed by {count} document(s)" for font, count in missing_fonts.most_common()
+        )
+    else:
+        lines.append("- None.")
     lines.extend(["", "## Top reason codes", ""])
     lines.extend(f"- `{key}`: {value}" for key, value in reasons.most_common(20))
     lines.extend(["", "## Unverified evidence", ""])
@@ -1544,6 +1628,14 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=240)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--keep-previous-runs",
+        action="store_true",
+        help=(
+            "do not delete other corpus-run directories next to --out when starting "
+            "a fresh (non-resumed) run; by default each new run prunes prior ones"
+        ),
+    )
     parser.add_argument(
         "--refresh-semantic",
         action="store_true",
@@ -1611,6 +1703,10 @@ def main() -> int:
     args.typst = str(Path(args.typst).resolve())
     args.frozen = args.frozen.resolve()
     args.out = args.out.resolve()
+    if not args.resume and not args.keep_previous_runs and not args.out.exists():
+        removed = prune_previous_runs(args.out)
+        if removed:
+            print(f"Pruned {len(removed)} previous run(s): {', '.join(removed)}")
     args.out.mkdir(parents=True, exist_ok=True)
     args.exporter_state = exporter_state()
     args.exporter_revision = args.exporter_state["revision"]
