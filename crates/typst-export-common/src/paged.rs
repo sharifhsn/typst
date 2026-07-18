@@ -67,6 +67,36 @@ impl PagedGeometry {
         self.tables.iter().find(|table| table.logical_id == logical_id)
     }
 
+    /// The occurrence matching a specific element instance. `logical_id` is
+    /// span-based, so it is shared not only by a table's own header row
+    /// repeating across a page break, but also by every call to a *reusable*
+    /// grid/table-producing function (the same `grid(..)` call site invoked
+    /// once per section of a CV, once per code listing, etc.) — genuinely
+    /// different content that happens to originate from one source line.
+    /// `location` (an introspection identity assigned per realized element
+    /// instance, not per source span) disambiguates the two: true repeats of
+    /// one call site share it, distinct calls to a shared function do not.
+    /// Falls back to the plain span match when `location` is unavailable —
+    /// synthetic content and cases where the scan tag carried none — which
+    /// preserves the old (occasionally wrong, but no worse than before this
+    /// distinction existed) first-match behavior rather than losing geometry
+    /// entirely.
+    pub fn table_for(
+        &self,
+        logical_id: u128,
+        location: Option<Location>,
+    ) -> Option<&PagedTableGeometry> {
+        if let Some(location) = location
+            && let Some(table) = self
+                .tables
+                .iter()
+                .find(|table| table.logical_id == logical_id && table.location == Some(location))
+        {
+            return Some(table);
+        }
+        self.first_table(logical_id)
+    }
+
     /// A one-page, text-free frame whose native shape count exceeds the
     /// consumer-safety budget.
     pub fn dense_visual_page(&self) -> Option<&Frame> {
@@ -100,6 +130,13 @@ fn dense_visual_only(frame: &Frame) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PagedTableGeometry {
     pub logical_id: u128,
+    /// The introspection location of the specific element instance this
+    /// occurrence came from, when the layout tag carried one. Distinguishes
+    /// genuinely different call sites that happen to share `logical_id` (see
+    /// [`PagedGeometry::table_for`]) from true repeats of one call site
+    /// (a table's own header row repeated across a page break), which share
+    /// both `logical_id` *and* `location`.
+    pub location: Option<Location>,
     pub page: usize,
     pub cells: Vec<PagedCellGeometry>,
 }
@@ -166,6 +203,7 @@ impl Scanner {
                     let table_index = self.tables.len();
                     self.tables.push(PagedTableGeometry {
                         logical_id: logical_id(content),
+                        location: Some(tag.location()),
                         page: self.page,
                         cells: Vec::new(),
                     });

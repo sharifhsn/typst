@@ -1216,7 +1216,7 @@ fn measured_table_geometry(
     ctx: &DocxCtx,
 ) -> Option<MeasuredTableGeometry> {
     let logical_id = typst_export_common::paged::logical_id(source);
-    let table = ctx.paged_geometry.first_table(logical_id)?;
+    let table = ctx.paged_geometry.table_for(logical_id, source.location())?;
     if table.cells.is_empty() || table.cells.iter().any(|cell| !cell.axis_aligned) {
         return None;
     }

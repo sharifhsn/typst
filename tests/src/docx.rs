@@ -7123,3 +7123,51 @@ Real content here."#,
     );
     assert_all_wellformed(&p);
 }
+
+#[test]
+fn reused_row_grid_measures_each_call_own_row_height() {
+    // A resume/CV-style "section with a side heading" idiom: a reusable
+    // function wraps a single-row `grid(columns: (label-width, 1fr), ..)` and
+    // is called once per section with very different content. Every call
+    // shares one `grid(..)` source span (the reusable function's own body),
+    // so `logical_id` (span + element, the identity used to unify a table's
+    // *own* header row repeating across a page break, and deliberately also
+    // to widen a repeated code-listing gutter to its widest occurrence) is
+    // IDENTICAL across all calls even though each is a physically distinct,
+    // unrelated table instance. Looking up geometry by `logical_id` alone
+    // (`first_table`) always returned the *first* call's row height for every
+    // later call — a short "Skills" row inherited a tall "Employment
+    // History" row's measured height, opening a huge blank gap before it.
+    let p = parts(
+        r#"#set page(width: 300pt, height: 1000pt, margin: 20pt)
+#let section(title, body) = {
+  grid(columns: (60pt, 1fr), gutter: 10pt, [*#title*], body)
+}
+#section("Tall", [#lorem(60)])
+#section("Short", [One line.])"#,
+    );
+    let doc = &p["word/document.xml"];
+    let tables = element_fragments(doc, "tbl");
+    assert_eq!(tables.len(), 2, "each call is its own physical table");
+
+    let tr_height = |table_xml: &str| -> i32 {
+        let marker = "<w:trHeight w:val=\"";
+        let start = table_xml.find(marker).expect("table has a measured row height")
+            + marker.len();
+        table_xml[start..]
+            .split('"')
+            .next()
+            .expect("trHeight value closes")
+            .parse()
+            .expect("trHeight value is decimal")
+    };
+    let tall = tr_height(tables[0]);
+    let short = tr_height(tables[1]);
+    assert!(
+        short < tall / 2,
+        "the short section's row must be measured from its OWN content \
+         ({short} twips), not inherit the tall section's row height \
+         ({tall} twips) just because they share a source span"
+    );
+    assert_all_wellformed(&p);
+}
