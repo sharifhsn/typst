@@ -147,6 +147,32 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   effect: pending gate (both fixes are general — (a) affects any bracketed
   image-in-box icon idiom, (b) affects any document using the common
   "show-everywhere page-setup wrapper" template pattern).
+- Follow-up fix (4/10, `cv/imtsuki-resume`): a table-geometry *identity* bug,
+  not a sizing bug. The resume factors its "section with a side heading"
+  layout into a reusable function wrapping a single-row
+  `grid(columns: (label, 1fr), ..)`, called once per section (Employment
+  History, Education, Past Internships, Skills) with very different content
+  heights. `logical_id` (span + element) is intentionally shared across
+  physically distinct occurrences of one call site — that is what lets a
+  repeated code-listing gutter widen to its widest occurrence and lets a
+  table's own header row merge correctly across a page break — but the row-
+  height lookup used `first_table(logical_id)`, which just returns the FIRST
+  matching occurrence, so every later call to the shared section-layout
+  function inherited the FIRST call's measured row height. A short row
+  ("Past Internships") got a ~330pt minimum height stamped onto it from an
+  unrelated, much taller row ("Employment History"), opening a huge blank
+  gap. Fixed by giving each occurrence an optional introspection `location`
+  (distinct per realized element instance, unlike the span-based
+  `logical_id`) and preferring an exact location match before falling back to
+  the old first-match behavior; the legitimate cross-page header-row merge
+  and column-width-widening aggregation (both genuinely span-only by design)
+  are untouched. Worst-case fix: `cv/imtsuki-resume` 3 → 1 pages, exact
+  parity. Full-corpus effect (LibreOffice-backed 1408-doc gate): native_good
+  473 → 484, fallback_visual 314 → 355, native_degraded 130 → 120,
+  fallback_degraded 296 → 253 — every category moved toward higher fidelity,
+  none regressed; package_ok unchanged at 1283/1286 (same 3 pre-existing
+  export_error docs, independently confirmed not caused by any of this
+  session's changes).
 - Also diagnosed and explicitly set aside: a `slide_shaped_docx`-flagged
   document (a presentation compiled through the DOCX path, mismatched
   category vs. actual content shape) is a structural pairing issue already
