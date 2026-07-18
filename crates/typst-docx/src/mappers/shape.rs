@@ -574,7 +574,7 @@ fn build(
 /// heights — and bails (`None`) when it is not: resolving a cell-relative
 /// `height: 100%` against the page manufactured full-page ink and forced each
 /// such shape onto its own page.
-fn resolve_axis(r: Rel<Length>, styles: StyleChain, base: Option<Abs>) -> Option<Abs> {
+pub(crate) fn resolve_axis(r: Rel<Length>, styles: StyleChain, base: Option<Abs>) -> Option<Abs> {
     use typst_library::foundations::Resolve;
     let rel = r.resolve(styles);
     if rel.rel.is_zero() {

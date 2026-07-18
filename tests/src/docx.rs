@@ -3950,6 +3950,61 @@ fn block_columns_with_manual_break_use_top_aligned_editable_cells() {
 }
 
 #[test]
+fn placed_plain_box_scopes_relative_image_to_its_own_width() {
+    // A common corner-badge idiom: `place(..)[box(width: 1cm)[image(width:
+    // 100%)]]`. The plain-box inline-extraction fast path used to drop the
+    // box's own width entirely when flattening its body to runs, so the
+    // image's 100% resolved against the ambient paragraph width instead of
+    // the box's 1cm — a 1cm badge silently became a page-wide image.
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40"><rect width="80" height="40" fill="#a03"/></svg>"##;
+
+    let p = parts_with_files(
+        r#"#set page(width: 300pt, height: 400pt, margin: 20pt)
+Body text before.
+#place(bottom + right, dx: 1.5cm, dy: 0cm)[
+  #box(width: 1cm)[
+    #image("logo.svg", width: 100%)
+  ]
+]"#,
+        &[("logo.svg", SVG)],
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<wp:extent cx=\"360045\" cy=\"180023\""),
+        "the image resolves 100% against the box's own 1cm width, keeping the source 2:1 aspect ratio"
+    );
+    assert!(
+        !doc.contains("cx=\"2540000\""),
+        "must not fall back to the ambient page content width"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn placed_plain_box_scopes_relative_shape_to_its_own_size() {
+    // Same defect, isolated to a bodyless decorative shape instead of an
+    // image, and with the nested `#place` (page-number badge idiom) that
+    // originally routed this content through the plain-box fast path instead
+    // of the single-drawing native shape path.
+    let p = parts(
+        r#"#set page(width: 300pt, height: 400pt, margin: 20pt)
+Body text before.
+#place(bottom + right, dx: 1.5cm, dy: 0cm)[
+  #box(width: 1cm, height: 1cm)[
+    #rect(width: 100%, height: 100%, fill: red),
+    #place(center + horizon, text(size: 8pt, fill: white)[7])
+  ]
+]"#,
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<wp:extent cx=\"360045\" cy=\"360000\""),
+        "the rect resolves both 100% axes against the box's own 1cm square, not the page"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn manual_column_relative_images_use_the_column_width() {
     const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40"><rect width="80" height="40" fill="#0b6"/></svg>"##;
 

@@ -2197,11 +2197,48 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                         // together (`#box[..]` to prevent a line break,
                         // `#box(width: ..)[label]`, a baseline shift). Extract
                         // its runs so the text stays selectable instead of
-                        // rasterizing it to an image; the only thing lost is the
-                        // box's geometric constraint, which has no inline-flow
-                        // equivalent. `body_extractable` still guards the one
-                        // layout-bound case (a per-line equation label inside).
-                        out.extend(self.inline_runs(&body, styles, props.clone())?);
+                        // rasterizing it to an image; the box's own geometric
+                        // constraint has no inline-flow equivalent and is lost
+                        // for ordinary text, which is harmless. But a body
+                        // containing a relatively-sized child (an `image(width:
+                        // 100%)` inside a small fixed-width icon/badge box, a
+                        // common idiom) must still resolve that percentage
+                        // against the box's OWN width/height, not the ambient
+                        // paragraph width — otherwise a 1cm badge silently
+                        // becomes a page-wide image. Scope the bases the same
+                        // way a table cell already does before extracting.
+                        // `body_extractable` still guards the one layout-bound
+                        // case (a per-line equation label inside).
+                        use typst_library::foundations::Smart;
+                        use typst_library::layout::Sizing;
+                        let width_base = match elem.width.get(styles) {
+                            Sizing::Rel(r) => mappers::shape::resolve_axis(
+                                r,
+                                styles,
+                                Some(self.available_width),
+                            ),
+                            _ => None,
+                        };
+                        let height_base = match elem.height.get(styles) {
+                            Smart::Custom(r) => {
+                                mappers::shape::resolve_axis(r, styles, self.shape_height_base)
+                            }
+                            Smart::Auto => None,
+                        };
+                        let width_dxa = width_base.map(props::abs_to_twip);
+                        let runs = self.with_shape_height_base(
+                            height_base.or(self.shape_height_base),
+                            |ctx| {
+                                if let Some(width_dxa) = width_dxa {
+                                    ctx.with_available_width(width_dxa, |ctx| {
+                                        ctx.inline_runs(&body, styles, props.clone())
+                                    })
+                                } else {
+                                    ctx.inline_runs(&body, styles, props.clone())
+                                }
+                            },
+                        )?;
+                        out.extend(runs);
                     } else if crate::convert::contains_place(&body)
                         && let Some(frame) = crate::convert::coherent_mixed_placed_canvas(
                             child, styles, self,
