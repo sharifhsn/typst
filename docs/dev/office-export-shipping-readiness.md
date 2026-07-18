@@ -1,6 +1,6 @@
 # Office export shipping readiness
 
-Status date: 2026-07-15
+Status date: 2026-07-18
 
 This is the current product and validation snapshot after consolidating the DOCX,
 PPTX, Pandoc, shared Office, DOCX review, corpus-hardening, and OOXML-math branch
@@ -72,7 +72,24 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 
 ### DOCX
 
-- The fresh 1,408-document authority completed at `1bf829900`, followed by
+- The 2026-07-18 pagination campaign (commits `b05bd79` + `ff55d6b`) fixed the
+  two dominant page-growth mechanisms — weak page breaks lowered as hard breaks
+  (now Word's idempotent `pageBreakBefore`), and relative shape heights resolved
+  against the page instead of the measured cell row box. Against the same-day
+  pre-fix authority: visual-policy passes 910 → 960, exact page counts 626 →
+  656, and total absolute page deviation down 24% (5,130 → 3,908 pages). The
+  worst offender (`book/alen-ops99-sleep-guide`) dropped 188 → 125 rendered
+  pages against a 106-page reference.
+- Known metric caveat from that campaign: LibreOffice's DOCX→PDF conversion
+  performs `oddPage` section transitions but does not materialize parity blank
+  pages, so chapter-on-odd-page theses (kthesis family, ~10 documents) now
+  render *shorter* than their paged references by one page per chapter. The
+  old always-hard weak breaks accidentally compensated for this. The export now
+  encodes the author's parity intent idiomatically; Microsoft Word honors it.
+- Remaining distinct page-inflation families (measured, unfixed): Arabic/RTL
+  pure-paragraph line metrics, math-raster fallback growth, positioned-overlay
+  fallbacks, and a diffuse ~15–20% table-row/leading drift.
+- The prior full authority completed at `1bf829900`, followed by
   serial consumer retries and an OMML-aware semantic refresh. It produced 1,405
   valid packages, 1,392 successful LibreOffice renders, nine remaining
   consumer failures, and one source-owned DOCX-target error (`paper/tracl`).
