@@ -539,6 +539,25 @@ fn write_block(
             w.close(); // p
             true
         }
+        Block::WeakPageBreak => {
+            // Normally folded into a following paragraph's `pageBreakBefore`
+            // by `move_page_breaks_before_following_blocks`. If one survives
+            // to encoding (a scope with no following paragraph), emit the
+            // minimized idempotent carrier rather than an explicit `<w:br>`,
+            // preserving the no-blank-page guarantee.
+            open_para(w);
+            w.open(xml::W_PPR).start_children();
+            w.open("w:pageBreakBefore").empty();
+            w.open("w:spacing")
+                .attr("w:before", "0")
+                .attr("w:after", "0")
+                .attr("w:line", "1")
+                .attr("w:lineRule", "exact")
+                .empty();
+            w.close(); // pPr
+            w.close(); // p
+            true
+        }
         Block::Tag(_) => false,
     }
 }

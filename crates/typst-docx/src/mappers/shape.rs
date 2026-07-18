@@ -38,9 +38,9 @@ pub fn shape(
     styles: StyleChain,
     ctx: &mut DocxCtx,
 ) -> SourceResult<Option<Run>> {
-    let reference =
-        typst_library::layout::Size::new(ctx.available_width, ctx.raster_height);
-    let Some((w, h, spec)) = build(ctx, child, styles, reference) else {
+    let width_base = ctx.available_width;
+    let height_base = ctx.shape_height_base;
+    let Some((w, h, spec)) = build(ctx, child, styles, width_base, height_base) else {
         return Ok(None);
     };
     let (w_emu, h_emu) = (abs_to_emu(w), abs_to_emu(h));
@@ -426,7 +426,8 @@ fn build(
     ctx: &mut DocxCtx,
     child: &Content,
     styles: StyleChain,
-    reference: typst_library::layout::Size,
+    width_base: Abs,
+    height_base: Option<Abs>,
 ) -> Option<(Abs, Abs, ShapeSpec)> {
     if let Some(e) = child.to_packed::<BoxElem>() {
         if e.body.get_ref(styles).is_some() {
@@ -444,7 +445,8 @@ fn build(
             e.width.get(styles),
             e.height.get(styles),
             styles,
-            reference,
+            width_base,
+            height_base,
         )?;
         let fill = fill_color(ctx, &fill_paint)?;
         let stroke = sides_stroke_first(&raw_stroke, styles);
@@ -458,8 +460,13 @@ fn build(
         if e.body.get_ref(styles).is_some() {
             return None;
         }
-        let (w, h) =
-            explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
+        let (w, h) = explicit_size(
+            e.width.get(styles),
+            e.height.get(styles),
+            styles,
+            width_base,
+            height_base,
+        )?;
         let fill = fill_color(ctx, e.fill.get_ref(styles))?;
         let stroke =
             sides_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
@@ -468,8 +475,13 @@ fn build(
         if e.body.get_ref(styles).is_some() {
             return None;
         }
-        let (w, h) =
-            explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
+        let (w, h) = explicit_size(
+            e.width.get(styles),
+            e.height.get(styles),
+            styles,
+            width_base,
+            height_base,
+        )?;
         let fill = fill_color(ctx, e.fill.get_ref(styles))?;
         let stroke =
             sides_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
@@ -478,8 +490,13 @@ fn build(
         if e.body.get_ref(styles).is_some() {
             return None;
         }
-        let (w, h) =
-            explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
+        let (w, h) = explicit_size(
+            e.width.get(styles),
+            e.height.get(styles),
+            styles,
+            width_base,
+            height_base,
+        )?;
         let fill = fill_color(ctx, e.fill.get_ref(styles))?;
         let stroke =
             single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
@@ -488,29 +505,34 @@ fn build(
         if e.body.get_ref(styles).is_some() {
             return None;
         }
-        let (w, h) =
-            explicit_size(e.width.get(styles), e.height.get(styles), styles, reference)?;
+        let (w, h) = explicit_size(
+            e.width.get(styles),
+            e.height.get(styles),
+            styles,
+            width_base,
+            height_base,
+        )?;
         let fill = fill_color(ctx, e.fill.get_ref(styles))?;
         let stroke =
             single_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
         Some((w, h, ShapeSpec { geom: ShapeGeom::Ellipse, fill, stroke, txbx: None }))
     } else if let Some(e) = child.to_packed::<PolygonElem>() {
-        use typst_library::foundations::Resolve;
         use typst_library::layout::Point;
-        // Resolve each vertex against `reference` — a vertex is a `Rel<Length>`
-        // per axis, so a percentage component (e.g. `(50%, 0pt)`, common in a
-        // full-width decorative motif) resolves against the page like `#rect`'s
-        // percentage sizing, and an `em` length against the font size.
+        // Resolve each vertex like `#rect`'s percentage sizing — a vertex is a
+        // `Rel<Length>` per axis, so a percentage component (e.g. `(50%, 0pt)`,
+        // common in a full-width decorative motif) resolves against the scoped
+        // bases, and an `em` length against the font size. A vertical
+        // percentage with no honest height base bails to the fallback chain.
         let verts: Vec<Point> = e
             .vertices
             .iter()
             .map(|v| {
-                Point::new(
-                    v.x.resolve(styles).relative_to(reference.x),
-                    v.y.resolve(styles).relative_to(reference.y),
-                )
+                Some(Point::new(
+                    resolve_axis(v.x, styles, Some(width_base))?,
+                    resolve_axis(v.y, styles, height_base)?,
+                ))
             })
-            .collect();
+            .collect::<Option<_>>()?;
         if verts.len() < 2 {
             return None;
         }
@@ -545,27 +567,39 @@ fn build(
     }
 }
 
-/// Resolves an explicit `(width, height)` to absolute sizes against
-/// `reference` (the page's own content area — the same reference `#move`'s
-/// dx/dy already resolve percentages against, see `move_`), or `None` if
-/// either is auto or fractional. A pure-absolute size resolves identically
-/// regardless of `reference` (its ratio component is zero), so this covers
-/// the common case unchanged and additionally recovers the very common
-/// `width: 100%`/`height: 100%` (fill the container) pattern, which used to
-/// bail unconditionally.
+/// Resolves one axis of an explicit shape size. A pure-absolute length (its
+/// ratio component is zero after style resolution) needs no base at all. A
+/// ratio component resolves against `base` when one is honestly known — the
+/// scoped width budget, or the measured cell row box / section text area for
+/// heights — and bails (`None`) when it is not: resolving a cell-relative
+/// `height: 100%` against the page manufactured full-page ink and forced each
+/// such shape onto its own page.
+fn resolve_axis(r: Rel<Length>, styles: StyleChain, base: Option<Abs>) -> Option<Abs> {
+    use typst_library::foundations::Resolve;
+    let rel = r.resolve(styles);
+    if rel.rel.is_zero() {
+        Some(rel.abs)
+    } else {
+        base.map(|base| rel.relative_to(base))
+    }
+}
+
+/// Resolves an explicit `(width, height)` to absolute sizes, or `None` if
+/// either is auto or fractional, or carries a ratio with no honest base
+/// (see [`resolve_axis`]).
 fn explicit_size(
     width: Smart<Rel<Length>>,
     height: Sizing,
     styles: StyleChain,
-    reference: typst_library::layout::Size,
+    width_base: Abs,
+    height_base: Option<Abs>,
 ) -> Option<(Abs, Abs)> {
-    use typst_library::foundations::Resolve;
     let w = match width {
-        Smart::Custom(r) => r.resolve(styles).relative_to(reference.x),
+        Smart::Custom(r) => resolve_axis(r, styles, Some(width_base))?,
         _ => return None,
     };
     let h = match height {
-        Sizing::Rel(r) => r.resolve(styles).relative_to(reference.y),
+        Sizing::Rel(r) => resolve_axis(r, styles, height_base)?,
         _ => return None,
     };
     Some((w, h))
@@ -577,15 +611,15 @@ fn explicit_box_size(
     width: Sizing,
     height: Smart<Rel<Length>>,
     styles: StyleChain,
-    reference: typst_library::layout::Size,
+    width_base: Abs,
+    height_base: Option<Abs>,
 ) -> Option<(Abs, Abs)> {
-    use typst_library::foundations::Resolve;
     let w = match width {
-        Sizing::Rel(r) => r.resolve(styles).relative_to(reference.x),
+        Sizing::Rel(r) => resolve_axis(r, styles, Some(width_base))?,
         _ => return None,
     };
     let h = match height {
-        Smart::Custom(r) => r.resolve(styles).relative_to(reference.y),
+        Smart::Custom(r) => resolve_axis(r, styles, height_base)?,
         _ => return None,
     };
     Some((w, h))

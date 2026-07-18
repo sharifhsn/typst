@@ -227,6 +227,14 @@ pub enum Block {
     Toc(Toc),
     /// A non-final section break carrying its own `SectPr`.
     SectionBreak(SectPr),
+    /// A weak page break (`pagebreak(weak: true)` or a `set page` boundary
+    /// marker): breaks only when content precedes it on the page, and any run
+    /// of them collapses to one. Lowered by
+    /// `move_page_breaks_before_following_blocks` into an idempotent
+    /// `w:pageBreakBefore` on the following paragraph — never an explicit
+    /// `<w:br>`, which would manufacture blank pages exactly where Typst's
+    /// weak semantics guarantee none.
+    WeakPageBreak,
     /// Introspection tag passthrough for the introspector + bookmarks.
     Tag(Tag),
 }

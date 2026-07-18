@@ -160,6 +160,17 @@ pub struct DocxCtx<'a, 'e> {
     /// offsets against this rather than the full paper height.
     pub(crate) available_height: Abs,
 
+    /// Height base for resolving a *ratio* component in a decorative shape's
+    /// explicit size (`box(height: 100%, fill: ..)`). At document level this is
+    /// the section's text-area height (the base Typst itself uses for
+    /// top-level flow); inside a table/grid cell with converged measured
+    /// geometry it is the measured row box, so a bar-chart track resolves to
+    /// its true few-point height instead of a full page. `None` inside an
+    /// unmeasured container, where no honest base exists — shape lowering then
+    /// bails to its ordinary fallback chain rather than inventing page-height
+    /// ink.
+    pub(crate) shape_height_base: Option<Abs>,
+
     /// The finite page height, used only as a *retry* bound when rasterizing
     /// content that does not lay out under an infinite-height region — page-
     /// relative content such as a `place(bottom, ..)` cover, a slide, or a
@@ -269,6 +280,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             available_width: Abs::pt(450.0),
             page_content_width: Abs::pt(450.0),
             available_height: Abs::pt(698.0),
+            shape_height_base: Some(Abs::pt(698.0)),
             raster_height: Abs::pt(842.0),
             quoter: SmartQuoter::new(),
             last_char: None,
@@ -398,6 +410,23 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         self.available_width = Abs::pt(width_dxa.max(1) as f64 / 20.0);
         let result = f(self);
         self.available_width = previous;
+        result
+    }
+
+    /// Runs a nested lowering scope with the given shape-height base — the
+    /// measured cell row box inside a table with converged geometry, or `None`
+    /// inside an unmeasured container (relative shape heights then bail to
+    /// their fallback chain instead of resolving against the page). Restores
+    /// the parent base even when lowering returns an error.
+    pub(crate) fn with_shape_height_base<T>(
+        &mut self,
+        base: Option<Abs>,
+        f: impl FnOnce(&mut Self) -> SourceResult<T>,
+    ) -> SourceResult<T> {
+        let previous = self.shape_height_base;
+        self.shape_height_base = base.filter(|height| *height > Abs::zero());
+        let result = f(self);
+        self.shape_height_base = previous;
         result
     }
 

@@ -72,6 +72,7 @@ pub(crate) fn resolve_leading_background_layers(
 fn resolve_block_backgrounds(blocks: &mut [Block]) {
     for block in blocks.iter_mut() {
         match block {
+            Block::WeakPageBreak => {}
             Block::Para(para) => resolve_para_backgrounds(para),
             Block::Table(table) => {
                 for row in &mut table.rows {
@@ -113,7 +114,10 @@ fn block_has_flow_content(block: &Block) -> bool {
     match block {
         Block::Para(para) => para.content.iter().any(para_child_has_flow_content),
         Block::Table(_) | Block::Toc(_) => true,
-        Block::FlowSpace { .. } | Block::SectionBreak(_) | Block::Tag(_) => false,
+        Block::FlowSpace { .. }
+        | Block::SectionBreak(_)
+        | Block::Tag(_)
+        | Block::WeakPageBreak => false,
     }
 }
 
@@ -213,6 +217,7 @@ fn internal_bookmark_target(instruction: &str) -> Option<&str> {
 fn collect_bookmark_names(blocks: &[Block], names: &mut BTreeSet<EcoString>) {
     for block in blocks {
         match block {
+            Block::WeakPageBreak => {}
             Block::Para(para) => collect_para_bookmarks(para, names),
             Block::Table(table) => {
                 for row in &table.rows {
@@ -293,6 +298,7 @@ fn rewrite_dangling_fields_in_blocks(
 ) {
     for block in blocks {
         match block {
+            Block::WeakPageBreak => {}
             Block::Para(para) => {
                 rewrite_dangling_fields_in_para(para, bookmarks, missing)
             }
@@ -413,6 +419,7 @@ struct BookmarkScope {
 fn dedupe_blocks(blocks: &mut [Block], scope: &mut BookmarkScope) {
     for block in blocks.iter_mut() {
         match block {
+            Block::WeakPageBreak => {}
             Block::Para(para) => dedupe_para(para, scope),
             Block::Table(table) => {
                 for row in &mut table.rows {
@@ -637,6 +644,7 @@ fn validate_internal_field_targets(
 ) -> Result<(), DocumentInvariantError> {
     for block in blocks {
         match block {
+            Block::WeakPageBreak => {}
             Block::Para(para) => validate_para_field_targets(para, bookmarks)?,
             Block::Table(table) => {
                 for row in &table.rows {
@@ -728,6 +736,7 @@ impl State {
     fn visit_blocks(&mut self, blocks: &[Block]) -> Result<(), DocumentInvariantError> {
         for block in blocks {
             match block {
+                Block::WeakPageBreak => {}
                 Block::Para(para) => self.visit_para(para)?,
                 Block::Table(table) => {
                     for row in &table.rows {

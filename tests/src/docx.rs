@@ -5066,6 +5066,103 @@ fn consecutive_plain_pagebreaks_preserve_intentional_blank_pages() {
 }
 
 #[test]
+fn stacked_weak_pagebreaks_collapse_to_one_idempotent_boundary() {
+    // The ubiquitous template pattern: a level-1 heading show rule fires
+    // `pagebreak(weak: true)` on top of the caller's own explicit weak break.
+    // Typst collapses the run to at most one transition; the DOCX must too —
+    // as an idempotent pageBreakBefore, never explicit `<w:br>`s, which would
+    // manufacture blank pages exactly where weak semantics guarantee none.
+    let p = parts(
+        "#show heading.where(level: 1): it => {\n  pagebreak(weak: true)\n  text(blue, it.body)\n}\nIntro.\n#pagebreak(weak: true)\n= One\nBody one.\n#pagebreak(weak: true)\n= Two\nBody two.",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(!doc.contains("<w:br w:type=\"page\"/>"));
+    assert_eq!(doc.matches("<w:pageBreakBefore/>").count(), 2);
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn weak_pagebreak_at_document_start_stays_a_noop() {
+    let p = parts("#pagebreak(weak: true)\nHello.");
+    let doc = &p["word/document.xml"];
+    assert!(
+        !doc.contains("<w:br w:type=\"page\"/>"),
+        "a leading weak break must not become a hard break"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn weak_pagebreak_before_table_rides_a_minimized_carrier() {
+    let p = parts("Before.\n#pagebreak(weak: true)\n#table(columns: 2)[A][B]");
+    let doc = &p["word/document.xml"];
+    assert!(!doc.contains("<w:br w:type=\"page\"/>"));
+    assert!(
+        doc.contains("<w:pageBreakBefore/>"),
+        "the weak break rides an idempotent carrier paragraph before the table"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn weak_then_hard_pagebreak_preserves_the_blank_page() {
+    // `pagebreak(weak: true)` followed by `pagebreak()`: the weak break fires
+    // off the content page, the hard break then yields a blank page. The weak
+    // transition rides pageBreakBefore on the explicit break's own paragraph,
+    // so the pair stays two transitions mid-page and one at a page top.
+    let p = parts("Before.\n#pagebreak(weak: true)\n#pagebreak()\nAfter.");
+    let doc = &p["word/document.xml"];
+    assert_eq!(doc.matches("<w:br w:type=\"page\"/>").count(), 1);
+    assert_eq!(doc.matches("<w:pageBreakBefore/>").count(), 2);
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn weak_pagebreak_at_geometry_transition_adds_no_blank_pages() {
+    // A weak break stacked onto a `set page` geometry change folds into the
+    // section transition; only surplus *hard* breaks are real blank pages.
+    let p = parts(
+        "First.\n#pagebreak(weak: true)\n#set page(width: 300pt)\nSecond.",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(!doc.contains("<w:br w:type=\"page\"/>"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn relative_height_shape_in_measured_grid_cell_uses_the_row_box() {
+    // A bar-chart track: `box(height: 100%)` inside a fixed 8pt grid row must
+    // resolve against the measured row box (8pt = 101600 EMU), not the page —
+    // resolving against the page manufactured a full-page shape that forced
+    // itself onto its own page.
+    let p = parts(
+        "#grid(columns: (40pt, 60pt), rows: (8pt,), [Label], box(width: 60%, height: 100%, fill: orange))",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("cy=\"101600\""),
+        "the shape height is the measured 8pt row box"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn relative_height_shape_at_page_level_uses_the_content_area() {
+    // Top-level flow resolves `height: 50%` against the text area (page height
+    // minus margins), the same base Typst's own page region provides.
+    let p = parts(
+        "#set page(width: 200pt, height: 200pt, margin: 10pt)\n#rect(width: 50pt, height: 50%, fill: blue)",
+    );
+    let doc = &p["word/document.xml"];
+    // 50% of (200pt - 2 * 10pt) = 90pt = 1143000 EMU.
+    assert!(
+        doc.contains("cy=\"1143000\""),
+        "the shape height is half the 180pt content area"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn pagebreak_keeps_following_vertical_space_on_the_new_page() {
     let p = parts("Before.\n#pagebreak()\n#v(12pt)\nAfter.");
     let doc = &p["word/document.xml"];

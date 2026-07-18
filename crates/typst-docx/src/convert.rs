@@ -286,6 +286,7 @@ pub fn convert_children(
 fn move_page_breaks_before_following_blocks(blocks: &mut Vec<Block>) {
     let mut out = Vec::with_capacity(blocks.len());
     let mut pending = 0usize;
+    let mut pending_weak = false;
     let mut pending_flow_dxa = 0i32;
     for mut block in std::mem::take(blocks) {
         let is_break = matches!(
@@ -300,7 +301,16 @@ fn move_page_breaks_before_following_blocks(blocks: &mut Vec<Block>) {
             pending += 1;
             continue;
         }
-        if pending > 0 {
+        if matches!(block, Block::WeakPageBreak) {
+            // Weak breaks collapse: any run of them contributes at most one
+            // idempotent boundary, and one stacked onto hard breaks adds
+            // nothing (the page is already fresh after a hard break). Only a
+            // weak break *opening* the run matters — it fires before the hard
+            // breaks do, adding one transition when content precedes.
+            pending_weak |= pending == 0;
+            continue;
+        }
+        if pending > 0 || pending_weak {
             if matches!(block, Block::Tag(_)) {
                 out.push(block);
                 continue;
@@ -310,14 +320,28 @@ fn move_page_breaks_before_following_blocks(blocks: &mut Vec<Block>) {
                 continue;
             }
             if let Block::Para(para) = &mut block {
-                // A single break becomes idempotent pageBreakBefore. For two or
-                // more authored breaks, keep every explicit break as well: an
-                // explicit break followed by pageBreakBefore is idempotent at
-                // the top of a page, so N explicit breaks preserve N-1 blank
-                // pages while the paragraph property protects auto-pagination.
-                if pending > 1 {
-                    for _ in 0..pending {
-                        out.push(page_break_block());
+                // A single hard break becomes idempotent pageBreakBefore. For
+                // two or more authored hard breaks, keep every explicit break
+                // as well: an explicit break followed by pageBreakBefore is
+                // idempotent at the top of a page, so N explicit breaks
+                // preserve N-1 blank pages while the paragraph property
+                // protects auto-pagination. Weak breaks never emit an
+                // explicit `<w:br>` themselves — the flag alone reproduces
+                // their only-if-content-precedes semantics. A weak break
+                // *followed by* hard breaks fires first (one extra transition
+                // when content precedes): the flag rides on the first
+                // explicit-break paragraph so the whole run keeps Typst's
+                // count both mid-page and at a page top.
+                if pending > 1 || (pending > 0 && pending_weak) {
+                    for index in 0..pending {
+                        let mut break_block = page_break_block();
+                        if index == 0
+                            && pending_weak
+                            && let Block::Para(break_para) = &mut break_block
+                        {
+                            break_para.props.page_break_before = true;
+                        }
+                        out.push(break_block);
                     }
                 }
                 para.props.page_break_before = true;
@@ -327,7 +351,7 @@ fn move_page_breaks_before_following_blocks(blocks: &mut Vec<Block>) {
                         spacing.before.unwrap_or(0).saturating_add(pending_flow_dxa),
                     );
                 }
-            } else {
+            } else if pending > 0 {
                 // Tables and section boundaries have no paragraph property on
                 // which to carry the break without adding an empty line. Keep
                 // their boundaries explicit rather than changing flow height.
@@ -337,12 +361,25 @@ fn move_page_breaks_before_following_blocks(blocks: &mut Vec<Block>) {
                 if pending_flow_dxa != 0 {
                     out.push(Block::FlowSpace { dxa: pending_flow_dxa });
                 }
+            } else if !matches!(block, Block::SectionBreak(_)) {
+                // A weak break in front of a table (Word ignores
+                // `pageBreakBefore` inside table cells) rides on a minimized
+                // empty paragraph carrying the flag: still a no-op at a page
+                // top, at the cost of one ~twip line. In front of a section
+                // break it is dropped outright — the section transition is
+                // already a page start.
+                out.push(weak_page_break_carrier_block(pending_flow_dxa));
+            } else if pending_flow_dxa != 0 {
+                out.push(Block::FlowSpace { dxa: pending_flow_dxa });
             }
             pending = 0;
+            pending_weak = false;
             pending_flow_dxa = 0;
         }
         out.push(block);
     }
+    // Trailing hard breaks stay (an intentionally requested final blank page);
+    // a trailing weak break is Typst's own no-op and is dropped.
     for _ in 0..pending {
         out.push(page_break_block());
     }
@@ -350,6 +387,26 @@ fn move_page_breaks_before_following_blocks(blocks: &mut Vec<Block>) {
         out.push(Block::FlowSpace { dxa: pending_flow_dxa });
     }
     *blocks = out;
+}
+
+/// A minimized empty paragraph whose only job is to carry `pageBreakBefore`
+/// in front of a block that cannot carry it itself (a table). Costs one
+/// exact-height twip of flow, well inside consumer drift.
+fn weak_page_break_carrier_block(extra_before_dxa: i32) -> Block {
+    Block::Para(Para {
+        props: ParaProps {
+            page_break_before: true,
+            spacing: Some(Spacing {
+                before: Some(extra_before_dxa.max(0)),
+                after: Some(0),
+                line: Some(1),
+                line_rule_auto: false,
+                line_rule_at_least: false,
+            }),
+            ..ParaProps::default()
+        },
+        content: Vec::new(),
+    })
 }
 
 fn page_break_block() -> Block {
@@ -368,7 +425,7 @@ fn apply_pending_v(blocks: &mut Vec<Block>, from: usize, pending_v: i32) -> i32 
     }
     for index in from..blocks.len() {
         match &mut blocks[index] {
-            Block::Tag(_) | Block::SectionBreak(_) => continue,
+            Block::Tag(_) | Block::SectionBreak(_) | Block::WeakPageBreak => continue,
             Block::Para(para) => {
                 let sp = para.props.spacing.get_or_insert_with(Default::default);
                 sp.before = Some(sp.before.unwrap_or(0) + pending_v);
@@ -851,12 +908,22 @@ fn handle_block_inner(
     } else if let Some(elem) = child.to_packed::<TableCell>() {
         // Same as `GridCell` above, for `#table.cell(..)`.
         out.extend(ctx.blocks(&elem.body, styles)?);
-    } else if child.is::<typst_library::layout::PagebreakElem>() {
-        // A page break maps to a `<w:br w:type="page"/>` in its own paragraph.
-        out.push(Block::Para(Para {
-            props: ParaProps::default(),
-            content: vec![ParaChild::Run(Run::PageBreak)],
-        }));
+    } else if let Some(elem) = child.to_packed::<typst_library::layout::PagebreakElem>()
+    {
+        // A hard page break maps to a `<w:br w:type="page"/>` in its own
+        // paragraph — it must advance a page even when the current one is
+        // empty, so stacked hard breaks yield real blank pages. A *weak*
+        // break (or the even weaker `set page` boundary marker) only breaks
+        // when content precedes it, and runs of them collapse; a marker block
+        // carries that semantic to `move_page_breaks_before_following_blocks`.
+        if elem.weak.get(styles) || elem.boundary.get(styles) {
+            out.push(Block::WeakPageBreak);
+        } else {
+            out.push(Block::Para(Para {
+                props: ParaProps::default(),
+                content: vec![ParaChild::Run(Run::PageBreak)],
+            }));
+        }
     } else if let Some(elem) = child.to_packed::<ParElem>() {
         let mut props = ctx.resolve_par_props(elem, styles);
         props.review_origin = Some(

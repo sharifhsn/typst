@@ -794,6 +794,7 @@ fn record_dynamic_field_inventory(
 fn record_block_fields(report: &mut FidelityReport, snapshot_id: u128, blocks: &[Block]) {
     for block in blocks {
         match block {
+            Block::WeakPageBreak => {}
             Block::Para(para) => record_para_fields(report, snapshot_id, para),
             Block::Table(table) => {
                 for row in &table.rows {
@@ -937,6 +938,7 @@ fn record_block_fonts(
 ) {
     for block in blocks {
         match block {
+            Block::WeakPageBreak => {}
             Block::Para(para) => record_para_fonts(report, snapshot_id, book, para),
             Block::Table(table) => {
                 for row in &table.rows {
@@ -1143,6 +1145,7 @@ fn record_block_drawings(
 ) {
     for block in blocks {
         match block {
+            Block::WeakPageBreak => {}
             Block::Para(para) => record_para_drawings(report, snapshot_id, para),
             Block::Table(table) => {
                 for row in &table.rows {
@@ -1518,6 +1521,7 @@ fn collect_default_votes(blocks: &[Block], votes: &mut DefaultVotes) {
     }
     for b in blocks {
         match b {
+            Block::WeakPageBreak => {}
             Block::Para(para) => vote_para(votes, para),
             Block::Table(t) => {
                 for row in &t.rows {
@@ -1639,6 +1643,10 @@ fn set_ctx_geometry(ctx: &mut DocxCtx, geom: &SectGeom) {
     let content_height = geom.page_h - geom.margin_top - geom.margin_bottom;
     if content_height > 0 {
         ctx.available_height = Abs::pt(content_height as f64 / 20.0);
+        // Top-level flow resolves `height: 100%` against the text area, same
+        // as Typst's own page region; cells override this with their measured
+        // row box (`with_shape_height_base`).
+        ctx.shape_height_base = Some(ctx.available_height);
     }
     if geom.page_h > 0 {
         ctx.raster_height = Abs::pt(geom.page_h as f64 / 20.0);
@@ -1678,10 +1686,14 @@ fn resolve_sections(
         // they must NOT be folded.
         let mut forced_break = None;
         let break_start = i;
+        let mut hard_breaks = 0usize;
         while i < pairs.len() {
             if let Some(pb) = pairs[i].0.to_packed::<PagebreakElem>() {
                 if !pb.boundary.get(pairs[i].1) {
                     initial = pairs[i].1;
+                }
+                if !pb.weak.get(pairs[i].1) && !pb.boundary.get(pairs[i].1) {
+                    hard_breaks += 1;
                 }
                 forced_break = pb.to.get(pairs[i].1).map(|parity| match parity {
                     Parity::Even => SectType::EvenPage,
@@ -1711,7 +1723,11 @@ fn resolve_sections(
             let last = sections.len() - 1;
             sections[last - 1].break_after =
                 Some(forced_break.unwrap_or(SectType::NextPage));
-            sections[last].leading_pagebreaks = skipped_breaks.saturating_sub(1);
+            // Weak/boundary breaks in the run collapse into the section
+            // transition itself; only surplus *hard* breaks are real blank
+            // pages.
+            sections[last].leading_pagebreaks =
+                skipped_breaks.saturating_sub(1).min(hard_breaks);
         } else if let Some(sect_type) = forced_break
             && let Some(previous) = sections.last_mut()
         {
@@ -1748,7 +1764,7 @@ fn resolve_sections(
             // the new Word section itself replaces the first actual break. Any
             // further consecutive breaks are real blank pages in the new run.
             sections[previous_sections].leading_pagebreaks =
-                skipped_breaks.saturating_sub(2);
+                skipped_breaks.saturating_sub(2).min(hard_breaks);
         }
     }
     sections
@@ -2547,6 +2563,7 @@ fn blocks_text_chars(blocks: &[Block]) -> usize {
 
 fn block_text_chars(block: &Block) -> usize {
     match block {
+        Block::WeakPageBreak => 0,
         Block::Para(para) => para.content.iter().map(para_child_text_chars).sum(),
         Block::Table(table) => table
             .rows
@@ -2803,6 +2820,7 @@ fn sig_block(block: &Block, out: &mut String) {
     use std::fmt::Write;
 
     match block {
+        Block::WeakPageBreak => out.push_str("weakbr;"),
         Block::Para(para) => sig_para(para, out),
         Block::Table(table) => {
             let _ = write!(
@@ -3542,6 +3560,7 @@ fn page_number_para(
 pub(crate) fn collect_tags(blocks: &[Block], out: &mut Vec<Tag>) {
     for block in blocks {
         match block {
+            Block::WeakPageBreak => {}
             Block::Tag(tag) => out.push(tag.clone()),
             Block::Para(para) => {
                 for child in &para.content {
@@ -3607,6 +3626,16 @@ fn collect_positioned_tags(
     };
     for block in blocks {
         match block {
+            // Mirrors Typst's weak-break semantics in the synthetic page
+            // model: advance only off a non-empty page, and land on a fresh
+            // one (so a run of weak breaks advances at most once).
+            Block::WeakPageBreak => {
+                if *seen_content {
+                    *page += 1;
+                    *y = 0;
+                    *seen_content = false;
+                }
+            }
             Block::Tag(tag) => record(tag, map, out, *page, *section, *y),
             Block::Para(para) => {
                 let mut visible = false;

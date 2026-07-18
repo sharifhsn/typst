@@ -471,7 +471,7 @@ fn row_is_layout_empty(cells: &[Cell]) -> bool {
     cells.iter().all(|cell| {
         cell.blocks.iter().all(|block| match block {
             Block::Para(para) => para.content.iter().all(para_child_is_layout_empty),
-            Block::Tag(_) => true,
+            Block::Tag(_) | Block::WeakPageBreak => true,
             Block::FlowSpace { dxa } => *dxa == 0,
             Block::Table(_) | Block::Toc(_) | Block::SectionBreak(_) => false,
         })
@@ -617,9 +617,23 @@ fn build_cell(
             .saturating_sub(margins.right)
             .max(1)
     });
+    // Relative heights inside the cell (`box(height: 100%)` chart tracks and
+    // similar) resolve against the measured cell content box when the paged
+    // snapshot supplied one; without a measurement there is no honest base, so
+    // shape lowering bails to its fallback chain instead of inheriting the
+    // page-level base.
+    let content_height = geometry.height_dxa.map(|height| {
+        let dxa = height
+            .saturating_sub(margins.top)
+            .saturating_sub(margins.bottom)
+            .max(1);
+        typst_library::layout::Abs::pt(dxa as f64 / 20.0)
+    });
     let previous_cell_geometry = ctx.cell_owns_inline_block_geometry;
     ctx.cell_owns_inline_block_geometry = inline_block_margins.is_some();
-    let blocks_result = cell_blocks(ctx, cell, styles, jc, content_width);
+    let blocks_result = ctx.with_shape_height_base(content_height, |ctx| {
+        cell_blocks(ctx, cell, styles, jc, content_width)
+    });
     ctx.cell_owns_inline_block_geometry = previous_cell_geometry;
     let mut blocks = blocks_result?;
 
