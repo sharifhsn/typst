@@ -2738,6 +2738,52 @@ fn wrap_content_figure_is_recovered_not_rasterized() {
 }
 
 #[test]
+fn shown_inline_code_span_stays_in_the_surrounding_sentence() {
+    // `show raw.where(block: false): it => box(fill: .., text(it))` — the
+    // common shaded-inline-code idiom — realizes to a bare `#box` mid-
+    // sentence. Realize can only split a paragraph around it (there is no
+    // block-level variant of `#box`), and that box used to fall through to
+    // the standalone-text-box block path: an inline Word `wps:txbx` does not
+    // flow, so the sentence broke into separate paragraphs with the code span
+    // wrapping character-by-character inside a tiny fixed-size box. It must
+    // stay in the current paragraph as ordinary shaded run text instead.
+    let p = parts(
+        r##"#show raw.where(block: false): it => box(
+  fill: rgb("#f0f0f2"),
+  inset: (x: 2.5pt, y: 0pt),
+  text(it),
+)
+Declare an immutable `let`, try to reassign it, and read the error."##,
+    );
+    let doc = &p["word/document.xml"];
+    assert_eq!(doc.matches("<w:p ").count(), 1, "the sentence stays one paragraph");
+    assert!(!doc.contains("wps:txbx"), "no inline text box — it does not flow in Word/LibreOffice");
+    assert!(doc.contains("<w:shd "), "the code span is shaded run text instead");
+    assert!(
+        doc.contains("Declare an immutable")
+            && doc.contains(">let<")
+            && doc.contains(", try to reassign it, and read the error."),
+        "the sentence text survives intact around the code span"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn bodyless_placed_shape_split_from_a_sentence_stays_inline() {
+    // A bodyless, fill-only box (a decorative dot/swatch) mid-sentence hits
+    // the same realize-split path as the shaded-code-span case above, through
+    // a different downstream branch (native shape, not run shading).
+    let p = parts(
+        "A status marker #box(width: 4pt, height: 4pt, fill: red, radius: 2pt) inline with text.",
+    );
+    let doc = &p["word/document.xml"];
+    assert_eq!(doc.matches("<w:p ").count(), 1, "the sentence stays one paragraph");
+    assert!(!doc.contains("wps:txbx"), "a bodyless shape is a vector drawing, not a text box");
+    assert!(doc.contains("A status marker") && doc.contains("inline with text."));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn frameless_box_wrapping_columns_flows_instead_of_rasterizing() {
     // A bare top-level `#box(inset: ..)[#columns(2, ..)]` (the poster-template
     // idiom — pollux's own layout) is paragraph-wrapped by Typst's realize

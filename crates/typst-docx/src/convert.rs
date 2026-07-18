@@ -207,6 +207,37 @@ pub fn convert_children(
             }
             have_pending = true;
             last_was_par = false;
+        } else if let Some(boxed) = child.to_packed::<typst_library::layout::BoxElem>()
+            && boxed
+                .body
+                .get_ref(*styles)
+                .as_ref()
+                .is_none_or(body_inline_extractable)
+        {
+            // Same split-paragraph problem as inline math/raw above, for a
+            // `#box` — commonly the output of `show raw.where(block: false)`
+            // wrapping an inline code span in a shaded pill. `#box` has no
+            // block-level variant (unlike raw/equation, it cannot be authored
+            // as block content), so realize can only split a paragraph around
+            // one, never emit a *genuinely* standalone bare box here: Typst's
+            // own realize always paragraph-wraps solitary inline content
+            // (see `paragraph_sole_block_container` above, which already
+            // redirects that ParElem-wrapped case to the block dispatch).
+            // Reaching this loop as a bare, unwrapped child therefore always
+            // means realize split a sentence around it, and it must stay in
+            // the current paragraph — `handle_inline`'s existing box dispatch
+            // (shape / shaded run / plain extraction) already does the right
+            // thing once the box arrives inline instead of being flushed to
+            // `handle_block`'s standalone-text-box path, whose Word `wps:txbx`
+            // does not flow inline and breaks the sentence mid-word. Guarded
+            // to `body_inline_extractable` bodies (bodyless, or no block-flow
+            // element inside) so a `#layout(..)`-produced box wrapping a real
+            // grid/figure/table — which needs `handle_block`'s dedicated
+            // wrap-content-figure/mixed-canvas recovery, not plain inline
+            // extraction — keeps taking the existing block dispatch below.
+            push_inline(ctx, child, *styles, &mut pending)?;
+            have_pending = true;
+            last_was_par = false;
         } else if is_inline(child) {
             if !have_pending && pending.is_empty() {
                 let props = ParaProps {
