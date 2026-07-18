@@ -87,8 +87,20 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   old always-hard weak breaks accidentally compensated for this. The export now
   encodes the author's parity intent idiomatically; Microsoft Word honors it.
 - Remaining distinct page-inflation families (measured, unfixed): Arabic/RTL
-  pure-paragraph line metrics, math-raster fallback growth, positioned-overlay
-  fallbacks, and a diffuse ~15–20% table-row/leading drift.
+  pure-paragraph line metrics (investigated and diagnosed as consumer-side
+  complex-script text-shaping drift outside the exporter's control — see
+  memory/commit history, not pursued further), math-raster fallback growth,
+  and a diffuse ~15–20% table-row/leading drift.
+- Follow-up fix (commit `8c3b53e`): a positioned corner-badge idiom
+  (`place(..)[box(width: 1cm)[image(width: 100%), ..]]`, the common
+  footer-shield/page-number pattern) silently dropped the box's own
+  width/height constraint when its body was flattened to inline runs,
+  resolving the nested image's `100%` against the ambient page width instead
+  — a 1cm badge became a near-full-page image repeated every page. Fixed by
+  scoping the box's own resolved size for that extraction, matching table
+  cells. Worst-case fix: `report/lion-ecl` 52 → 10 rendered pages (7-page
+  reference). Full-corpus effect: degraded documents 487 → 435, native_good
+  454 → 472, visual-policy passes 960 → 963, zero regressions.
 - The prior full authority completed at `1bf829900`, followed by
   serial consumer retries and an OMML-aware semantic refresh. It produced 1,405
   valid packages, 1,392 successful LibreOffice renders, nine remaining
