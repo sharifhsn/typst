@@ -116,6 +116,37 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   435 → 426; no category regressed in aggregate (no per-document prior-vs-new
   diff retained — the previous authority was auto-pruned before a snapshot
   was saved).
+- Follow-up fix (2/10 of the 10-document goal, `dmitro44-osisp_coursework_report`):
+  investigated and confirmed as the already-documented diffuse ~15–20%
+  leading/table-row drift family (not single-mechanism-fixable) via an
+  independent pure-Cyrillic/Times-New-Roman-paragraph repro — no new
+  exporter defect, no code change.
+- Follow-up fix (3/10, `cv/linked-cv`): two independent bugs compounded into a
+  700% page explosion (1 → 8 rendered pages) on a single-page CV template.
+  (a) SVG "tech-icon" bodies use the bracketed-markup idiom
+  `box(height: size)[#image(bytes(svg), height: 100%)]`; the box→image
+  icon-sizing special case only matched a *bare* `ImageElem` argument with
+  `height: auto`, so the bracketed body (a realize-inserted `SequenceElem`)
+  with its own explicit relative height fell through to the plain-box
+  fallback and rasterized each icon at an unbounded, wildly elongated size.
+  Fixed by unwrapping `SequenceElem`/`StyledElem` wrappers down to the bare
+  image (`unwrap_sole_image`) and widening the height match from
+  `Sizing::Auto`-only to any explicit sizing. (b) The template wraps its
+  entire body in `#show: doc => { set page(footer: ..); context { doc } }` —
+  the standard "establish page geometry once, from a show-everywhere rule"
+  idiom. Typst inserts a *boundary* pagebreak exactly where the new page
+  style takes effect; the realize scaffolding before it (a handful of
+  `TagElem`s, no visible content) still differed in resolved page geometry
+  (no footer vs. footer) from the real body that followed, so the section
+  resolver gave that empty run its own Word section — and a section
+  transition costs a full blank page even with zero paragraphs in it. Fixed
+  by `merge_content_empty_sections`, a post-pass that absorbs any
+  content-empty section (no forced break, no requested blank pages) into a
+  neighbouring section instead of giving it its own transition. Combined:
+  8 → 1 rendered pages, exact parity with the gold reference. Full-corpus
+  effect: pending gate (both fixes are general — (a) affects any bracketed
+  image-in-box icon idiom, (b) affects any document using the common
+  "show-everywhere page-setup wrapper" template pattern).
 - Also diagnosed and explicitly set aside: a `slide_shaped_docx`-flagged
   document (a presentation compiled through the DOCX path, mismatched
   category vs. actual content shape) is a structural pairing issue already

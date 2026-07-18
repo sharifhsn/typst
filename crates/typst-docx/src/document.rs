@@ -1767,7 +1767,56 @@ fn resolve_sections(
                 skipped_breaks.saturating_sub(2).min(hard_breaks);
         }
     }
+    merge_content_empty_sections(pairs, &mut sections);
     sections
+}
+
+/// Drops section boundaries that wrap nothing but invisible marker content
+/// (`TagElem`s, with no paragraph/table/drawing in between). A `set page(..)`
+/// wrapped in a `#context` block — the standard idiom for a template's
+/// top-level `show: doc => {..}` rule that establishes page geometry before
+/// laying out the real body — makes Typst insert a *boundary* pagebreak right
+/// where the new page style takes effect, before anything has been drawn.
+/// `resolve_sections` still (correctly, per its own geometry diff) sees a
+/// page-style change there and gives it its own section — but a Word section
+/// transition costs a full page even when the section it closes has zero
+/// paragraphs, so the document opens on a blank page. Absorb such
+/// content-empty sections into a neighbouring section instead of giving them
+/// their own transition; the marker pairs still get walked as part of the
+/// neighbour's range (mirroring how two same-geometry sections above already
+/// merge across a skipped boundary pagebreak).
+fn merge_content_empty_sections(
+    pairs: &[(&Content, StyleChain)],
+    sections: &mut Vec<SectionRun>,
+) {
+    let is_content_empty = |range: std::ops::Range<usize>| {
+        !range.is_empty()
+            && pairs[range]
+                .iter()
+                .all(|(child, _)| child.is::<typst_library::introspection::TagElem>())
+    };
+    let mut idx = 0;
+    while idx < sections.len() {
+        let section = &sections[idx];
+        if section.break_after.is_some()
+            || section.leading_pagebreaks != 0
+            || !is_content_empty(section.range.clone())
+        {
+            idx += 1;
+            continue;
+        }
+        let range = sections[idx].range.clone();
+        if idx + 1 < sections.len() {
+            sections[idx + 1].range.start = range.start;
+            sections.remove(idx);
+        } else if idx > 0 {
+            sections[idx - 1].range.end = range.end;
+            sections.remove(idx);
+        } else {
+            // The whole document is content-empty; nothing to merge into.
+            idx += 1;
+        }
+    }
 }
 
 fn push_column_sections(

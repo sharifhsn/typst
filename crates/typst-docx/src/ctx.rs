@@ -2156,31 +2156,35 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                     }
                 }
                 Some(body) => {
-                    // A box whose sole body is a bare image with no size of its
-                    // own (the common icon idiom — `box(height: 10pt,
-                    // image(name))`, Typst's own documented example): the
-                    // *box's* height is the only sizing information for this
-                    // image, but the "plain box" extraction below discards the
-                    // box's geometric constraint entirely (it has no inline-flow
-                    // equivalent for ordinary text) — for an image that means
-                    // falling back to its full intrinsic pixel size, producing a
-                    // giant image where a small inline icon was intended
+                    // A box whose sole body is a bare image (the common icon
+                    // idiom — `box(height: 10pt, image(name))`, Typst's own
+                    // documented example): the *box's* height is the sizing
+                    // information intended for this image, but the "plain box"
+                    // extraction below discards the box's geometric constraint
+                    // entirely (it has no inline-flow equivalent for ordinary
+                    // text) — for an image that means falling back to its own
+                    // height setting instead. When the image's own height was
+                    // `auto`, that meant its full intrinsic pixel size, producing
+                    // a giant image where a small inline icon was intended
                     // (confirmed visually: a CV's tiny GitHub/GitLab/LinkedIn
-                    // icons became half-page-sized images). Propagate the box's
-                    // height onto a cloned image before lowering it — matching
-                    // the aspect-ratio-preserving "height only" branch
-                    // `display_extents` already implements for an image with its
-                    // own explicit height — instead of discarding the
-                    // constraint.
-                    if let Some(image_elem) = body.to_packed::<ImageElem>()
-                        && matches!(
-                            image_elem.height.get(styles),
-                            typst_library::layout::Sizing::Auto
-                        )
+                    // icons became half-page-sized images). When the image's own
+                    // height is itself *relative* (`image(.., height: 100%)`, an
+                    // SVG-icon-helper idiom that means "fill the box"), the
+                    // percentage was left to resolve against whatever ambient
+                    // region `ctx.rasterize` uses when this image is lowered in
+                    // isolation later — effectively unbounded — producing a
+                    // multi-hundred-point sliver instead of a small icon.
+                    // Propagate the box's own height onto a cloned image before
+                    // lowering it either way — matching the aspect-ratio-
+                    // preserving "height only" branch `display_extents` already
+                    // implements for an image with its own explicit height —
+                    // instead of discarding the constraint or resolving `100%`
+                    // against the wrong base.
+                    if let Some(image_elem) = unwrap_sole_image(&body)
                         && let typst_library::foundations::Smart::Custom(rel) =
                             elem.height.get(styles)
                     {
-                        let sized = (**image_elem)
+                        let sized = (*image_elem)
                             .clone()
                             .with_height(typst_library::layout::Sizing::Rel(rel));
                         out.push(mappers::image::image(
@@ -2536,6 +2540,45 @@ fn contains_visible_text(content: &Content) -> bool {
             ControlFlow::Continue(())
         })
         .is_break()
+}
+
+/// Unwraps a body down to a single bare `ImageElem`, looking through the
+/// transparent wrappers realize commonly inserts around one child — a
+/// bracketed content block (`[#image(..)]`, the natural way to write an
+/// image as a box's body) realizes to a `SequenceElem` of one, and a
+/// preceding `#set`/`#show` can add a `StyledElem` layer. Without unwrapping
+/// these, the icon-sizing fix below (propagating a box's own height onto its
+/// sole image body) only ever matched a *bare* `ImageElem` passed directly as
+/// the box's body (`box(height:.., image(..))`, no brackets) and silently
+/// missed the equally common bracketed form.
+fn unwrap_sole_image(
+    body: &typst_library::foundations::Content,
+) -> Option<typst_library::foundations::Packed<ImageElem>> {
+    use typst_library::foundations::{SequenceElem, StyledElem};
+    use typst_library::introspection::TagElem;
+    use typst_library::model::ParbreakElem;
+    use typst_library::text::SpaceElem;
+
+    if let Some(image) = body.to_packed::<ImageElem>() {
+        return Some(image.clone());
+    }
+    if let Some(seq) = body.to_packed::<SequenceElem>() {
+        let mut only = None;
+        for child in &seq.children {
+            if child.is::<SpaceElem>() || child.is::<ParbreakElem>() || child.is::<TagElem>() {
+                continue;
+            }
+            if only.is_some() {
+                return None;
+            }
+            only = Some(child);
+        }
+        return only.and_then(unwrap_sole_image);
+    }
+    if let Some(styled) = body.to_packed::<StyledElem>() {
+        return unwrap_sole_image(&styled.child);
+    }
+    None
 }
 
 pub(crate) fn box_is_plain(

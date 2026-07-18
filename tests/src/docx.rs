@@ -7063,3 +7063,63 @@ fn rasterized_container_keeps_figure_count() {
     );
     assert_all_wellformed(&p);
 }
+
+#[test]
+fn boxed_bracketed_image_with_relative_height_scopes_to_the_box() {
+    // The `#box(height: size)[#image(.., height: 100%)]` icon idiom (bracketed
+    // markup, not a bare `image(..)` argument): the icon-sizing special case
+    // only matched a *bare* `ImageElem` body with `height: auto`, so a
+    // bracketed body (which realizes to a one-child `SequenceElem`) with its
+    // own explicit relative height fell through to the plain-box fallback,
+    // resolving the image's `100%` against nothing and rendering it at its
+    // full intrinsic pixel size — a small CV tech-icon became a half-page
+    // image.
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40"><rect width="80" height="40" fill="#0b6"/></svg>"##;
+
+    let p = parts_with_files(
+        r#"#set page(width: 300pt, height: 400pt, margin: 20pt)
+#box(height: 10pt)[#image("logo.svg", format: "svg", height: 100%)]"#,
+        &[("logo.svg", SVG)],
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<wp:extent cx=\"254000\" cy=\"127000\""),
+        "the image's 100% height resolves against the box's own 10pt, keeping the source 2:1 aspect ratio"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn leading_content_empty_page_setup_does_not_open_on_a_blank_page() {
+    // A common template idiom: `#show: doc => { set page(footer: ..); context
+    // { doc } }` — the show rule's own realize scaffolding (tags from a
+    // preceding counter/state update, common in real templates) sits before
+    // the *boundary* pagebreak Typst inserts where the new page style takes
+    // effect, so `resolve_sections` saw a genuine page-style change (no
+    // footer vs. footer) and gave the empty leading run its own Word section.
+    // A section transition costs a full page even with zero paragraphs in
+    // it, so the document opened on a blank first page before the real
+    // content on page two.
+    let p = parts(
+        r#"#let templ(doc) = {
+  counter("x").update(1)
+  set page(footer: context [Page #counter(page).display()])
+  context { doc }
+}
+#show: templ
+Real content here."#,
+    );
+    let doc = &p["word/document.xml"];
+    assert_eq!(
+        doc.matches("<w:sectPr>").count(),
+        1,
+        "the content-empty page-setup run must not become its own section"
+    );
+    assert!(
+        doc.find("Real content here").is_some_and(|body_pos| {
+            doc.find("<w:sectPr>").is_none_or(|sect_pos| sect_pos > body_pos)
+        }),
+        "the sole sectPr must trail the real content, not precede it as an empty first section"
+    );
+    assert_all_wellformed(&p);
+}
