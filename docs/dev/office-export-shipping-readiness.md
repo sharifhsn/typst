@@ -101,6 +101,27 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   cells. Worst-case fix: `report/lion-ecl` 52 → 10 rendered pages (7-page
   reference). Full-corpus effect: degraded documents 487 → 435, native_good
   454 → 472, visual-policy passes 960 → 963, zero regressions.
+- Follow-up fix (commit `e2fc8d8`, first of a 10-document goal): a bare `#box`
+  that Typst's realize splits a paragraph around (the ubiquitous
+  `show raw.where(block: false)` shaded-inline-code-pill idiom, and similar
+  patterns) was never recognized as paragraph-continuing content, so it fell
+  to the standalone-text-box block path — an *inline* Word text box does not
+  flow, so every code span broke its sentence into a separate paragraph and
+  wrapped character-by-character inside a tiny fixed box. Fixed by keeping a
+  bare top-level box in its paragraph (guarded so a `#layout(..)`-produced box
+  wrapping a real figure/grid/table still takes its dedicated recovery path).
+  Worst-case fix: `book/albertarakelyan-rust-handbook` 40 → 22 rendered pages
+  (23-page reference), native_degraded → native_good. Full-corpus effect:
+  native_good 472 → 473, fallback_visual 303 → 314, degraded documents
+  435 → 426; no category regressed in aggregate (no per-document prior-vs-new
+  diff retained — the previous authority was auto-pruned before a snapshot
+  was saved).
+- Also diagnosed and explicitly set aside: a `slide_shaped_docx`-flagged
+  document (a presentation compiled through the DOCX path, mismatched
+  category vs. actual content shape) is a structural pairing issue already
+  isolated by the checker as its own informational lane, not a per-document
+  exporter defect — excluded from north-star candidate selection going
+  forward.
 - The prior full authority completed at `1bf829900`, followed by
   serial consumer retries and an OMML-aware semantic refresh. It produced 1,405
   valid packages, 1,392 successful LibreOffice renders, nine remaining
