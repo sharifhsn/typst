@@ -361,16 +361,16 @@ fn move_page_breaks_before_following_blocks(blocks: &mut Vec<Block>) {
                 if pending_flow_dxa != 0 {
                     out.push(Block::FlowSpace { dxa: pending_flow_dxa });
                 }
-            } else if !matches!(block, Block::SectionBreak(_)) {
+            } else {
                 // A weak break in front of a table (Word ignores
-                // `pageBreakBefore` inside table cells) rides on a minimized
-                // empty paragraph carrying the flag: still a no-op at a page
-                // top, at the cost of one ~twip line. In front of a section
-                // break it is dropped outright — the section transition is
-                // already a page start.
+                // `pageBreakBefore` inside table cells) or a section break
+                // rides on a minimized empty paragraph carrying the flag:
+                // still a no-op at a page top, at the cost of one ~twip line.
+                // In front of a section break the carrier matters — a weak
+                // break with content behind it fires *before* the section
+                // transition does (thesis chapters lose one page start per
+                // chapter without it), while at a page top it stays a no-op.
                 out.push(weak_page_break_carrier_block(pending_flow_dxa));
-            } else if pending_flow_dxa != 0 {
-                out.push(Block::FlowSpace { dxa: pending_flow_dxa });
             }
             pending = 0;
             pending_weak = false;
@@ -916,7 +916,13 @@ fn handle_block_inner(
         // break (or the even weaker `set page` boundary marker) only breaks
         // when content precedes it, and runs of them collapse; a marker block
         // carries that semantic to `move_page_breaks_before_following_blocks`.
-        if elem.weak.get(styles) || elem.boundary.get(styles) {
+        // A parity request (`to: "odd"`) keeps the explicit break even when
+        // weak: it obliges a transition (plus possibly a parity blank) that a
+        // droppable weak marker cannot carry — thesis chapter rules rely on
+        // it. Flow lowering cannot open a parity *section* mid-block, so the
+        // hard break is the closest honest approximation.
+        let carries_parity = elem.to.get(styles).is_some();
+        if (elem.weak.get(styles) || elem.boundary.get(styles)) && !carries_parity {
             out.push(Block::WeakPageBreak);
         } else {
             out.push(Block::Para(Para {
