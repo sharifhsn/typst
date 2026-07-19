@@ -3815,6 +3815,34 @@ fn table_furniture_band_uses_the_table_s_own_measured_row_height() {
 }
 
 #[test]
+fn filled_block_wrapping_a_grid_shades_every_cell() {
+    // A dense CV/resume idiom: a colored "ribbon" header —
+    // `block(fill:.., inset:..)[#grid(columns:(1fr,auto), name_and_bio,
+    // avatar)]` — laying out name+bio next to an avatar image inside a
+    // solid-fill banner. `stamp_box_decorations` only stamped `w:shd` onto
+    // `Block::Para` entries in the filled block's body; a grid/table body
+    // (the common case whenever a filled block's content needs a
+    // side-by-side layout, not just flowing text) was silently skipped, so
+    // the fill vanished entirely while the body's OWN light/white text
+    // colors (authored assuming the dark background that no longer
+    // rendered) stayed — leaving text invisible against the page's default
+    // white background, indistinguishable from missing content.
+    let p = parts(
+        "#set page(width: 200pt, height: 200pt, margin: 10pt)\n\
+         #block(width: 100%, fill: rgb(\"#313c4e\"), inset: 8pt)[\n\
+           #grid(columns: (1fr, auto), [#text(fill: white)[John Doe]], [Avatar])\n\
+         ]",
+    );
+    let doc = &p["word/document.xml"];
+    assert_eq!(
+        doc.matches("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"313C4E\"/>").count(),
+        2,
+        "the block's fill must shade both grid cells, not vanish"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn multi_slot_page_numbering_emits_page_of_numpages() {
     // `numbering: "1 of 1"` is the "page X of Y" idiom: the first counting slot
     // is the current page (a `PAGE` field), the second the document total (a

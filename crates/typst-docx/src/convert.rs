@@ -1808,6 +1808,26 @@ fn stamp_box_decorations(
 
     let mut seen_para = 0usize;
     for (i, block) in inner.iter_mut().enumerate() {
+        // A filled block's body can itself be a grid/table (e.g. a resume's
+        // colored header ribbon laying out name+avatar side by side via
+        // `grid(columns: (1fr, auto), ..)`) rather than plain paragraphs.
+        // The fill is still the whole box's background — apply it to every
+        // cell (respecting any cell's own explicit fill) instead of silently
+        // dropping it, which previously left light/white text (authored
+        // assuming the dark background it no longer has) invisible against
+        // the page's default white background. Borders/insets/above/below
+        // stay paragraph-only below; only the fill has a clean per-cell
+        // analogue.
+        if let Block::Table(tbl) = block {
+            if let Some(f) = shd_fill {
+                for row in &mut tbl.rows {
+                    for cell in &mut row.cells {
+                        cell.shd_fill.get_or_insert(f);
+                    }
+                }
+            }
+            continue;
+        }
         let Block::Para(para) = block else { continue };
         let p = &mut para.props;
 
