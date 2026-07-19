@@ -190,12 +190,20 @@ pub fn convert_children(
             // Vertical spacing (G4c): fold into the next paragraph's `before`
             // rather than dropping it. Fractional spacing has no fixed twip
             // value, so it is dropped.
+            //
+            // A negative `#v(..)` (common in dense CV/resume templates to pull
+            // a heading's underline or a following block back up against a
+            // default gap the template doesn't want) must stay negative here,
+            // not clamp to zero: it is meant to CANCEL a natural
+            // paragraph-boundary gap that `collapse_par_spacing_run`
+            // (mappers/table.rs) adds on top of this value afterward. See
+            // `apply_pending_v`'s doc comment for the full chain.
             let from = blocks.len();
             flush(&mut pending, &mut pending_props, &mut have_pending, &mut pending_orphaned_whitespace, &mut blocks);
             pending_v = apply_pending_v(&mut blocks, from, pending_v);
             if let typst_library::layout::Spacing::Rel(rel) = elem.amount {
                 let twips = crate::props::abs_to_twip(rel.abs.resolve(*styles));
-                pending_v = (pending_v + twips).max(0);
+                pending_v += twips;
             }
             last_was_par = false;
         } else if let Some(eq) = child.to_packed::<EquationElem>()
@@ -470,6 +478,20 @@ fn page_break_block() -> Block {
 /// Folds an accumulated `#v(..)` spacing into the `before` of the first
 /// paragraph produced at/after `from`. Returns the residual (0 if applied, or
 /// the unchanged amount if no paragraph was found to carry it).
+///
+/// `pending_v` may be negative (a net-cancelling run of negative `#v(..)`
+/// calls, common in dense CV/resume templates to pull a heading's underline
+/// or a following block back up against a default gap the template doesn't
+/// want). It is folded into `spacing.before` here WITHOUT clamping to zero:
+/// `collapse_par_spacing_run` (mappers/table.rs) later combines this with the
+/// natural paragraph-boundary gap it is authored to cancel (Typst's
+/// `par.spacing`, carried separately via `typst_par_spacing_before/after`),
+/// and that combined total is what must not go negative — not this
+/// intermediate value on its own. Clamping here would silently discard a
+/// negative `#v`'s entire cancelling effect before it ever reaches the gap it
+/// was meant to offset. `write_spacing` (props.rs) has the final floor at
+/// the point of XML emission, after every pass that can combine spacing has
+/// run.
 fn apply_pending_v(blocks: &mut Vec<Block>, from: usize, pending_v: i32) -> i32 {
     if pending_v == 0 {
         return 0;
@@ -487,7 +509,10 @@ fn apply_pending_v(blocks: &mut Vec<Block>, from: usize, pending_v: i32) -> i32 
                 return 0;
             }
             Block::Table(_) | Block::Toc(_) => {
-                blocks.insert(index, Block::FlowSpace { dxa: pending_v });
+                let dxa = pending_v.max(0);
+                if dxa > 0 {
+                    blocks.insert(index, Block::FlowSpace { dxa });
+                }
                 return 0;
             }
         }

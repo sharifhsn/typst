@@ -278,11 +278,15 @@ fn defaults_run_props(defaults: &TextDefaults) -> RunProps {
 
 fn write_spacing(w: &mut XmlWriter, sp: &Spacing) {
     w.open(xml::W_SPACING);
+    // See the identical floor in `props::write_spacing`: `before`/`after` can
+    // carry a residual negative value from an authored negative `#v(..)`
+    // that outweighs the natural gap it was cancelling; Word's `w:spacing`
+    // has no negative primitive.
     if let Some(before) = sp.before {
-        w.attr("w:before", &before.to_string());
+        w.attr("w:before", &before.max(0).to_string());
     }
     if let Some(after) = sp.after {
-        w.attr("w:after", &after.to_string());
+        w.attr("w:after", &after.max(0).to_string());
     }
     if let Some(line) = sp.line {
         w.attr("w:line", &line.to_string());

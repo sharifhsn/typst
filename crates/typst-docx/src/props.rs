@@ -408,11 +408,17 @@ fn write_pbdr(w: &mut XmlWriter, b: &ParaBorders) {
 
 fn write_spacing(w: &mut XmlWriter, sp: &Spacing) {
     w.open(xml::W_SPACING);
+    // `before`/`after` can carry a negative running total internally — an
+    // authored negative `#v(..)` net-cancelling a natural paragraph-boundary
+    // gap added later by `collapse_par_spacing_run` (see `apply_pending_v`'s
+    // doc comment). Word's `w:spacing` has no negative primitive, so floor at
+    // zero only here, once every upstream pass that could combine spacing has
+    // already run.
     if let Some(before) = sp.before {
-        w.attr("w:before", &before.to_string());
+        w.attr("w:before", &before.max(0).to_string());
     }
     if let Some(after) = sp.after {
-        w.attr("w:after", &after.to_string());
+        w.attr("w:after", &after.max(0).to_string());
     }
     if let Some(line) = sp.line {
         w.attr("w:line", &line.to_string());

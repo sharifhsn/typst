@@ -7358,3 +7358,31 @@ fn unbreakable_row_taller_than_the_page_flows_instead_of_forcing_cant_split() {
     );
     assert_all_wellformed(&p);
 }
+
+#[test]
+fn negative_v_cancels_a_following_paragraph_s_natural_boundary_gap() {
+    // A negative `#v(..)` right after a text paragraph is a common dense
+    // CV/resume idiom: pull the next block (often a heading's underline
+    // `line()`, or a tightly-packed entry) back up against the ordinary
+    // paragraph-to-paragraph gap the author doesn't want. `apply_pending_v`
+    // used to clamp the running total to zero as soon as it went negative —
+    // discarding the whole cancelling effect before `collapse_par_spacing_run`
+    // ever combined it with the natural gap it was authored to offset, so the
+    // uncancelled default gap leaked through unchanged. The clamp belongs only
+    // at the final point of XML emission (`write_spacing`), after every pass
+    // that can combine spacing has run.
+    let p = parts(
+        "#set page(width: 200pt, height: 200pt, margin: 10pt)\n\
+         #set text(size: 12pt)\n\
+         Heading text\n\
+         #v(-0.8em)\n\
+         #line(length: 100%)",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<w:spacing w:before=\"0\"/>"),
+        "the negative #v(-0.8em) must fully cancel the natural paragraph-\
+         boundary gap before the line(), not leave it uncancelled"
+    );
+    assert_all_wellformed(&p);
+}
