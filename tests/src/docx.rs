@@ -7224,3 +7224,65 @@ fn reused_row_grid_measures_each_call_own_row_height() {
     );
     assert_all_wellformed(&p);
 }
+
+#[test]
+fn grid_cell_fixed_height_fill_scopes_to_its_own_row_not_the_page() {
+    // A poster/banner idiom: `grid(rows: (20%, 80%), block(fill:.., width:
+    // 100%, height: 100%)[..], body)` — a colored header band sized as a
+    // percentage of its OWN grid row. `handle_block_box`'s fixed-height
+    // detection (which turns a filled block into a native bounded table
+    // cell instead of an unbounded shaded paragraph) resolved that `height:
+    // 100%` against the page's full available height instead of the
+    // measured row box, so a 20%-of-page header band came out page-height
+    // tall and forced an entire extra blank page — mirroring the (already
+    // correctly cell-scoped) `available_width` used two lines below it in
+    // the same function.
+    let p = parts(
+        "#set page(width: 200pt, height: 400pt, margin: 0pt)\n\
+         #grid(\n\
+           rows: (20%, 80%),\n\
+           block(fill: blue, width: 100%, height: 100%)[Header],\n\
+           block[Body],\n\
+         )",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<w:trHeight w:val=\"1600\" w:hRule=\"atLeast\"/>"),
+        "the header row must be measured against its own 20% row (80pt = 1600 twips), \
+         not the full 400pt page"
+    );
+    assert!(
+        !doc.contains("w:val=\"8000\""),
+        "must not fall back to the page's full height"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn grid_cell_relative_image_height_scopes_to_its_own_row_not_the_page() {
+    // Same bug, in `display_extents`'s image-sizing path instead of
+    // `handle_block_box`'s fill path: a bare `image(height: 100%)` as a grid
+    // cell's whole body (a poster header's logo, sized to its 20%-of-page
+    // row) resolved its `100%` against the page's full available height —
+    // an oversized logo, the same defect class as the earlier
+    // `unwrap_sole_image` box-height fix, but for a cell's own row instead
+    // of a box's own declared height.
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40"><rect width="80" height="40" fill="#0b6"/></svg>"##;
+
+    let p = parts_with_files(
+        "#set page(width: 200pt, height: 400pt, margin: 0pt)\n\
+         #grid(\n\
+           rows: (20%, 80%),\n\
+           image(\"logo.svg\", height: 100%),\n\
+           block[Body],\n\
+         )",
+        &[("logo.svg", SVG)],
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<wp:extent cx=\"2032000\" cy=\"1016000\""),
+        "the logo's 100% height resolves against its own 20% row (80pt), not the full page, \
+         keeping the source 2:1 aspect ratio"
+    );
+    assert_all_wellformed(&p);
+}

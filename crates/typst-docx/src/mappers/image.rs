@@ -1688,9 +1688,18 @@ fn display_extents(
         Smart::Custom(rel) => Some(rel.resolve(styles).relative_to(ctx.available_width)),
         _ => None,
     };
-    // Resolve an explicit/relative height against the current container.
+    // Resolve an explicit/relative height against the current container — the
+    // measured cell/row box when this image sits inside one
+    // (`shape_height_base`, scoped by `with_shape_height_base`), else the
+    // page. Using the page unconditionally turned a poster header's
+    // `image(height: 120%)` logo (120% of its actual ~13%-of-page cell) into
+    // a multi-thousand-point image, same as `handle_block_box`'s analogous
+    // `fixed_height` bug just below the point this mirrors.
     let abs_h: Option<Abs> = match elem.height.get(styles) {
-        Sizing::Rel(rel) => Some(rel.resolve(styles).relative_to(ctx.available_height)),
+        Sizing::Rel(rel) => Some(
+            rel.resolve(styles)
+                .relative_to(ctx.shape_height_base.unwrap_or(ctx.available_height)),
+        ),
         _ => None,
     };
 

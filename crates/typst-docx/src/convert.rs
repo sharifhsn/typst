@@ -1536,10 +1536,23 @@ fn handle_block_box(
     // paragraph shading cannot retain the requested empty height; a one-cell
     // table can, while keeping every child paragraph/table native and editable.
     // Use `atLeast`, not `exact`, so font substitution never clips the content.
+    //
+    // The relative base is the block's own container, not the page: a `height:
+    // 100%` filled block used as a grid/table cell's ENTIRE body (a poster's
+    // colored header/footer band, sized by a `grid(rows: (13%, 83%, 4%), ..)`
+    // row) must resolve against that cell's own measured height
+    // (`shape_height_base`, already scoped per cell in `mappers::table`) —
+    // resolving it against the page's full available height instead turned a
+    // 13%-of-the-page header band into a page-height-tall block, which then
+    // exceeded the ratio guard below and rasterized/reflowed into a spurious
+    // extra page of solid fill. `available_width` just below already receives
+    // this same per-cell scoping (via `with_available_width`); only the height
+    // axis lacked its equivalent.
     let fixed_height = match elem.height.get(styles) {
-        typst_library::layout::Sizing::Rel(rel) => {
-            Some(rel.resolve(styles).relative_to(ctx.available_height))
-        }
+        typst_library::layout::Sizing::Rel(rel) => Some(
+            rel.resolve(styles)
+                .relative_to(ctx.shape_height_base.unwrap_or(ctx.available_height)),
+        ),
         _ => None,
     };
     if let (Some(Paint::Solid(color)), Some(height)) = (&fill, fixed_height)

@@ -418,15 +418,33 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     /// inside an unmeasured container (relative shape heights then bail to
     /// their fallback chain instead of resolving against the page). Restores
     /// the parent base even when lowering returns an error.
+    ///
+    /// Also scopes `raster_height` — the region a *bodyless* fallback block
+    /// (`block(fill:.., height: 100%)` with no content, the common colored
+    /// banner/divider idiom) gets laid out against when its infinite-height
+    /// attempt fails — to the same bound. Without this, a bodyless block
+    /// inside a cell resolved its own `100%` against the cell (via
+    /// `shape_height_base`, correctly) but then rasterized that resolved
+    /// height against the *page's* `raster_height` as the fallback region,
+    /// which is unrelated to the cell: a poster's `height: 13%` header/`4%`
+    /// footer band, each a bodyless colored `block`, rasterized to a
+    /// full-page-sized image and forced its own extra page. The two must
+    /// travel together — anything bounded to this cell's height should be
+    /// measured, resolved, AND rasterized against it, not just resolved.
     pub(crate) fn with_shape_height_base<T>(
         &mut self,
         base: Option<Abs>,
         f: impl FnOnce(&mut Self) -> SourceResult<T>,
     ) -> SourceResult<T> {
         let previous = self.shape_height_base;
+        let previous_raster = self.raster_height;
         self.shape_height_base = base.filter(|height| *height > Abs::zero());
+        if let Some(height) = self.shape_height_base {
+            self.raster_height = height;
+        }
         let result = f(self);
         self.shape_height_base = previous;
+        self.raster_height = previous_raster;
         result
     }
 
