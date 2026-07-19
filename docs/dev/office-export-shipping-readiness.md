@@ -244,6 +244,30 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   3 → 2 pages. Full-corpus effect: native_good steady at 484,
   fallback_visual 361 → 362, native_degraded steady at 120,
   fallback_degraded improved 248 → 244 (net improvement, no regressions).
+- Follow-up fix (8/10): a corpus sweep surfaced a striking cluster of 15
+  unrelated documents (book/flyer/report/cv/notes, no shared template) that
+  had all grown from 1 to exactly 3 pages — the same "suspiciously
+  identical ratio" signal that found two earlier fixes this session, worth
+  chasing over any single biggest-delta outlier. Root-caused one real,
+  general bug in `cv/alessandromason-resume`: a negative `#v(..)` right
+  after a paragraph (a common dense-CV idiom to pull a heading's underline
+  or a tightly-packed entry back up against the ordinary paragraph gap) was
+  clamped to zero the moment it accumulated, discarding its entire
+  cancelling effect before the pass that combines it with the natural
+  paragraph-boundary gap it was authored to offset — so that default gap
+  leaked through unchanged, inflating every such heading/entry. Fixed by
+  moving the zero-floor from accumulation time to the one place that has to
+  have it (XML emission, since Word's `w:spacing` has no negative
+  primitive), after every spacing-combining pass has run. Worst case:
+  alessandromason-resume 3 → 2 pages, the spacing bug visibly gone. Only 1
+  of the 15 clustered documents shared this root cause — the other 14 hit
+  1 → 3 by coincidence (checked one, `book/obelisk`, which uses no `#v(..)`
+  at all), the same lesson as an earlier same-ratio cluster this session.
+  Full-corpus effect: native_good 484 → 485, native_degraded 120 → 119 (net
+  improvement), fallback_degraded 244 → 245 (within noise — this fix
+  affects heading/entry-adjacent spacing broadly, and the corpus's usual
+  LibreOffice font-substitution noise dominates at this granularity); same
+  5 pre-existing baseline failures, zero new ones.
 - Also diagnosed and explicitly set aside: a `slide_shaped_docx`-flagged
   document (a presentation compiled through the DOCX path, mismatched
   category vs. actual content shape) is a structural pairing issue already
