@@ -173,6 +173,27 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   none regressed; package_ok unchanged at 1283/1286 (same 3 pre-existing
   export_error docs, independently confirmed not caused by any of this
   session's changes).
+- Follow-up fix (5/10, `notes/takei-batu-mynote`): a CJK math notes document
+  using the `cjk-spacer` package (Latin/CJK kerning) grew 550% (6 → 39
+  pages). `cjk-spacer` brackets essentially every inline-math/punctuation
+  boundary in a zero-width "ghost" trick built from `hide(..)` and `h(..)`
+  calls inside a `context` block. `HElem` was already recognized as
+  paragraph-continuing inline content, but `HideElem` (`#hide[..]`) was not —
+  a bare top-level `hide(..)` fell to the generic block dispatch, which
+  flushes the paragraph being assembled both before and after it, so this
+  kerning idiom fragmented ordinary sentences into one paragraph per word.
+  Fixed by adding `HideElem` to the paragraph-continuation whitelist (its
+  existing inline handling already lowers it to nothing but harvested
+  introspection tags, matching Typst's own full-redaction semantics for
+  `hide`). Separately hardened paragraph flushing against a related case: a
+  lone `SpaceElem` realize leaves behind around a promoted-to-block child
+  (`$ x $`, block because of the internal spaces) used to become its own
+  spurious blank-line paragraph; dropped instead, matching real layout's
+  insignificant-whitespace-at-a-block-boundary behavior. Worst-case fix:
+  `notes/takei-batu-mynote` 39 → 8 pages (6-page reference). Full-corpus
+  effect: package_ok steady at 1283/1286, category distribution unchanged
+  within noise (`cjk-spacer` is not widespread in this corpus, but both
+  fixes are general and transformative wherever they apply).
 - Also diagnosed and explicitly set aside: a `slide_shaped_docx`-flagged
   document (a presentation compiled through the DOCX path, mismatched
   category vs. actual content shape) is a structural pairing issue already
