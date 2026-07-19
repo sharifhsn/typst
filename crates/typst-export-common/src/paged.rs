@@ -225,6 +225,24 @@ impl Scanner {
 
     fn record_cell(&mut self, region: &GridCellRegion, transform: Transform) {
         let Some(active) = self.active_tables.last() else { return };
+        let cells = &mut self.tables[active.table_index].cells;
+        // Some constructs (e.g. the bibliography's paged-only two-column
+        // rendering, built via `BlockElem::multi_layouter` specifically to
+        // avoid generating its own introspection tag — see
+        // `BIBLIOGRAPHY_RULE` in typst-layout) lay out a grid without ever
+        // opening a `TableElem`/`GridElem` scope of their own. Its cells'
+        // region tags still fire (`tag_cell_region` runs unconditionally per
+        // cell), so with no scope of their own they land on whatever real
+        // table happens to be open around them — a poster section's `[..]`
+        // grid cell containing a `#bibliography(..)`, say. A well-formed
+        // table only ever places one cell origin per (x, y) in a single
+        // frame walk, so a second claim to an already-recorded origin is
+        // exactly that kind of orphaned tag, not a legitimate resize/retry:
+        // drop it rather than let it corrupt the real cell's column/row
+        // median with a foreign grid's unrelated dimensions.
+        if cells.iter().any(|cell| cell.x == region.x && cell.y == region.y) {
+            return;
+        }
         let origin = Point::zero().transform(transform);
         let axis_aligned = transform.kx.is_zero()
             && transform.ky.is_zero()
@@ -232,7 +250,7 @@ impl Scanner {
             && transform.sy.get() > 0.0;
         let width_pt = region.width.to_pt() * transform.sx.get().abs();
         let height_pt = region.height.to_pt() * transform.sy.get().abs();
-        self.tables[active.table_index].cells.push(PagedCellGeometry {
+        cells.push(PagedCellGeometry {
             page: self.page,
             x: region.x,
             y: region.y,

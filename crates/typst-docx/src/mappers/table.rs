@@ -446,7 +446,12 @@ fn cellgrid(
 
         rows.push(Row {
             header: is_header_row(y),
-            cant_split: row_cant_split(grid, y),
+            cant_split: row_cant_split(
+                grid,
+                y,
+                emitted_row_height.map(|height| height.val),
+                ctx,
+            ),
             height: emitted_row_height,
             cells,
         });
@@ -1625,7 +1630,7 @@ fn row_sizing(grid: &CellGrid, y: usize) -> Option<Sizing> {
 
 /// Whether a row is unbreakable. A row is kept together when every cell whose
 /// rowspan is fully contained in it is unbreakable.
-fn row_cant_split(grid: &CellGrid, y: usize) -> bool {
+fn row_cant_split(grid: &CellGrid, y: usize, height_dxa: Option<i32>, ctx: &DocxCtx) -> bool {
     let ncols = grid.non_gutter_column_count();
     let mut any = false;
     for x in 0..ncols {
@@ -1638,7 +1643,27 @@ fn row_cant_split(grid: &CellGrid, y: usize) -> bool {
     }
     // Only assert `cantSplit` when the row actually owns ≥1 origin cell and all
     // are unbreakable; otherwise let Word paginate freely.
-    any
+    if !any {
+        return false;
+    }
+    // Typst's `breakable: false` is measured against its OWN (possibly huge,
+    // e.g. a poster-sized single sheet) page: content that fits there without
+    // ever needing to break is legitimately unbreakable in that layout. Word
+    // pages don't share that headroom, and a row that consumes most of the
+    // page — especially one wrapping a nested table, which LibreOffice can
+    // fail to place at all inside an unbreakable outer row once it needs to
+    // grow past its declared minimum — is exactly the case that goes missing
+    // in practice. Same 0.6-of-page ratio as the analogous fixed-height-block
+    // guard in `convert::handle_block_box`: below it, a row is a genuinely
+    // bounded panel; above it, forcing `cantSplit` risks losing the content
+    // instead of merely ignoring Typst's non-breakable hint.
+    if let Some(dxa) = height_dxa {
+        let pt = f64::from(dxa) / 20.0;
+        if pt > ctx.available_height.to_pt() * 0.6 {
+            return false;
+        }
+    }
+    true
 }
 
 /// Appends an empty paragraph if the last serialized block is not one (Word

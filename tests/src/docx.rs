@@ -7286,3 +7286,75 @@ fn grid_cell_relative_image_height_scopes_to_its_own_row_not_the_page() {
     );
     assert_all_wellformed(&p);
 }
+
+#[test]
+fn bibliography_inside_a_grid_cell_does_not_corrupt_the_grid_s_own_column_widths() {
+    // `BIBLIOGRAPHY_RULE` (typst-layout's `rules.rs`) deliberately lays out a
+    // paged-only two-column citation grid via `BlockElem::multi_layouter`
+    // specifically to skip generating its own introspection tag (documented
+    // there as intentional, so bibliography convergence doesn't pollute
+    // queries/counters). Its per-cell `GridCellRegion` region tags still fire
+    // unconditionally, though — with no scope of their own, they land on
+    // whatever real `grid()`/`table()` happens to be open around them (e.g. a
+    // poster section `[..]` cell that also holds `#bibliography(..)`), and
+    // used to corrupt that grid's OWN measured column widths (the `simple-
+    // research-poster` template's first body column collapsed to a sliver
+    // because of this). The paged-geometry scanner must not attribute a
+    // second claim to an already-recorded (x, y) origin within one table.
+    let bib = br#"one:
+  type: article
+  title: One
+  author: A. One
+  date: 2020
+two:
+  type: article
+  title: Two
+  author: B. Two
+  date: 2021
+"#;
+    let p = parts_with_files(
+        "#set page(width: 500pt, height: 200pt, margin: 10pt)\n\
+         #grid(\n\
+           columns: 3,\n\
+           gutter: 10pt,\n\
+           [Column A text @one @two],\n\
+           [Column B text here],\n\
+           [#bibliography(\"bibtest.yml\")],\n\
+         )",
+        &[("bibtest.yml", bib)],
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<w:gridCol w:w=\"1131\"/>"),
+        "the first column must be measured from its own real content, not a \
+         foreign 2-cell bibliography grid's unrelated dimensions"
+    );
+    assert!(doc.contains("Column A"));
+    assert!(doc.contains("Column B"));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn unbreakable_row_taller_than_the_page_flows_instead_of_forcing_cant_split() {
+    // A `grid.cell(breakable: false)` row is unbreakable in Typst's OWN
+    // layout because it always fits there (e.g. a poster-sized single
+    // sheet). Word pages don't share that headroom: a row this tall,
+    // forced `cantSplit`, can never be placed as a single unbreakable
+    // unit — LibreOffice silently drops the row instead of rendering it,
+    // losing the content entirely. `row_cant_split` must fall back to
+    // letting the row flow once its height passes a page-relative ratio,
+    // mirroring the fixed-height-block guard in `handle_block_box`.
+    let p = parts(
+        "#set page(width: 200pt, height: 100pt, margin: 0pt)\n\
+         #grid(\n\
+           columns: 1,\n\
+           grid.cell(breakable: false)[#block(height: 90pt)[X]],\n\
+         )",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        !doc.contains("<w:cantSplit/>"),
+        "a row 90pt tall on a 100pt page must not be forced unbreakable"
+    );
+    assert_all_wellformed(&p);
+}
