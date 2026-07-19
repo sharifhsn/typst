@@ -299,6 +299,47 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   the higher parallelism resolved cleanly on retry at lower concurrency
   (transient contention, not a content regression) — same 5 pre-existing
   baseline failures otherwise.
+- Follow-up fix (10/10, the final target of this campaign): picked
+  `cv/modern-resume` (worst-remaining visual score, 1 → 2 pages) and found
+  a decoration-propagation bug distinct from every earlier fix this
+  session. A dense-CV header-ribbon idiom — `block(width:100%, fill:..,
+  inset:..)[#grid(columns:(1fr,auto), name_and_bio, avatar_image)]`, laying
+  a name/bio next to an avatar side by side inside a solid-fill banner —
+  lost its fill entirely: `stamp_box_decorations` (the function that stamps
+  a filled block's fill/border/inset onto its lowered content) only handled
+  `Block::Para` entries, silently `continue`-ing past `Block::Table`. The
+  body's own light/white text colors (authored assuming the dark
+  background) survived, so the text was genuinely present in the XML but
+  rendered invisible against the page's default white background —
+  visually indistinguishable from missing content. Fixed by applying the
+  fill directly to every cell of a nested table (respecting any cell's own
+  explicit fill). Borders/insets/spacing remain paragraph-only for now;
+  only the fill had a clean per-cell analogue, and it was the fill's
+  absence that caused the severe defect. Worst-case fix: the whole banner
+  ("John Doe", contact bar) now renders correctly, closely matching gold.
+  Full-corpus effect: native_good/native_degraded/fallback_visual all
+  steady, fallback_degraded 241 → 242 (within noise); same 5 pre-existing
+  baseline failures, zero new ones — also confirming the target-9 gate's
+  LibreOffice timeout was genuinely transient (back to the 2-consumer_error
+  baseline this run).
+- This completes the session's "10 more documents" pagination/fidelity
+  campaign (targets picked from the corpus's worst-offenders list across
+  repeated full-corpus validation gates, filtering `slide_shaped_docx` and
+  verifying local reproducibility before committing to each candidate).
+  Recurring bug families found and fixed across the ten targets: page-level
+  (`ctx.available_height`/`available_width`) values used where a
+  properly cell-scoped equivalent already existed (4 distinct instances);
+  `logical_id` span-based identity conflating genuinely different call-site
+  occurrences (row-height, and separately bibliography-grid cell-tag
+  contamination); paragraph-fragmentation from elements missing from
+  `is_inline()`'s whitelist; a `.max(0)` clamp applied too early in a
+  spacing-folding pipeline, destroying a negative value's ability to cancel
+  a later positive one; a furniture-band height heuristic that understood
+  only one narrow content shape; and a decoration-application pass that
+  silently skipped a content shape it wasn't written to expect. Several of
+  these (the height-scoping and decoration-propagation gaps especially) are
+  worth actively grep-ing for analogues elsewhere in the exporter before
+  the next campaign, per the pattern established this session.
 - Also diagnosed and explicitly set aside: a `slide_shaped_docx`-flagged
   document (a presentation compiled through the DOCX path, mismatched
   category vs. actual content shape) is a structural pairing issue already
