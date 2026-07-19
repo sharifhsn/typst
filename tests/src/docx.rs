@@ -7125,6 +7125,59 @@ Real content here."#,
 }
 
 #[test]
+fn hidden_content_between_words_does_not_fragment_the_sentence() {
+    // `#hide[..]` has zero visual footprint by definition — Typst's own
+    // paged export drops every one of its frame items but tags, and
+    // `handle_inline` already lowers a hidden body to nothing but harvested
+    // tags. But a BARE top-level `hide(..)` (reached directly, not already
+    // inside a paragraph being buffered) used to fall through `is_inline`'s
+    // whitelist to the generic block dispatch, which flushes the paragraph
+    // being assembled before AND after it. A real-world idiom that wraps
+    // every inline-math/punctuation boundary in `hide(..)` for zero-width
+    // Latin/CJK kerning (the `cjk-spacer` package) fragmented an ordinary
+    // sentence into one paragraph per word this way — inflating a 6-page
+    // document to 39 rendered pages.
+    let p = parts("Before#hide[x]after.");
+    let doc = &p["word/document.xml"];
+    assert_eq!(
+        element_fragments(doc, "p").len(),
+        1,
+        "a bare top-level #hide(..) must not split the surrounding sentence \
+         into separate paragraphs"
+    );
+    assert!(doc.contains("Before"));
+    assert!(doc.contains("after."));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn orphaned_whitespace_around_a_promoted_block_equation_is_dropped() {
+    // `$ x $` (spaces inside the delimiters) is a BLOCK equation; the plain
+    // spaces authored around it in `Before $ x $ after.` remain as ordinary
+    // top-level `SpaceElem`s once realize splits the paragraph. Each one
+    // used to flush as its own one-space paragraph (a spurious blank line)
+    // instead of being recognized as insignificant whitespace at a block
+    // boundary — real Typst layout has no visible representation for it.
+    let p = parts(
+        "#show math.equation.where(block: true): it => block(width: 100%, it)\n\
+         Before $ x $ after.",
+    );
+    let doc = &p["word/document.xml"];
+    let paragraphs = element_fragments(doc, "p");
+    assert_eq!(
+        paragraphs.len(),
+        3,
+        "exactly Before / the equation / after — no orphaned-space paragraphs \
+         in between: {paragraphs:?}"
+    );
+    assert!(
+        paragraphs.iter().all(|p| !p.contains("<w:t xml:space=\"preserve\"> </w:t>")),
+        "no paragraph should contain only a lone space"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn reused_row_grid_measures_each_call_own_row_height() {
     // A resume/CV-style "section with a side heading" idiom: a reusable
     // function wraps a single-row `grid(columns: (label-width, 1fr), ..)` and

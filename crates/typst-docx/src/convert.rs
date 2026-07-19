@@ -52,6 +52,19 @@ pub fn convert_children(
     // content). Used to tell two adjacent paragraphs apart from one paragraph
     // that Typst split into `[par, inline-equation, par]`.
     let mut last_was_par = false;
+    // Whether `pending` currently holds nothing but a lone orphaned
+    // `SpaceElem` — the single space realize leaves behind when a paragraph
+    // is split around a promoted-to-block child (e.g. an inline equation
+    // with a `show math.equation.where(block: true)` rule, or any block
+    // sitting directly between two words with no other whitespace). Real
+    // Typst layout treats that whitespace as insignificant at a block
+    // boundary; naively flushing it here instead emits a standalone
+    // one-space paragraph — a spurious blank line, repeated at every such
+    // boundary, that can substantially inflate page count in text dense
+    // with promoted-block content. Cleared as soon as `pending` gains any
+    // other content, so a real paragraph that merely *starts* with a space
+    // is unaffected.
+    let mut pending_orphaned_whitespace = false;
 
     for (child, styles) in children {
         // A *leading* pagebreak (before any content) is page-setup machinery, not
@@ -72,7 +85,7 @@ pub fn convert_children(
         }
         if child.is::<ParbreakElem>() {
             let from = blocks.len();
-            flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
+            flush(&mut pending, &mut pending_props, &mut have_pending, &mut pending_orphaned_whitespace, &mut blocks);
             pending_v = apply_pending_v(&mut blocks, from, pending_v);
             last_was_par = false;
             continue;
@@ -93,7 +106,7 @@ pub fn convert_children(
                 && let Some(sole) = paragraph_sole_block_container(&par.body, *styles)
             {
                 let from = blocks.len();
-                flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
+                flush(&mut pending, &mut pending_props, &mut have_pending, &mut pending_orphaned_whitespace, &mut blocks);
                 pending_v = apply_pending_v(&mut blocks, from, pending_v);
                 handle_block(ctx, sole, *styles, &mut blocks)?;
                 last_was_par = false;
@@ -110,7 +123,7 @@ pub fn convert_children(
             let continues = !last_was_par && have_pending;
             if !continues {
                 let from = blocks.len();
-                flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
+                flush(&mut pending, &mut pending_props, &mut have_pending, &mut pending_orphaned_whitespace, &mut blocks);
                 pending_v = apply_pending_v(&mut blocks, from, pending_v);
                 // Typst's default `first-line-indent` (`all: false`) indents a
                 // paragraph only when it directly follows another; Word's
@@ -146,6 +159,7 @@ pub fn convert_children(
                 pending.insert(par_start, ParaChild::BookmarkStart { id, name });
                 pending.push(ParaChild::BookmarkEnd { id });
             }
+            pending_orphaned_whitespace = false;
             have_pending = true;
             last_was_par = true;
         } else if let Some(elem) = child.to_packed::<TagElem>() {
@@ -177,7 +191,7 @@ pub fn convert_children(
             // rather than dropping it. Fractional spacing has no fixed twip
             // value, so it is dropped.
             let from = blocks.len();
-            flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
+            flush(&mut pending, &mut pending_props, &mut have_pending, &mut pending_orphaned_whitespace, &mut blocks);
             pending_v = apply_pending_v(&mut blocks, from, pending_v);
             if let typst_library::layout::Spacing::Rel(rel) = elem.amount {
                 let twips = crate::props::abs_to_twip(rel.abs.resolve(*styles));
@@ -194,6 +208,7 @@ pub fn convert_children(
             if let Some(props) = pending_props.as_mut() {
                 props.review_origin = None;
             }
+            pending_orphaned_whitespace = false;
             have_pending = true;
             last_was_par = false;
         } else if let Some(raw) = child.to_packed::<typst_library::text::RawElem>()
@@ -205,6 +220,7 @@ pub fn convert_children(
             if let Some(props) = pending_props.as_mut() {
                 props.review_origin = None;
             }
+            pending_orphaned_whitespace = false;
             have_pending = true;
             last_was_par = false;
         } else if let Some(boxed) = child.to_packed::<typst_library::layout::BoxElem>()
@@ -236,10 +252,12 @@ pub fn convert_children(
             // wrap-content-figure/mixed-canvas recovery, not plain inline
             // extraction — keeps taking the existing block dispatch below.
             push_inline(ctx, child, *styles, &mut pending)?;
+            pending_orphaned_whitespace = false;
             have_pending = true;
             last_was_par = false;
         } else if is_inline(child) {
             if !have_pending && pending.is_empty() {
+                pending_orphaned_whitespace = child.is::<typst_library::text::SpaceElem>();
                 let props = ParaProps {
                     review_origin: Some(
                         ctx.review_origin(child.span(), ReviewCandidateKind::Paragraph),
@@ -247,20 +265,22 @@ pub fn convert_children(
                     ..Default::default()
                 };
                 pending_props = Some(props);
+            } else if !child.is::<typst_library::text::SpaceElem>() {
+                pending_orphaned_whitespace = false;
             }
             push_inline(ctx, child, *styles, &mut pending)?;
             have_pending = true;
             last_was_par = false;
         } else {
             let from = blocks.len();
-            flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
+            flush(&mut pending, &mut pending_props, &mut have_pending, &mut pending_orphaned_whitespace, &mut blocks);
             handle_block(ctx, child, *styles, &mut blocks)?;
             pending_v = apply_pending_v(&mut blocks, from, pending_v);
             last_was_par = false;
         }
     }
     let from = blocks.len();
-    flush(&mut pending, &mut pending_props, &mut have_pending, &mut blocks);
+    flush(&mut pending, &mut pending_props, &mut have_pending, &mut pending_orphaned_whitespace, &mut blocks);
     apply_pending_v(&mut blocks, from, pending_v);
 
     // Drop a *trailing* pagebreak-only paragraph: a document closing a `set page`
@@ -510,10 +530,21 @@ fn flush(
     pending: &mut Vec<ParaChild>,
     props: &mut Option<ParaProps>,
     have_pending: &mut bool,
+    orphaned_whitespace: &mut bool,
     blocks: &mut Vec<Block>,
 ) {
     if !*have_pending && pending.is_empty() {
         *props = None;
+        return;
+    }
+    // A lone space realize left behind at a block boundary (see
+    // `pending_orphaned_whitespace`'s doc comment) has no visible effect in
+    // real Typst layout — drop it instead of emitting a spurious blank
+    // paragraph.
+    if std::mem::take(orphaned_whitespace) {
+        pending.clear();
+        *props = None;
+        *have_pending = false;
         return;
     }
     let content = std::mem::take(pending);
@@ -547,7 +578,7 @@ pub(crate) fn review_span(content: &Content) -> typst_syntax::Span {
 /// (which can be inline or block) through the math mapper.
 fn is_inline(child: &Content) -> bool {
     use typst_library::introspection::CounterDisplayElem;
-    use typst_library::layout::HElem;
+    use typst_library::layout::{HElem, HideElem};
     use typst_library::model::{EmphElem, LinkElem, RefElem, StrongElem};
     use typst_library::text::{
         HighlightElem, LinebreakElem, SmallcapsElem, SmartQuoteElem, SpaceElem,
@@ -572,6 +603,18 @@ fn is_inline(child: &Content) -> bool {
         || child.is::<LinkElem>()
         || child.is::<RefElem>()
         || child.is::<ImageElem>()
+        // `#hide[..]` has zero visual footprint by definition (Typst's own
+        // paged export drops every one of its frame items but tags) and
+        // `handle_inline` already lowers it to nothing but harvested tags —
+        // but reaching this function at all means it sits at TOP level, not
+        // yet inside a paragraph. Without this arm it fell to the generic
+        // block dispatch, which flushes the paragraph being buffered before
+        // and after it. A zero-width kerning idiom that wraps every inline
+        // math/punctuation boundary in `hide(..)` calls (the `cjk-spacer`
+        // package's "ghost width" trick, used to fix Latin/CJK spacing) then
+        // fragments an otherwise-ordinary sentence into one paragraph per
+        // word — observed inflating a 6-page document to 39 rendered pages.
+        || child.is::<HideElem>()
 }
 
 /// Whether a container's body (a `#box`/`#pad`/… body) can be lowered to native
