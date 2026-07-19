@@ -213,9 +213,37 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   now render correctly. Full-corpus effect: native_good steady at 484,
   fallback_visual 354 → 361, fallback_degraded 254 → 248 (net improvement,
   no regressions); `report/lion-ecl` (an earlier fix) improved as a bonus,
-  9 → 8 pages. A separate, unrelated defect remains in this poster (its
-  3-column body collapses to 2 physical Word columns) — left for a future
-  target.
+  9 → 8 pages.
+- Follow-up fix (7/10, same `poster/simple-research-poster`): the residual
+  "3-column body collapses to 2 physical Word columns" defect flagged
+  above turned out to be two independent bugs. First, `row_cant_split`
+  faithfully honored Typst's own `breakable: false` on a grid row even
+  when that row is taller than any Word page could accommodate — Typst's
+  own layout is safe marking such a row unbreakable because it always
+  fits on *its* page (a poster-sized single sheet), but Word's `cantSplit`
+  on an equivalently oversized row makes it literally unplaceable, and
+  LibreOffice silently drops it rather than degrading. Fixed with the same
+  0.6-of-page ratio guard already used by `handle_block_box`'s
+  fixed-height detection. Second, and the actual cause of the visible
+  "missing column": Typst's bibliography rendering deliberately lays out
+  its paged-only two-column citation grid via `BlockElem::multi_layouter`
+  specifically to avoid generating its own introspection tag (intentional,
+  so bibliography convergence doesn't pollute ref/counter queries) — but
+  its per-cell region tags still fire unconditionally, and with no
+  enclosing table scope of their own they land on whatever real
+  grid()/table() happens to be open around them in the frame tree. The
+  poster's References section, itself inside the 3-column body grid,
+  leaked its bibliography's unrelated 2×2 cell dimensions into the outer
+  grid's own column-width medians, collapsing the first column to a ~20pt
+  sliver — visually indistinguishable from missing content. Fixed in the
+  shared paged-geometry scanner: a well-formed table only ever places one
+  cell origin per (x, y) in a single frame walk, so a second claim to an
+  already-recorded origin is rejected rather than folded into the
+  measurement. Worst-case fix: simple-research-poster now renders all
+  three body columns at their real, equal widths with zero lost content,
+  3 → 2 pages. Full-corpus effect: native_good steady at 484,
+  fallback_visual 361 → 362, native_degraded steady at 120,
+  fallback_degraded improved 248 → 244 (net improvement, no regressions).
 - Also diagnosed and explicitly set aside: a `slide_shaped_docx`-flagged
   document (a presentation compiled through the DOCX path, mismatched
   category vs. actual content shape) is a structural pairing issue already
