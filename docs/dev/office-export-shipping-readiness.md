@@ -194,6 +194,28 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   effect: package_ok steady at 1283/1286, category distribution unchanged
   within noise (`cjk-spacer` is not widespread in this corpus, but both
   fixes are general and transformative wherever they apply).
+- Follow-up fix (6/10, `poster/simple-research-poster`): an A1 academic
+  poster grew 300% (1 → 4 pages) and rendered with an invisible
+  white-on-white title (the dark header banner missing) and a giant,
+  page-height logo. The template wraps everything in one outer
+  `grid(rows: (13%, 83%, 4%), header, body, footer)`, where the header/
+  footer bands are each a `block(fill: .., height: 100%)` sized to their
+  own grid row, not the page. Two independent call sites resolved that
+  `height: 100%` against the page's full available height instead of the
+  measured cell/row box (`available_width` in the same function already
+  received correct per-cell scoping; only the height axis lacked it):
+  `handle_block_box`'s fixed-height-fill detection, and `display_extents`'s
+  relative-image-height resolution. Also extended the per-cell scoping
+  helper to cover the raster-fallback region a *bodyless* filled block
+  (a plain colored divider, no content) rasterizes against, matching an
+  existing precedent in the footer-content-conversion code. Worst-case fix:
+  simple-research-poster 4 → 3 pages (1-page reference), header/title/logo
+  now render correctly. Full-corpus effect: native_good steady at 484,
+  fallback_visual 354 → 361, fallback_degraded 254 → 248 (net improvement,
+  no regressions); `report/lion-ecl` (an earlier fix) improved as a bonus,
+  9 → 8 pages. A separate, unrelated defect remains in this poster (its
+  3-column body collapses to 2 physical Word columns) — left for a future
+  target.
 - Also diagnosed and explicitly set aside: a `slide_shaped_docx`-flagged
   document (a presentation compiled through the DOCX path, mismatched
   category vs. actual content shape) is a structural pairing issue already
