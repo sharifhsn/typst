@@ -2411,7 +2411,7 @@ fn build_furniture_refs(
             }
         }
         FurniturePlan::Sampled { first } => {
-            if let Some(height) = single_line_furniture_height(&first.blocks) {
+            if let Some(height) = furniture_content_height(&first.blocks) {
                 adjust_furniture_band(sect, slot, height);
             }
             let affected_text_chars = blocks_text_chars(&first.blocks);
@@ -2437,12 +2437,66 @@ fn adjust_furniture_band(sect: &mut SectPr, slot: FurnitureSlot, height: i32) {
     *band = band.saturating_sub(height).clamp(1, margin.saturating_sub(1).max(1));
 }
 
+/// The band distance is one section-wide property shared by every ref (e.g.
+/// the title-page and default headers), so every ref that actually renders
+/// something must agree on the same measured height before trusting it. A
+/// ref with NO visible content (the common `context(if here().page() >= 2
+/// [..])` idiom, whose title-page/first-page sample is empty because the
+/// header is deliberately suppressed there) has no laid-out extent to
+/// disagree with — it never occupies band space — so it is skipped rather
+/// than forcing the whole computation to bail just because it isn't a
+/// content shape `furniture_content_height` can measure.
 fn uniform_single_line_furniture_height(refs: &[FurnitureRefPlan]) -> Option<i32> {
     let mut heights = refs
         .iter()
-        .map(|planned| single_line_furniture_height(&planned.lowered.blocks));
+        .filter(|planned| !furniture_blocks_are_empty(&planned.lowered.blocks))
+        .map(|planned| furniture_content_height(&planned.lowered.blocks));
     let first = heights.next()??;
     heights.all(|height| height == Some(first)).then_some(first)
+}
+
+fn furniture_blocks_are_empty(blocks: &[Block]) -> bool {
+    blocks.iter().all(|block| matches!(block, Block::Tag(_)))
+}
+
+/// Measures a furniture region's (header/footer) laid-out height so
+/// `adjust_furniture_band` can translate Typst's "band bottom" origin to
+/// Word's "band top" origin. Two shapes are understood; anything else keeps
+/// the conservative full-margin boundary (see `adjust_furniture_band`'s doc
+/// comment) because its laid-out extent isn't represented here.
+fn furniture_content_height(blocks: &[Block]) -> Option<i32> {
+    let serialized: Vec<&Block> =
+        blocks.iter().filter(|block| !matches!(block, Block::Tag(_))).collect();
+    match serialized[..] {
+        [Block::Para(_)] => single_line_furniture_height(blocks),
+        // A one-row table (a common "name/title cell + logo cell" header
+        // idiom) followed by a plain trailing paragraph (typically a bare
+        // `line()` rule, `w:pBdr` only, no text) — the table's row already
+        // carries its true measured height from `ctx.paged_geometry`
+        // (`mappers::table::cellgrid`, the same measurement every body
+        // table gets), which single-line font-size heuristics can't
+        // reach. The trailing paragraph's own contribution is folded in via
+        // `single_line_furniture_height` when it carries text, or ignored
+        // (an empty `w:pBdr`-only rule paragraph's line height is small
+        // relative to the table row, so omitting it only *under*-shrinks
+        // the band — safe, unlike overshrinking, which would overlap body
+        // content onto the furniture).
+        [Block::Table(tbl), ref rest @ ..] if rest.len() <= 1 => {
+            let mut height = tbl
+                .rows
+                .iter()
+                .map(|row| row.height.map(|h| h.val))
+                .sum::<Option<i32>>()?;
+            if let [trailing_para @ Block::Para(_)] = rest
+                && let Some(trailing) =
+                    single_line_furniture_height(std::slice::from_ref(trailing_para))
+            {
+                height += trailing;
+            }
+            Some(height)
+        }
+        _ => None,
+    }
 }
 
 fn single_line_furniture_height(blocks: &[Block]) -> Option<i32> {

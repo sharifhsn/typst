@@ -3776,6 +3776,45 @@ fn single_line_furniture_band_uses_content_start_distance() {
 }
 
 #[test]
+fn table_furniture_band_uses_the_table_s_own_measured_row_height() {
+    // A common header idiom: a borderless `table(columns:(70%,30%))` (a
+    // "title cell + logo cell" row) followed by a `line()` underline rule,
+    // suppressed on page 1 via `context(if here().page() >= 2 [..])` (so
+    // the title page has no header). `single_line_furniture_height` only
+    // understood a bare single paragraph, so this multi-block, table-shaped
+    // header fell through to the conservative full-margin band boundary —
+    // and even after teaching it the table shape, comparing the empty
+    // page-1 sample against the real page-2+ sample for "uniform height"
+    // made the whole computation bail, since an empty ref can never match a
+    // populated one. Both gaps together left a large uncancelled blank
+    // strip above every content page's header. The table's row already
+    // carries its true measured height (`ctx.paged_geometry`, same
+    // measurement any body table gets) — this test pins both: the
+    // table-shaped measurement itself, and ignoring the legitimately-empty
+    // title-page sample when checking uniformity.
+    let p = parts(
+        "#set page(\n\
+           width: 300pt, height: 300pt, \
+           margin: (top: 85pt, bottom: 30pt, left: 30pt, right: 30pt),\n\
+           header: context(if here().page() >= 2 [\n\
+             #table(columns: (70%, 30%), stroke: none, inset: 0pt, [Title], [Logo])\n\
+             #line(length: 100%)\n\
+           ]),\n\
+         )\n\
+         First page.\n\
+         #pagebreak()\n\
+         Second page.",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("w:header=\"1045\""),
+        "the header band must shrink to the table row's own measured height, \
+         not fall back to the full unadjusted margin"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn multi_slot_page_numbering_emits_page_of_numpages() {
     // `numbering: "1 of 1"` is the "page X of Y" idiom: the first counting slot
     // is the current page (a `PAGE` field), the second the document total (a
