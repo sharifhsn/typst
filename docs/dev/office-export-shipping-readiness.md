@@ -268,6 +268,37 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   affects heading/entry-adjacent spacing broadly, and the corpus's usual
   LibreOffice font-substitution noise dominates at this granularity); same
   5 pre-existing baseline failures, zero new ones.
+- Follow-up fix (9/10): investigated `poster/obelisk` first (part of the
+  same 1→3 cluster) but set it aside — it's a heavily `place()`-based
+  "designed full-page layout" (margin bars, sidenotes, a watermark
+  numeral), the same "breaks when isolated for rasterization" limitation
+  already documented for `report/lion-ecl`'s family; two independent
+  minimal repros of its `block(breakable:false)`-wrapped heading + `place`
+  content pattern failed to reproduce the drop in isolation. Picked
+  `report/stella-sre-crypto-guide` instead (worst visual score in the
+  corpus, 37 → 41 pages) and found a genuine, general bug: a common header
+  idiom — a borderless `table(columns:(70%,30%))` "title cell + logo cell"
+  row followed by a `line()` underline — isn't a shape
+  `single_line_furniture_height` understood (it only handled a bare single
+  paragraph), so it fell back to the conservative full-margin header band
+  instead of the tight, content-measured one, pushing every page's body
+  down. A second bug compounded it: a `context(if here().page() >= 2
+  [..])`-suppressed title-page header (a common "no header on page 1"
+  idiom) is legitimately empty, but the uniformity check across
+  title-page/default refs required them to match, silently discarding the
+  whole measurement rather than just skipping the ref that renders
+  nothing. Fixed both: generalized the height measurement to recognize a
+  one-row table (using its own `ctx.paged_geometry`-measured row height,
+  the same measurement any body table gets) plus a trailing simple line,
+  and skip empty refs when checking uniformity. Worst-case fix: 41 → 37
+  pages, exact parity with gold, blank gap above the header visually
+  confirmed gone. Full-corpus effect (also switched to `--jobs 16`, this
+  machine's core count supports it and LibreOffice conversions already run
+  with isolated per-call profiles): fallback_visual 362 → 365,
+  fallback_degraded 245 → 241 (net improvement); one LibreOffice timeout at
+  the higher parallelism resolved cleanly on retry at lower concurrency
+  (transient contention, not a content regression) — same 5 pre-existing
+  baseline failures otherwise.
 - Also diagnosed and explicitly set aside: a `slide_shaped_docx`-flagged
   document (a presentation compiled through the DOCX path, mismatched
   category vs. actual content shape) is a structural pairing issue already
