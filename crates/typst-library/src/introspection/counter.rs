@@ -712,6 +712,25 @@ impl Count for Packed<CounterUpdateElem> {
     }
 }
 
+impl Packed<CounterUpdateElem> {
+    /// If this update sets the **page** counter to a literal value — i.e.
+    /// `counter(page).update(n)`, a page-number restart — return `n`.
+    ///
+    /// A `Step` or a closure `update(n => …)` is ordinary counting rather than
+    /// an explicit renumber, so it returns `None`. Exposed for the docx
+    /// exporter, which maps such a restart onto `w:pgNumType/@w:start` (its
+    /// private `key`/`update` fields are otherwise unreadable across crates).
+    pub fn page_number_reset(&self) -> Option<u64> {
+        if self.key != CounterKey::Page {
+            return None;
+        }
+        match &self.update {
+            CounterUpdate::Set(state) => Some(state.first()),
+            _ => None,
+        }
+    }
+}
+
 /// Executes a display of a counter.
 #[elem(Construct, Unqueriable, Locatable)]
 pub struct CounterDisplayElem {

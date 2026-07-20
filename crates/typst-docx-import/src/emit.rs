@@ -349,8 +349,16 @@ impl Emitter<'_> {
         {
             simple_args.push(format!("columns: {columns}"));
         }
-        if next.page_num_fmt != previous.page_num_fmt
-            && let Some(numbering) = page_numbering_arg(next.page_num_fmt.as_deref())
+        // A section with no `w:pgNumType/@w:fmt` uses Word's default, which is
+        // decimal — so the effective format is compared, not the raw option.
+        // This matters because `#set page(numbering:)` is sticky in Typst: a
+        // thesis whose front matter set roman and whose body has no format
+        // would inherit roman on every body page unless the reset to `"1"` is
+        // emitted here.
+        let prev_fmt = previous.page_num_fmt.as_deref().unwrap_or("decimal");
+        let next_fmt = next.page_num_fmt.as_deref().unwrap_or("decimal");
+        if next_fmt != prev_fmt
+            && let Some(numbering) = page_numbering_arg(Some(next_fmt))
         {
             simple_args.push(format!("numbering: {numbering}"));
         }

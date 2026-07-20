@@ -1599,6 +1599,12 @@ struct SectGeom {
     line_numbers: Option<LineNumbering>,
     /// `set page(numbering:)`, if any (drives `pgNumType` + the PAGE field).
     numbering: Option<typst_library::model::Numbering>,
+    /// An explicit page-counter restart in this run — `counter(page).update(n)`
+    /// → `w:pgNumType/@w:start`. A restart is an intentional section boundary
+    /// (a thesis's roman front matter then an arabic body restarting at 1), so
+    /// [`same_section`] compares it: two otherwise-identical runs that restart
+    /// the page number are genuinely different sections and must not merge.
+    page_num_start: Option<i64>,
     /// Where the auto page-number marginal lands: Top → header, else footer.
     number_in_header: bool,
     /// The `w:jc` for an auto page-number paragraph (from `number_align.x()`).
@@ -1872,8 +1878,17 @@ fn push_section_run(
     break_after: Option<SectType>,
     allow_empty: bool,
 ) {
+    // A page-number restart (`geom.page_num_start.is_some()`) always begins a
+    // new section — that is the whole reason it is a boundary. A run with *no*
+    // restart continues the previous section's numbering, so it may still
+    // merge into an otherwise-identical predecessor even if that predecessor
+    // itself restarted: the continuation belongs to the section it extends
+    // (see `same_section`, which no longer keys on the start for exactly this
+    // reason — a symmetric equality there would wrongly split every
+    // no-restart continuation off from the restart it follows).
     if let Some(last) = sections.last_mut()
         && last.break_after.is_none()
+        && geom.page_num_start.is_none()
         && same_section(&last.geom, &geom)
     {
         last.range.end = range.end;
@@ -1895,6 +1910,7 @@ fn close_previous_section_at(
 ) {
     if let Some(last) = sections.last_mut()
         && last.break_after.is_none()
+        && geom.page_num_start.is_none()
         && same_section(&last.geom, geom)
     {
         last.range.end = boundary;
@@ -1969,6 +1985,7 @@ fn run_geometry(
     page_sizes: Option<&[typst_library::layout::Size]>,
 ) -> SectGeom {
     use typst_library::foundations::{Resolve, Smart, Styles};
+    use typst_library::introspection::{CounterUpdateElem, Tag, TagElem};
     use typst_library::layout::{
         Abs, AlignElem, Binding, Dir, Em, FixAlignment, FixedAlignment, Length,
         OuterVAlignment, PageElem, Paper, Rel, Sides, Size,
@@ -2111,6 +2128,23 @@ fn run_geometry(
     });
 
     let numbering = sc.get_ref(PageElem::numbering).clone();
+    // An explicit `counter(page).update(n)` at the top of this run is a page-
+    // number restart — the exporter's counterpart of Word's `w:pgNumType`
+    // `@w:start`. Only a `Set` to a literal is a restart worth a section
+    // boundary; a `Step` or a closure `Func` is ordinary counting, not the
+    // "this section renumbers from N" intent, so those are left alone. The
+    // value is read straight from the realized element with no engine, exactly
+    // as the page-counter frame walk in `introspection::counter` reads it.
+    // The update reaches the realized flow wrapped in the introspection
+    // `TagElem` that carries it (it never appears as a bare child), so we look
+    // through the tag's start element — exactly as the page-counter frame walk
+    // in `introspection::counter` does.
+    let page_num_start = group.iter().find_map(|(child, _)| {
+        let Tag::Start(elem, _) = &child.to_packed::<TagElem>()?.tag else {
+            return None;
+        };
+        elem.to_packed::<CounterUpdateElem>()?.page_number_reset().map(|n| n as i64)
+    });
     let number_align = sc.get(PageElem::number_align);
     let number_in_header = matches!(number_align.y(), Some(OuterVAlignment::Top));
     let number_jc = number_align.x().map(|x| match x.fix(sc.resolve(TextElem::dir)) {
@@ -2169,6 +2203,7 @@ fn run_geometry(
         vertical_align,
         line_numbers,
         numbering,
+        page_num_start,
         number_in_header,
         number_jc,
         header,
@@ -2266,9 +2301,15 @@ fn build_section(
     let mut header_parts = Vec::new();
     let mut footer_parts = Vec::new();
 
-    // Page numbering → pgNumType (glyph format) + a PAGE field in the auto band.
-    if let Some(numbering) = &geom.numbering {
-        sect.pg_num = Some(PgNumType { fmt: numbering_fmt(ctx, numbering), start: None });
+    // Page numbering → pgNumType: the glyph format from `set page(numbering:)`
+    // (which also drives a PAGE field in the auto band), and/or a restart
+    // value from `counter(page).update(n)`. Either alone is enough to warrant
+    // the element — a section can restart the page number without changing its
+    // format (a thesis body restarting at arabic 1), in which case the format
+    // is Word's default decimal.
+    if geom.numbering.is_some() || geom.page_num_start.is_some() {
+        let fmt = geom.numbering.as_ref().map(|n| numbering_fmt(ctx, n)).unwrap_or("decimal");
+        sect.pg_num = Some(PgNumType { fmt, start: geom.page_num_start });
     }
 
     // -- Header content + page background/foreground -----------------------

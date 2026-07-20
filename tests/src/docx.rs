@@ -6682,6 +6682,49 @@ fn snapshot_page_counters_preserve_patterns_and_resets() {
 }
 
 #[test]
+fn page_counter_reset_becomes_pgnumtype_start() {
+    // `counter(page).update(n)` is a page-number restart — Word's
+    // `w:pgNumType/@w:start`. It is also a section boundary in its own right:
+    // a run that restarts the page number is a distinct section even when its
+    // geometry is identical to the one before.
+    let p = parts(
+        "#set page(numbering: \"i\")\nFront\n#pagebreak()\n\
+         #set page(numbering: \"1\")\n#counter(page).update(1)\nBody\n#pagebreak()\n\
+         #counter(page).update(7)\nLater",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains(r#"<w:pgNumType w:fmt="lowerRoman""#),
+        "front matter keeps its roman format:\n{doc}"
+    );
+    assert!(
+        doc.contains(r#"<w:pgNumType w:fmt="decimal" w:start="1""#),
+        "the arabic body restarts at 1:\n{doc}"
+    );
+    assert!(
+        doc.contains(r#"w:start="7""#),
+        "a mid-document restart with no format change still emits its start:\n{doc}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn page_counter_continuation_does_not_split_a_section() {
+    // A run with *no* restart continues the previous section's numbering, so
+    // it must not be split off into its own `<w:sectPr>` — only an actual
+    // `counter(page).update(n)` is a boundary. Guards the asymmetric merge:
+    // two page runs identical but for one carrying a restart stay one section
+    // when the later one merely continues.
+    let p = parts(
+        "#set page(numbering: \"1\")\n#counter(page).update(1)\nOne\n\
+         #pagebreak()\nTwo\n#pagebreak()\nThree",
+    );
+    let sections = p["word/document.xml"].matches("<w:sectPr").count();
+    assert_eq!(sections, 1, "no-restart page breaks stay in one section");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn leading_page_setup_does_not_advance_the_synthetic_page() {
     // A top-of-document `set page(..)` produces page-run machinery before the
     // first real body content. That setup must not count as a physical page,
