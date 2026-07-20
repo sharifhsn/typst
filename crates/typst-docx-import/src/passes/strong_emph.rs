@@ -6,7 +6,9 @@
 //! that still carries a font/size/color/underline/etc. is left alone; it
 //! needs a real `#text(..)` call.
 
-use crate::tdoc::{Block, Chart, Figure, Inline, Inlines, List, Table, TextStyle, TypstDoc};
+use crate::tdoc::{
+    Block, Chart, ChartContent, Figure, Inline, Inlines, List, Table, TextStyle, TypstDoc,
+};
 
 /// Entry point: rewrite bold/italic-only styled runs into `Strong`/`Emph`
 /// throughout `doc.body`.
@@ -41,10 +43,11 @@ fn walk_block(block: &mut Block) {
                 promote_in_place(caption);
             }
         }
-        // See the matching arm (and its comment) in `collapse_style` — a
-        // chart's cells are plain text today, but get the same walk as
-        // `Block::Table`'s cells for the same two reasons.
-        Block::Chart(Chart { table: Table { rows, .. }, .. }) => {
+        // See the matching arms (and their comment) in `collapse_style` — a
+        // chart-as-table's cells are plain text today, but get the same walk
+        // as `Block::Table`'s cells for the same two reasons; a
+        // chart-as-plot has no `Inlines` in it at all.
+        Block::Chart(Chart { content: ChartContent::Table(Table { rows, .. }), .. }) => {
             for row in rows {
                 for cell in &mut row.cells {
                     for inner in &mut cell.body {
@@ -53,6 +56,7 @@ fn walk_block(block: &mut Block) {
                 }
             }
         }
+        Block::Chart(Chart { content: ChartContent::Plot(_), .. }) => {}
         Block::CodeBlock { .. }
         | Block::Equation { .. }
         | Block::Rule

@@ -130,12 +130,15 @@ pub enum RunContent {
     /// text box (`wps:txbx`) or its VML equivalent (`v:textbox`). Word floats
     /// these; we keep the content and lose the geometry.
     TextBox(Vec<BodyItem>),
-    /// A charted `w:drawing` — the `rId` of its `c:chart`/`cx:chart` part.
+    /// A charted `w:drawing`. Reuses [`DrawingRef`] because a chart *is* a
+    /// drawing: it carries the same `rId` and `wp:extent`, and Word's extent
+    /// is the chart's authored size, which the plot renderer needs.
+    /// The `rId` here points at its `c:chart`/`cx:chart` part.
     /// Typst has no chart-drawing primitive, but the chart's cached data
     /// lives in that separate part (resolved against
     /// [`WmlPackage::charts`]), not inline here, so lowering it to a table
     /// keeps the information instead of dropping it — see [`ChartData`].
-    Chart(EcoString),
+    Chart(DrawingRef),
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -264,6 +267,41 @@ pub struct ChartData {
     /// Category labels (the shared x-axis), if the chart declares any.
     pub categories: Vec<EcoString>,
     pub series: Vec<ChartSeries>,
+    /// What kind of chart this is — see [`ChartKind`]. Drives whether
+    /// [`crate::mappers::chart`] can draw it as a plot under
+    /// [`crate::opts::ChartStyle::Plot`]; irrelevant to the table fallback,
+    /// which works for any kind.
+    pub kind: ChartKind,
+    /// `c:legend/c:legendPos` — where Word placed the legend, or `None` when
+    /// the chart declares no legend at all (in which case it shows none).
+    pub legend: Option<LegendPos>,
+}
+
+/// A chart's plot type, as far as it maps onto something Typst's `lilaq`
+/// package can draw. Only the classic-chart shape ([`ChartData`]'s doc
+/// comment) carries a kind other than [`Self::Other`] — ChartEx charts
+/// (box-and-whisker, sunburst, waterfall, …) have no `lilaq` counterpart
+/// either, so they stay `Other` rather than being guessed at.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+pub enum ChartKind {
+    Bar,
+    Line,
+    Scatter,
+    Area,
+    /// A type with no plotting counterpart (pie, radar, stock, surface, …) —
+    /// these always fall back to the data table.
+    #[default]
+    Other,
+}
+
+/// `c:legendPos` — the edge Word put the chart legend on.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum LegendPos {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopRight,
 }
 
 #[derive(Debug, Default, Clone)]

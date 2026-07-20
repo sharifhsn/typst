@@ -94,6 +94,7 @@ fn first_quoted_arg(instr: &str) -> Option<EcoString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::opts::ImportOptions;
     use crate::report::ImportReport;
     use crate::wml::model::{RunItem, WmlPackage};
 
@@ -110,7 +111,8 @@ mod tests {
         let field = Field { instr: " PAGE ".into(), result: text_result("7") };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let inlines = lower_field(&field, &mut ctx);
         assert!(matches!(
             &inlines[..],
@@ -125,7 +127,8 @@ mod tests {
         let field = Field { instr: " TOC \\o \"1-3\" \\h ".into(), result: text_result("stale") };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let inlines = lower_field(&field, &mut ctx);
         assert!(matches!(&inlines[..], [Inline::Verbatim(s)] if s == "#outline()"));
     }
@@ -138,7 +141,8 @@ mod tests {
         };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let inlines = lower_field(&field, &mut ctx);
         match &inlines[..] {
             [Inline::Link { dest, body }] => {
@@ -156,7 +160,8 @@ mod tests {
             Field { instr: " HYPERLINK \"https://example.com\" ".into(), result: Vec::new() };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let inlines = lower_field(&field, &mut ctx);
         match &inlines[..] {
             [Inline::Link { dest, body }] => {
@@ -174,7 +179,8 @@ mod tests {
         let field = Field { instr: " HYPERLINK \\l _Toc1 ".into(), result: text_result("5") };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let inlines = lower_field(&field, &mut ctx);
         assert!(matches!(&inlines[..], [Inline::Text(t)] if t == "5"));
         assert_eq!(report.notes.len(), 1);
@@ -186,7 +192,8 @@ mod tests {
         let field = Field { instr: " FILENAME \\* MERGEFORMAT ".into(), result: text_result("report.docx") };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let inlines = lower_field(&field, &mut ctx);
         assert!(matches!(&inlines[..], [Inline::Text(t)] if t == "report.docx"));
         assert_eq!(report.notes.len(), 1);
@@ -199,7 +206,8 @@ mod tests {
         let field = Field { instr: " AUTHOR ".into(), result: text_result("Jane Doe") };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         for _ in 0..200 {
             lower_field(&field, &mut ctx);
         }
@@ -211,7 +219,8 @@ mod tests {
         let field = Field { instr: "   ".into(), result: Vec::new() };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let inlines = lower_field(&field, &mut ctx);
         assert!(inlines.is_empty());
         assert!(report.notes.is_empty());

@@ -4,7 +4,7 @@
 //! emitted Typst source is idiomatic — headings as `=`, emphasis as
 //! `*`/`_`, and lists as `-`/`+`.
 
-use typst_docx_import::{import_docx, import_docx_with, ImportOptions, Tier};
+use typst_docx_import::{import_docx, import_docx_with, ChartStyle, ImportOptions, Tier};
 use typst_ooxml_core::opc::{Package, PackageOptions, RelMode, Rels};
 
 const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -957,6 +957,230 @@ fn chart_with_no_data_at_all_produces_no_output() {
     );
 }
 
+// --- `ChartStyle::Plot` ------------------------------------------------------
+
+/// Like `docx_with_chart`, but with two chart references (`rId1`/`rId2` →
+/// `charts/chart1.xml`/`charts/chart2.xml`) in separate paragraphs — for the
+/// test asserting the `lilaq` import is emitted only once however many
+/// charts in the document actually use it.
+fn docx_with_two_charts(chart1_inner: &str, chart2_inner: &str) -> Vec<u8> {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:drawing>
+      <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+        <c:chart r:id="rId1"/>
+      </a:graphicData></a:graphic>
+    </w:drawing></w:r></w:p>
+    <w:p><w:r><w:drawing>
+      <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+        <c:chart r:id="rId2"/>
+      </a:graphicData></a:graphic>
+    </w:drawing></w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+    let wrap = |inner: &str| {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">{inner}</c:chartSpace>"#
+        )
+    };
+
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut doc_rels = Rels::new();
+    let rid1 = doc_rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart",
+        "charts/chart1.xml",
+        RelMode::Internal,
+    );
+    let rid2 = doc_rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart",
+        "charts/chart2.xml",
+        RelMode::Internal,
+    );
+    assert_eq!(rid1, "rId1");
+    assert_eq!(rid2, "rId2");
+
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_xml("word/charts/chart1.xml", "application/xml", wrap(chart1_inner));
+    package.add_xml("word/charts/chart2.xml", "application/xml", wrap(chart2_inner));
+    package.add_relationships("word/document.xml", &doc_rels).unwrap();
+    package.finish(&Rels::new()).unwrap()
+}
+
+/// The task's own worked example: three series, each 3 points, no categories
+/// — deliberately the shape most likely to get the grouped-bar-offset math
+/// wrong (see the doc comment on the test that uses this).
+fn three_series_bar_chart_xml() -> &'static str {
+    r#"<c:chart><c:plotArea><c:barChart>
+      <c:ser>
+        <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>S1</c:v></c:pt></c:strCache></c:strRef></c:tx>
+        <c:val><c:numRef><c:numCache>
+          <c:pt idx="0"><c:v>4.3</c:v></c:pt>
+          <c:pt idx="1"><c:v>2.5</c:v></c:pt>
+          <c:pt idx="2"><c:v>3.5</c:v></c:pt>
+        </c:numCache></c:numRef></c:val>
+      </c:ser>
+      <c:ser>
+        <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>S2</c:v></c:pt></c:strCache></c:strRef></c:tx>
+        <c:val><c:numRef><c:numCache>
+          <c:pt idx="0"><c:v>2.4</c:v></c:pt>
+          <c:pt idx="1"><c:v>4.4</c:v></c:pt>
+          <c:pt idx="2"><c:v>1.8</c:v></c:pt>
+        </c:numCache></c:numRef></c:val>
+      </c:ser>
+      <c:ser>
+        <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>S3</c:v></c:pt></c:strCache></c:strRef></c:tx>
+        <c:val><c:numRef><c:numCache>
+          <c:pt idx="0"><c:v>2.0</c:v></c:pt>
+          <c:pt idx="1"><c:v>2.0</c:v></c:pt>
+          <c:pt idx="2"><c:v>3.0</c:v></c:pt>
+        </c:numCache></c:numRef></c:val>
+      </c:ser>
+    </c:barChart></c:plotArea></c:chart>"#
+}
+
+fn plot_options() -> ImportOptions {
+    ImportOptions { charts: typst_docx_import::ChartStyle::Plot, ..Default::default() }
+}
+
+/// The default options (`ChartStyle::Table`) must produce exactly the same
+/// output as before this feature existed, for a chart that — under `Plot` —
+/// would actually be plottable. In particular: no `#import` of `lilaq`
+/// anywhere, since the emitted source stays self-contained by default.
+#[test]
+fn default_chart_style_stays_a_table_and_never_imports_lilaq() {
+    let docx = docx_with_chart(three_series_bar_chart_xml(), None);
+    let result = import_docx(&docx).expect("import should succeed");
+    assert!(result.source.contains("#table("), "{}", result.source);
+    assert!(!result.source.contains("lilaq"), "{}", result.source);
+    assert!(!result.source.contains("#import"), "{}", result.source);
+}
+
+/// A bar chart under `ChartStyle::Plot` draws grouped bars: three
+/// `lq.bar(..)` calls with the width/offset formula from the task (`width =
+/// 1/(N+1)`, offset `(i - (N-1)/2) * width`), and the `lilaq` import appears
+/// exactly once even with *two* charts in the document.
+#[test]
+fn bar_chart_under_chart_style_plot_produces_grouped_lq_bar_calls_and_one_import() {
+    let docx = docx_with_two_charts(three_series_bar_chart_xml(), three_series_bar_chart_xml());
+    let result =
+        import_docx_with(&docx, &plot_options()).expect("import should succeed");
+    let src = &result.source;
+
+    assert!(
+        src.contains("lq.bar((-0.25, 0.75, 1.75), (4.3, 2.5, 3.5), width: 0.25, label: [S1])"),
+        "{src}"
+    );
+    assert!(
+        src.contains("lq.bar((0, 1, 2), (2.4, 4.4, 1.8), width: 0.25, label: [S2])"),
+        "{src}"
+    );
+    assert!(
+        src.contains("lq.bar((0.25, 1.25, 2.25), (2, 2, 3), width: 0.25, label: [S3])"),
+        "{src}"
+    );
+    assert!(!src.contains("table("), "expected no fallback table:\n{src}");
+    assert_eq!(
+        src.matches("#import \"@preview/lilaq:0.6.0\" as lq").count(),
+        1,
+        "expected exactly one lilaq import for two plottable charts:\n{src}"
+    );
+}
+
+/// A line chart under `ChartStyle::Plot` draws with `lq.plot(..)`.
+#[test]
+fn line_chart_under_chart_style_plot_produces_lq_plot() {
+    let chart_inner = r#"<c:chart><c:plotArea><c:lineChart><c:ser>
+      <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Temp</c:v></c:pt></c:strCache></c:strRef></c:tx>
+      <c:val><c:numRef><c:numCache>
+        <c:pt idx="0"><c:v>1</c:v></c:pt>
+        <c:pt idx="1"><c:v>2</c:v></c:pt>
+      </c:numCache></c:numRef></c:val>
+    </c:ser></c:lineChart></c:plotArea></c:chart>"#;
+    let docx = docx_with_chart(chart_inner, None);
+    let result =
+        import_docx_with(&docx, &plot_options()).expect("import should succeed");
+    assert!(
+        result.source.contains("lq.plot((0, 1), (1, 2), label: [Temp])"),
+        "{}",
+        result.source
+    );
+}
+
+/// A pie chart has no `lilaq` counterpart, so even under `ChartStyle::Plot`
+/// it still falls back to the data table, with a note explaining why.
+#[test]
+fn pie_chart_under_chart_style_plot_still_falls_back_to_table_with_a_note() {
+    let chart_inner = r#"<c:chart><c:plotArea><c:pieChart><c:ser>
+      <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Share</c:v></c:pt></c:strCache></c:strRef></c:tx>
+      <c:val><c:numRef><c:numCache>
+        <c:pt idx="0"><c:v>40</c:v></c:pt>
+        <c:pt idx="1"><c:v>60</c:v></c:pt>
+      </c:numCache></c:numRef></c:val>
+    </c:ser></c:pieChart></c:plotArea></c:chart>"#;
+    let docx = docx_with_chart(chart_inner, None);
+    let result =
+        import_docx_with(&docx, &plot_options()).expect("import should succeed");
+    assert!(result.source.contains("#table("), "{}", result.source);
+    assert!(!result.source.contains("lilaq"), "{}", result.source);
+    assert!(
+        result
+            .report
+            .notes
+            .iter()
+            .any(|n| n.what == "chart" && n.detail.contains("no plotting counterpart")),
+        "expected a reason naming the unplottable kind: {:?}",
+        result.report.notes
+    );
+}
+
+/// A series whose cached values aren't actually numbers can't be plotted;
+/// falls back to the table with a note under `ChartStyle::Plot`.
+#[test]
+fn non_numeric_chart_values_fall_back_to_table_with_a_note_under_plot_mode() {
+    let chart_inner = r#"<c:chart><c:plotArea><c:barChart><c:ser>
+      <c:val><c:numRef><c:numCache>
+        <c:pt idx="0"><c:v>N/A</c:v></c:pt>
+        <c:pt idx="1"><c:v>2.5</c:v></c:pt>
+      </c:numCache></c:numRef></c:val>
+    </c:ser></c:barChart></c:plotArea></c:chart>"#;
+    let docx = docx_with_chart(chart_inner, None);
+    let result =
+        import_docx_with(&docx, &plot_options()).expect("import should succeed");
+    assert!(result.source.contains("#table("), "{}", result.source);
+    assert!(!result.source.contains("lilaq"), "{}", result.source);
+    assert!(
+        result.report.notes.iter().any(|n| n.what == "chart" && n.detail.contains("not numeric")),
+        "expected a reason naming the non-numeric values: {:?}",
+        result.report.notes
+    );
+}
+
+/// When *every* chart in a document falls back to the table under
+/// `ChartStyle::Plot` (here: a lone pie chart), the `lilaq` import must not
+/// appear at all — nothing in the emitted source actually needs it.
+#[test]
+fn no_lilaq_import_when_every_chart_falls_back_under_plot_mode() {
+    let chart_inner = r#"<c:chart><c:plotArea><c:pieChart><c:ser>
+      <c:val><c:numRef><c:numCache>
+        <c:pt idx="0"><c:v>40</c:v></c:pt>
+        <c:pt idx="1"><c:v>60</c:v></c:pt>
+      </c:numCache></c:numRef></c:val>
+    </c:ser></c:pieChart></c:plotArea></c:chart>"#;
+    let docx = docx_with_chart(chart_inner, None);
+    let result =
+        import_docx_with(&docx, &plot_options()).expect("import should succeed");
+    assert!(!result.source.contains("#import"), "{}", result.source);
+    assert!(!result.source.contains("lilaq"), "{}", result.source);
+}
+
 /// MCE's contract is that a consumer takes an `mc:Choice` only if it supports
 /// that choice's requirement. We handle `wps` text boxes better than the
 /// legacy VML fallback beside them, so that Choice wins — but we cannot draw
@@ -1163,4 +1387,72 @@ fn tracked_insertions_are_kept_and_deletions_dropped() {
     assert!(src.contains("MovedIn"), "w:moveTo content was dropped:\n{src}");
     assert!(!src.contains("DeletedText"), "w:del content leaked back in:\n{src}");
     assert!(!src.contains("MovedOut"), "w:moveFrom content leaked back in:\n{src}");
+}
+
+/// A plotted chart must use Word's own extent and legend placement. Rendering
+/// at the plotting library's default size makes four category labels collide
+/// and puts the legend on top of the bars; `lilaq` also draws legends *inside*
+/// the data area, whereas Word's four edge positions are outside it.
+#[test]
+fn a_plotted_chart_uses_words_size_and_legend_placement() {
+    const CHART: &str = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <c:chart>
+    <c:plotArea>
+      <c:barChart>
+        <c:ser>
+          <c:tx><c:v>Series 1</c:v></c:tx>
+          <c:cat><c:strRef><c:strCache>
+            <c:pt idx="0"><c:v>Alpha</c:v></c:pt>
+            <c:pt idx="1"><c:v>Beta</c:v></c:pt>
+          </c:strCache></c:strRef></c:cat>
+          <c:val><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>1.5</c:v></c:pt>
+            <c:pt idx="1"><c:v>2.5</c:v></c:pt>
+          </c:numCache></c:numRef></c:val>
+        </c:ser>
+      </c:barChart>
+    </c:plotArea>
+    <c:legend><c:legendPos val="b"/></c:legend>
+  </c:chart>
+</c:chartSpace>"#;
+
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut rels = Rels::new();
+    let rid = rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart",
+        "charts/chart1.xml",
+        RelMode::Internal,
+    );
+    // 5486400 EMU = 432pt wide, 2743200 = 216pt tall.
+    let doc = format!(
+        r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+  <w:body><w:p><w:r><w:drawing><wp:inline>
+    <wp:extent cx="5486400" cy="2743200"/>
+    <c:chart r:id="{rid}"/>
+  </wp:inline></w:drawing></w:r></w:p></w:body>
+</w:document>"#
+    );
+    package.add_xml("word/document.xml", "application/xml", doc);
+    package.add_xml("word/charts/chart1.xml", "application/xml", CHART.into());
+    package.add_relationships("word/document.xml", &rels).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let opts = ImportOptions { charts: ChartStyle::Plot, ..Default::default() };
+    let src = import_docx_with(&bytes, &opts).expect("import should succeed").source;
+
+    assert!(src.contains("width: 432pt"), "Word's extent not used:\n{src}");
+    assert!(src.contains("height: 216pt"), "Word's extent not used:\n{src}");
+    // `b` is an outside-bottom legend, not lilaq's inside default.
+    assert!(
+        src.contains("legend: (position: top + center, dy: 100%"),
+        "legend placement not mapped:\n{src}"
+    );
+    assert!(src.contains("lq.bar("), "expected a bar plot:\n{src}");
 }

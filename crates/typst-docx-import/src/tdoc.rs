@@ -7,6 +7,8 @@
 
 use ecow::EcoString;
 
+pub use crate::wml::model::LegendPos;
+
 /// A whole Typst document: a hoisted preamble (`#set`/`#show`/imports) plus the
 /// body. The emitter renders the preamble first, then the body as markup.
 #[derive(Debug, Default, Clone)]
@@ -65,9 +67,9 @@ pub enum Block {
     Table(Table),
     /// An image plus optional caption (a `#figure`).
     Figure(Figure),
-    /// A Word chart, imported as the data table behind it. Typst cannot draw
-    /// Word's chart types, but the part carries the full cached dataset, so
-    /// the information survives even though the plot doesn't.
+    /// A Word chart — by default imported as the data table behind it (Typst
+    /// has no native chart-drawing primitive), or as a real `lilaq` plot
+    /// under [`crate::opts::ChartStyle::Plot`]. See [`Chart`].
     Chart(Chart),
     /// A fenced code block (` ```lang … ``` `).
     CodeBlock { lang: Option<EcoString>, text: EcoString },
@@ -215,12 +217,61 @@ pub struct TableCell {
     pub body: Vec<Block>,
 }
 
-/// A Word chart, lowered to the data table behind it (see
-/// [`crate::wml::model::ChartData`]) — [`Block::Chart`]'s payload.
+/// A Word chart — [`Block::Chart`]'s payload. Brought across either as the
+/// data table behind it or as a drawn plot, depending on
+/// [`crate::opts::ChartStyle`]; see [`ChartContent`].
 #[derive(Debug, Clone)]
 pub struct Chart {
     pub title: Option<EcoString>,
-    pub table: Table,
+    pub content: ChartContent,
+}
+
+/// How a chart's data is represented in the Typst IR. `Table` is always
+/// available (see [`crate::wml::model::ChartData`]'s doc comment); `Plot`
+/// only when [`crate::opts::ChartStyle::Plot`] is requested *and*
+/// [`crate::mappers::chart::lower_chart`] finds the chart plottable —
+/// otherwise it falls back to `Table` there too.
+#[derive(Debug, Clone)]
+pub enum ChartContent {
+    Table(Table),
+    Plot(Plot),
+}
+
+/// A chart redrawn with the `lilaq` plotting package, rather than as its data
+/// table.
+#[derive(Debug, Clone)]
+pub struct Plot {
+    pub kind: PlotKind,
+    /// The size Word laid the chart out at (`wp:extent`). Rendering at the
+    /// plotting library's default instead makes a chart with several long
+    /// category labels collide its own ticks and legend.
+    pub width_pt: Option<f64>,
+    pub height_pt: Option<f64>,
+    /// Where to put the legend. `None` means the chart declared none, so none
+    /// is drawn — not "use the library default", which would invent a legend
+    /// Word deliberately left off.
+    pub legend: Option<LegendPos>,
+    /// Category labels for the x axis. Empty means plot against the point
+    /// index.
+    pub categories: Vec<EcoString>,
+    pub series: Vec<PlotSeries>,
+}
+
+/// The `lilaq` mark used to draw a [`Plot`] — a narrower set than
+/// [`crate::wml::model::ChartKind`]: an area chart's outline maps onto `Line`
+/// (see [`crate::mappers::chart`]'s lowering doc comment for why), and a
+/// chart with no plotting counterpart never reaches this type at all.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum PlotKind {
+    Bar,
+    Line,
+    Scatter,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlotSeries {
+    pub name: Option<EcoString>,
+    pub values: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]

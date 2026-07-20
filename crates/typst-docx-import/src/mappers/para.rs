@@ -7,8 +7,6 @@
 
 use typst_ooxml_core::units::twip_to_abs;
 
-use ecow::EcoString;
-
 use crate::lower::LowerCtx;
 use crate::mappers::run::lower_paragraph_inlines;
 use crate::mappers::{chart, drawing};
@@ -61,15 +59,15 @@ pub(crate) fn lower_paragraph(p: &Paragraph, ctx: &mut LowerCtx) -> ParaResult {
     // Resolve the anchored block up front, before classifying the paragraph,
     // so it survives every branch below. A drawing wins over a chart when a
     // paragraph somehow carries both; an unresolvable one (already reported)
-    // simply yields `None` and the paragraph is treated as text-only.
+    // simply yields `None` and the paragraph is treated as text-only. `ctx`
+    // isn't needed again in this function after this point, so the chart
+    // branch can take it outright rather than reborrowing just its `report`
+    // field the way the drawing branch does (chart lowering also reads
+    // `ctx.options` to decide table-vs-plot, so it needs the whole context).
     let anchored = drawing_ref
         .and_then(|d| drawing::lower_drawing(d, package, &mut *ctx.report))
         .map(Block::Figure)
-        .or_else(|| {
-            first_chart(p)
-                .and_then(|rid| chart::lower_chart(rid, package, &mut *ctx.report))
-                .map(Block::Chart)
-        });
+        .or_else(|| first_chart(p).and_then(|d| chart::lower_chart(d, ctx)).map(Block::Chart));
 
     let kind = if eff_para.bottom_border && !has_text && drawing_ref.is_none() {
         ParaKind::Rule
@@ -123,10 +121,10 @@ fn first_drawing(p: &Paragraph) -> Option<&DrawingRef> {
 
 /// The first chart reference among this paragraph's own runs — same
 /// simplification (and same reasoning) as [`first_drawing`] just above.
-fn first_chart(p: &Paragraph) -> Option<&EcoString> {
+fn first_chart(p: &Paragraph) -> Option<&DrawingRef> {
     p.runs.iter().find_map(|run_item| match run_item {
         RunItem::Run(r) => r.content.iter().find_map(|c| match c {
-            RunContent::Chart(rel_id) => Some(rel_id),
+            RunContent::Chart(d) => Some(d),
             _ => None,
         }),
         RunItem::Hyperlink { .. } | RunItem::Field(_) => None,
@@ -182,6 +180,7 @@ fn par_style(eff: &ParaProps) -> ParStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::opts::ImportOptions;
     use crate::wml::model::{BodyItem, Run, RunProps, WmlPackage};
 
     /// A paragraph whose *only* content is a text box (no other text, no
@@ -206,7 +205,8 @@ mod tests {
         };
         let package = WmlPackage::default();
         let mut report = crate::report::ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let result = lower_paragraph(&p, &mut ctx);
 
         match result.kind {

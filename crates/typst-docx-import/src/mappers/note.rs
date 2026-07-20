@@ -62,6 +62,7 @@ mod tests {
     use rustc_hash::FxHashMap;
 
     use super::*;
+    use crate::opts::ImportOptions;
     use crate::report::ImportReport;
     use crate::tdoc::Block;
     use crate::wml::model::{
@@ -91,7 +92,8 @@ mod tests {
     fn footnote_resolves_to_its_lowered_body() {
         let package = package_with_footnote(1, text_body("snoska"));
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let inline =
             lower_note_ref(false, 1, &mut ctx).expect("expected a resolved footnote");
         match inline {
@@ -108,7 +110,8 @@ mod tests {
     fn dangling_reference_drops_with_a_report_note() {
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let inline = lower_note_ref(false, 1, &mut ctx);
         assert!(inline.is_none());
         assert_eq!(report.notes.len(), 1);
@@ -121,7 +124,8 @@ mod tests {
         endnotes.insert(1, text_body("end note text"));
         let package = WmlPackage { endnotes, ..Default::default() };
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let inline =
             lower_note_ref(true, 1, &mut ctx).expect("expected a resolved endnote");
         assert!(matches!(inline, Inline::Footnote(_)));
@@ -145,7 +149,8 @@ mod tests {
         };
         let package = package_with_footnote(1, self_ref_body);
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
 
         // Must return promptly (not hang) with the outer reference resolved
         // but its self-referential inner one dropped — leaving the note's

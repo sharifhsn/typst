@@ -10,8 +10,10 @@ use std::path::PathBuf;
 
 use crate::opts::ImportOptions;
 use crate::tdoc::{
-    Align, Block, BreakKind, Chart, Figure, Furniture, Inline, Inlines, List, Margins, PageSetup,
-    ParStyle, Script, Stmt, Table, TableCell, TextStyle, TypstDoc,
+    Align, Block, BreakKind, Chart, ChartContent, Figure, Furniture, Inline, Inlines, List,
+    LegendPos, Margins, PageSetup, ParStyle, Plot, PlotKind, PlotSeries, Script, Stmt, Table,
+    TableCell,
+    TextStyle, TypstDoc,
 };
 use crate::wml::model::WmlPackage;
 
@@ -32,6 +34,7 @@ pub fn emit(
         assets: Vec::new(),
         seen_assets: HashSet::new(),
         used_ruby: false,
+        used_plot: false,
     };
 
     let mut out = String::new();
@@ -55,10 +58,15 @@ pub fn emit(
         out.push('\n');
     }
 
-    // Helper definitions go above everything, and only once it's known which
-    // ones the rendered body actually called for.
+    // Helper definitions/imports go above everything, and only once it's
+    // known which ones the rendered body actually called for. Order between
+    // the two doesn't matter to Typst (neither depends on the other), so
+    // this just always puts the import above the helper.
     if emitter.used_ruby {
         out.insert_str(0, &format!("{RUBY_HELPER}\n\n"));
+    }
+    if emitter.used_plot {
+        out.insert_str(0, &format!("{LILAQ_IMPORT}\n\n"));
     }
 
     (out, emitter.assets)
@@ -74,6 +82,11 @@ struct Emitter<'a> {
     /// Set when an [`Inline::Ruby`] is rendered, so [`RUBY_HELPER`] is emitted
     /// only for documents that actually use it.
     used_ruby: bool,
+    /// Set when a [`Plot`] is actually rendered (as opposed to every chart in
+    /// the document falling back to a table), so [`LILAQ_IMPORT`] is emitted
+    /// only for documents that actually need the package. Mirrors
+    /// `used_ruby` exactly — see its doc comment.
+    used_plot: bool,
 }
 
 /// Word's `w:ruby` has no Typst counterpart, so documents that use furigana
@@ -86,6 +99,13 @@ struct Emitter<'a> {
 /// rendering both against a real Japanese sentence.
 const RUBY_HELPER: &str =
     "#let ruby(base, gloss) = box(place(top + center, dy: -0.85em, text(size: 0.5em, gloss)) + base)";
+
+/// A chart under [`crate::opts::ChartStyle::Plot`] is drawn with `lilaq`
+/// (`typst.app/universe/package/lilaq`), so a document that renders at least
+/// one gains this import. Version pinned, exactly as verified against
+/// `lilaq:0.6.0` — the syntax [`Emitter::render_plot`] emits is not
+/// guaranteed to keep working across a `lilaq` major/minor bump.
+const LILAQ_IMPORT: &str = "#import \"@preview/lilaq:0.6.0\" as lq";
 
 impl Emitter<'_> {
     fn render_block(&mut self, block: &Block) -> String {
@@ -288,19 +308,95 @@ impl Emitter<'_> {
         }
     }
 
-    /// A [`Chart`] renders as its data table — the bare `table(..)`
-    /// expression from [`Self::render_table`], captioned with the chart's
-    /// title if it has one, exactly like [`Self::render_figure`] wraps an
-    /// `image(..)` call. The title is plain text (see
-    /// [`crate::wml::parse::parse_chart_title`]), not structured `Inlines`,
-    /// so it's markup-escaped directly rather than routed through
-    /// [`Self::render_inlines`].
+    /// A [`Chart`] renders as its content expression — either the bare
+    /// `table(..)` expression from [`Self::render_table`], or the bare
+    /// `lq.diagram(..)` expression from [`Self::render_plot`] — captioned
+    /// with the chart's title if it has one, exactly like
+    /// [`Self::render_figure`] wraps an `image(..)` call. The title is plain
+    /// text (see [`crate::wml::parse::parse_chart_title`]), not structured
+    /// `Inlines`, so it's markup-escaped directly rather than routed through
+    /// [`Self::render_inlines`]. Deliberately never also passes the title to
+    /// `lq.diagram`'s own `title:` argument — the figure caption is the one
+    /// Typst-idiomatic place for it, and setting both would print it twice.
     fn render_chart(&mut self, chart: &Chart) -> String {
-        let table_expr = self.render_table(&chart.table);
+        let content_expr = match &chart.content {
+            ChartContent::Table(table) => self.render_table(table),
+            ChartContent::Plot(plot) => self.render_plot(plot),
+        };
         match &chart.title {
-            Some(title) => format!("#figure({table_expr}, caption: [{}])", escape_markup(title)),
-            None => format!("#{table_expr}"),
+            Some(title) => {
+                format!("#figure({content_expr}, caption: [{}])", escape_markup(title))
+            }
+            None => format!("#{content_expr}"),
         }
+    }
+
+    /// Render a `lq.diagram(..)` *expression* — the plot counterpart of
+    /// [`Self::render_table`], same bare-expression convention (no leading
+    /// `#`) so [`Self::render_chart`] can embed it in `figure(..)` the same
+    /// way. Category ticks become an explicit `xaxis:` argument; an empty
+    /// [`Plot::categories`] omits it entirely, leaving `lilaq`'s default
+    /// numeric axis (which is exactly the point index every mark below plots
+    /// against anyway).
+    fn render_plot(&mut self, plot: &Plot) -> String {
+        self.used_plot = true;
+
+        let mut lines = vec!["lq.diagram(".to_string()];
+        // Word's own extent for the chart. Without it `lilaq` uses its default
+        // size, which is far narrower than a typical Word chart — enough that
+        // four category labels overlap each other and the legend covers the
+        // last series' bars.
+        if let Some(width) = plot.width_pt {
+            lines.push(format!("  width: {},", pt(width)));
+        }
+        if let Some(height) = plot.height_pt {
+            lines.push(format!("  height: {},", pt(height)));
+        }
+        // Word's own legend placement. A chart that declared no legend gets
+        // `none` rather than the library default — drawing a legend Word
+        // deliberately left off is an invention, not an approximation.
+        lines.push(format!("  legend: {},", legend_arg(plot.legend)));
+        if !plot.categories.is_empty() {
+            let ticks: Vec<String> = plot
+                .categories
+                .iter()
+                .enumerate()
+                .map(|(i, category)| format!("({i}, [{}])", escape_markup(category)))
+                .collect();
+            lines.push(format!("  xaxis: (ticks: {}),", fmt_tuple_of(ticks)));
+        }
+        for mark in self.render_plot_marks(plot) {
+            lines.push(format!("  {mark},"));
+        }
+        lines.push(")".to_string());
+        lines.join("\n")
+    }
+
+    /// One `lq.plot`/`lq.scatter`/`lq.bar` call per series — see
+    /// [`Self::render_xy_marks`] and [`Self::render_bar_marks`] for the two
+    /// shapes ([`PlotKind::Bar`] needs grouped x-offsets; the other two plot
+    /// a series straight against its own point index).
+    fn render_plot_marks(&mut self, plot: &Plot) -> Vec<String> {
+        match plot.kind {
+            PlotKind::Bar => render_bar_marks(&plot.series),
+            PlotKind::Line => self.render_xy_marks("lq.plot", &plot.series),
+            PlotKind::Scatter => self.render_xy_marks("lq.scatter", &plot.series),
+        }
+    }
+
+    /// A line/scatter series plotted against its own point index: `func((0,
+    /// 1, …), (v₀, v₁, …), label: [name])`. `label:` is omitted for an
+    /// unnamed series (see [`Self::render_bar_marks`] for the same rule on
+    /// the bar path).
+    fn render_xy_marks(&mut self, func: &str, series: &[PlotSeries]) -> Vec<String> {
+        series
+            .iter()
+            .map(|s| {
+                let xs = fmt_tuple((0..s.values.len()).map(|i| i as f64));
+                let ys = fmt_tuple(s.values.iter().copied());
+                format!("{func}({xs}, {ys}{})", render_series_label(s))
+            })
+            .collect()
     }
 
     /// Map a `Figure::image_path` (a `word/media/...` part name) into the
@@ -659,6 +755,26 @@ fn string_literal(text: &str) -> String {
     out
 }
 
+/// `c:legendPos` → `lilaq`'s legend `position`, or `none` for a chart that
+/// declares no legend.
+fn legend_arg(pos: Option<LegendPos>) -> &'static str {
+    // `lilaq` places a legend *inside* the data area by default, which is
+    // where Word puts one only for `tr` (its overlay corner). For the four
+    // edge positions Word draws the legend outside the plot, and the package's
+    // documented way to do that is to anchor on the opposite edge and shift by
+    // the full data-area extent — otherwise the legend sits on top of the bars.
+    match pos {
+        None => "none",
+        Some(LegendPos::Top) => "(position: bottom + center, dy: -100%, pad: 8pt)",
+        Some(LegendPos::Bottom) => "(position: top + center, dy: 100%, pad: 8pt)",
+        Some(LegendPos::Left) => "(position: right + horizon, dx: -100%, pad: 8pt)",
+        Some(LegendPos::Right) => "(position: left + horizon, dx: 100%, pad: 8pt)",
+        // Word's `tr` is an overlay corner inside the plot — the one case
+        // where `lilaq`'s own default placement is already right.
+        Some(LegendPos::TopRight) => "(position: top + right)",
+    }
+}
+
 fn rgb_lit(color: [u8; 3]) -> String {
     format!("rgb(\"{:02X}{:02X}{:02X}\")", color[0], color[1], color[2])
 }
@@ -678,6 +794,58 @@ fn fmt_pt(value: f64) -> String {
 /// A point value with the `pt` unit suffix, e.g. `11pt` / `71.5pt`.
 fn pt(value: f64) -> String {
     format!("{}pt", fmt_pt(value))
+}
+
+/// A series' `label:` argument (`, label: [name]`), or an empty string for an
+/// unnamed series — the one bit [`Emitter::render_xy_marks`] and
+/// [`render_bar_marks`] share, since a bar mark's argument list otherwise
+/// looks nothing like a line/scatter mark's.
+fn render_series_label(series: &PlotSeries) -> String {
+    match &series.name {
+        Some(name) => format!(", label: [{}]", escape_markup(name)),
+        None => String::new(),
+    }
+}
+
+/// A Typst tuple literal from unformatted values, each passed through
+/// [`fmt_pt`] — e.g. `(0, 0.25, 1.75)`. A single-element tuple needs its
+/// trailing comma to parse as an array rather than a parenthesized
+/// expression, the same rule [`table_columns_arg`] already follows for a
+/// one-column table; zero elements is `()`, which needs no comma either way.
+fn fmt_tuple(values: impl Iterator<Item = f64>) -> String {
+    fmt_tuple_of(values.map(fmt_pt).collect())
+}
+
+/// [`fmt_tuple`]'s tuple-literal formatting, taking already-rendered pieces —
+/// what [`Emitter::render_plot`] uses for its category-tick pairs, which
+/// aren't plain numbers.
+fn fmt_tuple_of(parts: Vec<String>) -> String {
+    match parts.len() {
+        0 => "()".to_string(),
+        1 => format!("({},)", parts[0]),
+        _ => format!("({})", parts.join(", ")),
+    }
+}
+
+/// The grouped-bar marks for [`PlotKind::Bar`]: with `N` series, series `i`
+/// (0-based) gets its own width `1/(N+1)` and x offset `(i - (N-1)/2) *
+/// 1/(N+1)`, so the `N` bars for one category sit side by side centered on
+/// that category's tick rather than stacked on top of each other. Verified
+/// against `lilaq:0.6.0` for `N = 3` (offsets `-0.25, 0, 0.25`, width
+/// `0.25`) — see this crate's docs for the worked example this generalizes.
+fn render_bar_marks(series: &[PlotSeries]) -> Vec<String> {
+    let n = series.len();
+    let width = 1.0 / (n as f64 + 1.0);
+    series
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let offset = (i as f64 - (n as f64 - 1.0) / 2.0) * width;
+            let xs = fmt_tuple((0..s.values.len()).map(|j| j as f64 + offset));
+            let ys = fmt_tuple(s.values.iter().copied());
+            format!("lq.bar({xs}, {ys}, width: {}{})", fmt_pt(width), render_series_label(s))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1052,5 +1220,193 @@ mod tests {
         assert!(out.starts_with("#set page(\n  width: 595.28pt,\n"), "{out}");
         assert!(out.contains("  header: [H],\n"), "{out}");
         assert!(out.contains("  footer: [F],\n"), "{out}");
+    }
+
+    // --- Charts: `ChartContent::Table` / `ChartContent::Plot` ---------------
+
+    fn series(name: Option<&str>, values: &[f64]) -> PlotSeries {
+        PlotSeries { name: name.map(Into::into), values: values.to_vec() }
+    }
+
+    #[test]
+    fn table_chart_renders_like_before_with_no_lilaq_import() {
+        let table = Table {
+            columns: 1,
+            column_widths: vec![],
+            rows: vec![TableRow {
+                header: false,
+                cells: vec![TableCell {
+                    colspan: 1,
+                    rowspan: 1,
+                    fill: None,
+                    body: vec![para("1")],
+                }],
+            }],
+        };
+        let chart = Chart { title: Some("Sales".into()), content: ChartContent::Table(table) };
+        let d = doc(vec![], vec![Block::Chart(chart)]);
+        let out = run(&d);
+        assert!(out.contains("#figure(table("), "{out}");
+        assert!(out.contains("caption: [Sales]"), "{out}");
+        assert!(!out.contains("lilaq"), "table mode must never pull in lilaq:\n{out}");
+    }
+
+    #[test]
+    fn line_plot_renders_one_lq_plot_call_per_series_against_point_index() {
+        let plot = Plot {
+            kind: PlotKind::Line,
+            width_pt: None,
+            height_pt: None,
+            legend: None,
+            categories: vec![],
+            series: vec![series(Some("Series 1"), &[4.3, 2.5, 3.5])],
+        };
+        let chart = Chart { title: None, content: ChartContent::Plot(plot) };
+        let d = doc(vec![], vec![Block::Chart(chart)]);
+        let out = run(&d);
+        assert!(
+            out.contains("lq.plot((0, 1, 2), (4.3, 2.5, 3.5), label: [Series 1])"),
+            "{out}"
+        );
+        // No categories: `xaxis:` is omitted entirely rather than emitted empty.
+        assert!(!out.contains("xaxis:"), "{out}");
+        assert!(out.contains(LILAQ_IMPORT), "import missing:\n{out}");
+    }
+
+    #[test]
+    fn scatter_plot_uses_lq_scatter() {
+        let plot = Plot {
+            kind: PlotKind::Scatter,
+            width_pt: None,
+            height_pt: None,
+            legend: None,
+            categories: vec![],
+            series: vec![series(None, &[1.0, -2.5])],
+        };
+        let chart = Chart { title: None, content: ChartContent::Plot(plot) };
+        let out = run(&doc(vec![], vec![Block::Chart(chart)]));
+        // Unnamed series: no `label:` argument.
+        assert!(out.contains("lq.scatter((0, 1), (1, -2.5))"), "{out}");
+    }
+
+    /// The category axis becomes an explicit `xaxis: (ticks: ..)` argument,
+    /// and — since there's a title — the whole diagram is wrapped in a
+    /// `#figure(..)` the same way a table chart is.
+    #[test]
+    fn categories_become_xaxis_ticks_and_a_titled_plot_is_captioned() {
+        let plot = Plot {
+            kind: PlotKind::Line,
+            width_pt: None,
+            height_pt: None,
+            legend: None,
+            categories: vec!["Cat 1".into(), "Cat 2".into(), "Cat 3".into()],
+            series: vec![series(None, &[1.0, 2.0, 3.0])],
+        };
+        let chart = Chart { title: Some("Trend".into()), content: ChartContent::Plot(plot) };
+        let out = run(&doc(vec![], vec![Block::Chart(chart)]));
+        assert!(
+            out.contains("xaxis: (ticks: ((0, [Cat 1]), (1, [Cat 2]), (2, [Cat 3]))),"),
+            "{out}"
+        );
+        assert!(out.starts_with(&format!("{LILAQ_IMPORT}\n\n")), "{out}");
+        assert!(out.contains("#figure(lq.diagram("), "{out}");
+        assert!(out.contains("caption: [Trend]"), "{out}");
+    }
+
+    /// The worked example from the task: 3 series, grouped bars with width
+    /// `1/(N+1)` and offsets `(i - (N-1)/2) * 1/(N+1)` — verified rendering
+    /// correctly in real `lilaq:0.6.0` output before this test was written.
+    #[test]
+    fn grouped_bar_offsets_match_the_verified_three_series_example() {
+        let plot = Plot {
+            kind: PlotKind::Bar,
+            width_pt: None,
+            height_pt: None,
+            legend: None,
+            categories: vec![],
+            series: vec![
+                series(Some("S1"), &[4.3, 2.5, 3.5]),
+                series(Some("S2"), &[2.4, 4.4, 1.8]),
+                series(Some("S3"), &[2.0, 2.0, 3.0]),
+            ],
+        };
+        let chart = Chart { title: None, content: ChartContent::Plot(plot) };
+        let out = run(&doc(vec![], vec![Block::Chart(chart)]));
+        assert!(
+            out.contains(
+                "lq.bar((-0.25, 0.75, 1.75), (4.3, 2.5, 3.5), width: 0.25, label: [S1])"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("lq.bar((0, 1, 2), (2.4, 4.4, 1.8), width: 0.25, label: [S2])"),
+            "{out}"
+        );
+        // `fmt_pt`-style formatting trims a trailing `.0` (`2.0` -> `2`), the
+        // same rule every other number in this emitter's output already
+        // follows — see `fmt_pt`'s own doc comment.
+        assert!(
+            out.contains("lq.bar((0.25, 1.25, 2.25), (2, 2, 3), width: 0.25, label: [S3])"),
+            "{out}"
+        );
+    }
+
+    /// A single bar series needs no grouping at all — `N = 1` gives width
+    /// `0.5` and offset `0`, which still renders (not a special case in the
+    /// formula, just its `N = 1` instance).
+    #[test]
+    fn single_series_bar_chart_is_not_offset() {
+        let plot = Plot {
+            kind: PlotKind::Bar,
+            width_pt: None,
+            height_pt: None,
+            legend: None,
+            categories: vec![],
+            series: vec![series(None, &[1.0, 2.0])],
+        };
+        let chart = Chart { title: None, content: ChartContent::Plot(plot) };
+        let out = run(&doc(vec![], vec![Block::Chart(chart)]));
+        assert!(out.contains("lq.bar((0, 1), (1, 2), width: 0.5)"), "{out}");
+    }
+
+    /// Two plottable charts in one document must still pull in the `lilaq`
+    /// import exactly once, not once per chart.
+    #[test]
+    fn lilaq_import_is_emitted_exactly_once_for_two_plot_charts() {
+        let plot = || Plot {
+            kind: PlotKind::Line,
+            width_pt: None,
+            height_pt: None,
+            legend: None,
+            categories: vec![],
+            series: vec![series(None, &[1.0])],
+        };
+        let d = doc(
+            vec![],
+            vec![
+                Block::Chart(Chart { title: None, content: ChartContent::Plot(plot()) }),
+                Block::Chart(Chart { title: None, content: ChartContent::Plot(plot()) }),
+            ],
+        );
+        let out = run(&d);
+        assert_eq!(
+            out.matches(LILAQ_IMPORT).count(),
+            1,
+            "expected exactly one lilaq import:\n{out}"
+        );
+    }
+
+    /// A document where every chart is `ChartContent::Table` (e.g. every
+    /// chart fell back under `ChartStyle::Plot`) must not carry the `lilaq`
+    /// import at all — nothing in the source actually needs it.
+    #[test]
+    fn no_lilaq_import_when_every_chart_is_a_table() {
+        let table = Table { columns: 1, column_widths: vec![], rows: vec![] };
+        let d = doc(
+            vec![],
+            vec![Block::Chart(Chart { title: None, content: ChartContent::Table(table) })],
+        );
+        let out = run(&d);
+        assert!(!out.contains("lilaq"), "{out}");
     }
 }

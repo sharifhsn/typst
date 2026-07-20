@@ -163,12 +163,57 @@ the approximation rather than dropping content:
 
 | Word | imported as |
 | --- | --- |
-| chart (`c:chartSpace`) | the cached data as a `#figure(table(..))` |
+| chart (`c:chartSpace`) | the cached data as a `#figure(table(..))` — see below |
 | text box / shape text | `#box[..]` inlined at the anchor, geometry dropped |
 | endnote | `#footnote[..]` (Typst has no end-of-document note store) |
 | ruby / furigana | a generated `#let ruby(base, gloss)` preamble helper |
 | `PAGE`/`NUMPAGES` field | live `#context counter(page)` calls |
 | any other field | its cached result — what Word last rendered |
+
+### Opt-in packages
+
+The emitted source is self-contained by default — plain Typst plus extracted
+image assets, nothing to fetch. Where a construct has no Typst primitive but
+*does* have a good package, the mapping goes behind an option rather than on by
+default: the output gains an `#import`, and taking on a third-party dependency
+is the user's call to make, not the converter's. The import is emitted only
+when something actually uses it, the same way the `ruby` helper is.
+
+### Charts: table by default, `lilaq` plot opt-in
+
+`ImportOptions::charts` (`ChartStyle::Table`, the default, or `Plot`) decides
+how a chart crosses over. `Table` is what the row above describes — always
+available, self-contained, works for every chart type. `Plot` trades that
+self-containment for a real chart, drawn with the `lilaq` package
+(`mappers/chart.rs`'s `build_plot`, `emit.rs`'s `render_plot`): the document
+gains an `#import "@preview/lilaq:.."` the moment any chart actually renders as
+one.
+
+Only `Bar`/`Line`/`Scatter`/`Area` chart kinds have a `lilaq` mark at all (kind
+is detected from the plot-area child's local name — `barChart`, `lineChart`,
+…); `Area` draws as its outline (a `lilaq` line mark), since `lilaq` has no
+filled-area mark and the outline is the same series a line chart would plot.
+Everything else — pie, radar, stock, surface, every ChartEx type — has no
+counterpart and stays a table even under `Plot`. So does any chart whose
+cached values aren't clean: a non-numeric value, or a *missing* one (Word's
+sparse-`idx` gap filler is an empty string, not an absent point) can't be
+plotted without either inventing a `0.0` that was never there or silently
+shifting every later point's x position — both worse than falling back, so
+either one drops the whole chart to the table instead. Every fallback records
+a `Severity::Approximate` note naming the specific reason, deduplicated the
+same way every other repeated note is.
+
+A plotted chart carries Word's own geometry across: `wp:extent` becomes the
+diagram's `width`/`height`, and `c:legendPos` becomes the legend position.
+Neither is cosmetic. At `lilaq`'s default size a four-category axis overlaps
+its own tick labels and the legend covers the last series' bars; and `lilaq`
+places a legend *inside* the data area, whereas Word's four edge positions
+(`t`/`b`/`l`/`r`) are outside it — so those map to the package's documented
+outside-placement form (anchor on the opposite edge, shift by `100%`). Word's
+`tr` is genuinely an overlay corner, and is the one case where `lilaq`'s own
+default placement is already right. A chart with no `c:legend` element gets
+`legend: none` rather than the package default, since drawing a legend Word
+deliberately left off would be an invention rather than an approximation.
 
 ## Emitter constraints worth knowing
 
@@ -193,6 +238,9 @@ the escaper handles all three:
   after it: Typst can't place a block between two items of one list.
 - Scatter/bubble charts (`c:xVal`/`c:yVal`) aren't extracted; a chart relying
   on live formula references rather than a cached values yields an empty table.
+  Under `ChartStyle::Plot` the same gap means a genuine XY scatter chart has
+  nothing to plot either, so it falls back to that same empty table rather
+  than drawing — the fallback is at least honest, not a crash or a lie.
 - A drawing nested inside a hyperlink or a field's cached result isn't
   discovered as its paragraph's figure.
 - Adjacent runs sharing an identical style are emitted as separate `#text(..)`

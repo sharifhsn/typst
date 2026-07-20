@@ -5,15 +5,17 @@ use typst_ooxml_core::units::half_point_to_pt;
 
 use crate::mappers;
 use crate::mappers::para::{ParaKind, ParaResult};
+use crate::opts::ImportOptions;
 use crate::report::ImportReport;
 use crate::tdoc::{Block, List, ListItem, Stmt, TextStyle, TypstDoc};
 use crate::wml::model::{BodyItem, RunProps, WmlPackage};
 
 /// Everything the lowering phase threads through: the package being read, the
-/// the loss report, and the guards that stop a malformed
-/// document from recursing forever.
+/// options that govern how it's lowered, the loss report, and the guards
+/// that stop a malformed document from recursing forever.
 pub(crate) struct LowerCtx<'a> {
     pub package: &'a WmlPackage,
+    pub options: &'a ImportOptions,
     pub report: &'a mut ImportReport,
     /// `(is_endnote, id)` pairs currently being lowered — the cycle guard for
     /// note resolution. A malformed document can have note 1 reference note 1,
@@ -30,8 +32,12 @@ pub(crate) struct LowerCtx<'a> {
 const MAX_NOTE_DEPTH: usize = 8;
 
 impl<'a> LowerCtx<'a> {
-    pub(crate) fn new(package: &'a WmlPackage, report: &'a mut ImportReport) -> Self {
-        LowerCtx { package, report, note_stack: Vec::new() }
+    pub(crate) fn new(
+        package: &'a WmlPackage,
+        options: &'a ImportOptions,
+        report: &'a mut ImportReport,
+    ) -> Self {
+        LowerCtx { package, options, report, note_stack: Vec::new() }
     }
 
     /// Try to enter `(endnote, id)`'s body for lowering. Returns `false` —
@@ -219,7 +225,8 @@ mod tests {
         };
 
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let doc = lower(&mut ctx);
 
         assert_eq!(doc.body.len(), 1);
@@ -255,7 +262,8 @@ mod tests {
         };
 
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let doc = lower(&mut ctx);
 
         assert_eq!(doc.body.len(), 1);
@@ -288,7 +296,8 @@ mod tests {
         };
 
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let doc = lower(&mut ctx);
 
         assert_eq!(doc.body.len(), 1);
@@ -312,7 +321,8 @@ mod tests {
     fn distinct_notes_nest_and_unwind_cleanly() {
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         assert!(ctx.enter_note(false, 1));
         assert!(ctx.enter_note(false, 2));
         ctx.exit_note();
@@ -325,7 +335,8 @@ mod tests {
     fn a_note_cannot_re_enter_itself_while_still_on_the_stack() {
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         assert!(ctx.enter_note(false, 1));
         // Direct self-reference: note 1, still being lowered, refers to
         // itself again.
@@ -336,7 +347,8 @@ mod tests {
     fn an_indirect_cycle_through_another_note_is_also_refused() {
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         assert!(ctx.enter_note(false, 1));
         assert!(ctx.enter_note(false, 2));
         // Note 2 refers back to note 1, which is still on the stack.
@@ -347,7 +359,8 @@ mod tests {
     fn footnote_and_endnote_ids_are_tracked_independently() {
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         assert!(ctx.enter_note(false, 1));
         // An endnote with the same numeric id is a different note.
         assert!(ctx.enter_note(true, 1));
@@ -357,7 +370,8 @@ mod tests {
     fn a_long_non_cycling_chain_is_still_capped_by_depth() {
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         for id in 0..100 {
             if !ctx.enter_note(false, id) {
                 // Must give up well before 100 distinct, never-repeating ids.

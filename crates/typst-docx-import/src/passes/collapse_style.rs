@@ -10,7 +10,9 @@
 //! marker itself, so `size`/`bold`/`font`/`color` are cleared unconditionally
 //! inside [`Block::Heading`] bodies, not just when they match the doc default.
 
-use crate::tdoc::{Block, Chart, Figure, Inline, Inlines, List, Stmt, Table, TextStyle, TypstDoc};
+use crate::tdoc::{
+    Block, Chart, ChartContent, Figure, Inline, Inlines, List, Stmt, Table, TextStyle, TypstDoc,
+};
 
 /// Entry point: collapse every run in the document — body *and* header/footer
 /// content — against the preamble's default text style.
@@ -56,12 +58,15 @@ fn walk_block(block: &mut Block, default: &TextStyle) {
                 collapse_in_place(caption, default, false);
             }
         }
-        // A chart's table cells are built directly as plain `Inline::Text`
+        // A chart-as-table's cells are built directly as plain `Inline::Text`
         // (see `mappers::chart`), so there's no styling left to collapse —
         // but they still get the same walk as `Block::Table`'s cells above,
         // both to keep this match exhaustive and on the chance a future
-        // change gives a cell richer content.
-        Block::Chart(Chart { table: Table { rows, .. }, .. }) => {
+        // change gives a cell richer content. A chart-as-plot has no
+        // `Inlines` anywhere in it at all — series names and category labels
+        // are plain `EcoString`, escaped straight to markup at emit time
+        // (see `emit::render_plot`) — so there's nothing to walk.
+        Block::Chart(Chart { content: ChartContent::Table(Table { rows, .. }), .. }) => {
             for row in rows {
                 for cell in &mut row.cells {
                     for inner in &mut cell.body {
@@ -70,6 +75,7 @@ fn walk_block(block: &mut Block, default: &TextStyle) {
                 }
             }
         }
+        Block::Chart(Chart { content: ChartContent::Plot(_), .. }) => {}
         Block::CodeBlock { .. }
         | Block::Equation { .. }
         | Block::Rule

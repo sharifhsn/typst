@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use ecow::EcoString;
 
-pub use opts::{ImportOptions, Tier};
+pub use opts::{ChartStyle, ImportOptions, Tier};
 pub use report::ImportReport;
 pub use tdoc::TypstDoc;
 
@@ -91,7 +91,7 @@ pub fn import_docx_with(
     let package = wml::parse::parse_package(bytes, &mut report)?;
 
     // 2. Lower the Word IR to the Typst IR (tier-1 literal fidelity).
-    let mut ctx = lower::LowerCtx::new(&package, &mut report);
+    let mut ctx = lower::LowerCtx::new(&package, options, &mut report);
     let mut doc = lower::lower(&mut ctx);
 
     // 3. Optionally run tier-2 semantic passes.

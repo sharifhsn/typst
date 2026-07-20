@@ -185,6 +185,7 @@ mod tests {
     use rustc_hash::FxHashMap;
 
     use super::*;
+    use crate::opts::ImportOptions;
     use crate::report::ImportReport;
     use crate::wml::model::{Body, Paragraph, Relationship, Run, RunProps, WmlPackage};
 
@@ -223,7 +224,8 @@ mod tests {
     fn default_only_reference_produces_furniture_with_no_variants() {
         let package = package_with_furniture(vec![text_paragraph("Header text")], false);
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let furniture =
             lower_furniture(&[default_ref()], false, &mut ctx).expect("expected furniture");
         assert_eq!(furniture.default.len(), 1);
@@ -235,7 +237,8 @@ mod tests {
     fn no_default_and_no_active_variant_returns_none() {
         let package = package_with_furniture(vec![text_paragraph("Header text")], false);
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         // Only a `First` reference exists, and `title_pg` is false — inactive.
         let refs = vec![FurnitureRef { kind: FurnitureKind::First, rel_id: "rId1".into() }];
         let furniture = lower_furniture(&refs, false, &mut ctx);
@@ -267,14 +270,15 @@ mod tests {
         let refs =
             vec![default_ref(), FurnitureRef { kind: FurnitureKind::First, rel_id: "rId2".into() }];
         let mut report = ImportReport::default();
+        let options = ImportOptions::default();
 
         // Without `title_pg`, the `First` reference exists but is ignored.
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let without = lower_furniture(&refs, false, &mut ctx).unwrap();
         assert!(without.first.is_none());
 
         // With `title_pg`, it's honored.
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let with = lower_furniture(&refs, true, &mut ctx).unwrap();
         assert!(with.first.is_some());
     }
@@ -309,6 +313,7 @@ mod tests {
         let refs =
             vec![default_ref(), FurnitureRef { kind: FurnitureKind::Even, rel_id: "rId2".into() }];
         let mut report = ImportReport::default();
+        let options = ImportOptions::default();
 
         let without = WmlPackage {
             rels: rels_map(),
@@ -316,7 +321,7 @@ mod tests {
             even_and_odd_headers: false,
             ..Default::default()
         };
-        let mut ctx = LowerCtx::new(&without, &mut report);
+        let mut ctx = LowerCtx::new(&without, &options, &mut report);
         let result = lower_furniture(&refs, false, &mut ctx).unwrap();
         assert!(result.even.is_none());
 
@@ -326,7 +331,7 @@ mod tests {
             even_and_odd_headers: true,
             ..Default::default()
         };
-        let mut ctx = LowerCtx::new(&with, &mut report);
+        let mut ctx = LowerCtx::new(&with, &options, &mut report);
         let result = lower_furniture(&refs, false, &mut ctx).unwrap();
         assert!(result.even.is_some());
     }
@@ -337,7 +342,8 @@ mod tests {
         // `headerFooter.docx` in the POI corpus).
         let package = package_with_furniture(vec![empty_paragraph()], false);
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let furniture = lower_furniture(&[default_ref()], false, &mut ctx);
         assert!(furniture.is_none());
     }

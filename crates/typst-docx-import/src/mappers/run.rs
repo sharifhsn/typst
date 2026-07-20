@@ -161,6 +161,7 @@ fn text_style_from_run_props(eff: &RunProps) -> TextStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::opts::ImportOptions;
     use crate::report::ImportReport;
     use crate::tdoc::Block;
     use crate::wml::model::{Paragraph, Run, RunProps, WmlPackage};
@@ -187,7 +188,8 @@ mod tests {
         };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let inlines = lower_paragraph_inlines(&p, &mut ctx);
 
         assert_eq!(inlines.len(), 1);
@@ -222,7 +224,8 @@ mod tests {
         };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let inlines = lower_paragraph_inlines(&p, &mut ctx);
 
         assert_eq!(inlines.len(), 2);
@@ -241,7 +244,8 @@ mod tests {
         let p = Paragraph { props: Default::default(), runs: vec![text_box_run(vec![])] };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let mut ctx = LowerCtx::new(&package, &mut report);
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
         let inlines = lower_paragraph_inlines(&p, &mut ctx);
 
         assert_eq!(inlines.len(), 1);

@@ -7,14 +7,26 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("usage: import <in.docx> <out.typ> [--literal]");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Flags (`--literal`, `--charts=..`) may appear anywhere among the
+    // arguments, not just after the two positional paths — so positional
+    // arguments are gathered separately rather than read off fixed indices.
+    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    if positional.len() != 2 {
+        eprintln!("usage: import [--literal] [--charts=table|plot] <in.docx> <out.typ>");
         return ExitCode::from(2);
     }
-    let in_path = &args[1];
-    let out_path = PathBuf::from(&args[2]);
+    let in_path = positional[0];
+    let out_path = PathBuf::from(positional[1]);
     let literal = args.iter().any(|a| a == "--literal");
+    let charts_plot = match args.iter().find_map(|a| a.strip_prefix("--charts=")) {
+        None | Some("table") => false,
+        Some("plot") => true,
+        Some(other) => {
+            eprintln!("error: unknown --charts value {other:?} (expected \"table\" or \"plot\")");
+            return ExitCode::from(2);
+        }
+    };
 
     let bytes = match std::fs::read(in_path) {
         Ok(b) => b,
@@ -27,6 +39,9 @@ fn main() -> ExitCode {
     let mut options = typst_docx_import::ImportOptions::default();
     if literal {
         options.tier = typst_docx_import::Tier::Literal;
+    }
+    if charts_plot {
+        options.charts = typst_docx_import::ChartStyle::Plot;
     }
 
     let result = match typst_docx_import::import_docx_with(&bytes, &options) {

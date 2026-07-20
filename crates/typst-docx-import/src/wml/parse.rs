@@ -16,9 +16,10 @@ use typst_ooxml_core::{ns, opc::Reader};
 use crate::ImportError;
 use crate::report::ImportReport;
 use crate::wml::model::{
-    Body, BodyItem, BreakType, Cell, ChartData, ChartSeries, DrawingRef, Field, FurnitureKind,
-    FurnitureRef, LevelFormat, NumRef, Numbering, ParaProps, Paragraph, Relationship, Row, Run,
-    RunContent, RunItem, RunProps, SectPr, Style, StyleKind, Styles, Table, WmlPackage,
+    Body, BodyItem, BreakType, Cell, ChartData, ChartKind, ChartSeries, DrawingRef, Field,
+    FurnitureKind, FurnitureRef, LegendPos, LevelFormat, NumRef, Numbering, ParaProps, Paragraph,
+    Relationship, Row, Run, RunContent, RunItem, RunProps, SectPr, Style, StyleKind, Styles,
+    Table, WmlPackage,
 };
 
 /// Open the `.docx` and parse `word/document.xml`, `styles.xml`,
@@ -393,8 +394,8 @@ fn namespace_run_items(items: &mut [RunItem], part: &str) {
                         }
                         // A chart reference is a relationship id too — same
                         // reasoning as `Drawing`'s just above.
-                        RunContent::Chart(rel_id) => {
-                            *rel_id = eco_format!("{part}!{rel_id}");
+                        RunContent::Chart(d) => {
+                            d.rel_id = eco_format!("{part}!{}", d.rel_id);
                         }
                         // A text box's own content is itself a body — it can
                         // hold drawings and hyperlinks of its own, which need
@@ -850,9 +851,16 @@ fn parse_drawing(node: Node) -> Option<DrawingRef> {
 /// so matching by local name covers both without distinguishing them here.
 /// `None` if there's no such element (a shape or an image, not a chart) or it
 /// has no `r:id` (nothing to resolve).
-fn parse_chart_ref(node: Node) -> Option<EcoString> {
+fn parse_chart_ref(node: Node) -> Option<DrawingRef> {
     let chart = node.descendants().find(|n| is_element(*n, "chart"))?;
-    attr_ns(chart, ns::R, "id").map(EcoString::from)
+    let rel_id = attr_ns(chart, ns::R, "id")?.into();
+    // Same `wp:extent` a picture carries — this is the size Word laid the
+    // chart out at, and a plot rendered at a library default instead will
+    // collide its own axis labels and legend.
+    let extent = node.descendants().find(|n| is_element(*n, "extent"));
+    let cx_emu = extent.and_then(|n| attr(n, "cx")).and_then(parse_i64);
+    let cy_emu = extent.and_then(|n| attr(n, "cy")).and_then(parse_i64);
+    Some(DrawingRef { rel_id, cx_emu, cy_emu, alt: None })
 }
 
 // --- Text boxes (`wps:txbx`/`v:textbox`'s `w:txbxContent`) --------------------
@@ -1128,6 +1136,8 @@ fn parse_chart_classic(root: Node) -> ChartData {
     if let Some(title) = chart.children().find(|n| is_element(*n, "title")) {
         data.title = parse_chart_title(title);
     }
+    data.kind = chart_kind(chart);
+    data.legend = chart_legend(chart);
 
     let mut have_categories = false;
     for ser in chart.descendants().filter(|n| is_element(*n, "ser")) {
@@ -1148,6 +1158,49 @@ fn parse_chart_classic(root: Node) -> ChartData {
         data.series.push(ChartSeries { name, values });
     }
     data
+}
+
+/// A classic chart's plot type, from the first chart-type element found under
+/// `c:plotArea` (by local name, same convention as the rest of this module).
+/// `c:plotArea` also holds axis elements (`c:catAx`, `c:valAx`, …) alongside
+/// the chart-type wrapper, so this skips anything that isn't one of the known
+/// wrappers rather than assuming the wrapper is `plotArea`'s first child. A
+/// combo chart (e.g. bars with a line series overlaid) nests more than one
+/// wrapper; the first one in document order wins, per [`ChartKind`]'s doc
+/// comment.
+/// `c:legend/c:legendPos`. A chart with no `c:legend` element shows no
+/// legend at all, which is a different thing from "wherever the default is" —
+/// so absence is preserved rather than defaulted.
+fn chart_legend(chart: Node) -> Option<LegendPos> {
+    let legend = chart.descendants().find(|n| is_element(*n, "legend"))?;
+    let pos = legend
+        .children()
+        .find(|n| is_element(*n, "legendPos"))
+        .and_then(|n| attr(n, "val"));
+    Some(match pos {
+        Some("t") => LegendPos::Top,
+        Some("l") => LegendPos::Left,
+        Some("b") => LegendPos::Bottom,
+        Some("tr") => LegendPos::TopRight,
+        // `r` is also OOXML's own default when `legendPos` is absent.
+        _ => LegendPos::Right,
+    })
+}
+
+fn chart_kind(chart: Node) -> ChartKind {
+    let Some(plot_area) = chart.children().find(|n| is_element(*n, "plotArea")) else {
+        return ChartKind::default();
+    };
+    plot_area
+        .children()
+        .find_map(|child| match child.tag_name().name() {
+            "barChart" | "bar3DChart" => Some(ChartKind::Bar),
+            "lineChart" | "line3DChart" => Some(ChartKind::Line),
+            "scatterChart" | "bubbleChart" => Some(ChartKind::Scatter),
+            "areaChart" | "area3DChart" => Some(ChartKind::Area),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// A ChartEx chart (`cx:chartSpace`, used for chart types introduced after
@@ -2606,7 +2659,7 @@ mod tests {
         let RunContent::Chart(rel_id) = &r.content[0] else {
             panic!("expected a chart, got {:?}", r.content[0])
         };
-        assert_eq!(rel_id.as_str(), "rId5");
+        assert_eq!(rel_id.rel_id.as_str(), "rId5");
     }
 
     /// Parses `inner` as the content of a `c:chartSpace` root (namespaces for
@@ -2757,6 +2810,83 @@ mod tests {
         assert!(data.title.is_none());
         assert!(data.categories.is_empty());
         assert!(data.series.is_empty());
+        assert_eq!(data.kind, ChartKind::default());
+    }
+
+    /// [`ChartKind`] detection: one case per recognized local name, plus the
+    /// two ways a classic chart ends up `Other` (an unrecognized type, or no
+    /// `c:plotArea` at all).
+    #[test]
+    fn chart_kind_is_detected_from_the_plot_area_child_by_local_name() {
+        let cases: &[(&str, ChartKind)] = &[
+            ("barChart", ChartKind::Bar),
+            ("bar3DChart", ChartKind::Bar),
+            ("lineChart", ChartKind::Line),
+            ("line3DChart", ChartKind::Line),
+            ("scatterChart", ChartKind::Scatter),
+            ("bubbleChart", ChartKind::Scatter),
+            ("areaChart", ChartKind::Area),
+            ("area3DChart", ChartKind::Area),
+            ("pieChart", ChartKind::Other),
+            ("doughnutChart", ChartKind::Other),
+            ("radarChart", ChartKind::Other),
+            ("stockChart", ChartKind::Other),
+            ("surfaceChart", ChartKind::Other),
+        ];
+        for (tag, expected) in cases {
+            let data = parse_test_chart_space(&format!(
+                r#"<c:chart><c:plotArea><c:{tag}><c:ser></c:ser></c:{tag}></c:plotArea></c:chart>"#
+            ));
+            assert_eq!(data.kind, *expected, "unexpected kind for c:{tag}");
+        }
+    }
+
+    #[test]
+    fn chart_kind_defaults_to_other_with_no_plot_area_at_all() {
+        let data = parse_test_chart_space("<c:chart></c:chart>");
+        assert_eq!(data.kind, ChartKind::Other);
+    }
+
+    /// A combo chart (bars with a line series overlaid) nests more than one
+    /// chart-type element under `c:plotArea`; the first one in document
+    /// order wins, per [`ChartKind`]'s own doc comment.
+    #[test]
+    fn combo_chart_takes_the_first_plot_type_in_document_order() {
+        let data = parse_test_chart_space(
+            r#"<c:chart><c:plotArea>
+                 <c:lineChart><c:ser></c:ser></c:lineChart>
+                 <c:barChart><c:ser></c:ser></c:barChart>
+               </c:plotArea></c:chart>"#,
+        );
+        assert_eq!(data.kind, ChartKind::Line);
+    }
+
+    /// `c:plotArea` also holds axis elements alongside the chart-type
+    /// wrapper (`c:catAx`/`c:valAx` here, before the actual `c:barChart`) —
+    /// those must be skipped rather than mistaken for "no recognized type".
+    #[test]
+    fn axis_elements_in_plot_area_do_not_confuse_kind_detection() {
+        let data = parse_test_chart_space(
+            r#"<c:chart><c:plotArea>
+                 <c:catAx/><c:valAx/>
+                 <c:barChart><c:ser></c:ser></c:barChart>
+               </c:plotArea></c:chart>"#,
+        );
+        assert_eq!(data.kind, ChartKind::Bar);
+    }
+
+    /// ChartEx parts (`cx:chartSpace`) never carry a [`ChartKind`] other than
+    /// `Other` — `lilaq` has no counterpart for any ChartEx type either, so
+    /// there is nothing to detect.
+    #[test]
+    fn chartex_chart_always_keeps_the_default_other_kind() {
+        let data = parse_test_chart_space(
+            r#"<cx:chartData><cx:data id="0"/></cx:chartData>
+               <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                 <cx:series layoutId="boxWhisker"><cx:dataId val="0"/></cx:series>
+               </cx:plotAreaRegion></cx:plotArea></cx:chart>"#,
+        );
+        assert_eq!(data.kind, ChartKind::Other);
     }
 
     /// `word/charts/` also holds a chart's color/style siblings

@@ -14,16 +14,31 @@ pub enum Tier {
     Idiomatic,
 }
 
+/// How a Word chart is brought across.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+pub enum ChartStyle {
+    /// Lower a chart to the data table behind it. The emitted source stays
+    /// self-contained — it needs nothing but Typst itself.
+    #[default]
+    Table,
+    /// Draw the chart with the `lilaq` plotting package. The emitted source
+    /// gains an `#import "@preview/lilaq:..."`, so it no longer compiles
+    /// without that package available: opt in deliberately.
+    Plot,
+}
+
 #[derive(Debug, Clone)]
 pub struct ImportOptions {
     pub tier: Tier,
     /// Directory (project-relative) under which extracted images are placed.
     pub assets_dir: String,
+    /// How a Word chart is brought across — see [`ChartStyle`].
+    pub charts: ChartStyle,
 }
 
 impl Default for ImportOptions {
     fn default() -> Self {
-        Self { tier: Tier::default(), assets_dir: "assets".into() }
+        Self { tier: Tier::default(), assets_dir: "assets".into(), charts: ChartStyle::default() }
     }
 }
 
