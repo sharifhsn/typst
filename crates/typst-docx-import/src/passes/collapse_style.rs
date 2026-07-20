@@ -11,7 +11,8 @@
 //! inside [`Block::Heading`] bodies, not just when they match the doc default.
 
 use crate::tdoc::{
-    Block, Chart, ChartContent, Figure, Inline, Inlines, List, Stmt, Table, TextStyle, TypstDoc,
+    push_furniture_trees, Block, Chart, ChartContent, Figure, Inline, Inlines, List, Stmt, Table,
+    TextStyle, TypstDoc,
 };
 
 /// Entry point: collapse every run in the document — body *and* header/footer
@@ -76,6 +77,24 @@ fn walk_block(block: &mut Block, default: &TextStyle) {
             }
         }
         Block::Chart(Chart { content: ChartContent::Plot(_), .. }) => {}
+        // A later section's own content and header/footer furniture — see
+        // `TypstDoc::block_trees_mut`'s doc comment for why this pass has to
+        // reach both *here*, inline, rather than via a separate block-tree
+        // entry (a `Block::Section` lives inside the same tree as everything
+        // else in `doc.body`, so there is no second, independent mutable
+        // borrow of it to hand out).
+        Block::Section(section) => {
+            let mut trees = Vec::new();
+            push_furniture_trees(&mut section.setup, &mut trees);
+            for tree in trees {
+                for block in tree {
+                    walk_block(block, default);
+                }
+            }
+            for block in &mut section.body {
+                walk_block(block, default);
+            }
+        }
         Block::CodeBlock { .. }
         | Block::Equation { .. }
         | Block::Rule

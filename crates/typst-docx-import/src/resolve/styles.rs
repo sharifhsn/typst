@@ -48,7 +48,12 @@ fn merge_run(base: &RunProps, over: &RunProps) -> RunProps {
 /// counterpart of [`merge_run`]. `bottom_border` has no "unset" state in the
 /// model (it's a plain `bool`, not a `Toggle`), so it's OR'd: a border
 /// inherited from a style isn't clearable by a paragraph that simply doesn't
-/// mention one.
+/// mention one. `sect_pr` is never meaningfully set on a *style's* `pPr` (a
+/// section boundary is document-instance data, not a formatting template), so
+/// it follows the same "direct wins" rule as every other field here purely
+/// for mechanical consistency — nothing actually reads it off the resolved,
+/// effective properties this function produces (see [`ParaProps::sect_pr`]'s
+/// own doc comment for who does).
 fn merge_para(base: &ParaProps, over: &ParaProps) -> ParaProps {
     ParaProps {
         style_id: over.style_id.clone().or_else(|| base.style_id.clone()),
@@ -59,6 +64,7 @@ fn merge_para(base: &ParaProps, over: &ParaProps) -> ParaProps {
         indent_left: over.indent_left.or(base.indent_left),
         mark_props: merge_run(&base.mark_props, &over.mark_props),
         bottom_border: base.bottom_border || over.bottom_border,
+        sect_pr: over.sect_pr.clone().or_else(|| base.sect_pr.clone()),
     }
 }
 

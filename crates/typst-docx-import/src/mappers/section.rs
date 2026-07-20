@@ -27,18 +27,14 @@ pub(crate) fn lower_section(sect: &SectPr, ctx: &mut LowerCtx) -> PageSetup {
     let header = lower_furniture(&sect.header_refs, sect.title_pg, ctx);
     let footer = lower_furniture(&sect.footer_refs, sect.title_pg, ctx);
 
-    // Both fidelity gaps below are structural to this feature, not specific
-    // to any one document, so they're recorded whenever furniture is emitted
-    // at all rather than gated on some more specific (and here, unavailable)
-    // signal — `ImportReport` dedupes, so this only ever costs one line.
+    // Structural to this feature, not specific to any one document, so it's
+    // recorded whenever furniture is emitted at all rather than gated on some
+    // more specific (and here, unavailable) signal — `ImportReport` dedupes,
+    // so this only ever costs one line.
     if header.is_some() || footer.is_some() {
         ctx.report.approximate(
             "header/footer margins",
             "w:pgMar's header/footer page-edge distance isn't mapped to Typst's page margins",
-        );
-        ctx.report.approximate(
-            "header/footer sections",
-            "only the document's final section's header/footer is honored; it is applied to every page",
         );
     }
 
@@ -51,6 +47,8 @@ pub(crate) fn lower_section(sect: &SectPr, ctx: &mut LowerCtx) -> PageSetup {
         columns: sect.columns.filter(|&n| n > 1),
         header,
         footer,
+        page_num_fmt: sect.page_num_fmt.clone(),
+        page_num_start: sect.page_num_start,
     }
 }
 
@@ -103,12 +101,12 @@ fn resolve_variant(
         return None;
     };
     let key = furniture_key(&rel.target);
-    let Some(body) = package.furniture.get(&key) else {
+    let Some(items) = package.furniture.get(&key) else {
         ctx.report.drop("header/footer", "referenced part not found in package");
         return None;
     };
 
-    if uses_tab_stops(&body.items) {
+    if uses_tab_stops(items) {
         ctx.report.approximate(
             "header/footer tab stops",
             "w:tab/w:ptab columns become plain spaced text, not a multi-column layout",
@@ -119,7 +117,7 @@ fn resolve_variant(
     // as inside a table cell (Typst rejects it outright) — see
     // `mappers::table::lower_cell`'s equivalent guard.
     let was_in_container = ctx.enter_container();
-    let blocks = lower_items(&body.items, ctx);
+    let blocks = lower_items(items, ctx);
     ctx.exit_container(was_in_container);
     (!is_visually_empty(&blocks)).then_some(blocks)
 }
@@ -160,6 +158,13 @@ fn is_visually_empty(blocks: &[Block]) -> bool {
         | Block::Figure(_)
         | Block::CodeBlock { .. }
         | Block::Equation { .. } => false,
+        // A furniture body is a flat item list lowered from a `w:hdr`/
+        // `w:ftr` part, which can never carry its own `w:sectPr` — a
+        // `Block::Section` structurally never reaches here. Treated as
+        // non-empty rather than matched with `unreachable!()`, since being
+        // conservative costs nothing and this match must stay exhaustive as
+        // `Block` grows.
+        Block::Section(_) => false,
         Block::Rule | Block::Break(_) => true,
         Block::Verbatim(s) => s.trim().is_empty(),
     })
@@ -194,7 +199,7 @@ mod tests {
     use super::*;
     use crate::opts::ImportOptions;
     use crate::report::ImportReport;
-    use crate::wml::model::{Body, Paragraph, Relationship, Run, RunProps, WmlPackage};
+    use crate::wml::model::{Paragraph, Relationship, Run, RunProps, WmlPackage};
 
     fn text_paragraph(text: &str) -> BodyItem {
         BodyItem::Paragraph(Paragraph {
@@ -223,7 +228,7 @@ mod tests {
             Relationship { target: "header1.xml".into(), external: false },
         );
         let mut furniture = FxHashMap::default();
-        furniture.insert("word/header1.xml".into(), Body { items, sect_pr: None });
+        furniture.insert("word/header1.xml".into(), items);
         WmlPackage { rels, furniture, even_and_odd_headers, ..Default::default() }
     }
 
@@ -264,14 +269,8 @@ mod tests {
             Relationship { target: "header2.xml".into(), external: false },
         );
         let mut furniture = FxHashMap::default();
-        furniture.insert(
-            "word/header1.xml".into(),
-            Body { items: vec![text_paragraph("Default")], sect_pr: None },
-        );
-        furniture.insert(
-            "word/header2.xml".into(),
-            Body { items: vec![text_paragraph("First page")], sect_pr: None },
-        );
+        furniture.insert("word/header1.xml".into(), vec![text_paragraph("Default")]);
+        furniture.insert("word/header2.xml".into(), vec![text_paragraph("First page")]);
         let package = WmlPackage { rels, furniture, ..Default::default() };
 
         let refs =
@@ -292,16 +291,10 @@ mod tests {
 
     #[test]
     fn even_and_odd_headers_setting_gates_whether_the_even_variant_is_honored() {
-        fn furniture_map() -> FxHashMap<EcoString, Body> {
+        fn furniture_map() -> FxHashMap<EcoString, Vec<BodyItem>> {
             let mut furniture = FxHashMap::default();
-            furniture.insert(
-                "word/header1.xml".into(),
-                Body { items: vec![text_paragraph("Default")], sect_pr: None },
-            );
-            furniture.insert(
-                "word/header2.xml".into(),
-                Body { items: vec![text_paragraph("Even page")], sect_pr: None },
-            );
+            furniture.insert("word/header1.xml".into(), vec![text_paragraph("Default")]);
+            furniture.insert("word/header2.xml".into(), vec![text_paragraph("Even page")]);
             furniture
         }
         fn rels_map() -> FxHashMap<EcoString, Relationship> {

@@ -11,9 +11,8 @@ use std::path::PathBuf;
 use crate::opts::ImportOptions;
 use crate::tdoc::{
     Align, Block, BreakKind, Chart, ChartContent, Figure, Furniture, Inline, Inlines, List,
-    LegendPos, Margins, PageSetup, ParStyle, Plot, PlotKind, PlotSeries, Script, Stmt, Table,
-    TableCell,
-    TextStyle, TypstDoc,
+    LegendPos, Margins, PageSetup, ParStyle, Plot, PlotKind, PlotSeries, Script, Section,
+    SectionStart, Stmt, Table, TableCell, TextStyle, TypstDoc,
 };
 use crate::wml::model::WmlPackage;
 
@@ -35,6 +34,7 @@ pub fn emit(
         seen_assets: HashSet::new(),
         used_ruby: false,
         used_plot: false,
+        current_page: PageSetup::default(),
     };
 
     let mut out = String::new();
@@ -87,6 +87,13 @@ struct Emitter<'a> {
     /// only for documents that actually need the package. Mirrors
     /// `used_ruby` exactly — see its doc comment.
     used_plot: bool,
+    /// The page setup currently in effect — the preamble's initial
+    /// `Stmt::SetPage`, updated to each [`Section`]'s own setup as
+    /// [`Self::render_section`] renders it in document order. Lets a later
+    /// section restate only the `#set page(..)` arguments that actually
+    /// *differ* from the section before, instead of repeating full geometry
+    /// at every break (see [`Self::render_set_page_diff`]).
+    current_page: PageSetup,
 }
 
 /// Word's `w:ruby` has no Typst counterpart, so documents that use furigana
@@ -135,6 +142,7 @@ impl Emitter<'_> {
             Block::Rule => "#line(length: 100%)".to_string(),
             Block::Break(BreakKind::Page) => "#pagebreak()".to_string(),
             Block::Break(BreakKind::Column) => "#colbreak()".to_string(),
+            Block::Section(section) => self.render_section(section),
             Block::Verbatim(s) => s.to_string(),
         }
     }
@@ -199,7 +207,10 @@ impl Emitter<'_> {
 
     fn render_stmt(&mut self, stmt: &Stmt) -> String {
         match stmt {
-            Stmt::SetPage(page) => self.render_set_page(page),
+            Stmt::SetPage(page) => {
+                self.current_page = page.clone();
+                self.render_set_page(page)
+            }
             Stmt::SetText(style) => render_set_text(style),
             Stmt::SetPar(style) => render_set_par(style),
             Stmt::Verbatim(s) => s.to_string(),
@@ -223,28 +234,161 @@ impl Emitter<'_> {
         if let Some(columns) = page.columns {
             simple_args.push(format!("columns: {columns}"));
         }
+        if let Some(numbering) = page_numbering_arg(page.page_num_fmt.as_deref()) {
+            simple_args.push(format!("numbering: {numbering}"));
+        }
 
         // No furniture: keep the single-line form every other `#set page(..)`
         // call already uses. A header/footer's content can itself span
         // several lines (a `context` block with conditional branches), so
         // once one is present every argument gets its own indented line
         // instead — a 900-character `#set page(..)` line is not "readable".
-        if page.header.is_none() && page.footer.is_none() {
-            return format!("#set page({})", simple_args.join(", "));
+        let call = if page.header.is_none() && page.footer.is_none() {
+            format!("#set page({})", simple_args.join(", "))
+        } else {
+            let mut lines = vec!["#set page(".to_string()];
+            for arg in &simple_args {
+                lines.push(format!("  {arg},"));
+            }
+            if let Some(header) = &page.header {
+                push_indented(&mut lines, &self.render_furniture_arg("header", header));
+            }
+            if let Some(footer) = &page.footer {
+                push_indented(&mut lines, &self.render_furniture_arg("footer", footer));
+            }
+            lines.push(")".to_string());
+            lines.join("\n")
+        };
+
+        // `w:pgNumType/@w:start` — a restart right at the top of the
+        // document (a thesis's front matter starting its roman numbering at
+        // "i" rather than continuing from nothing) is exactly as real as one
+        // on a later section, so the first section's own preamble `#set
+        // page(..)` gets the same trailing `#counter(page).update(..)`
+        // `Self::render_section` adds for a later one.
+        match page.page_num_start {
+            Some(start) => format!("{call}\n#counter(page).update({start})"),
+            None => call,
+        }
+    }
+
+    /// Render one [`Block::Section`] — a Word section after the first (see
+    /// `lower::lower`, which lowers the document's first section flat into
+    /// the preamble/body instead).
+    ///
+    /// A `Continuous` section whose page setup is otherwise unchanged from the
+    /// section before it (see [`PageSetup::matches_except_columns`]) is the
+    /// one case Typst can honor without a page break at all: it becomes
+    /// `#columns(n)[..]` wrapping the section's own content, or — reverting to
+    /// a single column — just that content with no wrapper at all (verified:
+    /// `#columns(2)[..]` on its own, no `#pagebreak()`/`#set page` beside it,
+    /// compiles and lays out as Word's continuous multi-column section).
+    /// Every other start type, and a `Continuous` section that changes
+    /// anything else, gets an explicit break followed by a `#set page(..)`
+    /// restating only what differs from the section before (see
+    /// [`Self::render_set_page_diff`]) — `lower::lower` is what records the
+    /// resulting approximation for the `Continuous` case, since this function
+    /// has no [`crate::report::ImportReport`] to record one in (see this
+    /// module's own doc comment: it renders the tree it's handed, it doesn't
+    /// infer anything about the document).
+    fn render_section(&mut self, section: &Section) -> String {
+        let previous = std::mem::replace(&mut self.current_page, section.setup.clone());
+        let body = self.render_cell_body(&section.body);
+
+        if section.start == SectionStart::Continuous
+            && section.setup.matches_except_columns(&previous)
+        {
+            return match section.setup.columns {
+                Some(n) if n > 1 => format!("#columns({n})[{body}]"),
+                _ => body,
+            };
+        }
+
+        let mut out = render_break_directive(section.start);
+        if let Some(set_page) = self.render_set_page_diff(&previous, &section.setup) {
+            out.push('\n');
+            out.push_str(&set_page);
+        }
+        if let Some(start) = section.setup.page_num_start {
+            out.push('\n');
+            out.push_str(&format!("#counter(page).update({start})"));
+        }
+        out.push_str("\n\n");
+        out.push_str(&body);
+        out
+    }
+
+    /// `#set page(..)` restating only the arguments that differ from
+    /// `previous` — keeps a multi-section document from repeating full page
+    /// geometry at every break, matching the design's own "stays readable"
+    /// goal. `None` if nothing does — the break (and any
+    /// `#counter(page).update(..)` [`Self::render_section`] adds separately)
+    /// is enough on its own.
+    fn render_set_page_diff(&mut self, previous: &PageSetup, next: &PageSetup) -> Option<String> {
+        let mut simple_args = Vec::new();
+        if next.width_pt != previous.width_pt
+            && let Some(width) = next.width_pt
+        {
+            simple_args.push(format!("width: {}", pt(width)));
+        }
+        if next.height_pt != previous.height_pt
+            && let Some(height) = next.height_pt
+        {
+            simple_args.push(format!("height: {}", pt(height)));
+        }
+        if next.margin != previous.margin
+            && let Some(margin) = &next.margin
+        {
+            simple_args.push(format!("margin: {}", render_margins(margin)));
+        }
+        if next.flipped != previous.flipped {
+            simple_args.push(format!("flipped: {}", next.flipped));
+        }
+        if next.columns != previous.columns
+            && let Some(columns) = next.columns
+        {
+            simple_args.push(format!("columns: {columns}"));
+        }
+        if next.page_num_fmt != previous.page_num_fmt
+            && let Some(numbering) = page_numbering_arg(next.page_num_fmt.as_deref())
+        {
+            simple_args.push(format!("numbering: {numbering}"));
+        }
+
+        let header_changed = next.header != previous.header;
+        let footer_changed = next.footer != previous.footer;
+        if simple_args.is_empty() && !header_changed && !footer_changed {
+            return None;
+        }
+        if !header_changed && !footer_changed {
+            return Some(format!("#set page({})", simple_args.join(", ")));
         }
 
         let mut lines = vec!["#set page(".to_string()];
         for arg in &simple_args {
             lines.push(format!("  {arg},"));
         }
-        if let Some(header) = &page.header {
-            push_indented(&mut lines, &self.render_furniture_arg("header", header));
+        if header_changed {
+            push_indented(&mut lines, &self.render_page_furniture_diff("header", &next.header));
         }
-        if let Some(footer) = &page.footer {
-            push_indented(&mut lines, &self.render_furniture_arg("footer", footer));
+        if footer_changed {
+            push_indented(&mut lines, &self.render_page_furniture_diff("footer", &next.footer));
         }
         lines.push(")".to_string());
-        lines.join("\n")
+        Some(lines.join("\n"))
+    }
+
+    /// One `header:`/`footer:` argument for [`Self::render_set_page_diff`]:
+    /// the furniture content if this section has one, or `none` to explicitly
+    /// clear what the section before it set. Typst's page-level `set` rules
+    /// accumulate down the style chain rather than resetting between calls,
+    /// so simply omitting the argument when a section drops its header would
+    /// leave the *previous* section's header showing on every later page.
+    fn render_page_furniture_diff(&mut self, name: &str, furniture: &Option<Furniture>) -> String {
+        match furniture {
+            Some(furniture) => self.render_furniture_arg(name, furniture),
+            None => format!("{name}: none"),
+        }
     }
 
     /// Render one `header:`/`footer:` argument. A furniture with only a
@@ -501,6 +645,38 @@ fn push_indented(lines: &mut Vec<String>, arg: &str) {
     }
     buf.push(',');
     lines.push(buf);
+}
+
+/// The `#pagebreak(..)` a [`Section`] needs before its own content.
+/// `Continuous` only reaches here when [`Emitter::render_section`] has
+/// already decided a break can't be avoided (its page setup changed in a way
+/// Typst can't apply mid-page) — a plain break is the right fallback there,
+/// same as `NextPage`/`NextColumn` (Typst has no "next column, possibly also
+/// next page" primitive, so `NextColumn` is treated the same as `NextPage`,
+/// per this crate's own `SectionStart` doc comment).
+fn render_break_directive(start: SectionStart) -> String {
+    match start {
+        SectionStart::EvenPage => "#pagebreak(to: \"even\")".to_string(),
+        SectionStart::OddPage => "#pagebreak(to: \"odd\")".to_string(),
+        SectionStart::NextPage | SectionStart::NextColumn | SectionStart::Continuous => {
+            "#pagebreak()".to_string()
+        }
+    }
+}
+
+/// `w:pgNumType/@w:fmt` → Typst's `numbering:` glyph string, verified against
+/// real `typst compile` output for each. `None` for a format this importer
+/// doesn't recognize (kept as whatever the section already had, rather than
+/// guessed at) or when there's no format to map at all.
+fn page_numbering_arg(fmt: Option<&str>) -> Option<&'static str> {
+    Some(match fmt? {
+        "decimal" => "\"1\"",
+        "lowerRoman" => "\"i\"",
+        "upperRoman" => "\"I\"",
+        "lowerLetter" => "\"a\"",
+        "upperLetter" => "\"A\"",
+        _ => return None,
+    })
 }
 
 fn render_margins(margin: &Margins) -> String {

@@ -28,14 +28,17 @@ pub struct WmlPackage {
     pub media: FxHashMap<EcoString, Vec<u8>>,
     /// Parsed `w:hdr`/`w:ftr` parts by zip name (`word/header1.xml` → body).
     /// Headers and footers share one map: they are structurally identical and
-    /// the `sectPr` reference is what gives a part its role.
-    pub furniture: FxHashMap<EcoString, Body>,
+    /// the `sectPr` reference is what gives a part's role. A flat item list
+    /// rather than a [`Body`] — a header/footer part can never carry its own
+    /// `w:sectPr`, so there is no section boundary to model.
+    pub furniture: FxHashMap<EcoString, Vec<BodyItem>>,
     /// `settings.xml` declares `w:evenAndOddHeaders`.
     pub even_and_odd_headers: bool,
     /// `word/footnotes.xml` bodies by `w:id`, boilerplate separators excluded.
-    pub footnotes: FxHashMap<i64, Body>,
+    /// Flat, same reasoning as [`Self::furniture`].
+    pub footnotes: FxHashMap<i64, Vec<BodyItem>>,
     /// `word/endnotes.xml`, likewise.
-    pub endnotes: FxHashMap<i64, Body>,
+    pub endnotes: FxHashMap<i64, Vec<BodyItem>>,
     /// Parsed chart parts by zip name (`word/charts/chart1.xml` → data). A
     /// chart's `r:id` reference (see [`RunContent::Chart`]) resolves through
     /// [`Self::rels`] to a target *name*; this map is keyed by the full zip
@@ -50,11 +53,29 @@ pub struct Relationship {
     pub external: bool,
 }
 
+/// `word/document.xml`'s `w:body`: an ordered list of sections, always at
+/// least one. A `w:sectPr` inside a paragraph's `w:pPr` marks the *end* of a
+/// section — that paragraph is the section's last item, and the `sectPr`
+/// describes the section just finished; the body-level `w:sectPr` (a direct
+/// child of `w:body`, always last) describes the final section. A document
+/// with no `w:sectPr` at all — neither on a paragraph nor at the body's end —
+/// is one section with default properties (see `wml::parse::parse_document_body`).
+///
+/// Only `word/document.xml`'s own body is shaped this way: a header/footer
+/// part, a footnote/endnote body, and a text box's content are all the same
+/// paragraph/table content but can never carry a section boundary of their
+/// own, so they stay a plain `Vec<BodyItem>` (see [`WmlPackage::furniture`]).
 #[derive(Debug, Default)]
 pub struct Body {
+    pub sections: Vec<Section>,
+}
+
+/// One Word section: the content it governs, and the page setup that applies
+/// to it (`w:sectPr`).
+#[derive(Debug, Default)]
+pub struct Section {
     pub items: Vec<BodyItem>,
-    /// The final `w:sectPr` (body-level page geometry).
-    pub sect_pr: Option<SectPr>,
+    pub props: SectPr,
 }
 
 #[derive(Debug)]
@@ -241,6 +262,13 @@ pub struct ParaProps {
     pub mark_props: RunProps,
     /// Whether a `w:pBdr/w:bottom` (a rule-like bottom border) is present.
     pub bottom_border: bool,
+    /// `w:pPr/w:sectPr` — present only when this paragraph is the *last* item
+    /// of a section (see [`Section`]); describes the section it closes. Direct,
+    /// per-instance data: a style's own `pPr` is never a document section
+    /// boundary, so this is never resolved through the `basedOn`/style chain
+    /// (see `resolve::styles::merge_para`) — only [`crate::wml::parse::
+    /// parse_document_body`] ever reads it, straight off the raw paragraph.
+    pub sect_pr: Option<SectPr>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -396,6 +424,39 @@ pub struct SectPr {
     pub footer_refs: Vec<FurnitureRef>,
     /// `w:titlePg` — the first page takes its own header/footer.
     pub title_pg: bool,
+    /// `w:type` — how this section starts. Absent means `nextPage` (Word's own
+    /// default when the element is missing).
+    pub start: SectionStart,
+    /// `w:pgNumType/@w:fmt` — the page-number format, if the section sets one.
+    /// Absent means "inherit whatever the previous section had" (Word never
+    /// resets the format just because a section doesn't restate it).
+    pub page_num_fmt: Option<EcoString>,
+    /// `w:pgNumType/@w:start` — the number this section restarts at. Absent
+    /// means no restart here (the counter just keeps incrementing).
+    pub page_num_start: Option<i64>,
+}
+
+/// `w:sectPr/w:type/@w:val` — how a section starts relative to the one before
+/// it. Mirrored (not duplicated) in the Typst IR as `tdoc::SectionStart`
+/// (re-exported from here) since both sides mean exactly the same thing.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+pub enum SectionStart {
+    /// Starts on a new page. Word's own default when `w:type` is absent.
+    #[default]
+    NextPage,
+    /// Stays on the *same* page as the section before it — a column-count or
+    /// page-numbering change with no visible page break. The one start type
+    /// Typst can sometimes honor without a `#pagebreak()` at all (see
+    /// `emit::render_section`).
+    Continuous,
+    /// Starts on the next even-numbered page.
+    EvenPage,
+    /// Starts on the next odd-numbered page.
+    OddPage,
+    /// Starts in the next column of a multi-column layout. Real documents use
+    /// this vanishingly rarely; Typst has no "next column, possibly also next
+    /// page" primitive, so it's treated the same as `NextPage`.
+    NextColumn,
 }
 
 /// A `w:headerReference`/`w:footerReference`: which page class it applies to,

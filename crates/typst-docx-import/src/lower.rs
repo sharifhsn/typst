@@ -7,8 +7,8 @@ use crate::mappers;
 use crate::mappers::para::{ParaKind, ParaResult};
 use crate::opts::ImportOptions;
 use crate::report::ImportReport;
-use crate::tdoc::{Block, List, ListItem, Stmt, TextStyle, TypstDoc};
-use crate::wml::model::{BodyItem, RunProps, WmlPackage};
+use crate::tdoc::{self, Block, List, ListItem, Stmt, TextStyle, TypstDoc};
+use crate::wml::model::{BodyItem, RunProps, SectionStart, WmlPackage};
 
 /// Everything the lowering phase threads through: the package being read, the
 /// options that govern how it's lowered, the loss report, and the guards
@@ -136,20 +136,59 @@ impl<'a> LowerCtx<'a> {
 
 pub(crate) fn lower(ctx: &mut LowerCtx) -> TypstDoc {
     let mut doc = TypstDoc::default();
-    let package = ctx.package;
 
-    // Preamble: page geometry (plus header/footer) from the body's
-    // `w:sectPr`, and a document default `#set text(..)` so bare runs
-    // inherit the doc's base font/size.
-    if let Some(sect_pr) = &package.body.sect_pr {
-        let page = mappers::section::lower_section(sect_pr, ctx);
-        doc.preamble.push(Stmt::SetPage(page));
-    }
-    if let Some(style) = default_text_style(&package.styles.default_run) {
+    // The document's first section keeps the exact behaviour a single-section
+    // document has always had: its page geometry (plus header/footer) goes to
+    // the preamble as a `#set page(..)`, and its content is lowered flat into
+    // `doc.body` — no `Block::Section` wrapper, no synthesized page break.
+    // This is what makes a single-section import byte-identical to before.
+    let Some((first, rest)) = ctx.package.body.sections.split_first() else {
+        // `Body::sections` is only ever empty for a hand-built `Body::default()`
+        // (real parses always produce at least one) — nothing to lower.
+        return doc;
+    };
+    let first_setup = mappers::section::lower_section(&first.props, ctx);
+    doc.preamble.push(Stmt::SetPage(first_setup.clone()));
+
+    // A document default `#set text(..)` so bare runs inherit the doc's base
+    // font/size — after the page setup, matching the order every existing
+    // test and fixture already expects.
+    if let Some(style) = default_text_style(&ctx.package.styles.default_run) {
         doc.preamble.push(Stmt::SetText(style));
     }
 
-    doc.body = lower_items(&package.body.items, ctx);
+    doc.body = lower_items(&first.items, ctx);
+
+    // Every section after the first becomes one `Block::Section`, resolving
+    // its own page setup and header/footer independently (the existing
+    // `lower_furniture` machinery already takes a `SectPr`; this just calls it
+    // once per section instead of once for the whole document).
+    let mut previous = first_setup;
+    for section in rest {
+        let setup = mappers::section::lower_section(&section.props, ctx);
+        let start = section.props.start;
+
+        // A `continuous` section is only safe to render without a page break
+        // when the *only* thing it changes is the column count (see
+        // `PageSetup::matches_except_columns`) — Typst has no way to change
+        // page size, margins, header/footer, or page numbering without
+        // starting a new page. When something else changed too, `emit`
+        // still has to break there (see `emit::render_section`), so the
+        // approximation is recorded here, at lower time, where `ctx.report`
+        // is reachable.
+        if start == SectionStart::Continuous && !setup.matches_except_columns(&previous) {
+            ctx.report.approximate(
+                "continuous section",
+                "Word kept this section on the same page, but its page setup changed in a \
+                 way Typst can only apply starting a new page",
+            );
+        }
+
+        let body = lower_items(&section.items, ctx);
+        doc.body.push(Block::Section(tdoc::Section { setup: setup.clone(), start, body }));
+        previous = setup;
+    }
+
     doc
 }
 
@@ -259,11 +298,18 @@ mod tests {
     use crate::tdoc::Inline;
     use crate::wml::model::{
         Body, LevelFormat, NumRef, Numbering, ParaProps, Paragraph, Run, RunContent, RunItem,
-        RunProps, Style, StyleKind, Styles,
+        RunProps, Section, SectPr, Style, StyleKind, Styles,
     };
 
     fn text_run(text: &str) -> RunItem {
         RunItem::Run(Run { props: RunProps::default(), content: vec![RunContent::Text(text.into())] })
+    }
+
+    /// A single-section `Body` with default page properties — the shape every
+    /// test in this module wants, since none of them are testing sectioning
+    /// itself (that's `wml::parse`'s own test module).
+    fn single_section(items: Vec<BodyItem>) -> Body {
+        Body { sections: vec![Section { items, props: SectPr::default() }] }
     }
 
     #[test]
@@ -282,13 +328,10 @@ mod tests {
             },
         );
         let package = WmlPackage {
-            body: Body {
-                items: vec![BodyItem::Paragraph(Paragraph {
-                    props: ParaProps { style_id: Some("Heading1".into()), ..Default::default() },
-                    runs: vec![text_run("Title")],
-                })],
-                sect_pr: None,
-            },
+            body: single_section(vec![BodyItem::Paragraph(Paragraph {
+                props: ParaProps { style_id: Some("Heading1".into()), ..Default::default() },
+                runs: vec![text_run("Title")],
+            })]),
             styles: Styles { by_id, ..Default::default() },
             ..Default::default()
         };
@@ -325,7 +368,7 @@ mod tests {
         };
 
         let package = WmlPackage {
-            body: Body { items: vec![para("Item 1"), para("Item 2")], sect_pr: None },
+            body: single_section(vec![para("Item 1"), para("Item 2")]),
             numbering: Numbering { instances, abstract_nums },
             ..Default::default()
         };
@@ -354,13 +397,10 @@ mod tests {
             content: vec![RunContent::Text("Hi".into())],
         });
         let package = WmlPackage {
-            body: Body {
-                items: vec![BodyItem::Paragraph(Paragraph {
-                    props: ParaProps::default(),
-                    runs: vec![run],
-                })],
-                sect_pr: None,
-            },
+            body: single_section(vec![BodyItem::Paragraph(Paragraph {
+                props: ParaProps::default(),
+                runs: vec![run],
+            })]),
             ..Default::default()
         };
 
@@ -381,6 +421,119 @@ mod tests {
             },
             other => panic!("expected a paragraph, got {other:?}"),
         }
+    }
+
+    /// The first section is lowered flat (no `Block::Section`); every section
+    /// after it becomes its own `Block::Section`, in order.
+    #[test]
+    fn only_sections_after_the_first_become_block_section() {
+        let package = WmlPackage {
+            body: Body {
+                sections: vec![
+                    Section {
+                        items: vec![para_item("first")],
+                        props: SectPr { page_w: Some(12240), ..Default::default() },
+                    },
+                    Section {
+                        items: vec![para_item("second")],
+                        props: SectPr { page_w: Some(15840), ..Default::default() },
+                    },
+                ],
+            },
+            ..Default::default()
+        };
+
+        let mut report = ImportReport::default();
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
+        let doc = lower(&mut ctx);
+
+        // Section 1's geometry hoisted to the preamble, its content flat.
+        assert!(matches!(&doc.preamble[0], Stmt::SetPage(p) if p.width_pt.is_some()));
+        assert_eq!(doc.body.len(), 2);
+        assert!(matches!(&doc.body[0], Block::Paragraph { .. }));
+
+        match &doc.body[1] {
+            Block::Section(section) => {
+                assert_eq!(
+                    section.setup.width_pt,
+                    Some(typst_ooxml_core::units::twip_to_abs(15840.0).to_pt())
+                );
+                assert_eq!(section.body.len(), 1);
+            }
+            other => panic!("expected a Block::Section, got {other:?}"),
+        }
+    }
+
+    /// A `continuous` section that changes something besides columns (here,
+    /// the page width) can't stay on the same page in Typst, so lowering
+    /// records the approximation right where it has `ctx.report` to do so —
+    /// `emit` itself has none (see `emit`'s own module doc comment).
+    #[test]
+    fn continuous_section_forced_to_break_records_an_approximation() {
+        let package = WmlPackage {
+            body: Body {
+                sections: vec![
+                    Section {
+                        items: vec![para_item("first")],
+                        props: SectPr { page_w: Some(12240), ..Default::default() },
+                    },
+                    Section {
+                        items: vec![para_item("second")],
+                        props: SectPr {
+                            page_w: Some(15840),
+                            start: SectionStart::Continuous,
+                            ..Default::default()
+                        },
+                    },
+                ],
+            },
+            ..Default::default()
+        };
+
+        let mut report = ImportReport::default();
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
+        lower(&mut ctx);
+
+        assert!(
+            report.notes.iter().any(|n| n.what == "continuous section"),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// A `continuous` section that changes only the column count needs no
+    /// approximation at all — that's exactly the case Typst can honor.
+    #[test]
+    fn continuous_section_changing_only_columns_records_no_approximation() {
+        let package = WmlPackage {
+            body: Body {
+                sections: vec![
+                    Section { items: vec![para_item("first")], props: SectPr::default() },
+                    Section {
+                        items: vec![para_item("second")],
+                        props: SectPr {
+                            columns: Some(2),
+                            start: SectionStart::Continuous,
+                            ..Default::default()
+                        },
+                    },
+                ],
+            },
+            ..Default::default()
+        };
+
+        let mut report = ImportReport::default();
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
+        lower(&mut ctx);
+
+        assert!(report.notes.iter().all(|n| n.what != "continuous section"), "{:?}", report.notes);
+    }
+
+    fn para_item(text: &str) -> BodyItem {
+        BodyItem::Paragraph(Paragraph { props: ParaProps::default(), runs: vec![text_run(text)] })
     }
 
     // The five tests below moved here from `report.rs` — they exercise

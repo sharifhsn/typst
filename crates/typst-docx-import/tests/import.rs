@@ -1911,3 +1911,144 @@ fn section_column_count_survives() {
     let src = import(doc(r#"<w:cols w:space="708"/>"#));
     assert!(!src.contains("columns:"), "single column needlessly stated:\n{src}");
 }
+
+// --- Multi-section documents -------------------------------------------------
+
+fn import_document(doc_xml: &str) -> String {
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", doc_xml.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+    import_docx(&bytes).expect("import should succeed").source
+}
+
+/// Two `nextPage` sections (the WSU-thesis shape: every section starts a new
+/// page) must produce a real `#pagebreak()` between them and a *second*
+/// `#set page(..)` for the section after it — the top blocker this feature
+/// exists to fix (today only the final section's geometry is honored at all).
+#[test]
+fn two_next_page_sections_produce_a_break_and_a_second_set_page() {
+    let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+  <w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>First section</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Second section</w:t></w:r></w:p>
+  <w:sectPr><w:pgSz w:w="16838" w:h="11906"/></w:sectPr>
+</w:body></w:document>"#;
+
+    let src = import_document(doc);
+    assert!(src.contains("First section"), "{src}");
+    assert!(src.contains("Second section"), "{src}");
+    assert!(src.contains("#pagebreak()"), "missing page break between sections:\n{src}");
+    // The preamble's own `#set page(..)` plus a second one for the section
+    // after the break — not the "final section applied to the whole
+    // document" behaviour this feature replaces.
+    assert_eq!(src.matches("#set page(").count(), 2, "{src}");
+    assert!(src.contains("width:"), "second section's changed width was dropped:\n{src}");
+}
+
+/// The ACM case, and the most important one to get right: a `continuous`
+/// section that only changes the column count must render as
+/// `#columns(n)[..]` with **no** page break — Word kept the title block and
+/// the multi-column body on the same page, and emitting a break here would
+/// add a page and wreck the very pagination this feature is meant to
+/// preserve.
+#[test]
+fn continuous_column_change_wraps_in_columns_with_no_page_break() {
+    let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+  <w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>Title block</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Body in columns</w:t></w:r></w:p>
+  <w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:cols w:num="2"/><w:type w:val="continuous"/></w:sectPr>
+</w:body></w:document>"#;
+
+    let src = import_document(doc);
+    assert!(src.contains("#columns(2)["), "missing the columns wrapper:\n{src}");
+    assert!(src.contains("Body in columns"), "{src}");
+    assert!(
+        !src.contains("#pagebreak()"),
+        "a continuous, geometry-unchanged column switch must not break the page:\n{src}"
+    );
+    // No new `#set page(..)` either — only the column count changed, and
+    // that's expressed by the wrapper, not page geometry.
+    assert_eq!(src.matches("#set page(").count(), 1, "{src}");
+}
+
+/// A thesis's front matter in roman numerals, restarting at arabic 1 for the
+/// body (the Georgia Tech shape) — `w:pgNumType/@w:fmt` must reach `set
+/// page(numbering:)` and `@w:start` must reach `#counter(page).update(..)`,
+/// on the section that actually declares them.
+#[test]
+fn page_number_format_and_restart_produce_numbering_and_counter_update() {
+    let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+  <w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgNumType w:fmt="lowerRoman"/></w:sectPr></w:pPr><w:r><w:t>Front matter</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Chapter one</w:t></w:r></w:p>
+  <w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgNumType w:fmt="decimal" w:start="1"/></w:sectPr>
+</w:body></w:document>"#;
+
+    let src = import_document(doc);
+    assert!(src.contains("numbering: \"i\""), "front matter's roman numbering lost:\n{src}");
+    assert!(src.contains("numbering: \"1\""), "body's decimal format lost:\n{src}");
+    assert!(
+        src.contains("#counter(page).update(1)"),
+        "the restart to page 1 was dropped:\n{src}"
+    );
+}
+
+/// Each section resolves its own headers/footers independently — a template
+/// whose front matter and body carry different running heads must keep both,
+/// not just the document's *final* section's (the behaviour this feature
+/// replaces).
+#[test]
+fn per_section_headers_differ() {
+    let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>
+  <w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rId1"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>Front matter</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Chapter one</w:t></w:r></w:p>
+  <w:sectPr><w:headerReference w:type="default" r:id="rId2"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>
+</w:body></w:document>"#;
+
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut rels = Rels::new();
+    rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
+        "header1.xml",
+        RelMode::Internal,
+    );
+    rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
+        "header2.xml",
+        RelMode::Internal,
+    );
+    package.add_xml("word/document.xml", "application/xml", doc.into());
+    package.add_xml(
+        "word/header1.xml",
+        "application/xml",
+        r#"<?xml version="1.0"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Front matter header</w:t></w:r></w:p></w:hdr>"#.into(),
+    );
+    package.add_xml(
+        "word/header2.xml",
+        "application/xml",
+        r#"<?xml version="1.0"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Body header</w:t></w:r></w:p></w:hdr>"#.into(),
+    );
+    package.add_relationships("word/document.xml", &rels).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+    assert!(src.contains("header: [Front matter header]"), "first section's header lost:\n{src}");
+    assert!(src.contains("header: [Body header]"), "second section's header lost:\n{src}");
+}
+
+/// The floor this whole feature must not break: a single-section document
+/// (today's only case) must import exactly as it always has — no
+/// `Block::Section`, no synthesized page break, no stray `#set page(..)`.
+#[test]
+fn single_section_document_is_unaffected() {
+    let docx = build_docx();
+    let src = import_docx(&docx).expect("import should succeed").source;
+
+    assert_eq!(src.matches("#set page(").count(), 1, "{src}");
+    assert!(!src.contains("#pagebreak()"), "no section boundary should mean no break:\n{src}");
+    assert!(!src.contains("#columns("), "single section should never wrap in columns:\n{src}");
+}

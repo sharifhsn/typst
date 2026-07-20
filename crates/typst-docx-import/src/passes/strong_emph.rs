@@ -7,7 +7,8 @@
 //! needs a real `#text(..)` call.
 
 use crate::tdoc::{
-    Block, Chart, ChartContent, Figure, Inline, Inlines, List, Table, TextStyle, TypstDoc,
+    push_furniture_trees, Block, Chart, ChartContent, Figure, Inline, Inlines, List, Table,
+    TextStyle, TypstDoc,
 };
 
 /// Entry point: rewrite bold/italic-only styled runs into `Strong`/`Emph`
@@ -57,6 +58,22 @@ fn walk_block(block: &mut Block) {
             }
         }
         Block::Chart(Chart { content: ChartContent::Plot(_), .. }) => {}
+        // A later section's own content and header/footer furniture — see
+        // `collapse_style::walk_block`'s matching arm (and `TypstDoc::
+        // block_trees_mut`'s doc comment) for why this has to happen here,
+        // inline, rather than via a separate block-tree entry.
+        Block::Section(section) => {
+            let mut trees = Vec::new();
+            push_furniture_trees(&mut section.setup, &mut trees);
+            for tree in trees {
+                for block in tree {
+                    walk_block(block);
+                }
+            }
+            for block in &mut section.body {
+                walk_block(block);
+            }
+        }
         Block::CodeBlock { .. }
         | Block::Equation { .. }
         | Block::Rule

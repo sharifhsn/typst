@@ -8,7 +8,7 @@
 //! `Align::Justify` (Word's common body-text default), and only when there's
 //! a clear majority, never a bare plurality.
 
-use crate::tdoc::{Align, Block, ParStyle, Stmt, TypstDoc};
+use crate::tdoc::{Align, Block, ParStyle, Section, Stmt, TypstDoc};
 
 /// The fraction of top-level paragraphs that must be `Align::Justify` before
 /// this pass hoists it into the preamble.
@@ -17,27 +17,60 @@ const MAJORITY_THRESHOLD: f64 = 0.6;
 /// Entry point: hoist a document-wide `justify` if a strong majority of
 /// top-level paragraphs agree.
 pub fn run(doc: &mut TypstDoc) {
-    let total = doc.body.iter().filter(|b| matches!(b, Block::Paragraph { .. })).count();
+    let total = count_paragraphs(&doc.body);
     if total == 0 {
         return;
     }
-    let justified = doc
-        .body
-        .iter()
-        .filter(|b| matches!(b, Block::Paragraph { style, .. } if style.align == Some(Align::Justify)))
-        .count();
+    let justified = count_justified(&doc.body);
 
     if (justified as f64) / (total as f64) < MAJORITY_THRESHOLD {
         return;
     }
 
     set_preamble_justify(&mut doc.preamble);
+    clear_justify(&mut doc.body);
+}
 
-    for block in &mut doc.body {
-        if let Block::Paragraph { style, .. } = block
-            && style.align == Some(Align::Justify)
-        {
-            style.align = None;
+/// Every top-level paragraph in `blocks`, recursing into a [`Block::Section`]'s
+/// own content — a later Word section's body is still document body text and
+/// gets the same vote the first section's paragraphs do — but never into a
+/// table cell, list item, or footnote (sub-document content that shouldn't
+/// sway a document-wide decision), and never into a section's *header/footer*
+/// furniture either, for the same reason this pass never visits the
+/// preamble's own header/footer (see this module's own doc comment).
+fn count_paragraphs(blocks: &[Block]) -> usize {
+    blocks
+        .iter()
+        .map(|b| match b {
+            Block::Paragraph { .. } => 1,
+            Block::Section(Section { body, .. }) => count_paragraphs(body),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Same walk as [`count_paragraphs`], counting only the `Align::Justify` ones.
+fn count_justified(blocks: &[Block]) -> usize {
+    blocks
+        .iter()
+        .map(|b| match b {
+            Block::Paragraph { style, .. } if style.align == Some(Align::Justify) => 1,
+            Block::Section(Section { body, .. }) => count_justified(body),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Clears the now-redundant per-paragraph `Align::Justify` — the same walk as
+/// [`count_paragraphs`]/[`count_justified`].
+fn clear_justify(blocks: &mut [Block]) {
+    for block in blocks {
+        match block {
+            Block::Paragraph { style, .. } if style.align == Some(Align::Justify) => {
+                style.align = None;
+            }
+            Block::Section(Section { body, .. }) => clear_justify(body),
+            _ => {}
         }
     }
 }

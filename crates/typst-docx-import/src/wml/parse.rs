@@ -18,8 +18,8 @@ use crate::report::ImportReport;
 use crate::wml::model::{
     Body, BodyItem, BreakType, Cell, ChartData, ChartKind, ChartSeries, DrawingRef, Field,
     FurnitureKind, FurnitureRef, LegendPos, LevelFormat, NumRef, Numbering, ParaProps, Paragraph,
-    Relationship, Row, Run, RunContent, RunItem, RunProps, SectPr, Style, StyleKind, Styles,
-    Table, VmlShape, VmlShapeKind, WmlPackage,
+    Relationship, Row, Run, RunContent, RunItem, RunProps, Section, SectPr, SectionStart, Style,
+    StyleKind, Styles, Table, VmlShape, VmlShapeKind, WmlPackage,
 };
 
 // ===========================================================================
@@ -430,7 +430,7 @@ fn parse_document(xml: &str, report: &mut ImportReport) -> Result<Body, ImportEr
             .root_element()
             .children()
             .find(|n| is_element(*n, "body"))
-            .map(|body_node| parse_body_content(body_node, 0))
+            .map(parse_document_body)
     })
     .map_err(xml_err)?;
     body.ok_or_else(|| ImportError::Xml("word/document.xml has no w:body".into()))
@@ -578,28 +578,72 @@ fn splice_node<'a>(child: Node<'a, 'a>, depth: usize, out: &mut Vec<Node<'a, 'a>
     }
 }
 
-/// Walk a body-shaped container's children into a [`Body`]: paragraphs,
-/// tables, and (only meaningful for `w:body`) a trailing `w:sectPr`. Shared
-/// by [`parse_document`] (`word/document.xml`'s `w:body`),
-/// [`parse_furniture_part`] (a `w:hdr`/`w:ftr` part's root), and
-/// [`parse_txbx_content`] (a text box's own content, which is this same
-/// paragraph/table shape) — all hold the same content, so this is the one
-/// place that matches child element names rather than copies drifting apart.
+/// Walk a body-shaped container's children into a flat item list: paragraphs
+/// and tables, in document order. Shared by [`parse_furniture_part`] (a
+/// `w:hdr`/`w:ftr` part's root), [`parse_notes_part`] (a footnote/endnote's
+/// own body), and [`parse_txbx_content`] (a text box's own content) — all
+/// hold the same paragraph/table content, so this is the one place that
+/// matches child element names rather than copies drifting apart. None of
+/// these three can carry a section boundary of their own: `w:sectPr` is only
+/// valid directly inside `word/document.xml`'s `w:body`, or a paragraph's
+/// `w:pPr` there — see [`parse_document_body`] for the one walk that does
+/// need to recognize one.
 ///
 /// `tb_depth` is how many text boxes deep this call is nested — 0 at every
 /// top-level part, incremented only by [`parse_txbx_content`] — see
 /// [`MAX_TEXTBOX_DEPTH`].
-fn parse_body_content(node: Node, tb_depth: usize) -> Body {
-    let mut body = Body::default();
+fn parse_body_content(node: Node, tb_depth: usize) -> Vec<BodyItem> {
+    let mut items = Vec::new();
     for child in unwrap_wrappers(node) {
         match child.tag_name().name() {
-            "p" => body.items.push(BodyItem::Paragraph(parse_paragraph(child, tb_depth))),
-            "tbl" => body.items.push(BodyItem::Table(parse_table(child, 0, tb_depth))),
-            "sectPr" => body.sect_pr = Some(parse_sectpr(child)),
+            "p" => items.push(BodyItem::Paragraph(parse_paragraph(child, tb_depth))),
+            "tbl" => items.push(BodyItem::Table(parse_table(child, 0, tb_depth))),
             _ => {}
         }
     }
-    body
+    items
+}
+
+/// Walk `word/document.xml`'s `w:body` into a [`Body`] of [`Section`]s. A
+/// paragraph whose own `w:pPr` carries a `w:sectPr` is the *last* item of the
+/// section that `sectPr` describes; the body's own trailing `w:sectPr` (a
+/// direct child of `w:body`, per the schema always last) closes the final
+/// section the same way. Unlike [`parse_body_content`], this can't just
+/// collect a flat item list and split it afterward — a section-closing
+/// paragraph has to end up as the last item of *its own* section, which means
+/// watching for `w:pPr/w:sectPr` while items are still being collected.
+///
+/// A document with no `w:sectPr` at all — neither on a paragraph nor at the
+/// body's end — is one section with default properties: this is what
+/// guarantees the returned `Body::sections` is never empty.
+fn parse_document_body(node: Node) -> Body {
+    let mut sections = Vec::new();
+    let mut items = Vec::new();
+    for child in unwrap_wrappers(node) {
+        match child.tag_name().name() {
+            "p" => {
+                let paragraph = parse_paragraph(child, 0);
+                let closing = paragraph.props.sect_pr.clone();
+                items.push(BodyItem::Paragraph(paragraph));
+                if let Some(props) = closing {
+                    sections.push(Section { items: std::mem::take(&mut items), props });
+                }
+            }
+            "tbl" => items.push(BodyItem::Table(parse_table(child, 0, 0))),
+            "sectPr" => {
+                let props = parse_sectpr(child);
+                sections.push(Section { items: std::mem::take(&mut items), props });
+            }
+            _ => {}
+        }
+    }
+    // Trailing content with no closing `sectPr` still needs a home — and a
+    // document with no `sectPr` anywhere at all falls here too, producing
+    // the single default-properties section every caller can rely on.
+    if !items.is_empty() || sections.is_empty() {
+        sections.push(Section { items, props: SectPr::default() });
+    }
+    Body { sections }
 }
 
 // --- word/header*.xml, word/footer*.xml (`w:hdr`/`w:ftr`) ---------------------
@@ -622,7 +666,7 @@ fn parse_furniture_parts(
     reader: &mut Reader,
     rels: &mut FxHashMap<EcoString, Relationship>,
     report: &mut ImportReport,
-) -> FxHashMap<EcoString, Body> {
+) -> FxHashMap<EcoString, Vec<BodyItem>> {
     let mut furniture = FxHashMap::default();
     let names: Vec<EcoString> = reader
         .names()
@@ -640,24 +684,24 @@ fn parse_furniture_parts(
         // rather than aborting the rest of the document — same policy as
         // every other companion part.
         let Some(xml) = read_optional_part(reader, &name, &name, report) else { continue };
-        let mut body = parse_xml(&xml, &name, report, Body::default(), parse_furniture_part);
-        namespace_rel_ids(&mut body.items, &name);
+        let mut items = parse_xml(&xml, &name, report, Vec::new(), parse_furniture_part);
+        namespace_rel_ids(&mut items, &name);
 
         for (rid, rel) in parse_rels_for(reader, &name, report) {
             rels.insert(eco_format!("{name}!{rid}"), rel);
         }
 
-        furniture.insert(name, body);
+        furniture.insert(name, items);
     }
     furniture
 }
 
-/// Parse a `w:hdr`/`w:ftr` part into a [`Body`]. Unlike `word/document.xml`,
-/// there's no wrapping `w:body` — the root element itself is the content
-/// container — but its children are otherwise the same paragraph/table
-/// content [`parse_body_content`] already walks; a furniture part never
-/// carries its own `w:sectPr`.
-fn parse_furniture_part(document: Document) -> Body {
+/// Parse a `w:hdr`/`w:ftr` part into a flat item list. Unlike
+/// `word/document.xml`, there's no wrapping `w:body` — the root element
+/// itself is the content container — but its children are otherwise the same
+/// paragraph/table content [`parse_body_content`] already walks; a furniture
+/// part never carries its own `w:sectPr`.
+fn parse_furniture_part(document: Document) -> Vec<BodyItem> {
     parse_body_content(document.root_element(), 0)
 }
 
@@ -740,7 +784,7 @@ fn is_boilerplate_note(node: Node) -> bool {
 
 /// Parse `word/footnotes.xml`/`word/endnotes.xml` (`element_name` is
 /// `"footnote"`/`"endnote"`, matching the child element `w:footnotes`/
-/// `w:endnotes` actually holds) into a map of `w:id` → [`Body`].
+/// `w:endnotes` actually holds) into a map of `w:id` → flat item list.
 ///
 /// A note's children are ordinary body content — [`parse_body_content`] is
 /// reused verbatim, which is also what gives a note's own `w:sdt` wrappers
@@ -756,7 +800,7 @@ fn parse_notes_part(
     part_name: &str,
     element_name: &str,
     report: &mut ImportReport,
-) -> FxHashMap<i64, Body> {
+) -> FxHashMap<i64, Vec<BodyItem>> {
     let Some(xml) = read_optional_part(reader, part_name, part_name, report) else {
         return FxHashMap::default();
     };
@@ -773,9 +817,9 @@ fn parse_notes_part(
             // A note with no parsable `w:id` can never be resolved against a
             // `RunContent::NoteRef`, so it's not worth keeping.
             let Some(id) = attr(child, "id").and_then(parse_i64) else { continue };
-            let mut body = parse_body_content(child, 0);
-            namespace_rel_ids(&mut body.items, part_name);
-            notes.insert(id, body);
+            let mut items = parse_body_content(child, 0);
+            namespace_rel_ids(&mut items, part_name);
+            notes.insert(id, items);
         }
         notes
     });
@@ -1202,7 +1246,7 @@ fn parse_txbx_content(node: Node, tb_depth: usize) -> Vec<BodyItem> {
     if tb_depth >= MAX_TEXTBOX_DEPTH {
         return Vec::new();
     }
-    parse_body_content(node, tb_depth + 1).items
+    parse_body_content(node, tb_depth + 1)
 }
 
 /// Every `w:txbxContent` that belongs directly to one of `node`'s shapes,
@@ -1444,6 +1488,9 @@ fn parse_para_props(node: Node) -> ParaProps {
                     child.children().any(|n| is_element(n, "bottom"));
             }
             "rPr" => props.mark_props = parse_run_props(child),
+            // Marks this paragraph as the *last* item of a section — see
+            // `parse_document_body`, the one place that reads this field.
+            "sectPr" => props.sect_pr = Some(parse_sectpr(child)),
             _ => {}
         }
     }
@@ -1881,10 +1928,31 @@ fn parse_sectpr(node: Node) -> SectPr {
                 }
             }
             "titlePg" => sect.title_pg = true,
+            // Absent means `nextPage` — `SectionStart`'s own default, so an
+            // unrecognized `w:val` (a hand-edited or foreign-producer
+            // document) falls back the same way rather than being dropped.
+            "type" => sect.start = parse_section_start(attr(child, "val")),
+            "pgNumType" => {
+                sect.page_num_fmt = attr(child, "fmt").map(EcoString::from);
+                sect.page_num_start = attr(child, "start").and_then(parse_i64);
+            }
             _ => {}
         }
     }
     sect
+}
+
+/// `w:sectPr/w:type/@w:val` → [`SectionStart`]. `"nextColumn"` is real but
+/// vanishingly rare in practice; everything unrecognized falls back to
+/// `NextPage`, matching the type's own default for an absent element.
+fn parse_section_start(val: Option<&str>) -> SectionStart {
+    match val {
+        Some("continuous") => SectionStart::Continuous,
+        Some("evenPage") => SectionStart::EvenPage,
+        Some("oddPage") => SectionStart::OddPage,
+        Some("nextColumn") => SectionStart::NextColumn,
+        _ => SectionStart::NextPage,
+    }
 }
 
 /// `<w:headerReference w:type="..." r:id="..."/>` (and the `footerReference`
@@ -2214,8 +2282,9 @@ mod tests {
         assert!(!package.numbering.is_ordered(5, 1)); // bullet
 
         // -- body --
-        assert_eq!(package.body.items.len(), 2);
-        let sect = package.body.sect_pr.as_ref().unwrap();
+        assert_eq!(package.body.sections.len(), 1);
+        assert_eq!(package.body.sections[0].items.len(), 2);
+        let sect = &package.body.sections[0].props;
         assert_eq!(sect.page_w, Some(12240));
         assert_eq!(sect.page_h, Some(15840));
         assert!(sect.landscape);
@@ -2224,7 +2293,7 @@ mod tests {
         assert_eq!(sect.margin_bottom, Some(1440));
         assert_eq!(sect.margin_left, Some(1440));
 
-        let BodyItem::Paragraph(p) = &package.body.items[0] else {
+        let BodyItem::Paragraph(p) = &package.body.sections[0].items[0] else {
             panic!("expected a paragraph");
         };
         assert_eq!(p.props.style_id.as_deref(), Some("Heading1"));
@@ -2278,7 +2347,7 @@ mod tests {
         assert!(raw.starts_with("<m:oMath>"));
         assert!(raw.contains("x+y"));
 
-        let BodyItem::Table(table) = &package.body.items[1] else {
+        let BodyItem::Table(table) = &package.body.sections[0].items[1] else {
             panic!("expected a table");
         };
         assert_eq!(table.grid, vec![2000, 3000]);
@@ -2319,7 +2388,8 @@ mod tests {
 
         let mut report = ImportReport::default();
         let parsed = parse_package(&docx, &mut report).unwrap();
-        assert!(parsed.body.items.is_empty());
+        assert_eq!(parsed.body.sections.len(), 1);
+        assert!(parsed.body.sections[0].items.is_empty());
         assert!(parsed.styles.by_id.is_empty());
         assert!(parsed.numbering.instances.is_empty());
         assert!(parsed.rels.is_empty());
@@ -2528,6 +2598,99 @@ mod tests {
     }
 
     #[test]
+    fn absent_w_type_defaults_to_next_page() {
+        let sect = parse_test_sectpr(r#"<w:pgSz w:w="12240" w:h="15840"/>"#);
+        assert_eq!(sect.start, SectionStart::NextPage);
+    }
+
+    #[test]
+    fn w_type_maps_every_recognized_value() {
+        for (val, expected) in [
+            ("continuous", SectionStart::Continuous),
+            ("evenPage", SectionStart::EvenPage),
+            ("oddPage", SectionStart::OddPage),
+            ("nextColumn", SectionStart::NextColumn),
+            ("nextPage", SectionStart::NextPage),
+        ] {
+            let sect = parse_test_sectpr(&format!(r#"<w:type w:val="{val}"/>"#));
+            assert_eq!(sect.start, expected, "w:type={val}");
+        }
+    }
+
+    #[test]
+    fn unrecognized_w_type_falls_back_to_next_page() {
+        let sect = parse_test_sectpr(r#"<w:type w:val="somethingHandEdited"/>"#);
+        assert_eq!(sect.start, SectionStart::NextPage);
+    }
+
+    #[test]
+    fn pg_num_type_surfaces_format_and_start() {
+        let sect = parse_test_sectpr(r#"<w:pgNumType w:fmt="lowerRoman" w:start="4"/>"#);
+        assert_eq!(sect.page_num_fmt.as_deref(), Some("lowerRoman"));
+        assert_eq!(sect.page_num_start, Some(4));
+    }
+
+    #[test]
+    fn pg_num_type_with_only_fmt_leaves_start_absent() {
+        let sect = parse_test_sectpr(r#"<w:pgNumType w:fmt="upperLetter"/>"#);
+        assert_eq!(sect.page_num_fmt.as_deref(), Some("upperLetter"));
+        assert!(sect.page_num_start.is_none());
+    }
+
+    #[test]
+    fn no_pg_num_type_leaves_both_absent() {
+        let sect = parse_test_sectpr(r#"<w:pgSz w:w="12240" w:h="15840"/>"#);
+        assert!(sect.page_num_fmt.is_none());
+        assert!(sect.page_num_start.is_none());
+    }
+
+    /// A paragraph's own `w:pPr/w:sectPr` closes a section — that paragraph
+    /// is its *last* item — and the body's trailing `w:sectPr` closes the
+    /// final one. Three sections here (two paragraph-level closes plus the
+    /// trailing body-level one), each keeping only the items that came before
+    /// its own closing `sectPr`.
+    #[test]
+    fn a_paragraph_level_sectpr_closes_its_section_and_starts_a_new_one() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>
+  <w:p><w:r><w:t>one</w:t></w:r></w:p>
+  <w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:cols w:num="3"/></w:sectPr></w:pPr><w:r><w:t>two-closer</w:t></w:r></w:p>
+  <w:p><w:r><w:t>three</w:t></w:r></w:p>
+  <w:p><w:pPr><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr><w:r><w:t>four-closer</w:t></w:r></w:p>
+  <w:p><w:r><w:t>five</w:t></w:r></w:p>
+  <w:sectPr><w:pgSz w:w="15840" w:h="12240"/></w:sectPr>
+</w:body>
+</w:document>"#;
+        let mut report = ImportReport::default();
+        let body = parse_document(xml, &mut report).expect("should parse");
+
+        assert_eq!(body.sections.len(), 3);
+
+        assert_eq!(body.sections[0].items.len(), 2);
+        assert_eq!(body.sections[0].props.columns, Some(3));
+
+        assert_eq!(body.sections[1].items.len(), 2);
+        assert_eq!(body.sections[1].props.start, SectionStart::Continuous);
+
+        assert_eq!(body.sections[2].items.len(), 1);
+        assert_eq!(body.sections[2].props.page_w, Some(15840));
+    }
+
+    /// No `w:sectPr` at all — neither on a paragraph nor at the body's end —
+    /// is one section with default properties, never zero sections.
+    #[test]
+    fn a_document_with_no_sectpr_at_all_is_one_default_section() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body><w:p><w:r><w:t>only content</w:t></w:r></w:p></w:body>
+</w:document>"#;
+        let mut report = ImportReport::default();
+        let body = parse_document(xml, &mut report).expect("should parse");
+        assert_eq!(body.sections.len(), 1);
+        assert_eq!(body.sections[0].items.len(), 1);
+        assert_eq!(body.sections[0].props.start, SectionStart::NextPage);
+    }
+
+    #[test]
     fn header_reference_with_absent_or_unrecognized_type_defaults_to_default_kind() {
         let sect = parse_test_sectpr(
             r#"<w:headerReference r:id="rId1"/>
@@ -2654,7 +2817,7 @@ mod tests {
         // The header part landed in the furniture map...
         let header_body =
             package.furniture.get("word/header1.xml").expect("header1.xml in furniture");
-        let BodyItem::Paragraph(p) = &header_body.items[0] else {
+        let BodyItem::Paragraph(p) = &header_body[0] else {
             panic!("expected a paragraph")
         };
         let RunItem::Run(r) = &p.runs[0] else { panic!("expected a run") };
@@ -2810,14 +2973,14 @@ mod tests {
         assert!(!parsed.footnotes.contains_key(&-1));
         assert!(!parsed.footnotes.contains_key(&0));
         let body = &parsed.footnotes[&1];
-        let BodyItem::Paragraph(p) = &body.items[0] else { panic!("expected a paragraph") };
+        let BodyItem::Paragraph(p) = &body[0] else { panic!("expected a paragraph") };
         let RunItem::Run(r) = &p.runs[0] else { panic!("expected a run") };
         assert!(matches!(&r.content[0], RunContent::Text(t) if t == "snoska"));
 
         assert_eq!(parsed.endnotes.len(), 1);
         assert!(!parsed.endnotes.contains_key(&-1));
         let body = &parsed.endnotes[&1];
-        let BodyItem::Paragraph(p) = &body.items[0] else { panic!("expected a paragraph") };
+        let BodyItem::Paragraph(p) = &body[0] else { panic!("expected a paragraph") };
         let RunItem::Run(r) = &p.runs[0] else { panic!("expected a run") };
         assert!(matches!(&r.content[0], RunContent::Text(t) if t == "end note text"));
     }
@@ -2929,7 +3092,7 @@ mod tests {
         assert_eq!(package.rels["rId1"].target, "styles.xml");
 
         let body = &package.footnotes[&1];
-        let BodyItem::Paragraph(p) = &body.items[0] else { panic!("expected a paragraph") };
+        let BodyItem::Paragraph(p) = &body[0] else { panic!("expected a paragraph") };
         let RunItem::Run(r) = &p.runs[0] else { panic!("expected a run") };
         let RunContent::Drawing(d) = &r.content[0] else { panic!("expected a drawing") };
 
@@ -3521,7 +3684,8 @@ mod tests {
         </w:document>"#;
         let mut report = ImportReport::default();
         let body = parse_document(xml, &mut report).expect("should degrade, not abort");
-        assert_eq!(body.items.len(), 2);
+        assert_eq!(body.sections.len(), 1);
+        assert_eq!(body.sections[0].items.len(), 2);
         assert!(
             report.notes.iter().any(|n| n.what == "word/document.xml"
                 && n.detail.contains("OMML")),
@@ -3543,7 +3707,8 @@ mod tests {
         </w:document>"#;
         let mut report = ImportReport::default();
         let body = parse_document(xml, &mut report).expect("should degrade, not abort");
-        assert_eq!(body.items.len(), 1);
+        assert_eq!(body.sections.len(), 1);
+        assert_eq!(body.sections[0].items.len(), 1);
         assert!(
             report.notes.iter().any(|n| n.detail.contains("duplicate")),
             "{:?}",
@@ -3599,7 +3764,8 @@ mod tests {
         let mut report = ImportReport::default();
         let parsed =
             parse_package(&docx, &mut report).expect("must not abort on a bad companion part");
-        assert_eq!(parsed.body.items.len(), 1);
+        assert_eq!(parsed.body.sections.len(), 1);
+        assert_eq!(parsed.body.sections[0].items.len(), 1);
         assert!(parsed.styles.by_id.is_empty());
         assert!(report.notes.iter().any(|n| n.what == "styles.xml"), "{:?}", report.notes);
     }

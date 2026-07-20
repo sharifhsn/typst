@@ -55,7 +55,7 @@ pub(crate) fn lower_note_ref(endnote: bool, id: i64, ctx: &mut LowerCtx) -> Opti
     // meaningless as inside a table cell or text box (Typst rejects it
     // outright) — see `mappers::table::lower_cell`'s equivalent guard.
     let was_in_container = ctx.enter_container();
-    let blocks = lower_items(&body.items, ctx);
+    let blocks = lower_items(body, ctx);
     ctx.exit_container(was_in_container);
     ctx.exit_note();
 
@@ -71,23 +71,20 @@ mod tests {
     use crate::report::ImportReport;
     use crate::tdoc::Block;
     use crate::wml::model::{
-        Body, BodyItem, Paragraph, Run, RunContent, RunItem, RunProps, WmlPackage,
+        BodyItem, Paragraph, Run, RunContent, RunItem, RunProps, WmlPackage,
     };
 
-    fn text_body(text: &str) -> Body {
-        Body {
-            items: vec![BodyItem::Paragraph(Paragraph {
-                props: Default::default(),
-                runs: vec![RunItem::Run(Run {
-                    props: RunProps::default(),
-                    content: vec![RunContent::Text(text.into())],
-                })],
+    fn text_body(text: &str) -> Vec<BodyItem> {
+        vec![BodyItem::Paragraph(Paragraph {
+            props: Default::default(),
+            runs: vec![RunItem::Run(Run {
+                props: RunProps::default(),
+                content: vec![RunContent::Text(text.into())],
             })],
-            sect_pr: None,
-        }
+        })]
     }
 
-    fn package_with_footnote(id: i64, body: Body) -> WmlPackage {
+    fn package_with_footnote(id: i64, body: Vec<BodyItem>) -> WmlPackage {
         let mut footnotes = FxHashMap::default();
         footnotes.insert(id, body);
         WmlPackage { footnotes, ..Default::default() }
@@ -142,16 +139,13 @@ mod tests {
     /// must terminate the lowering and report the drop instead of hanging.
     #[test]
     fn self_referential_note_terminates_and_reports_instead_of_recursing() {
-        let self_ref_body = Body {
-            items: vec![BodyItem::Paragraph(Paragraph {
-                props: Default::default(),
-                runs: vec![RunItem::Run(Run {
-                    props: RunProps::default(),
-                    content: vec![RunContent::NoteRef { endnote: false, id: 1 }],
-                })],
+        let self_ref_body = vec![BodyItem::Paragraph(Paragraph {
+            props: Default::default(),
+            runs: vec![RunItem::Run(Run {
+                props: RunProps::default(),
+                content: vec![RunContent::NoteRef { endnote: false, id: 1 }],
             })],
-            sect_pr: None,
-        };
+        })];
         let package = package_with_footnote(1, self_ref_body);
         let mut report = ImportReport::default();
         let options = ImportOptions::default();
