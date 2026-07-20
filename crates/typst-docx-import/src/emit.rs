@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use crate::opts::ImportOptions;
 use crate::tdoc::{
-    Align, Block, BreakKind, Figure, Inline, Inlines, List, Margins, PageSetup, ParStyle, Script,
-    Stmt, Table, TableCell, TextStyle, TypstDoc,
+    Align, Block, BreakKind, Figure, Furniture, Inline, Inlines, List, Margins, PageSetup,
+    ParStyle, Script, Stmt, Table, TableCell, TextStyle, TypstDoc,
 };
 use crate::wml::model::WmlPackage;
 
@@ -35,7 +35,7 @@ pub fn emit(
 
     let mut out = String::new();
     for stmt in &doc.preamble {
-        out.push_str(&render_stmt(stmt));
+        out.push_str(&emitter.render_stmt(stmt));
         out.push('\n');
     }
     if !doc.preamble.is_empty() && !doc.body.is_empty() {
@@ -150,6 +150,93 @@ impl Emitter<'_> {
         }
     }
 
+    fn render_stmt(&mut self, stmt: &Stmt) -> String {
+        match stmt {
+            Stmt::SetPage(page) => self.render_set_page(page),
+            Stmt::SetText(style) => render_set_text(style),
+            Stmt::SetPar(style) => render_set_par(style),
+            Stmt::Verbatim(s) => s.to_string(),
+        }
+    }
+
+    fn render_set_page(&mut self, page: &PageSetup) -> String {
+        let mut simple_args = Vec::new();
+        if let Some(width) = page.width_pt {
+            simple_args.push(format!("width: {}", pt(width)));
+        }
+        if let Some(height) = page.height_pt {
+            simple_args.push(format!("height: {}", pt(height)));
+        }
+        if let Some(margin) = &page.margin {
+            simple_args.push(format!("margin: {}", render_margins(margin)));
+        }
+        if page.flipped {
+            simple_args.push("flipped: true".to_string());
+        }
+
+        // No furniture: keep the single-line form every other `#set page(..)`
+        // call already uses. A header/footer's content can itself span
+        // several lines (a `context` block with conditional branches), so
+        // once one is present every argument gets its own indented line
+        // instead — a 900-character `#set page(..)` line is not "readable".
+        if page.header.is_none() && page.footer.is_none() {
+            return format!("#set page({})", simple_args.join(", "));
+        }
+
+        let mut lines = vec!["#set page(".to_string()];
+        for arg in &simple_args {
+            lines.push(format!("  {arg},"));
+        }
+        if let Some(header) = &page.header {
+            push_indented(&mut lines, &self.render_furniture_arg("header", header));
+        }
+        if let Some(footer) = &page.footer {
+            push_indented(&mut lines, &self.render_furniture_arg("footer", footer));
+        }
+        lines.push(")".to_string());
+        lines.join("\n")
+    }
+
+    /// Render one `header:`/`footer:` argument. A furniture with only a
+    /// default variant is a plain content block; one with an active
+    /// `first`/`even` variant becomes a `context` block that branches on the
+    /// current page number, always falling back to `default` (or an empty
+    /// content block, if there isn't one) last.
+    fn render_furniture_arg(&mut self, name: &str, furniture: &Furniture) -> String {
+        if furniture.first.is_none() && furniture.even.is_none() {
+            let content = self.render_furniture_content(&furniture.default);
+            return format!("{name}: [{content}]");
+        }
+
+        let mut branches: Vec<(&str, String)> = Vec::new();
+        if let Some(first) = &furniture.first {
+            branches.push(("p == 1", self.render_furniture_content(first)));
+        }
+        if let Some(even) = &furniture.even {
+            branches.push(("calc.even(p)", self.render_furniture_content(even)));
+        }
+        let default_content = self.render_furniture_content(&furniture.default);
+
+        let mut lines = vec![
+            format!("{name}: context {{"),
+            "  let p = counter(page).get().first()".to_string(),
+        ];
+        for (i, (cond, content)) in branches.iter().enumerate() {
+            let keyword = if i == 0 { "if" } else { "else if" };
+            lines.push(format!("  {keyword} {cond} [{content}]"));
+        }
+        lines.push(format!("  else [{default_content}]"));
+        lines.push("}".to_string());
+        lines.join("\n")
+    }
+
+    /// Render a furniture's blocks (ordinary paragraphs/figures/tables — the
+    /// same content a table cell can hold) as inline markup content, the same
+    /// way [`Self::render_cell_body`] does for a cell.
+    fn render_furniture_content(&mut self, blocks: &[Block]) -> String {
+        self.render_cell_body(blocks)
+    }
+
     fn render_figure(&mut self, figure: &Figure) -> String {
         let path = self.resolve_asset(&figure.image_path);
 
@@ -241,30 +328,20 @@ fn render_list(list: &List) -> String {
         .join("\n")
 }
 
-fn render_stmt(stmt: &Stmt) -> String {
-    match stmt {
-        Stmt::SetPage(page) => render_set_page(page),
-        Stmt::SetText(style) => render_set_text(style),
-        Stmt::SetPar(style) => render_set_par(style),
-        Stmt::Verbatim(s) => s.to_string(),
+/// Append a (possibly multi-line) rendered argument to the `#set page(..)`
+/// call's `lines`, indenting every physical line by two spaces and adding the
+/// trailing comma Typst wants between call arguments.
+fn push_indented(lines: &mut Vec<String>, arg: &str) {
+    let mut arg_lines = arg.lines();
+    let Some(first) = arg_lines.next() else { return };
+    let mut buf = format!("  {first}");
+    for rest in arg_lines {
+        buf.push('\n');
+        buf.push_str("  ");
+        buf.push_str(rest);
     }
-}
-
-fn render_set_page(page: &PageSetup) -> String {
-    let mut args = Vec::new();
-    if let Some(width) = page.width_pt {
-        args.push(format!("width: {}", pt(width)));
-    }
-    if let Some(height) = page.height_pt {
-        args.push(format!("height: {}", pt(height)));
-    }
-    if let Some(margin) = &page.margin {
-        args.push(format!("margin: {}", render_margins(margin)));
-    }
-    if page.flipped {
-        args.push("flipped: true".to_string());
-    }
-    format!("#set page({})", args.join(", "))
+    buf.push(',');
+    lines.push(buf);
 }
 
 fn render_margins(margin: &Margins) -> String {
@@ -306,7 +383,56 @@ fn render_set_par(style: &ParStyle) -> String {
 }
 
 fn render_inlines(inlines: &Inlines) -> String {
-    inlines.iter().map(render_inline).collect()
+    // Render every inline up front: whether a `*`/`_` shorthand is safe
+    // depends on the characters either side of it, so the neighbours have to
+    // exist before the decision can be made. A `Strong`/`Emph` piece always
+    // begins with `*`, `_` or `#` — never alphanumeric — so using the
+    // shorthand rendering to probe the *next* piece's first character gives
+    // the same answer as the form eventually chosen for it.
+    let pieces: Vec<String> = inlines.iter().map(render_inline).collect();
+
+    let mut out = String::new();
+    for (i, (inline, piece)) in inlines.iter().zip(&pieces).enumerate() {
+        let (body, delim, function) = match inline {
+            Inline::Strong(body) => (body, '*', "strong"),
+            Inline::Emph(body) => (body, '_', "emph"),
+            _ => {
+                out.push_str(piece);
+                continue;
+            }
+        };
+
+        let prev = out.chars().next_back();
+        let next = pieces[i + 1..].iter().find_map(|p| p.chars().next());
+        let rendered = render_inlines(body);
+        if shorthand_is_safe(prev, next, &rendered) {
+            out.push(delim);
+            out.push_str(&rendered);
+            out.push(delim);
+        } else {
+            out.push_str(&format!("#{function}[{rendered}]"));
+        }
+    }
+    out
+}
+
+/// Whether the `*`/`_` markup shorthand parses as a delimiter in this position.
+///
+/// Typst only reads it as one at a word boundary: `a *b* c` is strong, but
+/// `a*b*c` is an unclosed-delimiter **error**, and the `_` equivalent degrades
+/// silently to literal underscores. Word, meanwhile, happily applies character
+/// formatting across sub-word run boundaries — bolding the middle of a word is
+/// routine — so the shorthand is only correct when both delimiters sit next to
+/// something non-alphanumeric. Everywhere else the function form is used: it is
+/// less pretty but always parses, and correctness outranks prettiness here.
+fn shorthand_is_safe(prev: Option<char>, next: Option<char>, body: &str) -> bool {
+    let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric());
+    // The delimiter must also hug its content — `* b *` does not open a strong.
+    boundary(prev)
+        && boundary(next)
+        && !body.is_empty()
+        && !body.starts_with(char::is_whitespace)
+        && !body.ends_with(char::is_whitespace)
 }
 
 fn render_inline(inline: &Inline) -> String {
@@ -392,13 +518,30 @@ pub fn escape_markup(text: &str) -> String {
 
     let mut out = String::with_capacity(text.len());
     let mut at_run_start = true;
-    for ch in text.chars() {
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
         let leading_marker = at_run_start && matches!(ch, '=' | '-' | '+' | '/');
         if ch != ' ' {
             at_run_start = false;
         }
 
-        if leading_marker || matches!(ch, '#' | '*' | '_' | '`' | '$' | '<' | '@' | '\\' | '~') {
+        // `//` opens a line comment, which would swallow the rest of the line
+        // including the closing `]`. URLs in prose ("http://…") hit this
+        // constantly. Escaping the first slash is enough to break the pair —
+        // `\/` consumes both characters, leaving a harmless lone slash. (`/*`
+        // needs no special case: `*` is escaped unconditionally below.)
+        let comment_start = ch == '/' && chars.peek() == Some(&'/');
+
+        // `[`/`]` delimit content blocks. Literal brackets are common in real
+        // prose ("[100]", "[Lower bound]"), and an unescaped one closes the
+        // enclosing `#text(..)[..]` early — emitting source that doesn't parse.
+        if leading_marker
+            || comment_start
+            || matches!(
+                ch,
+                '#' | '*' | '_' | '`' | '$' | '<' | '@' | '\\' | '~' | '[' | ']'
+            )
+        {
             out.push('\\');
         }
         out.push(ch);
@@ -494,6 +637,42 @@ mod tests {
         ];
         let d = doc(vec![], vec![Block::Paragraph { style: ParStyle::default(), body }]);
         assert_eq!(run(&d), "*bold* _italic_\n");
+    }
+
+    /// Word bolds sub-word spans routinely ("abc**de**fg"), but Typst only
+    /// reads `*`/`_` as delimiters at a word boundary — mid-word, `*` is an
+    /// unclosed-delimiter error and `_` silently stays literal. Those spans
+    /// must fall back to the function form.
+    #[test]
+    fn mid_word_emphasis_falls_back_to_the_function_form() {
+        let body = vec![
+            Inline::Text("abc".into()),
+            Inline::Strong(vec![Inline::Text("de".into())]),
+            Inline::Text("fg".into()),
+            Inline::Emph(vec![Inline::Text("hi".into())]),
+            Inline::Text("jk".into()),
+        ];
+        let d = doc(vec![], vec![Block::Paragraph { style: ParStyle::default(), body }]);
+        assert_eq!(run(&d), "abc#strong[de]fg#emph[hi]jk\n");
+
+        // A span touching a word on only one side is still unsafe.
+        let body = vec![
+            Inline::Text("abc".into()),
+            Inline::Strong(vec![Inline::Text("de".into())]),
+            Inline::Space,
+            Inline::Text("x".into()),
+        ];
+        let d = doc(vec![], vec![Block::Paragraph { style: ParStyle::default(), body }]);
+        assert_eq!(run(&d), "abc#strong[de] x\n");
+
+        // Punctuation is a boundary, so the shorthand survives where it can.
+        let body = vec![
+            Inline::Text("(".into()),
+            Inline::Strong(vec![Inline::Text("de".into())]),
+            Inline::Text(")".into()),
+        ];
+        let d = doc(vec![], vec![Block::Paragraph { style: ParStyle::default(), body }]);
+        assert_eq!(run(&d), "(*de*)\n");
     }
 
     #[test]
@@ -592,6 +771,20 @@ mod tests {
         assert_eq!(escape_markup("50% off"), "50% off");
     }
 
+    /// Brackets and `//` are the two escapes real Word prose reaches for
+    /// constantly — bracketed numbering and URLs. Both used to emit source
+    /// that failed to parse: an unescaped `]` closed the enclosing content
+    /// block early, and `//` opened a line comment that ate the rest of it.
+    #[test]
+    fn escape_markup_brackets_and_line_comments() {
+        assert_eq!(escape_markup("[100] a. Plot"), "\\[100\\] a. Plot");
+        assert_eq!(escape_markup("see http://x.org/~u/d.csv"), "see http:\\//x.org/\\~u/d.csv");
+        // A lone slash is harmless and stays readable; only the pair is broken up.
+        assert_eq!(escape_markup("and/or"), "and/or");
+        // Runs of slashes leave no unescaped `//` pair behind.
+        assert_eq!(escape_markup("a///b"), "a\\/\\//b");
+    }
+
     #[test]
     fn set_page_and_set_text_preamble() {
         let d = doc(
@@ -606,6 +799,7 @@ mod tests {
                         right_pt: 72.0,
                     }),
                     flipped: false,
+                    ..Default::default()
                 }),
                 Stmt::SetText(TextStyle {
                     font: Some("Roboto".into()),
@@ -634,5 +828,71 @@ mod tests {
             }],
         );
         assert!(run(&d).starts_with("#set par(justify: true)\n"));
+    }
+
+    fn para(text: &str) -> Block {
+        Block::Paragraph { style: ParStyle::default(), body: vec![Inline::Text(text.into())] }
+    }
+
+    #[test]
+    fn default_only_header_renders_as_a_plain_content_block() {
+        let d = doc(
+            vec![Stmt::SetPage(PageSetup {
+                header: Some(Furniture { default: vec![para("Simple header")], first: None, even: None }),
+                ..Default::default()
+            })],
+            vec![para("Hi")],
+        );
+        let out = run(&d);
+        assert!(out.contains("header: [Simple header]"), "{out}");
+        assert!(!out.contains("context"), "{out}");
+    }
+
+    #[test]
+    fn first_and_even_variants_render_as_a_context_block_with_default_fallback() {
+        let furniture = Furniture {
+            default: vec![para("Default")],
+            first: Some(vec![para("First")]),
+            even: Some(vec![para("Even")]),
+        };
+        let d = doc(
+            vec![Stmt::SetPage(PageSetup { header: Some(furniture), ..Default::default() })],
+            vec![para("Hi")],
+        );
+        let out = run(&d);
+        assert!(out.contains("header: context {"), "{out}");
+        assert!(out.contains("let p = counter(page).get().first()"), "{out}");
+        assert!(out.contains("if p == 1 [First]"), "{out}");
+        assert!(out.contains("else if calc.even(p) [Even]"), "{out}");
+        assert!(out.contains("else [Default]"), "{out}");
+    }
+
+    #[test]
+    fn variant_without_a_default_falls_back_to_an_empty_content_block() {
+        let furniture = Furniture { default: vec![], first: Some(vec![para("First")]), even: None };
+        let d = doc(
+            vec![Stmt::SetPage(PageSetup { footer: Some(furniture), ..Default::default() })],
+            vec![],
+        );
+        let out = run(&d);
+        assert!(out.contains("else []"), "{out}");
+    }
+
+    #[test]
+    fn header_and_footer_coexist_with_page_geometry_in_one_readable_call() {
+        let d = doc(
+            vec![Stmt::SetPage(PageSetup {
+                width_pt: Some(595.28),
+                header: Some(Furniture { default: vec![para("H")], first: None, even: None }),
+                footer: Some(Furniture { default: vec![para("F")], first: None, even: None }),
+                ..Default::default()
+            })],
+            vec![],
+        );
+        let out = run(&d);
+        // Multi-line and indented, not one giant line.
+        assert!(out.starts_with("#set page(\n  width: 595.28pt,\n"), "{out}");
+        assert!(out.contains("  header: [H],\n"), "{out}");
+        assert!(out.contains("  footer: [F],\n"), "{out}");
     }
 }

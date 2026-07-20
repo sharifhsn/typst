@@ -11,8 +11,10 @@ use crate::tdoc::{Block, Figure, Inline, Inlines, List, Table, TextStyle, TypstD
 /// Entry point: rewrite bold/italic-only styled runs into `Strong`/`Emph`
 /// throughout `doc.body`.
 pub fn run(doc: &mut TypstDoc) {
-    for block in &mut doc.body {
-        walk_block(block);
+    for tree in doc.block_trees_mut() {
+        for block in tree {
+            walk_block(block);
+        }
     }
 }
 

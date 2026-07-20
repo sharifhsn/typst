@@ -1,31 +1,47 @@
-//! The `run` mapper: Word runs (`w:r`) and hyperlinks (`w:hyperlink`) → the
+//! The `run` mapper: Word runs (`w:r`), hyperlinks (`w:hyperlink`), and
+//! fields (`w:fldSimple`/`w:fldChar` — see [`crate::mappers::field`]) → the
 //! Typst IR's [`Inlines`].
 
 use typst_ooxml_core::units::half_point_to_pt;
 
 use crate::lower::parse_hex_color;
-use crate::mappers::math;
+use crate::mappers::{field, math};
+use crate::opts::ImportOptions;
 use crate::report::ImportReport;
 use crate::resolve::styles::effective_run;
 use crate::tdoc::{Inline, Inlines, Script, TextStyle};
 use crate::wml::model::{BreakType, Paragraph, Run, RunContent, RunItem, RunProps, WmlPackage};
 
-/// Lower a whole paragraph's run sequence (including hyperlinks) to inlines.
+/// Lower a whole paragraph's run sequence (runs, hyperlinks, fields) to
+/// inlines.
 pub fn lower_paragraph_inlines(
     p: &Paragraph,
     package: &WmlPackage,
+    options: &ImportOptions,
     report: &mut ImportReport,
 ) -> Inlines {
-    let para_style_id = p.props.style_id.as_deref();
+    lower_run_items(&p.runs, package, p.props.style_id.as_deref(), options, report)
+}
+
+/// Lower a sequence of run-level items ([`RunItem::Run`]/`Hyperlink`/`Field`)
+/// to inlines. Shared by [`lower_paragraph_inlines`] (a paragraph's own runs)
+/// and by [`crate::mappers::field::lower_field`] (a field's cached result,
+/// and a hyperlink's content wraps back around to this same function too) —
+/// all three positions can hold the same mix of runs, hyperlinks, and
+/// (nested) fields.
+pub(crate) fn lower_run_items(
+    items: &[RunItem],
+    package: &WmlPackage,
+    para_style_id: Option<&str>,
+    options: &ImportOptions,
+    report: &mut ImportReport,
+) -> Inlines {
     let mut out = Vec::new();
-    for run_item in &p.runs {
+    for run_item in items {
         match run_item {
             RunItem::Run(r) => out.extend(lower_run(r, package, para_style_id, report)),
             RunItem::Hyperlink { rel_id, anchor, runs } => {
-                let mut inner = Vec::new();
-                for r in runs {
-                    inner.extend(lower_run(r, package, para_style_id, report));
-                }
+                let inner = lower_run_items(runs, package, para_style_id, options, report);
                 match rel_id {
                     Some(id) => match package.rels.get(id) {
                         Some(rel) => {
@@ -50,6 +66,7 @@ pub fn lower_paragraph_inlines(
                     }
                 }
             }
+            RunItem::Field(f) => out.extend(field::lower_field(f, package, options, report)),
         }
     }
     out

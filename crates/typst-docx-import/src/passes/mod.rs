@@ -13,6 +13,12 @@
 //! All three are lossless rewrites (they only ever remove *redundant*
 //! styling), so `report` is currently unused — it's threaded through for
 //! future passes that do need to record an approximation.
+//!
+//! The first two run over every block tree in the document
+//! ([`TypstDoc::block_trees_mut`]), so header/footer content is made
+//! idiomatic alongside the body. `hoist_par` deliberately does not: whether
+//! the *body* justifies is a document-wide decision that a handful of header
+//! paragraphs should not get a vote in.
 
 mod collapse_style;
 mod hoist_par;

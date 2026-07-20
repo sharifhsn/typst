@@ -13,10 +13,12 @@ use crate::wml::model::{BodyItem, RunProps, WmlPackage};
 pub fn lower(package: &WmlPackage, options: &ImportOptions, report: &mut ImportReport) -> TypstDoc {
     let mut doc = TypstDoc::default();
 
-    // Preamble: page geometry from the body's `w:sectPr`, and a document
-    // default `#set text(..)` so bare runs inherit the doc's base font/size.
+    // Preamble: page geometry (plus header/footer) from the body's
+    // `w:sectPr`, and a document default `#set text(..)` so bare runs
+    // inherit the doc's base font/size.
     if let Some(sect_pr) = &package.body.sect_pr {
-        doc.preamble.push(Stmt::SetPage(mappers::section::lower_section(sect_pr)));
+        let page = mappers::section::lower_section(sect_pr, package, options, report);
+        doc.preamble.push(Stmt::SetPage(page));
     }
     if let Some(style) = default_text_style(&package.styles.default_run) {
         doc.preamble.push(Stmt::SetText(style));
@@ -40,7 +42,9 @@ pub(crate) fn lower_items(
 
     for item in items {
         match item {
-            BodyItem::Paragraph(p) => match mappers::para::lower_paragraph(p, package, report) {
+            BodyItem::Paragraph(p) => match mappers::para::lower_paragraph(
+                p, package, options, report,
+            ) {
                 ParaResult::ListItem { ordered, level, body } => {
                     let li = ListItem { ordered, level, body };
                     match pending_list.as_mut() {

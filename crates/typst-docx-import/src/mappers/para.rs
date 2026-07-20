@@ -9,6 +9,7 @@ use typst_ooxml_core::units::twip_to_abs;
 
 use crate::mappers::drawing;
 use crate::mappers::run::lower_paragraph_inlines;
+use crate::opts::ImportOptions;
 use crate::report::ImportReport;
 use crate::resolve::styles::{effective_para, heading_level};
 use crate::tdoc::{Align, BreakKind, Figure, Inline, Inlines, ParStyle};
@@ -29,13 +30,18 @@ pub enum ParaResult {
     Empty,
 }
 
-pub fn lower_paragraph(p: &Paragraph, package: &WmlPackage, report: &mut ImportReport) -> ParaResult {
+pub fn lower_paragraph(
+    p: &Paragraph,
+    package: &WmlPackage,
+    options: &ImportOptions,
+    report: &mut ImportReport,
+) -> ParaResult {
     if let Some(kind) = sole_break_kind(p) {
         return ParaResult::Break(kind);
     }
 
     let eff_para = effective_para(&package.styles, &p.props);
-    let inlines = lower_paragraph_inlines(p, package, report);
+    let inlines = lower_paragraph_inlines(p, package, options, report);
     let has_text = inlines_have_text(&inlines);
     let drawing_ref = first_drawing(p);
 
@@ -96,11 +102,18 @@ fn first_drawing(p: &Paragraph) -> Option<&DrawingRef> {
             RunContent::Drawing(d) => Some(d),
             _ => None,
         }),
-        RunItem::Hyperlink { .. } => None,
+        // A drawing nested inside a hyperlink or a field's cached result
+        // isn't discovered as the paragraph's figure — same simplification
+        // as the pre-existing hyperlink exclusion; out of scope for v1.
+        RunItem::Hyperlink { .. } | RunItem::Field(_) => None,
     })
 }
 
-fn inlines_have_text(inlines: &Inlines) -> bool {
+/// Whether any inline in this sequence carries visible text — recursively,
+/// through strong/emph/link/styled wrappers. Also used by
+/// [`crate::mappers::section`] to decide whether a lowered furniture body
+/// (header/footer) is visually empty and should be dropped.
+pub(crate) fn inlines_have_text(inlines: &Inlines) -> bool {
     inlines.iter().any(|inline| match inline {
         Inline::Text(s) => !s.trim().is_empty(),
         Inline::Space | Inline::Linebreak => false,

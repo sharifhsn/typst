@@ -12,12 +12,14 @@
 
 use crate::tdoc::{Block, Figure, Inline, Inlines, List, Stmt, Table, TextStyle, TypstDoc};
 
-/// Entry point: collapse every run in `doc.body` against the preamble's
-/// default text style.
+/// Entry point: collapse every run in the document — body *and* header/footer
+/// content — against the preamble's default text style.
 pub fn run(doc: &mut TypstDoc) {
     let default = default_text_style(&doc.preamble);
-    for block in &mut doc.body {
-        walk_block(block, &default);
+    for tree in doc.block_trees_mut() {
+        for block in tree {
+            walk_block(block, &default);
+        }
     }
 }
 

@@ -15,6 +15,34 @@ pub struct TypstDoc {
     pub body: Vec<Block>,
 }
 
+impl TypstDoc {
+    /// Every block tree in the document: the header/footer content hanging off
+    /// a `#set page(..)` in the preamble, then the body.
+    ///
+    /// Furniture is ordinary content — paragraphs, tables, images — that merely
+    /// happens to be reachable through the preamble rather than sitting in
+    /// `body`. A pass that walks only `body` silently leaves headers and
+    /// footers at tier-1 literal formatting while the body around them gets
+    /// made idiomatic, which is both inconsistent and ugly. Passes should walk
+    /// this instead.
+    pub fn block_trees_mut(&mut self) -> Vec<&mut Vec<Block>> {
+        let mut trees: Vec<&mut Vec<Block>> = Vec::new();
+        for stmt in &mut self.preamble {
+            if let Stmt::SetPage(page) = stmt {
+                // Disjoint fields, so both may be borrowed mutably at once.
+                let furniture = [page.header.as_mut(), page.footer.as_mut()];
+                for furniture in furniture.into_iter().flatten() {
+                    trees.push(&mut furniture.default);
+                    trees.extend(furniture.first.as_mut());
+                    trees.extend(furniture.even.as_mut());
+                }
+            }
+        }
+        trees.push(&mut self.body);
+        trees
+    }
+}
+
 /// A preamble statement. `Verbatim` is the escape hatch for anything the
 /// structured variants don't cover yet.
 #[derive(Debug, Clone)]
@@ -188,6 +216,20 @@ pub struct PageSetup {
     pub height_pt: Option<f64>,
     pub margin: Option<Margins>,
     pub flipped: bool,
+    pub header: Option<Furniture>,
+    pub footer: Option<Furniture>,
+}
+
+/// Page furniture — a header or a footer. Word varies it by page class; Typst
+/// has one `header:`/`footer:` per page setup, so the variants collapse into a
+/// single `context`-conditional at emit time.
+#[derive(Debug, Clone)]
+pub struct Furniture {
+    pub default: Vec<Block>,
+    /// Only populated when `w:titlePg` is set.
+    pub first: Option<Vec<Block>>,
+    /// Only populated when `settings.xml` sets `w:evenAndOddHeaders`.
+    pub even: Option<Vec<Block>>,
 }
 
 #[derive(Debug, Copy, Clone)]

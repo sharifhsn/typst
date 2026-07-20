@@ -18,9 +18,20 @@ pub struct WmlPackage {
     pub styles: Styles,
     pub numbering: Numbering,
     /// `rId` → relationship target (image part name, hyperlink URL, …).
+    /// Header/footer parts number their own `rId`s independently of
+    /// `document.xml` (see [`Self::furniture`]), so an id resolved from a
+    /// furniture body is namespaced `"{part}!{rid}"` rather than bare —
+    /// [`crate::wml::parse`] rewrites those ids as it parses each part, so
+    /// every lookup against this map (bare or namespaced) just works.
     pub rels: FxHashMap<EcoString, Relationship>,
     /// Media parts by zip name (`word/media/image1.png` → bytes).
     pub media: FxHashMap<EcoString, Vec<u8>>,
+    /// Parsed `w:hdr`/`w:ftr` parts by zip name (`word/header1.xml` → body).
+    /// Headers and footers share one map: they are structurally identical and
+    /// the `sectPr` reference is what gives a part its role.
+    pub furniture: FxHashMap<EcoString, Body>,
+    /// `settings.xml` declares `w:evenAndOddHeaders`.
+    pub even_and_odd_headers: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -54,9 +65,32 @@ pub struct Paragraph {
 #[derive(Debug)]
 pub enum RunItem {
     Run(Run),
-    /// `w:hyperlink` — a link wrapping runs; either an external `rel_id`
-    /// (into [`WmlPackage::rels`]) or an internal `anchor` (bookmark name).
-    Hyperlink { rel_id: Option<EcoString>, anchor: Option<EcoString>, runs: Vec<Run> },
+    /// `w:hyperlink` — a link wrapping inline content; either an external
+    /// `rel_id` (into [`WmlPackage::rels`]) or an internal `anchor` (bookmark
+    /// name). `runs` holds `RunItem` (not `Run`) so a field can appear inside
+    /// a hyperlink's content — common for cross-references and TOC entries,
+    /// where the hyperlink supplies the jump target and a nested
+    /// PAGEREF/REF field supplies the displayed page number.
+    Hyperlink { rel_id: Option<EcoString>, anchor: Option<EcoString>, runs: Vec<RunItem> },
+    /// A Word field. Both OOXML spellings — the `w:fldSimple` element and the
+    /// flattened `w:fldChar` begin/separate/end run sequence — are folded
+    /// back into this one logical item at parse time, so lowering sees a
+    /// field as a field rather than as loose punctuation runs. See
+    /// [`crate::mappers::field`] for how `instr` is interpreted.
+    Field(Field),
+}
+
+/// A Word field: `w:fldSimple`, or the flattened `w:fldChar`
+/// begin/separate/end run sequence, folded back into one logical item by
+/// [`crate::wml::parse`].
+#[derive(Debug, Default)]
+pub struct Field {
+    /// The raw instruction, e.g. ` PAGE ` or ` HYPERLINK "https://x" \o "t" `.
+    pub instr: EcoString,
+    /// The cached result — what Word last rendered for this field. Fields can
+    /// nest (e.g. a TOC entry whose result contains a HYPERLINK field), so
+    /// this is `RunItem`s rather than plain runs.
+    pub result: Vec<RunItem>,
 }
 
 #[derive(Debug, Default)]
@@ -187,6 +221,26 @@ pub struct SectPr {
     pub margin_bottom: Option<i64>,
     pub margin_left: Option<i64>,
     pub margin_right: Option<i64>,
+    /// `w:headerReference` / `w:footerReference`, in document order.
+    pub header_refs: Vec<FurnitureRef>,
+    pub footer_refs: Vec<FurnitureRef>,
+    /// `w:titlePg` — the first page takes its own header/footer.
+    pub title_pg: bool,
+}
+
+/// A `w:headerReference`/`w:footerReference`: which page class it applies to,
+/// and the relationship pointing at the `w:hdr`/`w:ftr` part.
+#[derive(Debug, Clone)]
+pub struct FurnitureRef {
+    pub kind: FurnitureKind,
+    pub rel_id: EcoString,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum FurnitureKind {
+    Default,
+    First,
+    Even,
 }
 
 // --- Styles (`styles.xml`) --------------------------------------------------
