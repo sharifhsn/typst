@@ -32,3 +32,8 @@ package-lock.json
 # Local Microsoft Office fonts used for consumer-authority QA. These are
 # licensed with the local Office installation and must never be redistributed.
 /tools/docx-validate/font-fixtures/**/Cambria.ttc
+
+# Wide importer corpus: fetched on demand, never committed.
+tools/docx-import-corpus/wide-docs/
+tools/docx-import-corpus/wide-out/
+tools/docx-import-corpus/wide-results.json
