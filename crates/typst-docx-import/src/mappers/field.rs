@@ -35,6 +35,15 @@ pub(crate) fn lower_field(field: &Field, ctx: &mut LowerCtx) -> Inlines {
         // numbers baked in from whenever Word last updated fields); a live
         // `#outline()` is both idiomatic and correct, so the result is
         // deliberately discarded here rather than lowered.
+        //
+        // …unless the field itself sits inside a heading (`= #outline()`,
+        // seen in the wild): `#outline()` renders every heading's own
+        // content to build its listing, so a TOC field inside one of those
+        // headings would render itself again, forever ("maximum show rule
+        // depth exceeded"). A TOC field is only meaningful at block level
+        // anyway, so this falls back to the same cached-result text every
+        // other unmapped field already uses instead.
+        "TOC" if ctx.in_heading() => lower_fallback(&field_type, field, ctx),
         "TOC" => vec![Inline::Verbatim("#outline()".into())],
         _ => lower_fallback(&field_type, field, ctx),
     }
@@ -120,6 +129,25 @@ mod tests {
         ));
         // The result was discarded, not reported as approximate.
         assert!(report.notes.is_empty());
+    }
+
+    /// `= #outline()` — a TOC field lowered from inside a heading's own
+    /// content. `#outline()` renders every heading, including the one
+    /// containing it, so a live one here recurses forever ("maximum show
+    /// rule depth exceeded"). The field must fall back to its cached text
+    /// instead, exactly like any other unmapped field.
+    #[test]
+    fn toc_field_inside_a_heading_falls_back_to_cached_text_instead_of_a_live_outline() {
+        let field = Field { instr: " TOC \\o \"1-3\" \\h ".into(), result: text_result("stale") };
+        let package = WmlPackage::default();
+        let mut report = ImportReport::default();
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
+        ctx.enter_heading();
+        let inlines = lower_field(&field, &mut ctx);
+        assert!(matches!(&inlines[..], [Inline::Text(t)] if t == "stale"));
+        assert_eq!(ctx.report.notes.len(), 1);
+        assert_eq!(ctx.report.notes[0].what, "field TOC");
     }
 
     #[test]

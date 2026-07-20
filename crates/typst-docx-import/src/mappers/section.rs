@@ -113,7 +113,12 @@ fn resolve_variant(
         );
     }
 
+    // A page/column break inside a header/footer body is just as meaningless
+    // as inside a table cell (Typst rejects it outright) — see
+    // `mappers::table::lower_cell`'s equivalent guard.
+    let was_in_container = ctx.enter_container();
     let blocks = lower_items(&body.items, ctx);
+    ctx.exit_container(was_in_container);
     (!is_visually_empty(&blocks)).then_some(blocks)
 }
 

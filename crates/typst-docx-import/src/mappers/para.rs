@@ -47,12 +47,41 @@ impl ParaResult {
 
 pub(crate) fn lower_paragraph(p: &Paragraph, ctx: &mut LowerCtx) -> ParaResult {
     if let Some(kind) = sole_break_kind(p) {
+        // A page/column break only means something at the document's own
+        // flow level — inside a table cell, text box, footnote, or
+        // header/footer, Typst rejects it outright ("pagebreaks are not
+        // allowed inside of containers"). Dropping it here (rather than
+        // filtering it out in the emitter) is the paragraph mapper's own
+        // call to make: the emitter is a pretty-printer, not the place for a
+        // semantic decision like this.
+        if ctx.in_container() {
+            ctx.report.drop(
+                "page/column break",
+                "pagebreaks are not allowed inside a table cell, text box, footnote, or \
+                 header/footer; dropped",
+            );
+            return ParaResult::bare(ParaKind::Empty);
+        }
         return ParaResult::bare(ParaKind::Break(kind));
     }
 
     let package = ctx.package;
     let eff_para = effective_para(&package.styles, &p.props);
+    let heading = heading_level(&package.styles, p.props.style_id.as_deref());
+
+    // A TOC field lowered from inside a heading's own content must not
+    // become a live `#outline()` (it renders every heading, including the
+    // one containing it — infinite recursion), so `mappers::field` needs to
+    // know whether this paragraph's inlines are a heading's. Computed before
+    // lowering the inlines (rather than after, alongside the rest of this
+    // paragraph's classification below) specifically so it's in place while
+    // they're lowered.
+    let was_in_heading = heading.is_some().then(|| ctx.enter_heading());
     let inlines = lower_paragraph_inlines(p, ctx);
+    if let Some(was_in_heading) = was_in_heading {
+        ctx.exit_heading(was_in_heading);
+    }
+
     let has_text = inlines_have_text(&inlines);
     let drawing_ref = first_drawing(p);
 
@@ -71,7 +100,7 @@ pub(crate) fn lower_paragraph(p: &Paragraph, ctx: &mut LowerCtx) -> ParaResult {
 
     let kind = if eff_para.bottom_border && !has_text && drawing_ref.is_none() {
         ParaKind::Rule
-    } else if let Some(level) = heading_level(&package.styles, p.props.style_id.as_deref()) {
+    } else if let Some(level) = heading {
         ParaKind::Heading { level, body: inlines }
     } else if let Some(num) = eff_para.num {
         let ordered = package.numbering.is_ordered(num.num_id, num.ilvl);
@@ -217,5 +246,101 @@ mod tests {
             ParaKind::Empty => panic!("the text box was dropped along with the paragraph"),
             _ => panic!("expected ParaKind::Paragraph, got a different variant"),
         }
+    }
+
+    fn page_break_paragraph() -> Paragraph {
+        Paragraph {
+            props: Default::default(),
+            runs: vec![RunItem::Run(Run {
+                props: RunProps::default(),
+                content: vec![RunContent::Break(BreakType::Page)],
+            })],
+        }
+    }
+
+    /// A page/column break at the document's own flow level lowers to a
+    /// real break, same as always — `LowerCtx::in_container` starts `false`.
+    #[test]
+    fn page_break_outside_a_container_lowers_normally() {
+        let package = WmlPackage::default();
+        let mut report = crate::report::ImportReport::default();
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
+        let result = lower_paragraph(&page_break_paragraph(), &mut ctx);
+        assert!(matches!(result.kind, ParaKind::Break(BreakKind::Page)));
+    }
+
+    /// The same break, but lowered while `LowerCtx` says a table
+    /// cell/text box/footnote/header is being lowered — Typst rejects
+    /// `#pagebreak()` inside any of those outright ("pagebreaks are not
+    /// allowed inside of containers"), so it must be dropped (with a report
+    /// note) instead of emitted.
+    #[test]
+    fn page_break_inside_a_container_is_dropped_and_reported() {
+        let package = WmlPackage::default();
+        let mut report = crate::report::ImportReport::default();
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
+        ctx.enter_container();
+        let result = lower_paragraph(&page_break_paragraph(), &mut ctx);
+        assert!(matches!(result.kind, ParaKind::Empty));
+        assert_eq!(ctx.report.notes.len(), 1);
+        assert_eq!(ctx.report.notes[0].what, "page/column break");
+    }
+
+    /// `= #outline()` end to end: a heading-styled paragraph whose only
+    /// content is a TOC field must lower to the field's cached text, not a
+    /// live `#outline()` — verifying that `lower_paragraph` actually enters
+    /// `LowerCtx`'s heading scope *before* lowering the paragraph's own
+    /// inlines (where `mappers::field::lower_field` reads it), not after.
+    #[test]
+    fn a_toc_field_inside_a_heading_paragraph_uses_its_cached_text() {
+        use rustc_hash::FxHashMap;
+
+        use crate::wml::model::{Field, Style, StyleKind, Styles, WmlPackage};
+
+        let mut by_id = FxHashMap::default();
+        by_id.insert(
+            "Heading1".into(),
+            Style {
+                id: "Heading1".into(),
+                name: Some("heading 1".into()),
+                kind: StyleKind::Paragraph,
+                based_on: None,
+                outline_level: Some(0),
+                run: RunProps::default(),
+                para: ParaProps::default(),
+            },
+        );
+        let package = WmlPackage {
+            styles: Styles { by_id, ..Default::default() },
+            ..Default::default()
+        };
+
+        let p = Paragraph {
+            props: ParaProps { style_id: Some("Heading1".into()), ..Default::default() },
+            runs: vec![RunItem::Field(Field {
+                instr: " TOC \\o \"1-3\" \\h ".into(),
+                result: vec![RunItem::Run(Run {
+                    props: RunProps::default(),
+                    content: vec![RunContent::Text("stale toc".into())],
+                })],
+            })],
+        };
+
+        let mut report = crate::report::ImportReport::default();
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
+        let result = lower_paragraph(&p, &mut ctx);
+
+        match result.kind {
+            ParaKind::Heading { body, .. } => {
+                assert!(matches!(&body[..], [Inline::Text(t)] if t == "stale toc"));
+            }
+            _ => panic!("expected ParaKind::Heading, got a different variant"),
+        }
+        assert!(ctx.report.notes.iter().any(|n| n.what == "field TOC"));
+        // The heading scope must not leak past this paragraph.
+        assert!(!ctx.in_heading());
     }
 }

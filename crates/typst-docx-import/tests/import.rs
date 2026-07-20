@@ -1630,3 +1630,182 @@ fn a_plotted_chart_uses_words_size_and_legend_placement() {
     );
     assert!(src.contains("lq.bar("), "expected a bar plot:\n{src}");
 }
+
+/// Fix: `[content](args)` is Typst's own call-with-trailing-argument-list
+/// syntax, so a parenthetical citation right after a colored run's closing
+/// `#text(..)[..]` used to be read as that call's own arguments — surfacing
+/// as `the character & is not valid in code`. The parenthesis must render
+/// literally instead.
+#[test]
+fn parenthetical_after_a_styled_run_does_not_become_a_trailing_argument_list() {
+    let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+  <w:p>
+    <w:r><w:rPr><w:color w:val="FF0000"/></w:rPr><w:t xml:space="preserve">volatility </w:t></w:r>
+    <w:r><w:t>(Easterly &amp; Kraay, 2000)</w:t></w:r>
+  </w:p>
+</w:body></w:document>"#;
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", doc.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+    assert!(src.contains("\\(Easterly & Kraay, 2000)"), "{src}");
+}
+
+/// Fix: `[#pagebreak()],` inside a table cell — Typst rejects a page break
+/// inside any container ("pagebreaks are not allowed inside of
+/// containers"). The cell's break-only paragraph must be dropped, not
+/// emitted, and the rest of the table must survive.
+#[test]
+fn page_break_inside_a_table_cell_is_dropped_and_the_rest_of_the_table_survives() {
+    let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+  <w:tbl>
+    <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+    <w:tr><w:tc><w:p><w:r><w:br w:type="page"/></w:r></w:p></w:tc></w:tr>
+    <w:tr><w:tc><w:p><w:r><w:t>still here</w:t></w:r></w:p></w:tc></w:tr>
+  </w:tbl>
+</w:body></w:document>"#;
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", doc.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let result = import_docx(&bytes).expect("import should succeed");
+    assert!(!result.source.contains("#pagebreak()"), "{}", result.source);
+    assert!(result.source.contains("still here"), "{}", result.source);
+    assert!(
+        result.report.notes.iter().any(|n| n.what == "page/column break"),
+        "{:?}",
+        result.report.notes
+    );
+}
+
+/// Fix: `= #outline()` — a TOC field directly inside a heading. A live
+/// `#outline()` there renders every heading (including this one) again,
+/// forever ("maximum show rule depth exceeded"); it must fall back to the
+/// field's cached text instead, same as any other unmapped field.
+#[test]
+fn toc_field_inside_a_heading_falls_back_to_cached_text() {
+    let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
+    <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+    <w:r><w:instrText xml:space="preserve"> TOC \o "1-3" \h </w:instrText></w:r>
+    <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+    <w:r><w:t>Stale Contents</w:t></w:r>
+    <w:r><w:fldChar w:fldCharType="end"/></w:r>
+  </w:p>
+</w:body></w:document>"#;
+    let styles = r#"<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>
+</w:styles>"#;
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", doc.into());
+    package.add_xml("word/styles.xml", "application/xml", styles.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let result = import_docx(&bytes).expect("import should succeed");
+    assert!(!result.source.contains("#outline()"), "{}", result.source);
+    assert!(result.source.contains("= Stale Contents"), "{}", result.source);
+    assert!(result.report.notes.iter().any(|n| n.what == "field TOC"), "{:?}", result.report.notes);
+}
+
+/// Fix: `word/media/image1.jpeg` that actually begins `\x89PNG` — a real
+/// producer bug (`lo-sw-floattable-del-empty.docx`). Typst decodes by
+/// extension, so the lying name must be corrected by sniffing the real
+/// bytes, not just trusted or rejected.
+#[test]
+fn an_image_with_a_lying_extension_is_sniffed_and_renamed() {
+    let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+<w:body><w:p><w:r><w:drawing><wp:inline>
+  <wp:extent cx="914400" cy="914400"/>
+  <a:graphic><a:graphicData>
+    <pic:pic><pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill></pic:pic>
+  </a:graphicData></a:graphic>
+</wp:inline></w:drawing></w:r></w:p></w:body>
+</w:document>"#;
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut rels = Rels::new();
+    let image_rid = rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        "media/image1.jpeg",
+        RelMode::Internal,
+    );
+    assert_eq!(image_rid, "rId1");
+
+    let mut png_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    png_bytes.extend_from_slice(&[0u8; 16]);
+    package.add_xml("word/document.xml", "application/xml", doc.into());
+    package.add_media("word/media/image1.jpeg", "jpeg", "image/jpeg", png_bytes.clone());
+    package.add_relationships("word/document.xml", &rels).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let result = import_docx(&bytes).expect("import should succeed");
+    assert!(result.source.contains("image1.png"), "{}", result.source);
+    assert!(!result.source.contains("image1.jpeg"), "{}", result.source);
+    let (path, asset_bytes) =
+        result.assets.first().expect("expected the sniffed PNG to be extracted as an asset");
+    assert_eq!(path.to_str().unwrap(), "assets/image1.png");
+    assert_eq!(asset_bytes, &png_bytes);
+}
+
+/// Fix: a malformed OMML equation or a duplicated attribute anywhere in
+/// `word/document.xml` used to abort the whole import (`roxmltree` builds
+/// one tree per part, so a single bad element failed the entire parse).
+/// Reproduces both real corpus failures (`lo-sw-math-malformed_xml`,
+/// `lo-sw-tdf165348_broken_package`) end to end via [`import_docx`]: the
+/// import must now succeed, dropping only the offending fragment.
+#[test]
+fn malformed_equation_and_duplicate_attribute_degrade_instead_of_aborting_the_import() {
+    use std::io::{Cursor, Write};
+
+    const CT: &str = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+    const RELS: &str = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+
+    // `lo-sw-math-malformed_xml`: `<m:t>...</m:sPre>` inside an otherwise
+    // well-formed `word/document.xml`.
+    let equation_doc = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                                       xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+      <w:body>
+        <w:p><m:oMath><m:r><m:t xml:space="preserve">+</m:t></m:r><m:r><m:t xml:space="preserve">a</m:sPre></m:r></m:oMath></w:p>
+        <w:p><w:r><w:t>still here</w:t></w:r></w:p>
+      </w:body>
+    </w:document>"#;
+
+    // `lo-sw-tdf165348_broken_package`: `<w:jc w:val="center" w:val="center"/>`.
+    let duplicate_attr_doc = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>
+        <w:p><w:pPr><w:jc w:val="center" w:val="center"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p>
+      </w:body>
+    </w:document>"#;
+
+    for doc in [equation_doc, duplicate_attr_doc] {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+        for (name, body) in
+            [("[Content_Types].xml", CT), ("_rels/.rels", RELS), ("word/document.xml", doc)]
+        {
+            zip.start_file(name, opts).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+
+        let result = import_docx(&bytes).expect("import should degrade, not abort");
+        assert!(result.source.contains("still here") || result.source.contains("hi"));
+        assert!(
+            result.report.notes.iter().any(|n| n.what == "word/document.xml"),
+            "{:?}",
+            result.report.notes
+        );
+    }
+}

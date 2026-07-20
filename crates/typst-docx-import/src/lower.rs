@@ -21,6 +21,23 @@ pub(crate) struct LowerCtx<'a> {
     /// note resolution. A malformed document can have note 1 reference note 1,
     /// directly or through a chain, which would otherwise recurse forever.
     note_stack: Vec<(bool, i64)>,
+    /// Whether the content currently being lowered sits inside a table cell,
+    /// text box, footnote/endnote, or header/footer — anywhere Typst forbids
+    /// `#pagebreak()`/`#colbreak()` ("pagebreaks are not allowed inside of
+    /// containers"). Set around each such body by [`Self::enter_container`]/
+    /// [`Self::exit_container`]; [`crate::mappers::para::lower_paragraph`]
+    /// reads it to drop a page/column break instead of emitting one.
+    in_container: bool,
+    /// Whether the content currently being lowered is the direct inline
+    /// content of a heading paragraph. Set by [`Self::enter_heading`]/
+    /// [`Self::exit_heading`] around exactly that scope (so it still reads
+    /// `true` for, say, a hyperlink or a field's cached-result text nested
+    /// inside the heading, which recurses back through the same run-lowering
+    /// path); [`crate::mappers::field::lower_field`]'s `TOC` arm reads it to
+    /// avoid emitting a live `#outline()` where it would recurse into itself
+    /// (`#outline()` renders every heading, including the one that contains
+    /// it — "maximum show rule depth exceeded").
+    in_heading: bool,
 }
 
 /// How deep a chain of notes referencing other notes may nest before
@@ -37,7 +54,14 @@ impl<'a> LowerCtx<'a> {
         options: &'a ImportOptions,
         report: &'a mut ImportReport,
     ) -> Self {
-        LowerCtx { package, options, report, note_stack: Vec::new() }
+        LowerCtx {
+            package,
+            options,
+            report,
+            note_stack: Vec::new(),
+            in_container: false,
+            in_heading: false,
+        }
     }
 
     /// Try to enter `(endnote, id)`'s body for lowering. Returns `false` —
@@ -62,6 +86,51 @@ impl<'a> LowerCtx<'a> {
     /// Leave the note most recently entered via [`Self::enter_note`].
     pub(crate) fn exit_note(&mut self) {
         self.note_stack.pop();
+    }
+
+    /// Enter a container body (a table cell, a text box, a footnote/endnote,
+    /// or a header/footer) for the duration of lowering it. Returns the
+    /// previous value of [`Self::in_container`], which the caller must pass
+    /// back to [`Self::exit_container`] once the body is fully lowered — a
+    /// save/restore rather than a depth counter, since nesting only ever
+    /// needs a yes/no answer: a break three containers deep is exactly as
+    /// illegal as one, and unwinding to whatever the flag already was
+    /// (rather than hard-resetting to `false`) is what keeps that nested
+    /// case correct.
+    pub(crate) fn enter_container(&mut self) -> bool {
+        std::mem::replace(&mut self.in_container, true)
+    }
+
+    /// Leave the container most recently entered via [`Self::enter_container`].
+    pub(crate) fn exit_container(&mut self, was_in_container: bool) {
+        self.in_container = was_in_container;
+    }
+
+    /// Whether the content currently being lowered is inside a container —
+    /// see [`Self::in_container`]'s doc comment.
+    pub(crate) fn in_container(&self) -> bool {
+        self.in_container
+    }
+
+    /// Enter a heading paragraph's own direct inline content. Same
+    /// save/restore shape as [`Self::enter_container`], and for the same
+    /// nesting reason: a field or hyperlink inside the heading that
+    /// recurses back through [`crate::mappers::run::lower_run_items`] (a
+    /// field's cached result can itself contain a nested field) must still
+    /// see `true`.
+    pub(crate) fn enter_heading(&mut self) -> bool {
+        std::mem::replace(&mut self.in_heading, true)
+    }
+
+    /// Leave the heading most recently entered via [`Self::enter_heading`].
+    pub(crate) fn exit_heading(&mut self, was_in_heading: bool) {
+        self.in_heading = was_in_heading;
+    }
+
+    /// Whether the content currently being lowered is a heading's own direct
+    /// inline content — see [`Self::in_heading`]'s doc comment.
+    pub(crate) fn in_heading(&self) -> bool {
+        self.in_heading
     }
 }
 

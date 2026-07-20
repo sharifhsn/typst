@@ -9,7 +9,7 @@
 //! and the mappers.
 
 use ecow::{EcoString, eco_format};
-use roxmltree::{Document, Node};
+use roxmltree::{Document, Node, TextPos};
 use rustc_hash::FxHashMap;
 use typst_ooxml_core::{ns, opc::Reader};
 
@@ -22,11 +22,296 @@ use crate::wml::model::{
     Table, VmlShape, VmlShapeKind, WmlPackage,
 };
 
+// ===========================================================================
+// Resilient XML parsing.
+// ===========================================================================
+//
+// A single malformed element anywhere in a part's XML fails `Document::parse`
+// for the *whole* part — `roxmltree` builds one tree in one pass, so there is
+// no "skip just the bad bit" short of not handing it a broken tree in the
+// first place. Real-world producer bugs are responsible for this crate's
+// worst failures (a whole document refusing to import over one malformed
+// equation), but they also tend to be narrow and mechanically recognisable,
+// so [`repair_xml`] attempts one bounded, text-level fix — keyed off the
+// *shape* of `roxmltree`'s own typed error, never its rendered message —
+// before giving up. [`parse_xml`]/[`try_parse_xml`] are the two entry points
+// every part parse in this module funnels through: the former degrades to a
+// safe default on any unrepairable failure (every companion part), the
+// latter propagates the error so the one caller that has no safe default
+// (`parse_document`, for `word/document.xml` itself — there is no document
+// without it) can turn it into a fatal [`ImportError`].
+
+/// Parses `xml` and hands the resulting tree to `f`, retrying once against
+/// [`repair_xml`]'s text-level repair if the first attempt fails. A
+/// successful repair is itself recorded as a `what`-named [`Severity::Drop`]
+/// note — even though the rest of the part came through, whatever the repair
+/// excised (a duplicate attribute, a malformed equation) is still lost. On
+/// total failure (parsing failed outright, or [`repair_xml`] doesn't apply,
+/// or the repaired text *still* doesn't parse), returns the *original*
+/// error so the caller can decide what to do with it — nothing is recorded
+/// here in that case, since [`parse_xml`]'s callers each need their own
+/// wording for what "give up on this part" means for them.
+///
+/// [`Severity::Drop`]: crate::report::Severity::Drop
+fn try_parse_xml<T>(
+    xml: &str,
+    what: &str,
+    report: &mut ImportReport,
+    f: impl for<'d> FnOnce(Document<'d>) -> T,
+) -> Result<T, roxmltree::Error> {
+    match Document::parse(xml) {
+        Ok(doc) => Ok(f(doc)),
+        Err(e) => {
+            let Some((repaired, detail)) = repair_xml(xml, &e) else { return Err(e) };
+            match Document::parse(&repaired) {
+                Ok(doc) => {
+                    report.drop(what, eco_format!("malformed XML, repaired: {detail}"));
+                    Ok(f(doc))
+                }
+                Err(_) => Err(e),
+            }
+        }
+    }
+}
+
+/// [`try_parse_xml`], but degrading to `default` (with a `what`-named
+/// [`Severity::Drop`] note) on total failure instead of propagating it —
+/// what every part parsed by this module wants *except*
+/// `word/document.xml` (see `parse_document`, which calls [`try_parse_xml`]
+/// directly so it can turn the same failure into a fatal [`ImportError`]
+/// instead).
+///
+/// [`Severity::Drop`]: crate::report::Severity::Drop
+fn parse_xml<T>(
+    xml: &str,
+    what: &str,
+    report: &mut ImportReport,
+    default: T,
+    f: impl for<'d> FnOnce(Document<'d>) -> T,
+) -> T {
+    try_parse_xml(xml, what, report, f).unwrap_or_else(|e| {
+        report.drop(what, eco_format!("malformed XML: {e}; part skipped"));
+        default
+    })
+}
+
+/// Reads a part's XML, treating both "the part is absent" and "the part
+/// couldn't be read" (a corrupt zip entry, an XXE/size-limit rejection, …)
+/// as `None` — the latter with a `what`-named [`Severity::Drop`] note, since
+/// unlike genuine absence it *is* a loss. Every part read this way has a
+/// safe empty/default fallback; only `word/document.xml` (read directly in
+/// [`parse_package`], guarded by its own `reader.has` check) does not.
+///
+/// [`Severity::Drop`]: crate::report::Severity::Drop
+fn read_optional_part(
+    reader: &mut Reader,
+    part_name: &str,
+    what: &str,
+    report: &mut ImportReport,
+) -> Option<String> {
+    match reader.xml_part(part_name) {
+        Ok(xml) => xml,
+        Err(e) => {
+            report.drop(what, eco_format!("could not read part: {e}"));
+            None
+        }
+    }
+}
+
+/// Attempts a bounded, text-level repair for `err`, keyed off *what kind* of
+/// error `roxmltree` reported (never its rendered message — matching two
+/// error strings is exactly the special-casing this is meant to avoid), and
+/// returns the repaired text plus a human description of what changed.
+/// Handles two shapes real-world producers are seen to emit:
+///
+/// - [`roxmltree::Error::DuplicatedAttribute`] — a repeated attribute on one
+///   element is illegal XML, but unarguably redundant: whichever value a
+///   tolerant reader would pick, keeping the *first* occurrence and
+///   dropping the repeat changes nothing a well-formed sibling document
+///   could have meant (see [`remove_duplicate_attribute`]);
+/// - anything else, *if* the error's position falls inside an
+///   `<m:oMath>`/`<m:oMathPara>` region — this crate already treats an OMML
+///   equation as fully droppable content (see
+///   [`crate::mappers::math::omml_to_inline`]'s own fallback for one that
+///   fails to parse in isolation), so whatever specifically broke it
+///   (mismatched tags, an unescaped character, …), the safe move is to drop
+///   the whole equation rather than interpret a partially-written tag soup
+///   (see [`drop_enclosing_equation`]).
+///
+/// Anything else returns `None` — there's no general, safe rewrite for "some
+/// unrelated tag somewhere doesn't nest correctly" without guessing at what
+/// the writer meant, so the original error must stand.
+fn repair_xml(xml: &str, err: &roxmltree::Error) -> Option<(String, EcoString)> {
+    if let roxmltree::Error::DuplicatedAttribute(name, pos) = err {
+        let repaired = remove_duplicate_attribute(xml, *pos)?;
+        return Some((repaired, eco_format!("removed a duplicate '{name}' attribute")));
+    }
+    let offset = text_offset_at(xml, err.pos());
+    let repaired = drop_enclosing_equation(xml, offset)?;
+    Some((repaired, EcoString::from("dropped a malformed OMML equation")))
+}
+
+/// Converts a 1-based `(row, col)` [`TextPos`] — `roxmltree`'s own error
+/// position, where `col` counts *characters*, not bytes — back into a byte
+/// offset into `text`. The inverse of `roxmltree::Document::text_pos_at`,
+/// which only goes the other way; the repairs below need to slice the
+/// original text at the position an error was reported at.
+fn text_offset_at(text: &str, pos: TextPos) -> usize {
+    let mut row = 1u32;
+    let mut line_start = 0usize;
+    if pos.row > 1 {
+        for (i, b) in text.bytes().enumerate() {
+            if b == b'\n' {
+                row += 1;
+                if row == pos.row {
+                    line_start = i + 1;
+                    break;
+                }
+            }
+        }
+    }
+    for (col, (i, _)) in (1u32..).zip(text[line_start..].char_indices()) {
+        if col == pos.col {
+            return line_start + i;
+        }
+    }
+    text.len()
+}
+
+/// Excises the *second* occurrence of a duplicated attribute — `pos` points
+/// at its very first character (the start of its, possibly prefixed,
+/// qualified name; verified against `roxmltree`'s own attribute-resolution
+/// code, which reports the position of the repeat, not the original) — along
+/// with the run of whitespace immediately before it, so the tag doesn't come
+/// out with a doubled space where the attribute used to be.
+fn remove_duplicate_attribute(text: &str, pos: TextPos) -> Option<String> {
+    let start = text_offset_at(text, pos);
+    let bytes = text.as_bytes();
+
+    let mut i = start;
+    while i < bytes.len() && bytes[i] != b'=' {
+        i += 1;
+    }
+    i += 1; // Past `=`.
+    while bytes.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
+        i += 1;
+    }
+    let quote = *bytes.get(i)?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    i += 1;
+    while i < bytes.len() && bytes[i] != quote {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    let end = i + 1; // Past the closing quote.
+
+    let mut trim_start = start;
+    while trim_start > 0 && (bytes[trim_start - 1] as char).is_whitespace() {
+        trim_start -= 1;
+    }
+
+    let mut out = String::with_capacity(text.len() - (end - trim_start));
+    out.push_str(&text[..trim_start]);
+    out.push_str(&text[end..]);
+    Some(out)
+}
+
+/// If `offset` falls inside an `<m:oMath>`/`<m:oMathPara>` region, returns
+/// the text with that whole region excised. `m:oMath` is tried first (the
+/// narrowest droppable unit — a single equation): it also matches every
+/// `m:oMath` nested inside an `m:oMathPara`, so a document with several
+/// equations under one `m:oMathPara` only loses the one that's actually
+/// broken. Only if `offset` isn't inside any `m:oMath` region does this fall
+/// back to `m:oMathPara` itself (the error is in the wrapper's own markup,
+/// not any equation it contains). Returns `None` if `offset` isn't inside
+/// either — the caller's signal that this repair doesn't apply here.
+fn drop_enclosing_equation(text: &str, offset: usize) -> Option<String> {
+    for tag in ["m:oMath", "m:oMathPara"] {
+        for (start, end) in tag_regions(text, tag) {
+            if (start..end).contains(&offset) {
+                let mut out = String::with_capacity(text.len() - (end - start));
+                out.push_str(&text[..start]);
+                out.push_str(&text[end..]);
+                return Some(out);
+            }
+        }
+    }
+    None
+}
+
+/// Every non-overlapping `<tag ...>...</tag>` region in `text`, found by
+/// plain substring/tag-boundary matching rather than requiring `text` to
+/// parse as XML at all — the whole point, since this runs precisely when it
+/// doesn't. Safe for `m:oMath`/`m:oMathPara` specifically because neither
+/// ever nests inside another instance of itself, so "the next literal close
+/// tag after this open tag" is always the right match, however broken the
+/// content between them is — the malformed tag soup this exists to step
+/// over lives entirely *inside* a region, never in whether one starts or
+/// ends.
+fn tag_regions(text: &str, tag: &str) -> Vec<(usize, usize)> {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut regions = Vec::new();
+    let mut i = 0;
+    while let Some(rel) = text[i..].find(&open) {
+        let start = i + rel;
+        let after_name = start + open.len();
+        // Reject a prefix collision (`<m:oMathPara` also contains
+        // `<m:oMath` as a literal prefix): a genuine `m:oMath` tag name ends
+        // right there, at `>`, `/`, or whitespace.
+        let boundary = text[after_name..]
+            .chars()
+            .next()
+            .is_some_and(|c| c == '>' || c == '/' || c.is_whitespace());
+        if !boundary {
+            i = after_name;
+            continue;
+        }
+        let Some(tag_close_rel) = find_unquoted_gt(&text[after_name..]) else { break };
+        let tag_close = after_name + tag_close_rel;
+        let self_closing = text.as_bytes()[tag_close - 1] == b'/';
+        if self_closing {
+            i = tag_close + 1;
+            continue;
+        }
+        let search_from = tag_close + 1;
+        let Some(close_rel) = text[search_from..].find(&close) else {
+            i = search_from;
+            continue;
+        };
+        let end = search_from + close_rel + close.len();
+        regions.push((start, end));
+        i = end;
+    }
+    regions
+}
+
+/// The index of the first `>` in `s` that isn't inside a quoted attribute
+/// value — the end of one XML start/self-closing tag.
+fn find_unquoted_gt(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut quote: Option<u8> = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'"' || b == b'\'' => quote = Some(b),
+            None if b == b'>' => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Open the `.docx` and parse `word/document.xml`, `styles.xml`,
 /// `numbering.xml`, relationships and media into the Word IR.
 pub fn parse_package(
     bytes: &[u8],
-    _report: &mut ImportReport,
+    report: &mut ImportReport,
 ) -> Result<WmlPackage, ImportError> {
     // Fail early with a real error if it isn't even a package, so the stub is
     // honest end-to-end.
@@ -35,8 +320,14 @@ pub fn parse_package(
         return Err(ImportError::NotAWordDocument);
     }
 
-    let mut rels = parse_rels(&mut reader)?;
-    let even_and_odd_headers = parse_even_and_odd_headers(&mut reader)?;
+    // Every part below except `word/document.xml` itself degrades to a safe
+    // default (recording a `Severity::Drop` note) on any failure — missing,
+    // unreadable, or malformed XML that `try_parse_xml`'s one repair
+    // attempt couldn't fix — rather than aborting the whole import. There is
+    // no document without `word/document.xml`, so it alone still propagates
+    // a fatal `ImportError` (see `parse_document`).
+    let mut rels = parse_rels(&mut reader, report);
+    let even_and_odd_headers = parse_even_and_odd_headers(&mut reader, report);
 
     let mut media = FxHashMap::default();
     let media_names: Vec<EcoString> = reader
@@ -51,24 +342,26 @@ pub fn parse_package(
         }
     }
 
-    let styles = match reader.xml_part("word/styles.xml")? {
-        Some(xml) => parse_styles(&xml)?,
+    let styles = match read_optional_part(&mut reader, "word/styles.xml", "styles.xml", report) {
+        Some(xml) => parse_xml(&xml, "styles.xml", report, Styles::default(), parse_styles),
         None => Styles::default(),
     };
 
-    let numbering = match reader.xml_part("word/numbering.xml")? {
-        Some(xml) => parse_numbering(&xml)?,
+    let numbering = match read_optional_part(&mut reader, "word/numbering.xml", "numbering.xml", report)
+    {
+        Some(xml) => parse_xml(&xml, "numbering.xml", report, Numbering::default(), parse_numbering),
         None => Numbering::default(),
     };
 
     // Guaranteed present by the `has` check above.
     let doc_xml = reader.xml_part("word/document.xml")?.unwrap_or_default();
-    let body = parse_document(&doc_xml)?;
+    let body = parse_document(&doc_xml, report)?;
 
-    let furniture = parse_furniture_parts(&mut reader, &mut rels)?;
-    let footnotes = parse_notes_part(&mut reader, &mut rels, "word/footnotes.xml", "footnote")?;
-    let endnotes = parse_notes_part(&mut reader, &mut rels, "word/endnotes.xml", "endnote")?;
-    let charts = parse_chart_parts(&mut reader)?;
+    let furniture = parse_furniture_parts(&mut reader, &mut rels, report);
+    let footnotes =
+        parse_notes_part(&mut reader, &mut rels, "word/footnotes.xml", "footnote", report);
+    let endnotes = parse_notes_part(&mut reader, &mut rels, "word/endnotes.xml", "endnote", report);
+    let charts = parse_chart_parts(&mut reader, report);
 
     Ok(WmlPackage {
         body,
@@ -86,8 +379,8 @@ pub fn parse_package(
 
 // --- Relationships -----------------------------------------------------------
 
-fn parse_rels(reader: &mut Reader) -> Result<FxHashMap<EcoString, Relationship>, ImportError> {
-    Ok(parse_rels_for(reader, "word/document.xml")?.into_iter().collect())
+fn parse_rels(reader: &mut Reader, report: &mut ImportReport) -> FxHashMap<EcoString, Relationship> {
+    parse_rels_for(reader, "word/document.xml", report).into_iter().collect()
 }
 
 /// Reads `<dir>/_rels/<file>.rels` for `part_name` (`word/header1.xml` →
@@ -104,36 +397,43 @@ fn parse_rels(reader: &mut Reader) -> Result<FxHashMap<EcoString, Relationship>,
 fn parse_rels_for(
     reader: &mut Reader,
     part_name: &str,
-) -> Result<Vec<(EcoString, Relationship)>, ImportError> {
-    let mut rels = Vec::new();
+    report: &mut ImportReport,
+) -> Vec<(EcoString, Relationship)> {
     let rels_name = match part_name.rsplit_once('/') {
         Some((dir, file)) => format!("{dir}/_rels/{file}.rels"),
         None => format!("_rels/{part_name}.rels"),
     };
-    let Some(xml) = reader.xml_part(&rels_name)? else {
-        return Ok(rels);
+    let Some(xml) = read_optional_part(reader, &rels_name, &rels_name, report) else {
+        return Vec::new();
     };
-    let document = Document::parse(&xml).map_err(xml_err)?;
-    for node in document.descendants().filter(|n| is_element(*n, "Relationship")) {
-        let (Some(id), Some(target)) = (attr(node, "Id"), attr(node, "Target")) else {
-            continue;
-        };
-        let external = attr(node, "TargetMode") == Some("External");
-        rels.push((id.into(), Relationship { target: target.into(), external }));
-    }
-    Ok(rels)
+    parse_xml(&xml, &rels_name, report, Vec::new(), |document| {
+        document
+            .descendants()
+            .filter(|n| is_element(*n, "Relationship"))
+            .filter_map(|node| {
+                let (id, target) = (attr(node, "Id")?, attr(node, "Target")?);
+                let external = attr(node, "TargetMode") == Some("External");
+                Some((EcoString::from(id), Relationship { target: target.into(), external }))
+            })
+            .collect()
+    })
 }
 
 // --- word/document.xml --------------------------------------------------------
 
-fn parse_document(xml: &str) -> Result<Body, ImportError> {
-    let document = Document::parse(xml).map_err(xml_err)?;
-    let root = document.root_element();
-    let body_node = root
-        .children()
-        .find(|n| is_element(*n, "body"))
-        .ok_or_else(|| ImportError::Xml("word/document.xml has no w:body".into()))?;
-    Ok(parse_body_content(body_node, 0))
+/// The one part in the whole package with no safe fallback — there is no
+/// document without it — so unlike every other part parsed by this module,
+/// failure here (even after [`try_parse_xml`]'s one repair attempt) is fatal.
+fn parse_document(xml: &str, report: &mut ImportReport) -> Result<Body, ImportError> {
+    let body = try_parse_xml(xml, "word/document.xml", report, |document| {
+        document
+            .root_element()
+            .children()
+            .find(|n| is_element(*n, "body"))
+            .map(|body_node| parse_body_content(body_node, 0))
+    })
+    .map_err(xml_err)?;
+    body.ok_or_else(|| ImportError::Xml("word/document.xml has no w:body".into()))
 }
 
 /// How deep a nest of *transparent wrapper* elements [`unwrap_wrappers`]/
@@ -321,7 +621,8 @@ fn parse_body_content(node: Node, tb_depth: usize) -> Body {
 fn parse_furniture_parts(
     reader: &mut Reader,
     rels: &mut FxHashMap<EcoString, Relationship>,
-) -> Result<FxHashMap<EcoString, Body>, ImportError> {
+    report: &mut ImportReport,
+) -> FxHashMap<EcoString, Body> {
     let mut furniture = FxHashMap::default();
     let names: Vec<EcoString> = reader
         .names()
@@ -334,17 +635,21 @@ fn parse_furniture_parts(
         .collect();
 
     for name in names {
-        let Some(xml) = reader.xml_part(&name)? else { continue };
-        let mut body = parse_furniture_part(&xml)?;
+        // A malformed header/footer part degrades to an empty body (dropped
+        // downstream by `mappers::section`'s own "visually empty" check)
+        // rather than aborting the rest of the document — same policy as
+        // every other companion part.
+        let Some(xml) = read_optional_part(reader, &name, &name, report) else { continue };
+        let mut body = parse_xml(&xml, &name, report, Body::default(), parse_furniture_part);
         namespace_rel_ids(&mut body.items, &name);
 
-        for (rid, rel) in parse_rels_for(reader, &name)? {
+        for (rid, rel) in parse_rels_for(reader, &name, report) {
             rels.insert(eco_format!("{name}!{rid}"), rel);
         }
 
         furniture.insert(name, body);
     }
-    Ok(furniture)
+    furniture
 }
 
 /// Parse a `w:hdr`/`w:ftr` part into a [`Body`]. Unlike `word/document.xml`,
@@ -352,9 +657,8 @@ fn parse_furniture_parts(
 /// container — but its children are otherwise the same paragraph/table
 /// content [`parse_body_content`] already walks; a furniture part never
 /// carries its own `w:sectPr`.
-fn parse_furniture_part(xml: &str) -> Result<Body, ImportError> {
-    let document = Document::parse(xml).map_err(xml_err)?;
-    Ok(parse_body_content(document.root_element(), 0))
+fn parse_furniture_part(document: Document) -> Body {
+    parse_body_content(document.root_element(), 0)
 }
 
 /// Rewrite every relationship id inside a freshly parsed part body to its
@@ -451,31 +755,36 @@ fn parse_notes_part(
     rels: &mut FxHashMap<EcoString, Relationship>,
     part_name: &str,
     element_name: &str,
-) -> Result<FxHashMap<i64, Body>, ImportError> {
-    let mut notes = FxHashMap::default();
-    let Some(xml) = reader.xml_part(part_name)? else {
-        return Ok(notes);
+    report: &mut ImportReport,
+) -> FxHashMap<i64, Body> {
+    let Some(xml) = read_optional_part(reader, part_name, part_name, report) else {
+        return FxHashMap::default();
     };
-    let document = Document::parse(&xml).map_err(xml_err)?;
-    let root = document.root_element();
-
-    for child in root.children().filter(|n| is_element(*n, element_name)) {
-        if is_boilerplate_note(child) {
-            continue;
+    // A malformed notes part degrades to no notes at all, same policy as
+    // every other companion part — the references to it in the main body
+    // simply fail to resolve (already handled, and reported, by
+    // `mappers::note::lower_note_ref`).
+    let notes = parse_xml(&xml, part_name, report, FxHashMap::default(), |document| {
+        let mut notes = FxHashMap::default();
+        for child in document.root_element().children().filter(|n| is_element(*n, element_name)) {
+            if is_boilerplate_note(child) {
+                continue;
+            }
+            // A note with no parsable `w:id` can never be resolved against a
+            // `RunContent::NoteRef`, so it's not worth keeping.
+            let Some(id) = attr(child, "id").and_then(parse_i64) else { continue };
+            let mut body = parse_body_content(child, 0);
+            namespace_rel_ids(&mut body.items, part_name);
+            notes.insert(id, body);
         }
-        // A note with no parsable `w:id` can never be resolved against a
-        // `RunContent::NoteRef`, so it's not worth keeping.
-        let Some(id) = attr(child, "id").and_then(parse_i64) else { continue };
-        let mut body = parse_body_content(child, 0);
-        namespace_rel_ids(&mut body.items, part_name);
-        notes.insert(id, body);
-    }
+        notes
+    });
 
-    for (rid, rel) in parse_rels_for(reader, part_name)? {
+    for (rid, rel) in parse_rels_for(reader, part_name, report) {
         rels.insert(eco_format!("{part_name}!{rid}"), rel);
     }
 
-    Ok(notes)
+    notes
 }
 
 // --- word/settings.xml ---------------------------------------------------------
@@ -483,13 +792,13 @@ fn parse_notes_part(
 /// Whether `settings.xml` declares `<w:evenAndOddHeaders/>` — the switch that
 /// makes an `even`-typed header/footer reference active (see
 /// [`crate::mappers::section`]).
-fn parse_even_and_odd_headers(reader: &mut Reader) -> Result<bool, ImportError> {
-    let Some(xml) = reader.xml_part("word/settings.xml")? else {
-        return Ok(false);
+fn parse_even_and_odd_headers(reader: &mut Reader, report: &mut ImportReport) -> bool {
+    let Some(xml) = read_optional_part(reader, "word/settings.xml", "settings.xml", report) else {
+        return false;
     };
-    let document = Document::parse(&xml).map_err(xml_err)?;
-    let root = document.root_element();
-    Ok(root.children().any(|n| is_element(n, "evenAndOddHeaders")))
+    parse_xml(&xml, "settings.xml", report, false, |document| {
+        document.root_element().children().any(|n| is_element(n, "evenAndOddHeaders"))
+    })
 }
 
 fn parse_paragraph(node: Node, tb_depth: usize) -> Paragraph {
@@ -1274,7 +1583,10 @@ fn parse_cell_props(node: Node, cell: &mut Cell) {
 /// directory and keeps only the ones whose root is actually a chart
 /// (`chartSpace`, classic or ChartEx — see [`parse_chart_space`]), matching
 /// by local name exactly as the rest of this module does.
-fn parse_chart_parts(reader: &mut Reader) -> Result<FxHashMap<EcoString, ChartData>, ImportError> {
+fn parse_chart_parts(
+    reader: &mut Reader,
+    report: &mut ImportReport,
+) -> FxHashMap<EcoString, ChartData> {
     let mut charts = FxHashMap::default();
     let names: Vec<EcoString> = reader
         .names()
@@ -1284,15 +1596,20 @@ fn parse_chart_parts(reader: &mut Reader) -> Result<FxHashMap<EcoString, ChartDa
         .collect();
 
     for name in names {
-        let Some(xml) = reader.xml_part(&name)? else { continue };
-        let document = Document::parse(&xml).map_err(xml_err)?;
-        let root = document.root_element();
-        if root.tag_name().name() != "chartSpace" {
-            continue;
+        // A malformed chart part degrades to no chart at all (the anchoring
+        // drawing then simply has no chart data to resolve, same as any
+        // other unresolvable reference) — same policy as every other
+        // companion part.
+        let Some(xml) = read_optional_part(reader, &name, &name, report) else { continue };
+        let chart = parse_xml(&xml, &name, report, None, |document| {
+            let root = document.root_element();
+            (root.tag_name().name() == "chartSpace").then(|| parse_chart_space(root))
+        });
+        if let Some(chart) = chart {
+            charts.insert(name, chart);
         }
-        charts.insert(name, parse_chart_space(root));
     }
-    Ok(charts)
+    charts
 }
 
 /// Parse a chart part's root (`c:chartSpace`, or the ChartEx `cx:chartSpace`)
@@ -1583,8 +1900,7 @@ fn parse_furniture_ref(node: Node) -> Option<FurnitureRef> {
 
 // --- word/styles.xml -----------------------------------------------------------
 
-fn parse_styles(xml: &str) -> Result<Styles, ImportError> {
-    let document = Document::parse(xml).map_err(xml_err)?;
+fn parse_styles(document: Document) -> Styles {
     let root = document.root_element();
     let mut styles = Styles::default();
     for child in root.children().filter(|n| n.is_element()) {
@@ -1597,7 +1913,7 @@ fn parse_styles(xml: &str) -> Result<Styles, ImportError> {
             _ => {}
         }
     }
-    Ok(styles)
+    styles
 }
 
 fn parse_doc_defaults(node: Node, styles: &mut Styles) {
@@ -1650,8 +1966,7 @@ fn parse_style(node: Node) -> Style {
 
 // --- word/numbering.xml ---------------------------------------------------------
 
-fn parse_numbering(xml: &str) -> Result<Numbering, ImportError> {
-    let document = Document::parse(xml).map_err(xml_err)?;
+fn parse_numbering(document: Document) -> Numbering {
     let root = document.root_element();
     let mut numbering = Numbering::default();
     for child in root.children().filter(|n| n.is_element()) {
@@ -1693,7 +2008,7 @@ fn parse_numbering(xml: &str) -> Result<Numbering, ImportError> {
             _ => {}
         }
     }
-    Ok(numbering)
+    numbering
 }
 
 // --- Small XML helpers ---------------------------------------------------------
@@ -3134,5 +3449,145 @@ mod tests {
         let parsed = parse_package(&docx, &mut report).unwrap();
         assert_eq!(parsed.charts.len(), 1, "expected only chart1.xml: {:?}", parsed.charts.keys());
         assert!(parsed.charts.contains_key("word/charts/chart1.xml"));
+    }
+
+    // --- Resilient XML parsing (malformed companion parts / OMML fragments) ---
+
+    #[test]
+    fn text_offset_at_matches_a_known_row_col() {
+        let text = "line one\nline two\nabc";
+        assert_eq!(text_offset_at(text, TextPos::new(1, 1)), 0);
+        assert_eq!(text_offset_at(text, TextPos::new(3, 1)), "line one\nline two\n".len());
+        assert_eq!(text_offset_at(text, TextPos::new(2, 6)), "line one\nline ".len());
+    }
+
+    #[test]
+    fn remove_duplicate_attribute_excises_only_the_repeat() {
+        let text = r#"<w:jc xmlns:w="ns" w:val="center" w:val="center"/>"#;
+        let roxmltree::Error::DuplicatedAttribute(_, pos) = Document::parse(text).unwrap_err()
+        else {
+            panic!("expected a DuplicatedAttribute error")
+        };
+        let repaired = remove_duplicate_attribute(text, pos).expect("expected a repair");
+        assert_eq!(repaired, r#"<w:jc xmlns:w="ns" w:val="center"/>"#);
+        Document::parse(&repaired).expect("repaired text must actually parse");
+    }
+
+    #[test]
+    fn tag_regions_finds_o_math_without_confusing_it_for_o_math_para() {
+        let text = "<a><m:oMath>1</m:oMath><m:oMathPara><m:oMath>2</m:oMath></m:oMathPara></a>";
+        let regions = tag_regions(text, "m:oMath");
+        assert_eq!(regions.len(), 2, "{regions:?}");
+        assert_eq!(&text[regions[0].0..regions[0].1], "<m:oMath>1</m:oMath>");
+        assert_eq!(&text[regions[1].0..regions[1].1], "<m:oMath>2</m:oMath>");
+    }
+
+    #[test]
+    fn drop_enclosing_equation_removes_only_the_broken_equation() {
+        let text = r#"<w:p><w:r><w:t>before</w:t></w:r><m:oMath xmlns:m="ns"><m:r><m:t xml:space="preserve">a</m:sPre></m:r></m:oMath><w:r><w:t>after</w:t></w:r></w:p>"#;
+        let offset = text.find("m:sPre").unwrap();
+        let repaired =
+            drop_enclosing_equation(text, offset).expect("expected the equation dropped");
+        assert!(!repaired.contains("oMath"), "{repaired}");
+        assert!(repaired.contains("before") && repaired.contains("after"), "{repaired}");
+    }
+
+    /// The `lo-sw-math-malformed_xml` corpus failure, reproduced directly: a
+    /// mismatched closing tag inside an `m:oMath` (`m:t` opened, `m:sPre`
+    /// closes it — `roxmltree`'s real `expected 'm:t' tag, not 'm:sPre'`
+    /// error) used to abort the entire document. It must now degrade to
+    /// dropping just that one equation.
+    #[test]
+    fn a_malformed_equation_degrades_instead_of_aborting_the_document() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                                  xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+          <w:body>
+            <w:p><m:oMath><m:r><m:t xml:space="preserve">+</m:t></m:r><m:r><m:t xml:space="preserve">a</m:sPre></m:r></m:oMath></w:p>
+            <w:p><w:r><w:t>still here</w:t></w:r></w:p>
+          </w:body>
+        </w:document>"#;
+        let mut report = ImportReport::default();
+        let body = parse_document(xml, &mut report).expect("should degrade, not abort");
+        assert_eq!(body.items.len(), 2);
+        assert!(
+            report.notes.iter().any(|n| n.what == "word/document.xml"
+                && n.detail.contains("OMML")),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// The `lo-sw-tdf165348_broken_package` corpus failure, reproduced
+    /// directly: a duplicated `w:val` attribute (`roxmltree`'s real
+    /// `attribute 'val' at 7:30 is already defined` error) used to abort the
+    /// entire document too, even though it's nowhere near an equation.
+    #[test]
+    fn a_duplicate_attribute_degrades_instead_of_aborting_the_document() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body>
+            <w:p><w:pPr><w:jc w:val="center" w:val="center"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p>
+          </w:body>
+        </w:document>"#;
+        let mut report = ImportReport::default();
+        let body = parse_document(xml, &mut report).expect("should degrade, not abort");
+        assert_eq!(body.items.len(), 1);
+        assert!(
+            report.notes.iter().any(|n| n.detail.contains("duplicate")),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// Not every malformed `word/document.xml` is recoverable — one with no
+    /// shape [`repair_xml`] recognises must still be fatal (there is no
+    /// document without it).
+    #[test]
+    fn a_genuinely_unrecoverable_document_xml_is_still_fatal() {
+        let xml = "<w:document><w:body><w:p><w:r><w:t>oops";
+        let mut report = ImportReport::default();
+        assert!(parse_document(xml, &mut report).is_err());
+    }
+
+    /// A malformed *companion* part (here, `styles.xml`, in a shape neither
+    /// repair recognises) must not abort the whole import — it degrades to
+    /// an empty `Styles` with a report note, the same as any other
+    /// companion part, while `word/document.xml` — the one part with no
+    /// such fallback — still imports normally.
+    ///
+    /// Assembled as a raw OPC zip (the `Package` writer used everywhere else
+    /// in this module validates every part is well-formed XML before it will
+    /// write one at all, which is exactly backwards for a test that needs a
+    /// part to *not* be).
+    #[test]
+    fn a_malformed_companion_part_degrades_without_aborting_the_import() {
+        use std::io::{Cursor, Write};
+
+        const CT: &str = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+        const RELS: &str = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+        const DOC: &str = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+             <w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
+        // Malformed beyond either repair's reach: an unterminated element
+        // with no recognisable shape to fix.
+        const BAD_STYLES: &str = "<w:styles><w:style";
+
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+        for (name, body) in [
+            ("[Content_Types].xml", CT),
+            ("_rels/.rels", RELS),
+            ("word/document.xml", DOC),
+            ("word/styles.xml", BAD_STYLES),
+        ] {
+            zip.start_file(name, opts).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        let docx = zip.finish().unwrap().into_inner();
+
+        let mut report = ImportReport::default();
+        let parsed =
+            parse_package(&docx, &mut report).expect("must not abort on a bad companion part");
+        assert_eq!(parsed.body.items.len(), 1);
+        assert!(parsed.styles.by_id.is_empty());
+        assert!(report.notes.iter().any(|n| n.what == "styles.xml"), "{:?}", report.notes);
     }
 }

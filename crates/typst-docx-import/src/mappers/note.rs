@@ -51,7 +51,12 @@ pub(crate) fn lower_note_ref(endnote: bool, id: i64, ctx: &mut LowerCtx) -> Opti
         );
     }
 
+    // A page/column break inside a footnote/endnote body is just as
+    // meaningless as inside a table cell or text box (Typst rejects it
+    // outright) — see `mappers::table::lower_cell`'s equivalent guard.
+    let was_in_container = ctx.enter_container();
     let blocks = lower_items(&body.items, ctx);
+    ctx.exit_container(was_in_container);
     ctx.exit_note();
 
     Some(Inline::Footnote(blocks))

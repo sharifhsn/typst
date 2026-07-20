@@ -418,11 +418,19 @@ impl Emitter<'_> {
 
         if self.seen_assets.insert(emitted_path.clone()) {
             let bytes = self.package.media.get(image_path).or_else(|| {
-                self.package
-                    .media
-                    .iter()
-                    .find(|(name, _)| name.as_str().rsplit(['/', '\\']).next() == Some(basename))
-                    .map(|(_, bytes)| bytes)
+                // Matched by *stem* (the basename minus its extension), not
+                // the full basename: `mappers::drawing::lower_drawing` can
+                // hand back an `image_path` whose extension was corrected
+                // from a sniffed real format (a PNG saved under a lying
+                // `.jpeg` name) — deliberately different from the zip
+                // member's own, so the lookup that recovers its bytes can't
+                // require the two to match exactly.
+                let stem = file_stem(basename);
+                self.package.media.iter().find(|(name, _)| {
+                    let their_basename =
+                        name.as_str().rsplit(['/', '\\']).next().unwrap_or(name.as_str());
+                    file_stem(their_basename) == stem
+                }).map(|(_, bytes)| bytes)
             });
             if let Some(bytes) = bytes {
                 self.assets.push((emitted_path, bytes.clone()));
@@ -431,6 +439,14 @@ impl Emitter<'_> {
 
         emitted
     }
+}
+
+/// The part of `name` before its last `.` (or all of it, if there isn't
+/// one) — used by [`Emitter::resolve_asset`]'s fallback lookup, which must
+/// match a possibly extension-corrected emitted name back to its real zip
+/// member.
+fn file_stem(name: &str) -> &str {
+    name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name)
 }
 
 fn table_columns_arg(table: &Table) -> String {
@@ -538,6 +554,7 @@ impl Emitter<'_> {
                 Inline::Strong(body) => (body, '*', "strong"),
                 Inline::Emph(body) => (body, '_', "emph"),
                 _ => {
+                    escape_leading_paren(&mut out, piece);
                     out.push_str(piece);
                     // Two text boxes are independent floating objects that
                     // Word anchors at unrelated page positions; they were
@@ -567,6 +584,32 @@ impl Emitter<'_> {
             }
         }
         out
+    }
+}
+
+/// Escapes `piece`'s leading `(` in place (pushing a `\` onto `out`) when
+/// `out` already ends in `]` or `)` — the third context-dependent escape
+/// alongside [`escape_markup`]'s `//`-comment rule and [`shorthand_is_safe`]'s
+/// word-boundary rule, and for the same reason: Typst reads `[content](args)`
+/// as a **call** with a trailing argument list, so a parenthetical sitting
+/// right after a closing `]` (a `#text(..)[..]` content block, a
+/// `#strong[..]`, …) or `)` (a bare call like the `PAGE` field's `#context
+/// counter(page).display()`) is parsed as that call's arguments rather than
+/// as literal text. Real prose hits this constantly — citations, glosses,
+/// `(b)`-style list markers — so this only escapes the specific boundary that
+/// would otherwise misparse, the same way the other two rules do, rather than
+/// escaping every `(` and making ordinary prose ugly.
+///
+/// Only the opening delimiter is escaped. Once it's escaped, Typst is back
+/// in plain markup text, where a bare `)` has no special meaning of its own
+/// (unlike `[`/`]`, it isn't a markup delimiter everywhere) — it only reads
+/// as an argument-list close *because* an unescaped `(` opened one, which
+/// this rule already prevents. Escaping it too would be inert, and this
+/// emitter otherwise escapes only what's load-bearing (see `escape_markup`'s
+/// single-slash `//` fix for the same trade-off).
+fn escape_leading_paren(out: &mut String, piece: &str) {
+    if piece.starts_with('(') && matches!(out.chars().next_back(), Some(']' | ')')) {
+        out.push('\\');
     }
 }
 
@@ -1115,6 +1158,53 @@ mod tests {
         assert_eq!(escape_markup("and/or"), "and/or");
         // Runs of slashes leave no unescaped `//` pair behind.
         assert_eq!(escape_markup("a///b"), "a\\/\\//b");
+    }
+
+    /// `[content](args)` is Typst's own call-with-trailing-argument-list
+    /// syntax, so a parenthetical right after a `#text(..)[..]`'s closing
+    /// `]` — a citation, a gloss, a `(b)` list marker — must not be emitted
+    /// bare, or Typst reads the parenthesis as an argument list for the
+    /// preceding call instead of literal text.
+    #[test]
+    fn parenthetical_after_a_closing_bracket_is_escaped() {
+        let body = vec![
+            Inline::Styled {
+                style: TextStyle { color: Some([255, 0, 0]), ..Default::default() },
+                body: vec![Inline::Text("volatility ".into())],
+            },
+            Inline::Text("(Easterly & Kraay, 2000)".into()),
+        ];
+        let d = doc(vec![], vec![Block::Paragraph { style: ParStyle::default(), body }]);
+        let out = run(&d);
+        assert!(out.contains("]\\(Easterly & Kraay, 2000)"), "{out}");
+        // Only the opening delimiter needs escaping — see
+        // `escape_leading_paren`'s doc comment for why the closing `)` is
+        // left alone.
+        assert!(!out.contains("2000\\)"), "{out}");
+    }
+
+    /// The same hazard, but with a *call* (not a content block) as the
+    /// preceding piece — e.g. the `PAGE` field's `#context
+    /// counter(page).display()` immediately followed by parenthesized
+    /// prose. A trailing `)` is just as much a trigger as a trailing `]`.
+    #[test]
+    fn parenthetical_after_a_closing_paren_is_escaped() {
+        let body = vec![
+            Inline::Verbatim("#context counter(page).display()".into()),
+            Inline::Text("(see above)".into()),
+        ];
+        let d = doc(vec![], vec![Block::Paragraph { style: ParStyle::default(), body }]);
+        let out = run(&d);
+        assert!(out.contains("display()\\(see above)"), "{out}");
+    }
+
+    /// An ordinary `(` not preceded by a closing `]`/`)` must render bare —
+    /// this rule is context-dependent, not a blanket escape of every paren.
+    #[test]
+    fn parenthetical_with_no_preceding_bracket_or_call_stays_bare() {
+        let body = vec![Inline::Text("see (note 1) below".into())];
+        let d = doc(vec![], vec![Block::Paragraph { style: ParStyle::default(), body }]);
+        assert_eq!(run(&d), "see (note 1) below\n");
     }
 
     #[test]

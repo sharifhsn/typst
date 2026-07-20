@@ -117,7 +117,12 @@ fn lower_run(r: &Run, para_style_id: Option<&str>, ctx: &mut LowerCtx) -> Inline
             // `ImportReport`'s own dedup) rather than per text box, the same
             // way a repeated unmapped field only reports once.
             RunContent::TextBox(items) => {
+                // Same reasoning as a table cell's own body (see
+                // `mappers::table::lower_cell`): a page/column break inside a
+                // text box is meaningless and Typst rejects it outright.
+                let was_in_container = ctx.enter_container();
                 let blocks = lower_items(items, ctx);
+                ctx.exit_container(was_in_container);
                 content.push(Inline::TextBox(blocks));
                 ctx.report.approximate(
                     "text box",

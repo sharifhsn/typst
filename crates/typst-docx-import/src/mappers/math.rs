@@ -363,6 +363,16 @@ fn tokenize(text: &str, nor: bool, out: &mut Vec<EcoString>, report: &mut Import
             continue;
         }
 
+        // A character that is itself Typst math *syntax*, not just a glyph —
+        // see `math_syntax_symbol`'s doc comment. Swap in its symbol name
+        // instead of the bare character, so the glyph survives without
+        // triggering the syntax reading.
+        if let Some(name) = math_syntax_symbol(c) {
+            out.push(EcoString::from(name));
+            i += 1;
+            continue;
+        }
+
         // Anything else — operators, punctuation, other Unicode symbols
         // (`⊂`, `∪`, `→`, `×`, …): Typst accepts a bare Unicode symbol
         // directly in math source (typing `∪` is equivalent to typing
@@ -370,6 +380,86 @@ fn tokenize(text: &str, nor: bool, out: &mut Vec<EcoString>, report: &mut Import
         // a name lookup, never wrong.
         out.push(EcoString::from(c));
         i += 1;
+    }
+}
+
+/// Maps a character that is itself Typst math *syntax* — not just a glyph —
+/// to its symbol name, so `tokenize` (and [`escape_delim_glyph`], for the
+/// same character appearing as an `m:d` fence/separator instead of plain
+/// text) can emit the glyph without also triggering the syntax reading.
+/// Word's own OMML text can contain any of these as ordinary prose:
+///
+/// - `(`/`)` always open/close a group in math — even bare, unpaired, plain
+///   *text* ones (real corpus example: an `m:rad` whose radicand is the
+///   literal text `)2(`, from a document that types visual grouping as
+///   plain characters rather than real OMML delimiters). Left as bare
+///   characters, they don't just risk misparsing *this* construct — an
+///   unbalanced one silently shifts where every enclosing call's own
+///   parentheses are read as closing;
+/// - `[`/`]` open/close an *array* in math (as in `mat`'s row syntax), so a
+///   bare one parses as array syntax rather than content —
+///   `expected content, found array` (real corpus example: a French
+///   half-open interval `[0 ; +∞[`, both as plain text *and*, via
+///   [`escape_delim_glyph`], as an `m:d` fence character);
+/// - `;` is the 2-D row separator inside `mat(a, b; c, d)`-style argument
+///   lists, with the same failure mode;
+/// - `#` introduces a code expression (`#`-prefixed, exactly like markup),
+///   so a bare one tries to parse whatever follows it as code;
+/// - `$` would end the enclosing equation outright, same as it does in
+///   `$...$` markup.
+///
+/// Every mapping here is verified against `codex` (the crate backing
+/// Typst's own `sym.*` table): `paren.l`/`paren.r` are `(`/`)`,
+/// `bracket.l`/`bracket.r` are `[`/`]`, `semi` is `;`, `hash` is `#`,
+/// `dollar` is `$` — each an exact glyph match, so nothing about how the
+/// character *looks* changes, only how it parses. Other characters that are
+/// ordinary punctuation at the top level of a math body (`,`, `_`/`^`
+/// outside a construct this mapper already builds structurally, …) aren't
+/// included: they either carry no special meaning there or are never
+/// produced as bare text by this tokenizer to begin with.
+fn math_syntax_symbol(c: char) -> Option<&'static str> {
+    Some(match c {
+        '(' => "paren.l",
+        ')' => "paren.r",
+        '[' => "bracket.l",
+        ']' => "bracket.r",
+        ';' => "semi",
+        '#' => "hash",
+        '$' => "dollar",
+        _ => return None,
+    })
+}
+
+/// Applies [`math_syntax_symbol`] to a delimiter/separator character read
+/// from OMML data (`m:begChr`/`m:endChr`/`m:sepChr`'s `m:val`) rather than
+/// plain run text — the same hazard, reached through [`convert_delim`]
+/// instead of [`tokenize`], since Word lets an author put *any* character
+/// there, not just the conventional fence glyphs (real corpus example: a
+/// French half-open interval's `m:begChr`/`m:endChr` of `[`).
+///
+/// `(`/`)` are deliberately left bare even though [`math_syntax_symbol`]
+/// maps them: used as the *outermost* fence around `lr(..)`'s own content,
+/// a literal paren is already balanced by `lr(..)`'s own call parens and
+/// can't misparse the way an unpaired one embedded in running *text* can
+/// (see that function's doc comment for the case that does need escaping)
+/// — so `lr(( x ))`, the overwhelmingly common shape, stays exactly that
+/// rather than the uglier-but-equivalent `lr(paren.l x paren.r)`. Every
+/// other syntax-significant character (`[`/`]`/`;`/`#`/`$`) still gets
+/// escaped in *any* position: those parse as syntax by their mere presence,
+/// not by being unbalanced, so being "the fence" doesn't make them safe.
+///
+/// `s` is expected to be a single character (OMML's own convention for
+/// these attributes); anything else — empty, or, rarely, a producer-specific
+/// multi-character value — passes through unchanged.
+fn escape_delim_glyph(s: &str) -> EcoString {
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some('(' | ')'), None) => EcoString::from(s),
+        (Some(c), None) => match math_syntax_symbol(c) {
+            Some(name) => EcoString::from(name),
+            None => EcoString::from(c),
+        },
+        _ => EcoString::from(s),
     }
 }
 
@@ -622,15 +712,32 @@ fn fold_legacy_letterlike(c: char) -> Option<(char, bool)> {
 // Structural constructs.
 // ===========================================================================
 
+/// The zero-width space (Typst's `zws` symbol, U+200B) substituted for an
+/// operand that converts to nothing at all — an empty (or entirely
+/// unconvertible) `m:e`/`m:num`/`m:den`/`m:sub`/`m:sup`/…
+///
+/// No maths construct below may emit a call with a missing *required*
+/// argument: `sqrt()` is `missing argument: radicand`, not an empty radical,
+/// and the same is true of `frac(, y)`/`attach(x, bl: ())`/`hat()`/etc. —
+/// every construct here shares the exposure (`frac`, `root`, `attach`,
+/// accents, and the rest all read an operand the same way), so this is
+/// handled once, centrally, wherever a converted operand is about to be
+/// embedded — rather than each construct inventing its own empty-argument
+/// guard. Verified: `$sqrt(zws)$` compiles.
+fn operand(converted: &str) -> &str {
+    let trimmed = converted.trim();
+    if trimmed.is_empty() { "zws" } else { trimmed }
+}
+
 /// `m:f` — fraction: `frac(num, den)`, or `binom(num, den)` when the bar is
 /// hidden (`m:fPr/m:type val="noBar"`), or `num \/ den` when linear/skewed.
 fn convert_fraction(node: Node, report: &mut ImportReport, depth: usize) -> EcoString {
     let num = convert_row(child(node, "num").unwrap_or(node), report, depth);
     let den = convert_row(child(node, "den").unwrap_or(node), report, depth);
     match frac_type(node) {
-        FracType::NoBar => eco_format!("binom({}, {})", num.trim(), den.trim()),
-        FracType::Linear => eco_format!("{} \\/ {}", num.trim(), den.trim()),
-        FracType::Bar => eco_format!("frac({}, {})", num.trim(), den.trim()),
+        FracType::NoBar => eco_format!("binom({}, {})", operand(&num), operand(&den)),
+        FracType::Linear => eco_format!("{} \\/ {}", operand(&num), operand(&den)),
+        FracType::Bar => eco_format!("frac({}, {})", operand(&num), operand(&den)),
     }
 }
 
@@ -662,9 +769,9 @@ fn convert_radical(node: Node, report: &mut ImportReport, depth: usize) -> EcoSt
     let deg_hidden = child(node, "radPr").and_then(|pr| child(pr, "degHide")).is_some_and(is_on);
     let deg = child(node, "deg").map(|d| convert_row(d, report, depth)).unwrap_or_default();
     if deg_hidden || deg.trim().is_empty() {
-        eco_format!("sqrt({})", radicand.trim())
+        eco_format!("sqrt({})", operand(&radicand))
     } else {
-        eco_format!("root({}, {})", deg.trim(), radicand.trim())
+        eco_format!("root({}, {})", operand(&deg), operand(&radicand))
     }
 }
 
@@ -679,8 +786,13 @@ fn convert_radical(node: Node, report: &mut ImportReport, depth: usize) -> EcoSt
 /// like `sqrt(y)` or `lr(( a + b ))` whose parentheses already close at the
 /// very end. Anything else — anything containing a space or an operator at
 /// the top level — keeps its parentheses.
+///
+/// An empty operand goes through [`operand`] first, same as every other
+/// construct's — an attachment is just as much a "call with a missing
+/// argument" as `sqrt()` is (`e^()`/`e_()` is nothing to attach), it's just
+/// spelled with Typst's postfix syntax instead of a named function.
 fn attach_operand(s: &str) -> EcoString {
-    let s = s.trim();
+    let s = operand(s);
     if is_atomic(s) { s.into() } else { eco_format!("({s})") }
 }
 
@@ -749,17 +861,20 @@ fn convert_ssubsup(node: Node, report: &mut ImportReport, depth: usize) -> EcoSt
 
 /// `m:sPre` — pre-scripts (e.g. isotope notation `""^235_92 U`): `attach(e,
 /// bl: sub, tl: sup)`. A side missing its XML element entirely is omitted
-/// from the call rather than passed through as an empty `bl: ()`.
+/// from the call rather than passed through as an empty `bl: ()`; a side
+/// that *is* present but converts to nothing gets [`operand`]'s `zws`
+/// placeholder instead, the same as every other construct's required
+/// argument.
 fn convert_spre(node: Node, report: &mut ImportReport, depth: usize) -> EcoString {
     let e = convert_row(child(node, "e").unwrap_or(node), report, depth);
-    let mut args = e.trim().to_string();
+    let mut args = operand(&e).to_string();
     if let Some(sub) = child(node, "sub") {
         let sub = convert_row(sub, report, depth);
-        args.push_str(&format!(", bl: ({})", sub.trim()));
+        args.push_str(&format!(", bl: ({})", operand(&sub)));
     }
     if let Some(sup) = child(node, "sup") {
         let sup = convert_row(sup, report, depth);
-        args.push_str(&format!(", tl: ({})", sup.trim()));
+        args.push_str(&format!(", tl: ({})", operand(&sup)));
     }
     eco_format!("attach({args})")
 }
@@ -815,21 +930,21 @@ fn convert_nary(node: Node, report: &mut ImportReport, depth: usize) -> EcoStrin
 fn convert_func(node: Node, report: &mut ImportReport, depth: usize) -> EcoString {
     let name = child(node, "fName").map(|n| convert_row(n, report, depth)).unwrap_or_default();
     let e = child(node, "e").map(|n| convert_row(n, report, depth)).unwrap_or_default();
-    eco_format!("{} ({})", name.trim(), e.trim())
+    eco_format!("{} ({})", name.trim(), operand(&e))
 }
 
 /// `m:limLow` — a limit below a base (`lim_(x -> 0)`): `limits(e)_(lim)`.
 fn convert_limlow(node: Node, report: &mut ImportReport, depth: usize) -> EcoString {
     let e = convert_row(child(node, "e").unwrap_or(node), report, depth);
     let lim = convert_row(child(node, "lim").unwrap_or(node), report, depth);
-    eco_format!("limits({})_({})", e.trim(), lim.trim())
+    eco_format!("limits({})_({})", operand(&e), operand(&lim))
 }
 
 /// `m:limUpp` — a limit above a base: `limits(e)^(lim)`.
 fn convert_limupp(node: Node, report: &mut ImportReport, depth: usize) -> EcoString {
     let e = convert_row(child(node, "e").unwrap_or(node), report, depth);
     let lim = convert_row(child(node, "lim").unwrap_or(node), report, depth);
-    eco_format!("limits({})^({})", e.trim(), lim.trim())
+    eco_format!("limits({})^({})", operand(&e), operand(&lim))
 }
 
 /// `m:d` — delimiters: `lr(<beg> inner <end>)`, several `m:e` cells joined by
@@ -846,9 +961,13 @@ fn convert_limupp(node: Node, report: &mut ImportReport, depth: usize) -> EcoStr
 /// stringifying the matrix source inside a redundant `lr(..)`.
 fn convert_delim(node: Node, report: &mut ImportReport, depth: usize) -> EcoString {
     let pr = child(node, "dPr");
+    // Raw (unescaped) — [`convert_matrix_delimited`] pattern-matches these
+    // against literal `"("`/`")"`/`"{"` to recognise `mat`/`cases`, so the
+    // syntax-escaping below only happens at the point these are actually
+    // embedded as bare math source, just below, never here.
     let beg = delim_char(pr, "begChr", '(');
     let end = delim_char(pr, "endChr", ')');
-    let sep = pr
+    let sep_raw = pr
         .and_then(|pr| child(pr, "sepChr"))
         .and_then(mval)
         .filter(|s| !s.is_empty())
@@ -861,14 +980,22 @@ fn convert_delim(node: Node, report: &mut ImportReport, depth: usize) -> EcoStri
         return convert_matrix_delimited(matrix, beg.as_deref(), end.as_deref(), report, depth);
     }
 
+    // Escaped here, at the point of embedding as bare math source — a fence
+    // or separator character is exactly as liable to collide with Typst
+    // math syntax as any other bare character (see `math_syntax_symbol`'s
+    // doc comment; the French-interval corpus example reaches this exact
+    // path via an explicit `m:begChr`/`m:endChr` of `[`).
+    let sep = escape_delim_glyph(sep_raw);
     let inner_cells: Vec<EcoString> =
         cells.iter().map(|e| convert_row(*e, report, depth)).collect();
     let inner = inner_cells
         .iter()
-        .map(|s| s.trim())
+        .map(|s| operand(s))
         .collect::<Vec<_>>()
         .join(&format!("{sep} "));
 
+    let beg = beg.as_deref().map(escape_delim_glyph);
+    let end = end.as_deref().map(escape_delim_glyph);
     match (&beg, &end) {
         (Some(b), Some(e)) => eco_format!("lr({b} {inner} {e})"),
         // One side has no delimiter char at all: an unbalanced `lr(..)` isn't
@@ -926,12 +1053,15 @@ fn convert_matrix(node: Node, report: &mut ImportReport, depth: usize) -> EcoStr
     eco_format!("mat({})", rows.iter().map(|r| r.join(", ")).collect::<Vec<_>>().join("; "))
 }
 
-/// Each `m:mr` row's `m:e` cells, converted and trimmed.
+/// Each `m:mr` row's `m:e` cells, converted and trimmed. An empty cell gets
+/// [`operand`]'s `zws` placeholder — `mat(1, , 3)`'s middle slot is a missing
+/// positional argument to `mat(..)`, the exact shape [`operand`] guards
+/// against everywhere else.
 fn matrix_rows(node: Node, report: &mut ImportReport, depth: usize) -> Vec<Vec<EcoString>> {
     children(node, "mr")
         .map(|row| {
             children(row, "e")
-                .map(|e| EcoString::from(convert_row(e, report, depth).trim()))
+                .map(|e| EcoString::from(operand(&convert_row(e, report, depth))))
                 .collect()
         })
         .collect()
@@ -941,7 +1071,7 @@ fn matrix_rows(node: Node, report: &mut ImportReport, depth: usize) -> Vec<Vec<E
 /// plain multi-line/gather body without alignment): `cases(row1, row2)`.
 fn convert_eqarr(node: Node, report: &mut ImportReport, depth: usize) -> EcoString {
     let rows: Vec<EcoString> = children(node, "e")
-        .map(|e| EcoString::from(convert_row(e, report, depth).trim()))
+        .map(|e| EcoString::from(operand(&convert_row(e, report, depth))))
         .collect();
     eco_format!("cases({})", rows.join(", "))
 }
@@ -974,7 +1104,7 @@ fn convert_accent(node: Node, report: &mut ImportReport, depth: usize) -> EcoStr
             "hat"
         }
     };
-    eco_format!("{func}({})", e.trim())
+    eco_format!("{func}({})", operand(&e))
 }
 
 /// `m:bar` — over/under bar: `overline(e)` (`m:barPr/m:pos val="top"`) or
@@ -983,7 +1113,7 @@ fn convert_bar(node: Node, report: &mut ImportReport, depth: usize) -> EcoString
     let e = convert_row(child(node, "e").unwrap_or(node), report, depth);
     let pos = child(node, "barPr").and_then(|pr| child(pr, "pos")).and_then(mval);
     let func = if pos == Some("top") { "overline" } else { "underline" };
-    eco_format!("{func}({})", e.trim())
+    eco_format!("{func}({})", operand(&e))
 }
 
 /// `m:groupChr` — a stretched grouping character: `overbrace(e)` (`⏞`, or
@@ -996,9 +1126,9 @@ fn convert_groupchr(node: Node, report: &mut ImportReport, depth: usize) -> EcoS
     let chr = pr.and_then(|pr| child(pr, "chr")).and_then(mval).and_then(|s| s.chars().next());
     let pos = pr.and_then(|pr| child(pr, "pos")).and_then(mval);
     if chr == Some('⏞') || pos == Some("top") {
-        eco_format!("overbrace({})", e.trim())
+        eco_format!("overbrace({})", operand(&e))
     } else if chr == Some('⏟') || pos == Some("bot") {
-        eco_format!("underbrace({})", e.trim())
+        eco_format!("underbrace({})", operand(&e))
     } else {
         report.approximate(
             "OMML equation",
@@ -1488,5 +1618,105 @@ mod tests {
     fn superscript_digit_in_text_recovers_caret_structure() {
         let src = o_math(&plain_run("x²"));
         assert_eq!(convert(&src), "x^2");
+    }
+
+    /// A French half-open interval `[0 ; +∞[` (from a real corpus document):
+    /// `[`/`]`/`;` are Typst math *syntax* (array/row separators), so a bare
+    /// one parses as array syntax instead of content. They must come out as
+    /// their symbol names, not the literal character.
+    #[test]
+    fn bracket_and_semicolon_in_text_become_symbol_names_not_array_syntax() {
+        let src = o_math(&plain_run("[0 ; +"));
+        assert_eq!(convert(&src), "bracket.l 0 semi +");
+    }
+
+    /// `#` introduces a code expression and `$` would end the equation
+    /// outright — both need the same symbol-name treatment as brackets/semi.
+    #[test]
+    fn hash_and_dollar_in_text_become_symbol_names() {
+        let src = o_math(&plain_run("#x$"));
+        assert_eq!(convert(&src), "hash x dollar");
+    }
+
+    /// `m:rad` with an empty `m:e` (the actual corpus bug: `sqrt()`, which
+    /// fails with `missing argument: radicand`) must use the `zws` placeholder
+    /// instead of collapsing to a call with no argument at all.
+    #[test]
+    fn empty_radical_uses_zws_placeholder_not_an_empty_call() {
+        let inner = "<m:rad><m:e/></m:rad>";
+        assert_eq!(convert(&o_math(inner)), "sqrt(zws)");
+    }
+
+    /// The same guard applies to every other construct that embeds an
+    /// operand directly — accents included (`hat()` is just as much a
+    /// missing-argument error as `sqrt()`).
+    #[test]
+    fn empty_accent_base_uses_zws_placeholder() {
+        let inner = "<m:acc><m:e/></m:acc>";
+        assert_eq!(convert(&o_math(inner)), "hat(zws)");
+    }
+
+    /// …and attachments (`m:sSup`/`m:sSub`/`m:sSubSup`), which use Typst's
+    /// postfix `^`/`_` syntax rather than a named call but hit the exact same
+    /// "nothing to attach" gap when a side is present but empty.
+    #[test]
+    fn empty_attachment_operand_uses_zws_placeholder() {
+        let inner = format!(r#"<m:sSup><m:e>{}</m:e><m:sup/></m:sSup>"#, run("𝑥"));
+        assert_eq!(convert(&o_math(&inner)), "x^(zws)");
+    }
+
+    /// The `lo-sw-tdf158023_import` corpus failure: an `m:rad` whose radicand
+    /// is the literal plain text `)2(` (Word lets an author type visual
+    /// grouping as ordinary characters rather than real OMML delimiters).
+    /// Left bare, an unpaired `)`/`(` doesn't just misrender — it shifts
+    /// where the enclosing `sqrt(..)` call's own parentheses are read as
+    /// closing (`sqrt() 2 ()`, i.e. `sqrt()` with `2 ()` as unrelated
+    /// trailing content), which is `missing argument: radicand`, not a
+    /// cosmetic issue.
+    #[test]
+    fn unbalanced_literal_parens_in_plain_text_are_escaped_as_symbols() {
+        let inner = format!(r#"<m:rad><m:radPr><m:degHide m:val="on"/></m:radPr><m:deg/><m:e>{}</m:e></m:rad>"#, plain_run(")2("));
+        assert_eq!(convert(&o_math(&inner)), "sqrt(paren.r 2 paren.l)");
+    }
+
+    /// The `lo-sw-tdf170171` corpus failure, completed: a French half-open
+    /// interval `[0 ; +∞[` where the fence characters themselves — not just
+    /// the text between them — are `[`, set via an explicit
+    /// `m:begChr`/`m:endChr` (`bracket_and_semicolon_in_text_becomes_symbol_
+    /// names_not_array_syntax` above only covers the *text*; the fence
+    /// glyphs are a separate code path, `convert_delim`/`escape_delim_glyph`,
+    /// not `tokenize`).
+    #[test]
+    fn explicit_delimiter_char_that_is_syntax_significant_is_escaped() {
+        let inner = format!(
+            r#"<m:d><m:dPr><m:begChr m:val="["/><m:endChr m:val="["/></m:dPr><m:e>{}</m:e></m:d>"#,
+            run("𝑥")
+        );
+        assert_eq!(convert(&o_math(&inner)), "lr(bracket.l x bracket.l)");
+    }
+
+    /// The ordinary, overwhelmingly common case must stay pretty: `(`/`)` as
+    /// the *outermost* fence are already balanced by `lr(..)`'s own call
+    /// parens, so `escape_delim_glyph` leaves them bare rather than
+    /// producing the uglier (if equivalent) `lr(paren.l x paren.r)`.
+    #[test]
+    fn parens_as_the_outermost_delimiter_fence_stay_bare() {
+        let inner = format!(
+            r#"<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e>{}</m:e></m:d>"#,
+            run("𝑥")
+        );
+        assert_eq!(convert(&o_math(&inner)), "lr(( x ))");
+    }
+
+    /// `m:sPre` (`attach(..)`) with a present-but-empty `m:sub`/`m:sup`:
+    /// `bl: ()`/`tl: ()` get the same placeholder as every other operand.
+    #[test]
+    fn empty_spre_side_uses_zws_placeholder() {
+        let inner = format!(
+            r#"<m:sPre><m:sub/><m:sup>{}</m:sup><m:e>{}</m:e></m:sPre>"#,
+            run("235"),
+            run("𝑈")
+        );
+        assert_eq!(convert(&o_math(&inner)), "attach(U, bl: (zws), tl: (235))");
     }
 }
