@@ -9,15 +9,12 @@ use typst_ooxml_core::units::twip_to_abs;
 
 use ecow::EcoString;
 
+use crate::lower::LowerCtx;
 use crate::mappers::run::lower_paragraph_inlines;
 use crate::mappers::{chart, drawing};
-use crate::opts::ImportOptions;
-use crate::report::ImportReport;
 use crate::resolve::styles::{effective_para, heading_level};
 use crate::tdoc::{Align, Block, BreakKind, Inline, Inlines, ParStyle};
-use crate::wml::model::{
-    BreakType, DrawingRef, ParaProps, Paragraph, RunContent, RunItem, WmlPackage,
-};
+use crate::wml::model::{BreakType, DrawingRef, ParaProps, Paragraph, RunContent, RunItem};
 
 /// What a single Word paragraph lowers to: the block Word *anchored* in it —
 /// a figure or a chart, which Word hangs off a paragraph but Typst renders as
@@ -50,18 +47,14 @@ impl ParaResult {
     }
 }
 
-pub fn lower_paragraph(
-    p: &Paragraph,
-    package: &WmlPackage,
-    options: &ImportOptions,
-    report: &mut ImportReport,
-) -> ParaResult {
+pub(crate) fn lower_paragraph(p: &Paragraph, ctx: &mut LowerCtx) -> ParaResult {
     if let Some(kind) = sole_break_kind(p) {
         return ParaResult::bare(ParaKind::Break(kind));
     }
 
+    let package = ctx.package;
     let eff_para = effective_para(&package.styles, &p.props);
-    let inlines = lower_paragraph_inlines(p, package, options, report);
+    let inlines = lower_paragraph_inlines(p, ctx);
     let has_text = inlines_have_text(&inlines);
     let drawing_ref = first_drawing(p);
 
@@ -70,11 +63,11 @@ pub fn lower_paragraph(
     // paragraph somehow carries both; an unresolvable one (already reported)
     // simply yields `None` and the paragraph is treated as text-only.
     let anchored = drawing_ref
-        .and_then(|d| drawing::lower_drawing(d, package, report))
+        .and_then(|d| drawing::lower_drawing(d, package, &mut *ctx.report))
         .map(Block::Figure)
         .or_else(|| {
             first_chart(p)
-                .and_then(|rid| chart::lower_chart(rid, package, report))
+                .and_then(|rid| chart::lower_chart(rid, package, &mut *ctx.report))
                 .map(Block::Chart)
         });
 
@@ -213,7 +206,8 @@ mod tests {
         };
         let package = WmlPackage::default();
         let mut report = crate::report::ImportReport::default();
-        let result = lower_paragraph(&p, &package, &crate::opts::ImportOptions::default(), &mut report);
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let result = lower_paragraph(&p, &mut ctx);
 
         match result.kind {
             ParaKind::Paragraph { body, .. } => {

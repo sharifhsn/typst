@@ -3,19 +3,12 @@
 use ecow::EcoString;
 use typst_ooxml_core::units::twip_to_abs;
 
-use crate::lower::lower_items;
+use crate::lower::{lower_items, LowerCtx};
 use crate::mappers::para::inlines_have_text;
-use crate::opts::ImportOptions;
-use crate::report::ImportReport;
 use crate::tdoc::{Block, Furniture, Margins, PageSetup};
-use crate::wml::model::{BodyItem, FurnitureKind, FurnitureRef, RunContent, RunItem, SectPr, WmlPackage};
+use crate::wml::model::{BodyItem, FurnitureKind, FurnitureRef, RunContent, RunItem, SectPr};
 
-pub fn lower_section(
-    sect: &SectPr,
-    package: &WmlPackage,
-    options: &ImportOptions,
-    report: &mut ImportReport,
-) -> PageSetup {
+pub(crate) fn lower_section(sect: &SectPr, ctx: &mut LowerCtx) -> PageSetup {
     let margin = if sect.margin_top.is_some()
         || sect.margin_bottom.is_some()
         || sect.margin_left.is_some()
@@ -31,19 +24,19 @@ pub fn lower_section(
         None
     };
 
-    let header = lower_furniture(&sect.header_refs, sect.title_pg, package, options, report);
-    let footer = lower_furniture(&sect.footer_refs, sect.title_pg, package, options, report);
+    let header = lower_furniture(&sect.header_refs, sect.title_pg, ctx);
+    let footer = lower_furniture(&sect.footer_refs, sect.title_pg, ctx);
 
     // Both fidelity gaps below are structural to this feature, not specific
     // to any one document, so they're recorded whenever furniture is emitted
     // at all rather than gated on some more specific (and here, unavailable)
     // signal — `ImportReport` dedupes, so this only ever costs one line.
     if header.is_some() || footer.is_some() {
-        report.approximate(
+        ctx.report.approximate(
             "header/footer margins",
             "w:pgMar's header/footer page-edge distance isn't mapped to Typst's page margins",
         );
-        report.approximate(
+        ctx.report.approximate(
             "header/footer sections",
             "only the document's final section's header/footer is honored; it is applied to every page",
         );
@@ -74,18 +67,14 @@ fn twip(v: Option<i64>) -> f64 {
 fn lower_furniture(
     refs: &[FurnitureRef],
     title_pg: bool,
-    package: &WmlPackage,
-    options: &ImportOptions,
-    report: &mut ImportReport,
+    ctx: &mut LowerCtx,
 ) -> Option<Furniture> {
-    let default = resolve_variant(refs, FurnitureKind::Default, package, options, report)
-        .unwrap_or_default();
-    let first = title_pg
-        .then(|| resolve_variant(refs, FurnitureKind::First, package, options, report))
-        .flatten();
+    let package = ctx.package;
+    let default = resolve_variant(refs, FurnitureKind::Default, ctx).unwrap_or_default();
+    let first = title_pg.then(|| resolve_variant(refs, FurnitureKind::First, ctx)).flatten();
     let even = package
         .even_and_odd_headers
-        .then(|| resolve_variant(refs, FurnitureKind::Even, package, options, report))
+        .then(|| resolve_variant(refs, FurnitureKind::Even, ctx))
         .flatten();
 
     if default.is_empty() && first.is_none() && even.is_none() {
@@ -103,29 +92,28 @@ fn lower_furniture(
 fn resolve_variant(
     refs: &[FurnitureRef],
     kind: FurnitureKind,
-    package: &WmlPackage,
-    options: &ImportOptions,
-    report: &mut ImportReport,
+    ctx: &mut LowerCtx,
 ) -> Option<Vec<Block>> {
+    let package = ctx.package;
     let furniture_ref = refs.iter().find(|r| r.kind == kind)?;
     let Some(rel) = package.rels.get(&furniture_ref.rel_id) else {
-        report.drop("header/footer", "relationship target not found");
+        ctx.report.drop("header/footer", "relationship target not found");
         return None;
     };
     let key = furniture_key(&rel.target);
     let Some(body) = package.furniture.get(&key) else {
-        report.drop("header/footer", "referenced part not found in package");
+        ctx.report.drop("header/footer", "referenced part not found in package");
         return None;
     };
 
     if uses_tab_stops(&body.items) {
-        report.approximate(
+        ctx.report.approximate(
             "header/footer tab stops",
             "w:tab/w:ptab columns become plain spaced text, not a multi-column layout",
         );
     }
 
-    let blocks = lower_items(&body.items, package, options, report);
+    let blocks = lower_items(&body.items, ctx);
     (!is_visually_empty(&blocks)).then_some(blocks)
 }
 
@@ -197,7 +185,8 @@ mod tests {
     use rustc_hash::FxHashMap;
 
     use super::*;
-    use crate::wml::model::{Body, Paragraph, Relationship, Run, RunProps};
+    use crate::report::ImportReport;
+    use crate::wml::model::{Body, Paragraph, Relationship, Run, RunProps, WmlPackage};
 
     fn text_paragraph(text: &str) -> BodyItem {
         BodyItem::Paragraph(Paragraph {
@@ -234,9 +223,9 @@ mod tests {
     fn default_only_reference_produces_furniture_with_no_variants() {
         let package = package_with_furniture(vec![text_paragraph("Header text")], false);
         let mut report = ImportReport::default();
+        let mut ctx = LowerCtx::new(&package, &mut report);
         let furniture =
-            lower_furniture(&[default_ref()], false, &package, &ImportOptions::default(), &mut report)
-                .expect("expected furniture");
+            lower_furniture(&[default_ref()], false, &mut ctx).expect("expected furniture");
         assert_eq!(furniture.default.len(), 1);
         assert!(furniture.first.is_none());
         assert!(furniture.even.is_none());
@@ -246,10 +235,10 @@ mod tests {
     fn no_default_and_no_active_variant_returns_none() {
         let package = package_with_furniture(vec![text_paragraph("Header text")], false);
         let mut report = ImportReport::default();
+        let mut ctx = LowerCtx::new(&package, &mut report);
         // Only a `First` reference exists, and `title_pg` is false — inactive.
         let refs = vec![FurnitureRef { kind: FurnitureKind::First, rel_id: "rId1".into() }];
-        let furniture =
-            lower_furniture(&refs, false, &package, &ImportOptions::default(), &mut report);
+        let furniture = lower_furniture(&refs, false, &mut ctx);
         assert!(furniture.is_none());
     }
 
@@ -280,14 +269,13 @@ mod tests {
         let mut report = ImportReport::default();
 
         // Without `title_pg`, the `First` reference exists but is ignored.
-        let without =
-            lower_furniture(&refs, false, &package, &ImportOptions::default(), &mut report)
-                .unwrap();
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let without = lower_furniture(&refs, false, &mut ctx).unwrap();
         assert!(without.first.is_none());
 
         // With `title_pg`, it's honored.
-        let with = lower_furniture(&refs, true, &package, &ImportOptions::default(), &mut report)
-            .unwrap();
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let with = lower_furniture(&refs, true, &mut ctx).unwrap();
         assert!(with.first.is_some());
     }
 
@@ -328,9 +316,8 @@ mod tests {
             even_and_odd_headers: false,
             ..Default::default()
         };
-        let result =
-            lower_furniture(&refs, false, &without, &ImportOptions::default(), &mut report)
-                .unwrap();
+        let mut ctx = LowerCtx::new(&without, &mut report);
+        let result = lower_furniture(&refs, false, &mut ctx).unwrap();
         assert!(result.even.is_none());
 
         let with = WmlPackage {
@@ -339,8 +326,8 @@ mod tests {
             even_and_odd_headers: true,
             ..Default::default()
         };
-        let result = lower_furniture(&refs, false, &with, &ImportOptions::default(), &mut report)
-            .unwrap();
+        let mut ctx = LowerCtx::new(&with, &mut report);
+        let result = lower_furniture(&refs, false, &mut ctx).unwrap();
         assert!(result.even.is_some());
     }
 
@@ -350,8 +337,8 @@ mod tests {
         // `headerFooter.docx` in the POI corpus).
         let package = package_with_furniture(vec![empty_paragraph()], false);
         let mut report = ImportReport::default();
-        let furniture =
-            lower_furniture(&[default_ref()], false, &package, &ImportOptions::default(), &mut report);
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let furniture = lower_furniture(&[default_ref()], false, &mut ctx);
         assert!(furniture.is_none());
     }
 

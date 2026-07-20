@@ -7,23 +7,16 @@
 
 use typst_ooxml_core::units::half_point_to_pt;
 
-use crate::lower::{lower_items, parse_hex_color};
+use crate::lower::{lower_items, parse_hex_color, LowerCtx};
 use crate::mappers::{field, math, note};
-use crate::opts::ImportOptions;
-use crate::report::ImportReport;
 use crate::resolve::styles::effective_run;
 use crate::tdoc::{Inline, Inlines, Script, TextStyle};
-use crate::wml::model::{BreakType, Paragraph, Run, RunContent, RunItem, RunProps, WmlPackage};
+use crate::wml::model::{BreakType, Paragraph, Run, RunContent, RunItem, RunProps};
 
 /// Lower a whole paragraph's run sequence (runs, hyperlinks, fields) to
 /// inlines.
-pub fn lower_paragraph_inlines(
-    p: &Paragraph,
-    package: &WmlPackage,
-    options: &ImportOptions,
-    report: &mut ImportReport,
-) -> Inlines {
-    lower_run_items(&p.runs, package, p.props.style_id.as_deref(), options, report)
+pub(crate) fn lower_paragraph_inlines(p: &Paragraph, ctx: &mut LowerCtx) -> Inlines {
+    lower_run_items(&p.runs, p.props.style_id.as_deref(), ctx)
 }
 
 /// Lower a sequence of run-level items ([`RunItem::Run`]/`Hyperlink`/`Field`)
@@ -34,26 +27,22 @@ pub fn lower_paragraph_inlines(
 /// (nested) fields.
 pub(crate) fn lower_run_items(
     items: &[RunItem],
-    package: &WmlPackage,
     para_style_id: Option<&str>,
-    options: &ImportOptions,
-    report: &mut ImportReport,
+    ctx: &mut LowerCtx,
 ) -> Inlines {
     let mut out = Vec::new();
     for run_item in items {
         match run_item {
-            RunItem::Run(r) => {
-                out.extend(lower_run(r, package, para_style_id, options, report))
-            }
+            RunItem::Run(r) => out.extend(lower_run(r, para_style_id, ctx)),
             RunItem::Hyperlink { rel_id, anchor, runs } => {
-                let inner = lower_run_items(runs, package, para_style_id, options, report);
+                let inner = lower_run_items(runs, para_style_id, ctx);
                 match rel_id {
-                    Some(id) => match package.rels.get(id) {
+                    Some(id) => match ctx.package.rels.get(id) {
                         Some(rel) => {
                             out.push(Inline::Link { dest: rel.target.clone(), body: inner })
                         }
                         None => {
-                            report.approximate(
+                            ctx.report.approximate(
                                 "hyperlink",
                                 "relationship target not found; text kept unlinked",
                             );
@@ -62,7 +51,7 @@ pub(crate) fn lower_run_items(
                     },
                     None => {
                         if anchor.is_some() {
-                            report.approximate(
+                            ctx.report.approximate(
                                 "internal hyperlink",
                                 "anchor not resolved; link dropped, text kept",
                             );
@@ -71,7 +60,7 @@ pub(crate) fn lower_run_items(
                     }
                 }
             }
-            RunItem::Field(f) => out.extend(field::lower_field(f, package, options, report)),
+            RunItem::Field(f) => out.extend(field::lower_field(f, ctx)),
         }
     }
     out
@@ -79,13 +68,8 @@ pub(crate) fn lower_run_items(
 
 /// Lower a single run to zero or more inlines (empty if it's hidden text
 /// (`w:vanish`) or carries no visible content).
-fn lower_run(
-    r: &Run,
-    package: &WmlPackage,
-    para_style_id: Option<&str>,
-    options: &ImportOptions,
-    report: &mut ImportReport,
-) -> Inlines {
+fn lower_run(r: &Run, para_style_id: Option<&str>, ctx: &mut LowerCtx) -> Inlines {
+    let package = ctx.package;
     let eff = effective_run(&package.styles, para_style_id, &r.props);
     if eff.vanish == Some(true) {
         return Vec::new();
@@ -104,15 +88,15 @@ fn lower_run(
             // Charts are handled at the paragraph level too (block-level,
             // like a drawing) — see `mappers::para`/`mappers::chart`.
             RunContent::Chart(_) => {}
-            RunContent::Math(frag) => content.push(math::omml_to_inline(frag, report)),
+            RunContent::Math(frag) => content.push(math::omml_to_inline(frag, &mut *ctx.report)),
             // Furigana. Both halves are ordinary runs, so they lower through
             // the same path as any other inline content; the emitter supplies
             // the `ruby` helper Typst lacks. A ruby with no reading above it
             // is just text — unwrap it rather than pulling in the helper for
             // an annotation that isn't there.
             RunContent::Ruby { base, gloss } => {
-                let base = lower_run_items(base, package, para_style_id, options, report);
-                let gloss = lower_run_items(gloss, package, para_style_id, options, report);
+                let base = lower_run_items(base, para_style_id, ctx);
+                let gloss = lower_run_items(gloss, para_style_id, ctx);
                 if gloss.is_empty() {
                     content.extend(base);
                 } else {
@@ -120,9 +104,7 @@ fn lower_run(
                 }
             }
             RunContent::NoteRef { endnote, id } => {
-                if let Some(inline) =
-                    note::lower_note_ref(*endnote, *id, package, options, report)
-                {
+                if let Some(inline) = note::lower_note_ref(*endnote, *id, ctx) {
                     content.push(inline);
                 }
             }
@@ -135,9 +117,9 @@ fn lower_run(
             // `ImportReport`'s own dedup) rather than per text box, the same
             // way a repeated unmapped field only reports once.
             RunContent::TextBox(items) => {
-                let blocks = lower_items(items, package, options, report);
+                let blocks = lower_items(items, ctx);
                 content.push(Inline::TextBox(blocks));
-                report.approximate(
+                ctx.report.approximate(
                     "text box",
                     "floating position and size not preserved; content inlined at the \
                      anchor point",
@@ -179,8 +161,9 @@ fn text_style_from_run_props(eff: &RunProps) -> TextStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::report::ImportReport;
     use crate::tdoc::Block;
-    use crate::wml::model::{Paragraph, Run, RunProps};
+    use crate::wml::model::{Paragraph, Run, RunProps, WmlPackage};
 
     fn text_paragraph(text: &str) -> crate::wml::model::BodyItem {
         crate::wml::model::BodyItem::Paragraph(Paragraph {
@@ -204,8 +187,8 @@ mod tests {
         };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let inlines =
-            lower_paragraph_inlines(&p, &package, &ImportOptions::default(), &mut report);
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let inlines = lower_paragraph_inlines(&p, &mut ctx);
 
         assert_eq!(inlines.len(), 1);
         let Inline::TextBox(blocks) = &inlines[0] else {
@@ -239,8 +222,8 @@ mod tests {
         };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let inlines =
-            lower_paragraph_inlines(&p, &package, &ImportOptions::default(), &mut report);
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let inlines = lower_paragraph_inlines(&p, &mut ctx);
 
         assert_eq!(inlines.len(), 2);
         assert_eq!(
@@ -258,8 +241,8 @@ mod tests {
         let p = Paragraph { props: Default::default(), runs: vec![text_box_run(vec![])] };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let inlines =
-            lower_paragraph_inlines(&p, &package, &ImportOptions::default(), &mut report);
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let inlines = lower_paragraph_inlines(&p, &mut ctx);
 
         assert_eq!(inlines.len(), 1);
         let Inline::TextBox(blocks) = &inlines[0] else { panic!("expected a text box") };

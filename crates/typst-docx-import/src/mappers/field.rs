@@ -13,18 +13,12 @@
 
 use ecow::EcoString;
 
+use crate::lower::LowerCtx;
 use crate::mappers::run::lower_run_items;
-use crate::opts::ImportOptions;
-use crate::report::ImportReport;
 use crate::tdoc::{Inline, Inlines};
-use crate::wml::model::{Field, WmlPackage};
+use crate::wml::model::Field;
 
-pub fn lower_field(
-    field: &Field,
-    package: &WmlPackage,
-    options: &ImportOptions,
-    report: &mut ImportReport,
-) -> Inlines {
+pub(crate) fn lower_field(field: &Field, ctx: &mut LowerCtx) -> Inlines {
     let field_type = first_token_upper(&field.instr);
 
     match field_type.as_str() {
@@ -36,13 +30,13 @@ pub fn lower_field(
         "NUMPAGES" => {
             vec![Inline::Verbatim("#context counter(page).final().first()".into())]
         }
-        "HYPERLINK" => lower_hyperlink(&field_type, field, package, options, report),
+        "HYPERLINK" => lower_hyperlink(&field_type, field, ctx),
         // The cached result is the *stale* rendered table of contents (page
         // numbers baked in from whenever Word last updated fields); a live
         // `#outline()` is both idiomatic and correct, so the result is
         // deliberately discarded here rather than lowered.
         "TOC" => vec![Inline::Verbatim("#outline()".into())],
-        _ => lower_fallback(&field_type, field, package, options, report),
+        _ => lower_fallback(&field_type, field, ctx),
     }
 }
 
@@ -52,17 +46,11 @@ pub fn lower_field(
 /// `HYPERLINK` instruction with no quoted destination (only switches, like a
 /// bookmark-only `\l anchor`) has nothing to link to, so it falls through to
 /// the same generic cached-result handling as any other unmapped field.
-fn lower_hyperlink(
-    field_type: &str,
-    field: &Field,
-    package: &WmlPackage,
-    options: &ImportOptions,
-    report: &mut ImportReport,
-) -> Inlines {
+fn lower_hyperlink(field_type: &str, field: &Field, ctx: &mut LowerCtx) -> Inlines {
     let Some(dest) = first_quoted_arg(&field.instr) else {
-        return lower_fallback(field_type, field, package, options, report);
+        return lower_fallback(field_type, field, ctx);
     };
-    let mut body = lower_run_items(&field.result, package, None, options, report);
+    let mut body = lower_run_items(&field.result, None, ctx);
     if body.is_empty() {
         body = vec![Inline::Text(dest.clone())];
     }
@@ -71,19 +59,13 @@ fn lower_hyperlink(
 
 /// The load-bearing fallback for every field type without a structured
 /// mapping: lower the cached result as ordinary inline content, and record
-/// an [`ImportReport::approximate`] note naming the field type — unless the
-/// field is entirely blank (no instruction, no result), which carries
-/// nothing worth reporting.
-fn lower_fallback(
-    field_type: &str,
-    field: &Field,
-    package: &WmlPackage,
-    options: &ImportOptions,
-    report: &mut ImportReport,
-) -> Inlines {
-    let body = lower_run_items(&field.result, package, None, options, report);
+/// an [`crate::report::ImportReport::approximate`] note naming the field
+/// type — unless the field is entirely blank (no instruction, no result),
+/// which carries nothing worth reporting.
+fn lower_fallback(field_type: &str, field: &Field, ctx: &mut LowerCtx) -> Inlines {
+    let body = lower_run_items(&field.result, None, ctx);
     if !field_type.is_empty() {
-        report.approximate(
+        ctx.report.approximate(
             format!("field {field_type}"),
             "imported as its last-rendered text (not recomputed)",
         );
@@ -112,7 +94,8 @@ fn first_quoted_arg(instr: &str) -> Option<EcoString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wml::model::RunItem;
+    use crate::report::ImportReport;
+    use crate::wml::model::{RunItem, WmlPackage};
 
     fn text_result(text: &str) -> Vec<RunItem> {
         use crate::wml::model::{Run, RunContent, RunProps};
@@ -127,7 +110,8 @@ mod tests {
         let field = Field { instr: " PAGE ".into(), result: text_result("7") };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let inlines = lower_field(&field, &package, &ImportOptions::default(), &mut report);
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let inlines = lower_field(&field, &mut ctx);
         assert!(matches!(
             &inlines[..],
             [Inline::Verbatim(s)] if s == "#context counter(page).display()"
@@ -141,7 +125,8 @@ mod tests {
         let field = Field { instr: " TOC \\o \"1-3\" \\h ".into(), result: text_result("stale") };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let inlines = lower_field(&field, &package, &ImportOptions::default(), &mut report);
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let inlines = lower_field(&field, &mut ctx);
         assert!(matches!(&inlines[..], [Inline::Verbatim(s)] if s == "#outline()"));
     }
 
@@ -153,7 +138,8 @@ mod tests {
         };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let inlines = lower_field(&field, &package, &ImportOptions::default(), &mut report);
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let inlines = lower_field(&field, &mut ctx);
         match &inlines[..] {
             [Inline::Link { dest, body }] => {
                 assert_eq!(dest.as_str(), "https://example.com");
@@ -170,7 +156,8 @@ mod tests {
             Field { instr: " HYPERLINK \"https://example.com\" ".into(), result: Vec::new() };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let inlines = lower_field(&field, &package, &ImportOptions::default(), &mut report);
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let inlines = lower_field(&field, &mut ctx);
         match &inlines[..] {
             [Inline::Link { dest, body }] => {
                 assert_eq!(dest.as_str(), "https://example.com");
@@ -187,7 +174,8 @@ mod tests {
         let field = Field { instr: " HYPERLINK \\l _Toc1 ".into(), result: text_result("5") };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let inlines = lower_field(&field, &package, &ImportOptions::default(), &mut report);
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let inlines = lower_field(&field, &mut ctx);
         assert!(matches!(&inlines[..], [Inline::Text(t)] if t == "5"));
         assert_eq!(report.notes.len(), 1);
         assert_eq!(report.notes[0].what, "field HYPERLINK");
@@ -198,7 +186,8 @@ mod tests {
         let field = Field { instr: " FILENAME \\* MERGEFORMAT ".into(), result: text_result("report.docx") };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let inlines = lower_field(&field, &package, &ImportOptions::default(), &mut report);
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let inlines = lower_field(&field, &mut ctx);
         assert!(matches!(&inlines[..], [Inline::Text(t)] if t == "report.docx"));
         assert_eq!(report.notes.len(), 1);
         assert_eq!(report.notes[0].what, "field FILENAME");
@@ -210,8 +199,9 @@ mod tests {
         let field = Field { instr: " AUTHOR ".into(), result: text_result("Jane Doe") };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
+        let mut ctx = LowerCtx::new(&package, &mut report);
         for _ in 0..200 {
-            lower_field(&field, &package, &ImportOptions::default(), &mut report);
+            lower_field(&field, &mut ctx);
         }
         assert_eq!(report.notes.len(), 1);
     }
@@ -221,7 +211,8 @@ mod tests {
         let field = Field { instr: "   ".into(), result: Vec::new() };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let inlines = lower_field(&field, &package, &ImportOptions::default(), &mut report);
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let inlines = lower_field(&field, &mut ctx);
         assert!(inlines.is_empty());
         assert!(report.notes.is_empty());
     }

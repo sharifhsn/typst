@@ -10,39 +10,31 @@
 //! footnote is a real, reported approximation rather than a silent
 //! equivalence — see [`lower_note_ref`]'s `endnote` branch.
 
-use crate::lower::lower_items;
-use crate::opts::ImportOptions;
-use crate::report::ImportReport;
+use crate::lower::{lower_items, LowerCtx};
 use crate::tdoc::Inline;
-use crate::wml::model::WmlPackage;
 
 /// Resolve one `RunContent::NoteRef { endnote, id }` to its `Inline::Footnote`,
-/// or `None` if the reference can't be honored — recording why via `report`
+/// or `None` if the reference can't be honored — recording why via `ctx.report`
 /// in every such case:
 ///
 /// - the id isn't a key in the relevant part's map (dangling reference —
 ///   Word itself never produces this, but a hand-edited or corrupt document
 ///   can);
 /// - resolving it would re-enter a note already being lowered, directly or
-///   through a chain (see [`ImportReport::enter_note`]) — without this guard
+///   through a chain (see [`LowerCtx::enter_note`]) — without this guard
 ///   a self- or mutually-referential note would recurse forever.
-pub fn lower_note_ref(
-    endnote: bool,
-    id: i64,
-    package: &WmlPackage,
-    options: &ImportOptions,
-    report: &mut ImportReport,
-) -> Option<Inline> {
+pub(crate) fn lower_note_ref(endnote: bool, id: i64, ctx: &mut LowerCtx) -> Option<Inline> {
+    let package = ctx.package;
     let (notes, what) =
         if endnote { (&package.endnotes, "endnote") } else { (&package.footnotes, "footnote") };
 
     let Some(body) = notes.get(&id) else {
-        report.drop(what, "referenced note not found in the part; reference dropped");
+        ctx.report.drop(what, "referenced note not found in the part; reference dropped");
         return None;
     };
 
-    if !report.enter_note(endnote, id) {
-        report.drop(
+    if !ctx.enter_note(endnote, id) {
+        ctx.report.drop(
             what,
             "note reference cycle (or nesting too deep); reference dropped to avoid \
              recursing forever",
@@ -51,7 +43,7 @@ pub fn lower_note_ref(
     }
 
     if endnote {
-        report.approximate(
+        ctx.report.approximate(
             "endnote",
             "imported as a footnote; Typst has no end-of-document note store, so it renders \
              at the foot of its own page rather than collected with the document's other \
@@ -59,8 +51,8 @@ pub fn lower_note_ref(
         );
     }
 
-    let blocks = lower_items(&body.items, package, options, report);
-    report.exit_note();
+    let blocks = lower_items(&body.items, ctx);
+    ctx.exit_note();
 
     Some(Inline::Footnote(blocks))
 }
@@ -70,8 +62,11 @@ mod tests {
     use rustc_hash::FxHashMap;
 
     use super::*;
+    use crate::report::ImportReport;
     use crate::tdoc::Block;
-    use crate::wml::model::{Body, BodyItem, Paragraph, Run, RunContent, RunItem, RunProps};
+    use crate::wml::model::{
+        Body, BodyItem, Paragraph, Run, RunContent, RunItem, RunProps, WmlPackage,
+    };
 
     fn text_body(text: &str) -> Body {
         Body {
@@ -96,8 +91,9 @@ mod tests {
     fn footnote_resolves_to_its_lowered_body() {
         let package = package_with_footnote(1, text_body("snoska"));
         let mut report = ImportReport::default();
-        let inline = lower_note_ref(false, 1, &package, &ImportOptions::default(), &mut report)
-            .expect("expected a resolved footnote");
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let inline =
+            lower_note_ref(false, 1, &mut ctx).expect("expected a resolved footnote");
         match inline {
             Inline::Footnote(blocks) => {
                 assert_eq!(blocks.len(), 1);
@@ -112,7 +108,8 @@ mod tests {
     fn dangling_reference_drops_with_a_report_note() {
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
-        let inline = lower_note_ref(false, 1, &package, &ImportOptions::default(), &mut report);
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let inline = lower_note_ref(false, 1, &mut ctx);
         assert!(inline.is_none());
         assert_eq!(report.notes.len(), 1);
         assert_eq!(report.notes[0].what, "footnote");
@@ -124,8 +121,9 @@ mod tests {
         endnotes.insert(1, text_body("end note text"));
         let package = WmlPackage { endnotes, ..Default::default() };
         let mut report = ImportReport::default();
-        let inline = lower_note_ref(true, 1, &package, &ImportOptions::default(), &mut report)
-            .expect("expected a resolved endnote");
+        let mut ctx = LowerCtx::new(&package, &mut report);
+        let inline =
+            lower_note_ref(true, 1, &mut ctx).expect("expected a resolved endnote");
         assert!(matches!(inline, Inline::Footnote(_)));
         assert_eq!(report.notes.len(), 1);
         assert_eq!(report.notes[0].what, "endnote");
@@ -147,13 +145,14 @@ mod tests {
         };
         let package = package_with_footnote(1, self_ref_body);
         let mut report = ImportReport::default();
+        let mut ctx = LowerCtx::new(&package, &mut report);
 
         // Must return promptly (not hang) with the outer reference resolved
         // but its self-referential inner one dropped — leaving the note's
         // sole paragraph with no visible content, so it lowers to no blocks
         // at all (see `mappers::para::lower_paragraph`'s `Empty` case).
-        let inline = lower_note_ref(false, 1, &package, &ImportOptions::default(), &mut report)
-            .expect("the outer reference still resolves");
+        let inline =
+            lower_note_ref(false, 1, &mut ctx).expect("the outer reference still resolves");
         let Inline::Footnote(blocks) = inline else { panic!("expected Inline::Footnote") };
         assert!(blocks.is_empty(), "expected no blocks, got {blocks:?}");
         assert!(report.notes.iter().any(|n| n.what == "footnote"));

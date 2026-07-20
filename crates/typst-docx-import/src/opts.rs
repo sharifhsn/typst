@@ -17,19 +17,19 @@ pub enum Tier {
 #[derive(Debug, Clone)]
 pub struct ImportOptions {
     pub tier: Tier,
-    /// Accept `w:ins` (tracked insertions) as content and drop `w:del`
-    /// deletions. When false, both are reported and left out.
-    pub accept_tracked_changes: bool,
     /// Directory (project-relative) under which extracted images are placed.
     pub assets_dir: String,
 }
 
 impl Default for ImportOptions {
     fn default() -> Self {
-        Self {
-            tier: Tier::default(),
-            accept_tracked_changes: true,
-            assets_dir: "assets".into(),
-        }
+        Self { tier: Tier::default(), assets_dir: "assets".into() }
     }
 }
+
+// Tracked changes are always *accepted*: insertions (`w:ins`/`w:moveTo`) are
+// kept as content, deletions (`w:del`/`w:moveFrom`) are dropped. That is what
+// Word renders by default and what the author last meant the document to say.
+// There is deliberately no option for it — this used to be a
+// `accept_tracked_changes` flag that nothing read, which is worse than no
+// option at all, since it documented behaviour the importer didn't have.

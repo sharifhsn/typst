@@ -91,7 +91,8 @@ pub fn import_docx_with(
     let package = wml::parse::parse_package(bytes, &mut report)?;
 
     // 2. Lower the Word IR to the Typst IR (tier-1 literal fidelity).
-    let mut doc = lower::lower(&package, options, &mut report);
+    let mut ctx = lower::LowerCtx::new(&package, &mut report);
+    let mut doc = lower::lower(&mut ctx);
 
     // 3. Optionally run tier-2 semantic passes.
     if options.tier == Tier::Idiomatic {

@@ -241,6 +241,20 @@ fn splice_node<'a>(child: Node<'a, 'a>, depth: usize, out: &mut Vec<Node<'a, 'a>
                 splice_children(child, depth + 1, out);
             }
         }
+        // Tracked changes are *accepted*, which is what Word shows by default
+        // and what the document's author last meant it to say. An insertion
+        // (`w:ins`, or `w:moveTo` for text moved in) is part of the final
+        // text, so the wrapper is spliced away and its runs kept. A deletion
+        // (`w:del`/`w:moveFrom`) is not, so it falls through to the catch-all
+        // and is dropped — its text lives in `w:delText`, which `parse_run`
+        // doesn't read, so nothing leaks even if the wrapper is reached
+        // another way.
+        "ins" | "moveTo" => {
+            if depth < MAX_WRAPPER_DEPTH {
+                splice_children(child, depth + 1, out);
+            }
+        }
+        "del" | "moveFrom" => {}
         "sdt" => {
             if depth < MAX_WRAPPER_DEPTH
                 && let Some(content) = child.children().find(|n| is_element(*n, "sdtContent"))

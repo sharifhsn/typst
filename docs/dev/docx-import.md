@@ -140,6 +140,13 @@ so every walk — body, cell, row, paragraph, field folding — handles them ali
   same content twice*. Taking both duplicates every text box; taking neither
   loses it.
 - **`w:ruby`** — furigana, whose base and reading are both real sentence text.
+- **`w:smartTag`**, **`w:bdo`**, **`w:dir`** — auto-recognition markup and
+  bidi overrides, which nest several deep around a single run.
+- **`w:ins`** / **`w:moveTo`** — tracked insertions, which *are* part of the
+  final text. Deletions (`w:del`/`w:moveFrom`) are dropped instead, so tracked
+  changes come in accepted, which is what Word renders by default. There is no
+  option for this; there used to be an `accept_tracked_changes` flag that
+  nothing read, which is worse than no option at all.
 
 For `mc:AlternateContent` the choice is not automatic. MCE says a consumer
 takes an `mc:Choice` only if it supports that choice's requirement. We handle

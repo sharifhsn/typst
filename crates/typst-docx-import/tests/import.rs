@@ -1133,3 +1133,34 @@ fn smart_tags_and_bidi_overrides_are_transparent() {
     );
     assert!(src.contains("Overridden"), "w:bdo lost its text:\n{src}");
 }
+
+/// Tracked changes are accepted: `w:ins` wraps runs that *are* part of the
+/// final text, so the wrapper must be transparent, while `w:del` holds text
+/// the author removed and must not come back. `delins.docx` in the POI corpus
+/// has 43 insertions that were being dropped wholesale.
+#[test]
+fn tracked_insertions_are_kept_and_deletions_dropped() {
+    let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+  <w:p>
+    <w:r><w:t xml:space="preserve">Kept </w:t></w:r>
+    <w:ins w:id="1" w:author="a"><w:r><w:t xml:space="preserve">InsertedText </w:t></w:r></w:ins>
+    <w:del w:id="2" w:author="a"><w:r><w:delText>DeletedText </w:delText></w:r></w:del>
+    <w:moveTo w:id="3"><w:r><w:t>MovedIn</w:t></w:r></w:moveTo>
+    <w:moveFrom w:id="4"><w:r><w:delText>MovedOut</w:delText></w:r></w:moveFrom>
+  </w:p>
+</w:body></w:document>"#;
+
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", doc.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+    assert!(src.contains("Kept"), "plain run lost:\n{src}");
+    assert!(src.contains("InsertedText"), "w:ins content was dropped:\n{src}");
+    assert!(src.contains("MovedIn"), "w:moveTo content was dropped:\n{src}");
+    assert!(!src.contains("DeletedText"), "w:del content leaked back in:\n{src}");
+    assert!(!src.contains("MovedOut"), "w:moveFrom content leaked back in:\n{src}");
+}

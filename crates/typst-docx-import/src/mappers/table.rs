@@ -2,18 +2,11 @@
 
 use typst_ooxml_core::units::twip_to_abs;
 
-use crate::lower::{lower_items, parse_hex_color};
-use crate::opts::ImportOptions;
-use crate::report::ImportReport;
+use crate::lower::{lower_items, parse_hex_color, LowerCtx};
 use crate::tdoc::{self, TableCell, TableRow};
-use crate::wml::model::{Cell, Row, Table as WmlTable, WmlPackage};
+use crate::wml::model::{Cell, Row, Table as WmlTable};
 
-pub fn lower_table(
-    table: &WmlTable,
-    package: &WmlPackage,
-    options: &ImportOptions,
-    report: &mut ImportReport,
-) -> tdoc::Table {
+pub(crate) fn lower_table(table: &WmlTable, ctx: &mut LowerCtx) -> tdoc::Table {
     // The column count must accommodate the WIDEST row's total span, not just
     // `w:tblGrid`'s length: in real-world documents the declared grid and the
     // rows' actual `w:gridSpan`s routinely disagree, and a cell whose colspan
@@ -36,8 +29,7 @@ pub fn lower_table(
         .collect();
     column_widths.resize(columns, None);
 
-    let mut rows: Vec<TableRow> =
-        table.rows.iter().map(|row| lower_row(row, package, options, report)).collect();
+    let mut rows: Vec<TableRow> = table.rows.iter().map(|row| lower_row(row, ctx)).collect();
 
     // Typst's `#table` auto-flows cells into a fixed-width grid with no notion
     // of "rows": a row whose cells span fewer than `columns` leaves the flow
@@ -64,25 +56,15 @@ pub fn lower_table(
     tdoc::Table { columns, column_widths, rows }
 }
 
-fn lower_row(
-    row: &Row,
-    package: &WmlPackage,
-    options: &ImportOptions,
-    report: &mut ImportReport,
-) -> TableRow {
-    let cells = row.cells.iter().map(|cell| lower_cell(cell, package, options, report)).collect();
+fn lower_row(row: &Row, ctx: &mut LowerCtx) -> TableRow {
+    let cells = row.cells.iter().map(|cell| lower_cell(cell, ctx)).collect();
     TableRow { header: row.is_header, cells }
 }
 
-fn lower_cell(
-    cell: &Cell,
-    package: &WmlPackage,
-    options: &ImportOptions,
-    report: &mut ImportReport,
-) -> TableCell {
+fn lower_cell(cell: &Cell, ctx: &mut LowerCtx) -> TableCell {
     // `vMerge == Some(false)` (a "continue" cell) still needs its slot filled
     // — pragmatic v1: emit it like any other cell (usually empty content).
-    let body = lower_items(&cell.content, package, options, report);
+    let body = lower_items(&cell.content, ctx);
     TableCell {
         colspan: cell.grid_span.max(1),
         rowspan: 1,
