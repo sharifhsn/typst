@@ -21,6 +21,7 @@ typst-utils = { workspace = true }
 
 [dev-dependencies]
 typst-ooxml-core = { workspace = true }
+zip = { workspace = true }
 
 [lints]
 workspace = true

@@ -27,6 +27,12 @@ pub struct ReadLimits {
     pub max_part_bytes: u64,
     pub max_expanded_bytes: u64,
     pub max_entries: usize,
+    /// Maximum XML element-nesting depth. XML parsers (roxmltree included)
+    /// descend recursively per open element and overflow the stack on
+    /// pathologically deep documents (e.g. a torture file nesting 5000 tables).
+    /// Real OOXML nests only a handful of levels; this cap is far above any
+    /// genuine document and far below the overflow threshold.
+    pub max_xml_depth: usize,
 }
 
 impl Default for ReadLimits {
@@ -36,8 +42,51 @@ impl Default for ReadLimits {
             max_part_bytes: 64 * 1024 * 1024,
             max_expanded_bytes: 256 * 1024 * 1024,
             max_entries: 8192,
+            max_xml_depth: 256,
         }
     }
+}
+
+/// A cheap, allocation-free scan for the maximum XML element-nesting depth,
+/// used to reject documents that would overflow a recursive-descent parser
+/// before it ever runs. Approximate by design (it does not fully parse
+/// attribute values), but conservative: it never *under*-counts a genuinely
+/// deep chain of simple element tags, which is the shape that causes overflow.
+fn exceeds_xml_depth(xml: &str, limit: usize) -> bool {
+    let bytes = xml.as_bytes();
+    let mut depth: usize = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        match bytes.get(i + 1) {
+            // Comments, CDATA, processing instructions, declarations: not
+            // elements, no depth change.
+            Some(b'!') | Some(b'?') => {}
+            // A close tag `</...>`.
+            Some(b'/') => depth = depth.saturating_sub(1),
+            // An open tag — unless it self-closes (`<.../>`).
+            _ => {
+                let end = bytes[i..].iter().position(|&b| b == b'>').map(|p| i + p);
+                let self_closing =
+                    end.is_some_and(|e| e > i && bytes[e - 1] == b'/');
+                if !self_closing {
+                    depth += 1;
+                    if depth > limit {
+                        return true;
+                    }
+                }
+            }
+        }
+        // Advance past this tag.
+        match bytes[i..].iter().position(|&b| b == b'>') {
+            Some(p) => i += p + 1,
+            None => break,
+        }
+    }
+    false
 }
 
 /// Error reading an OPC package.
@@ -130,6 +179,9 @@ impl<'a> Reader<'a> {
             return Err(ReadError::Unsafe(
                 "DOCTYPE and ENTITY declarations are forbidden",
             ));
+        }
+        if exceeds_xml_depth(&xml, self.limits.max_xml_depth) {
+            return Err(ReadError::Unsafe("XML nesting is too deep"));
         }
         Ok(Some(xml))
     }

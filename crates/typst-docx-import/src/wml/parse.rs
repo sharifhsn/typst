@@ -98,7 +98,7 @@ fn parse_document(xml: &str) -> Result<Body, ImportError> {
     for child in body_node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
             "p" => body.items.push(BodyItem::Paragraph(parse_paragraph(child))),
-            "tbl" => body.items.push(BodyItem::Table(parse_table(child))),
+            "tbl" => body.items.push(BodyItem::Table(parse_table(child, 0))),
             "sectPr" => body.sect_pr = Some(parse_sectpr(child)),
             _ => {}
         }
@@ -285,7 +285,15 @@ fn toggle(node: Option<Node>) -> Option<bool> {
 
 // --- Tables (`w:tbl`) ---------------------------------------------------------
 
-fn parse_table(node: Node) -> Table {
+/// Maximum table-nesting depth the parser will descend into. Word's own
+/// practical nesting is a handful of levels; anything beyond this is either a
+/// pathological/DoS document (POI's `deep-table-cell.docx` nests 5000 deep) or
+/// corrupt. Capping here bounds the Word IR — and therefore the recursive
+/// lowering that mirrors it — so no input can overflow the stack. Content
+/// below the cap is dropped; no real document reaches it.
+const MAX_TABLE_DEPTH: usize = 24;
+
+fn parse_table(node: Node, depth: usize) -> Table {
     let mut table = Table::default();
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
@@ -296,14 +304,14 @@ fn parse_table(node: Node) -> Table {
                     }
                 }
             }
-            "tr" => table.rows.push(parse_row(child)),
+            "tr" => table.rows.push(parse_row(child, depth)),
             _ => {}
         }
     }
     table
 }
 
-fn parse_row(node: Node) -> Row {
+fn parse_row(node: Node, depth: usize) -> Row {
     let mut row = Row::default();
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
@@ -311,21 +319,23 @@ fn parse_row(node: Node) -> Row {
                 row.is_header =
                     child.children().any(|n| is_element(n, "tblHeader"));
             }
-            "tc" => row.cells.push(parse_cell(child)),
+            "tc" => row.cells.push(parse_cell(child, depth)),
             _ => {}
         }
     }
     row
 }
 
-fn parse_cell(node: Node) -> Cell {
+fn parse_cell(node: Node, depth: usize) -> Cell {
     let mut cell =
         Cell { grid_span: 1, v_merge: None, shd_fill: None, content: Vec::new() };
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
             "tcPr" => parse_cell_props(child, &mut cell),
             "p" => cell.content.push(BodyItem::Paragraph(parse_paragraph(child))),
-            "tbl" => cell.content.push(BodyItem::Table(parse_table(child))),
+            "tbl" if depth < MAX_TABLE_DEPTH => {
+                cell.content.push(BodyItem::Table(parse_table(child, depth + 1)));
+            }
             _ => {}
         }
     }
