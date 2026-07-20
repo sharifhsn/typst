@@ -28,3 +28,28 @@ pub fn extent_emu(abs: Abs) -> i64 {
 pub fn alpha_to_100k(alpha: u8) -> u32 {
     alpha as u32 * 100_000 / 255
 }
+
+// --- Inverse conversions (OOXML readers / the DOCX importer) ----------------
+
+/// Twips (twentieths of a point, the `w:pgSz`/`w:ind`/`w:spacing` unit) → an
+/// absolute length. Inverse of [`abs_to_twip`].
+pub fn twip_to_abs(twip: f64) -> Abs {
+    Abs::pt(twip / 20.0)
+}
+
+/// Half-points (the `w:sz` unit) → points. Inverse of [`pt_to_half_point`].
+pub fn half_point_to_pt(half_pt: f64) -> f64 {
+    half_pt / 2.0
+}
+
+/// Eighths of a point (a border's `w:sz` unit) → points. Inverse of
+/// [`pt_to_eighth_point`].
+pub fn eighth_point_to_pt(eighth_pt: f64) -> f64 {
+    eighth_pt / 8.0
+}
+
+/// EMU (English Metric Units, the DrawingML `cx`/`cy` unit) → an absolute
+/// length. Inverse of [`abs_to_emu`].
+pub fn emu_to_abs(emu: f64) -> Abs {
+    Abs::pt(emu / EMU_PER_PT)
+}

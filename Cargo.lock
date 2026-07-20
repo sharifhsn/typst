@@ -3291,6 +3291,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "typst-docx-import"
+version = "0.15.0"
+dependencies = [
+ "ecow",
+ "roxmltree 0.21.1",
+ "rustc-hash",
+ "typst-library",
+ "typst-ooxml-core",
+ "typst-utils",
+]
+
+[[package]]
 name = "typst-docx-roundtrip"
 version = "0.15.0"
 dependencies = [

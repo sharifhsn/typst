@@ -1,17 +1,163 @@
-//! OPC (Open Packaging Conventions) zip package assembly.
+//! OPC (Open Packaging Conventions) zip package assembly, plus a hardened
+//! read side ([`Reader`]) shared by the DOCX importer and round-trip merge.
 
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 
 use ecow::{EcoString, eco_format};
 use rustc_hash::FxHashMap;
 use zip::write::{SimpleFileOptions, ZipWriter};
+use zip::read::ZipArchive;
 use zip::{CompressionMethod, DateTime};
 
 use crate::xml::escape_attr;
 use crate::{ns, xml};
+
+// --- Read side --------------------------------------------------------------
+
+/// Conservative resource limits for untrusted `.docx`/`.pptx` archives. These
+/// mirror the round-trip merge path's own limits; a zip-bomb or a hostile part
+/// must never exhaust memory. Callers that need larger caps can pre-validate
+/// and use [`Reader::open_with_limits`].
+#[derive(Copy, Clone, Debug)]
+pub struct ReadLimits {
+    pub max_archive_bytes: usize,
+    pub max_part_bytes: u64,
+    pub max_expanded_bytes: u64,
+    pub max_entries: usize,
+}
+
+impl Default for ReadLimits {
+    fn default() -> Self {
+        Self {
+            max_archive_bytes: 128 * 1024 * 1024,
+            max_part_bytes: 64 * 1024 * 1024,
+            max_expanded_bytes: 256 * 1024 * 1024,
+            max_entries: 8192,
+        }
+    }
+}
+
+/// Error reading an OPC package.
+#[derive(Debug)]
+pub enum ReadError {
+    /// The archive itself could not be opened as a zip.
+    Zip(zip::result::ZipError),
+    /// An I/O error occurred while reading a part.
+    Io(std::io::Error),
+    /// The archive violated a [`ReadLimits`] bound, or contained a forbidden
+    /// construct (a `<!DOCTYPE>`/`<!ENTITY>` declaration — the XXE vector).
+    Unsafe(&'static str),
+}
+
+impl Display for ReadError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            ReadError::Zip(e) => write!(f, "invalid OPC package: {e}"),
+            ReadError::Io(e) => write!(f, "error reading OPC part: {e}"),
+            ReadError::Unsafe(msg) => write!(f, "unsafe OPC package: {msg}"),
+        }
+    }
+}
+
+impl Error for ReadError {}
+
+/// A read-only view over an OPC package (a `.docx`/`.pptx` zip). Enforces
+/// [`ReadLimits`] on open and on every part read, and rejects XML parts that
+/// carry `<!DOCTYPE>`/`<!ENTITY>` declarations.
+pub struct Reader<'a> {
+    archive: ZipArchive<Cursor<&'a [u8]>>,
+    limits: ReadLimits,
+    names: Vec<EcoString>,
+}
+
+impl<'a> Reader<'a> {
+    /// Opens a package with the default [`ReadLimits`].
+    pub fn open(bytes: &'a [u8]) -> Result<Self, ReadError> {
+        Self::open_with_limits(bytes, ReadLimits::default())
+    }
+
+    /// Opens a package with explicit limits.
+    pub fn open_with_limits(
+        bytes: &'a [u8],
+        limits: ReadLimits,
+    ) -> Result<Self, ReadError> {
+        if bytes.len() > limits.max_archive_bytes {
+            return Err(ReadError::Unsafe("archive is too large"));
+        }
+        let mut archive =
+            ZipArchive::new(Cursor::new(bytes)).map_err(ReadError::Zip)?;
+        if archive.len() > limits.max_entries {
+            return Err(ReadError::Unsafe("archive has too many entries"));
+        }
+        let mut expanded = 0u64;
+        let mut names = Vec::with_capacity(archive.len());
+        for index in 0..archive.len() {
+            let entry = archive.by_index(index).map_err(ReadError::Zip)?;
+            expanded = expanded
+                .checked_add(entry.size())
+                .ok_or(ReadError::Unsafe("expanded size overflow"))?;
+            if expanded > limits.max_expanded_bytes {
+                return Err(ReadError::Unsafe("expanded archive is too large"));
+            }
+            names.push(EcoString::from(entry.name()));
+        }
+        Ok(Self { archive, limits, names })
+    }
+
+    /// The names of every part in the package (zip entry paths), in archive
+    /// order. Use to discover `word/media/*`, `word/header*.xml`, etc.
+    pub fn names(&self) -> &[EcoString] {
+        &self.names
+    }
+
+    /// Whether a part exists.
+    pub fn has(&self, name: &str) -> bool {
+        self.names.iter().any(|n| n == name)
+    }
+
+    /// Reads a part as a validated UTF-8 XML string. Returns `None` if the
+    /// part is absent. Enforces the per-part size cap and rejects
+    /// `<!DOCTYPE>`/`<!ENTITY>` (the XXE vector).
+    pub fn xml_part(&mut self, name: &str) -> Result<Option<String>, ReadError> {
+        let Some(bytes) = self.part_bytes(name)? else { return Ok(None) };
+        let xml = String::from_utf8(bytes)
+            .map_err(|_| ReadError::Unsafe("XML part is not valid UTF-8"))?;
+        let lowered = xml.to_ascii_lowercase();
+        if lowered.contains("<!doctype") || lowered.contains("<!entity") {
+            return Err(ReadError::Unsafe(
+                "DOCTYPE and ENTITY declarations are forbidden",
+            ));
+        }
+        Ok(Some(xml))
+    }
+
+    /// Reads a part's raw bytes (media, embedded objects). Returns `None` if
+    /// absent. Enforces the per-part size cap.
+    pub fn part_bytes(&mut self, name: &str) -> Result<Option<Vec<u8>>, ReadError> {
+        if !self.has(name) {
+            return Ok(None);
+        }
+        let mut entry = self.archive.by_name(name).map_err(ReadError::Zip)?;
+        if entry.size() > self.limits.max_part_bytes {
+            return Err(ReadError::Unsafe("a package part is too large"));
+        }
+        let mut buf = Vec::with_capacity(entry.size() as usize);
+        entry
+            .by_ref()
+            .take(self.limits.max_part_bytes + 1)
+            .read_to_end(&mut buf)
+            .map_err(ReadError::Io)?;
+        if buf.len() as u64 > self.limits.max_part_bytes {
+            return Err(ReadError::Unsafe("a package part is too large"));
+        }
+        Ok(Some(buf))
+    }
+}
+
+// --- Write side -------------------------------------------------------------
 
 /// Relationship target mode.
 #[derive(Copy, Clone, Eq, PartialEq)]
