@@ -382,6 +382,10 @@ pub struct SectPr {
     pub page_w: Option<i64>,
     pub page_h: Option<i64>,
     pub landscape: bool,
+    /// `w:cols/@w:num` — the section's text-column count. A two-column
+    /// call-for-papers layout is a hard requirement of the template that
+    /// imposes it, not a cosmetic detail.
+    pub columns: Option<u32>,
     /// `w:pgMar` in twips.
     pub margin_top: Option<i64>,
     pub margin_bottom: Option<i64>,

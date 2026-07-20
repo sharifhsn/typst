@@ -220,6 +220,9 @@ impl Emitter<'_> {
         if page.flipped {
             simple_args.push("flipped: true".to_string());
         }
+        if let Some(columns) = page.columns {
+            simple_args.push(format!("columns: {columns}"));
+        }
 
         // No furniture: keep the single-line form every other `#set page(..)`
         // call already uses. A header/footer's content can itself span

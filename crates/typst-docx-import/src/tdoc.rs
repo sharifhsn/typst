@@ -291,6 +291,9 @@ pub struct PageSetup {
     pub height_pt: Option<f64>,
     pub margin: Option<Margins>,
     pub flipped: bool,
+    /// Text columns (`#set page(columns: n)`). `None` or 1 is a single
+    /// column and emits nothing.
+    pub columns: Option<u32>,
     pub header: Option<Furniture>,
     pub footer: Option<Furniture>,
 }

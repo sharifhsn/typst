@@ -1859,6 +1859,11 @@ fn parse_sectpr(node: Node) -> SectPr {
                 sect.page_h = attr(child, "h").and_then(parse_i64);
                 sect.landscape = attr(child, "orient") == Some("landscape");
             }
+            // `w:cols` without `w:num` is a single column; the attribute is
+            // only written when there is more than one.
+            "cols" => {
+                sect.columns = attr(child, "num").and_then(|v| v.parse::<u32>().ok());
+            }
             "pgMar" => {
                 sect.margin_top = attr(child, "top").and_then(parse_i64);
                 sect.margin_bottom = attr(child, "bottom").and_then(parse_i64);

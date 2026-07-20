@@ -47,6 +47,8 @@ pub(crate) fn lower_section(sect: &SectPr, ctx: &mut LowerCtx) -> PageSetup {
         height_pt: sect.page_h.map(|h| twip_to_abs(h as f64).to_pt()),
         margin,
         flipped: sect.landscape,
+        // A single column is Typst's default, so don't state it.
+        columns: sect.columns.filter(|&n| n > 1),
         header,
         footer,
     }

@@ -1880,3 +1880,34 @@ fn literal_commas_and_mismatched_fences_stay_valid_maths() {
     assert!(src.contains("paren.l"), "unmatched `(` fence left bare:\n{src}");
     assert!(src.contains("bracket.r"), "`]` fence not symbolised:\n{src}");
 }
+
+/// A mandated template's column count is a hard requirement, not a cosmetic
+/// detail: an IEEE call-for-papers layout is two-column and an ACM one is
+/// three, and a submission that comes back single-column does not conform.
+#[test]
+fn section_column_count_survives() {
+    let doc = |cols: &str| {
+        format!(
+            r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+  <w:p><w:r><w:t>Body</w:t></w:r></w:p>
+  <w:sectPr><w:pgSz w:w="12240" w:h="15840"/>{cols}</w:sectPr>
+</w:body></w:document>"#
+        )
+    };
+    let import = |body: String| {
+        let mut package =
+            Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+        package.add_xml("word/document.xml", "application/xml", body);
+        package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+        let bytes = package.finish(&Rels::new()).unwrap();
+        import_docx(&bytes).expect("import should succeed").source
+    };
+
+    let src = import(doc(r#"<w:cols w:num="2" w:space="360"/>"#));
+    assert!(src.contains("columns: 2"), "two-column layout lost:\n{src}");
+
+    // A single column is Typst's default and shouldn't be restated.
+    let src = import(doc(r#"<w:cols w:space="708"/>"#));
+    assert!(!src.contains("columns:"), "single column needlessly stated:\n{src}");
+}
