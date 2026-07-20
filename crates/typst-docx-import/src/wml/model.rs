@@ -32,6 +32,16 @@ pub struct WmlPackage {
     pub furniture: FxHashMap<EcoString, Body>,
     /// `settings.xml` declares `w:evenAndOddHeaders`.
     pub even_and_odd_headers: bool,
+    /// `word/footnotes.xml` bodies by `w:id`, boilerplate separators excluded.
+    pub footnotes: FxHashMap<i64, Body>,
+    /// `word/endnotes.xml`, likewise.
+    pub endnotes: FxHashMap<i64, Body>,
+    /// Parsed chart parts by zip name (`word/charts/chart1.xml` → data). A
+    /// chart's `r:id` reference (see [`RunContent::Chart`]) resolves through
+    /// [`Self::rels`] to a target *name*; this map is keyed by the full zip
+    /// name that target resolves to, the same convention [`Self::media`]
+    /// uses for images.
+    pub charts: FxHashMap<EcoString, ChartData>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +118,24 @@ pub enum RunContent {
     Drawing(DrawingRef),
     /// OMML math (`m:oMath`) captured as a raw XML fragment.
     Math(EcoString),
+    /// `w:ruby` — a phonetic guide (furigana): `gloss` is the small reading
+    /// set above `base`. Both halves hold ordinary runs, and `w:ruby` sits
+    /// *inside* a `w:r`, which is why it is run content rather than a
+    /// [`RunItem`] beside one.
+    Ruby { base: Vec<RunItem>, gloss: Vec<RunItem> },
+    /// A `w:footnoteReference`/`w:endnoteReference` — the marker in the body
+    /// text. The note's content lives in a separate part, keyed by this id.
+    NoteRef { endnote: bool, id: i64 },
+    /// A shape's text (`w:txbxContent`) — the body content of a DrawingML
+    /// text box (`wps:txbx`) or its VML equivalent (`v:textbox`). Word floats
+    /// these; we keep the content and lose the geometry.
+    TextBox(Vec<BodyItem>),
+    /// A charted `w:drawing` — the `rId` of its `c:chart`/`cx:chart` part.
+    /// Typst has no chart-drawing primitive, but the chart's cached data
+    /// lives in that separate part (resolved against
+    /// [`WmlPackage::charts`]), not inline here, so lowering it to a table
+    /// keeps the information instead of dropping it — see [`ChartData`].
+    Chart(EcoString),
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -206,6 +234,43 @@ pub struct Cell {
     /// `w:shd/@w:fill` hex.
     pub shd_fill: Option<EcoString>,
     pub content: Vec<BodyItem>,
+}
+
+// --- Charts (`word/charts/*.xml`) -------------------------------------------
+
+/// A chart's cached data — the numbers and labels Word last plotted. Enough
+/// to rebuild the chart as a table, which is what the importer does (Typst
+/// has no chart-drawing primitive, and inventing one is out of scope).
+///
+/// This shape is classic-chart-first (`c:chartSpace`'s `c:ser`/`c:cat`/
+/// `c:val`, one value per category per series): a plain category axis shared
+/// by every series, each series a column. The newer ChartEx format
+/// (`cx:chartSpace`, `word/charts/chartEx*.xml`, used for chart types
+/// introduced after Office 2013 — box-and-whisker, sunburst, waterfall, …)
+/// stores its data differently — a flat `cx:data` block per series-ish
+/// grouping, with categories and values aligned by shared point index rather
+/// than nested inside the series itself — but maps onto the same
+/// `categories`/`series` shape well enough for the chart types this importer
+/// has actually seen in the wild (a box-and-whisker chart's raw, unaggregated
+/// data table *is* one row per point with a repeated category label, which
+/// is exactly what this struct already represents). A chart type whose
+/// category axis is genuinely hierarchical (e.g. a sunburst's nested
+/// leaf/stem/branch levels) only keeps its finest (first) level here — the
+/// coarser levels are a real, but comparatively minor, loss on top of the
+/// larger one (the plot itself) this whole construct already accepts.
+#[derive(Debug, Default, Clone)]
+pub struct ChartData {
+    pub title: Option<EcoString>,
+    /// Category labels (the shared x-axis), if the chart declares any.
+    pub categories: Vec<EcoString>,
+    pub series: Vec<ChartSeries>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ChartSeries {
+    pub name: Option<EcoString>,
+    /// Values, positionally aligned with `categories` where both exist.
+    pub values: Vec<EcoString>,
 }
 
 // --- Sections (`w:sectPr`) --------------------------------------------------

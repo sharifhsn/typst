@@ -4,7 +4,7 @@
 use typst_ooxml_core::units::half_point_to_pt;
 
 use crate::mappers;
-use crate::mappers::para::ParaResult;
+use crate::mappers::para::{ParaKind, ParaResult};
 use crate::opts::ImportOptions;
 use crate::report::ImportReport;
 use crate::tdoc::{Block, List, ListItem, Stmt, TextStyle, TypstDoc};
@@ -42,23 +42,38 @@ pub(crate) fn lower_items(
 
     for item in items {
         match item {
-            BodyItem::Paragraph(p) => match mappers::para::lower_paragraph(
-                p, package, options, report,
-            ) {
-                ParaResult::ListItem { ordered, level, body } => {
-                    let li = ListItem { ordered, level, body };
-                    match pending_list.as_mut() {
-                        Some(list) => list.items.push(li),
-                        None => pending_list = Some(List { items: vec![li] }),
-                    }
-                }
-                other => {
+            BodyItem::Paragraph(p) => {
+                let ParaResult { anchored, kind } =
+                    mappers::para::lower_paragraph(p, package, options, report);
+
+                // An anchored figure/chart is a block in its own right and
+                // leads the paragraph it hangs off. Typst can't place a block
+                // between two items of one list, so an anchored block inside a
+                // list item ends the list and starts a new one after it —
+                // slightly worse than Word's layout, but it keeps the image.
+                if let Some(block) = anchored {
                     if let Some(list) = pending_list.take() {
                         blocks.push(Block::List(list));
                     }
-                    push_para_result(&mut blocks, other);
+                    blocks.push(block);
                 }
-            },
+
+                match kind {
+                    ParaKind::ListItem { ordered, level, body } => {
+                        let li = ListItem { ordered, level, body };
+                        match pending_list.as_mut() {
+                            Some(list) => list.items.push(li),
+                            None => pending_list = Some(List { items: vec![li] }),
+                        }
+                    }
+                    other => {
+                        if let Some(list) = pending_list.take() {
+                            blocks.push(Block::List(list));
+                        }
+                        push_para_kind(&mut blocks, other);
+                    }
+                }
+            }
             BodyItem::Table(t) => {
                 if let Some(list) = pending_list.take() {
                     blocks.push(Block::List(list));
@@ -73,19 +88,14 @@ pub(crate) fn lower_items(
     blocks
 }
 
-fn push_para_result(blocks: &mut Vec<Block>, result: ParaResult) {
-    match result {
-        ParaResult::Break(kind) => blocks.push(Block::Break(kind)),
-        ParaResult::Rule => blocks.push(Block::Rule),
-        ParaResult::Heading { level, body } => blocks.push(Block::Heading { level, body }),
-        ParaResult::Figure(figure) => blocks.push(Block::Figure(figure)),
-        ParaResult::FigureAndParagraph { figure, style, body } => {
-            blocks.push(Block::Figure(figure));
-            blocks.push(Block::Paragraph { style, body });
-        }
-        ParaResult::Paragraph { style, body } => blocks.push(Block::Paragraph { style, body }),
-        ParaResult::Empty => {}
-        ParaResult::ListItem { .. } => unreachable!("list items are handled by the caller"),
+fn push_para_kind(blocks: &mut Vec<Block>, kind: ParaKind) {
+    match kind {
+        ParaKind::Break(kind) => blocks.push(Block::Break(kind)),
+        ParaKind::Rule => blocks.push(Block::Rule),
+        ParaKind::Heading { level, body } => blocks.push(Block::Heading { level, body }),
+        ParaKind::Paragraph { style, body } => blocks.push(Block::Paragraph { style, body }),
+        ParaKind::Empty => {}
+        ParaKind::ListItem { .. } => unreachable!("list items are handled by the caller"),
     }
 }
 

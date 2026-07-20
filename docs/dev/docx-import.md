@@ -122,11 +122,58 @@ Current state:
 | --- | --- |
 | import | 111/128 |
 | compile | 111/111 |
-| text coverage | mean ~94%, median 100% |
+| text coverage | mean ~98%, median 100%, min 50% |
 
 The 17 non-imports are all *correct refusals*: fuzzer-corrupted archives,
 truncated files, password-encrypted documents, an XXE probe, and a 5000-deep
 nested-table DoS fixture. Each returns a clean error.
+
+## Wrapper elements
+
+Three OOXML constructs wrap content without contributing any of their own, and
+all three are made transparent in one place (`splice_node` in `wml/parse.rs`)
+so every walk — body, cell, row, paragraph, field folding — handles them alike:
+
+- **`w:sdt`** (content controls) — spliced away in favour of `w:sdtContent`.
+  Word wraps cover pages, date pickers and whole footers in these.
+- **`mc:AlternateContent`** — an `mc:Choice`/`mc:Fallback` pair holding *the
+  same content twice*. Taking both duplicates every text box; taking neither
+  loses it.
+- **`w:ruby`** — furigana, whose base and reading are both real sentence text.
+
+For `mc:AlternateContent` the choice is not automatic. MCE says a consumer
+takes an `mc:Choice` only if it supports that choice's requirement. We handle
+`wps` text boxes and the `a14`/`w14` drawing extensions better than the legacy
+VML fallback beside them, so those Choices win. `cx` (2014 extended charts —
+sunburst, box-and-whisker, waterfall) is the exception: Typst can't draw them
+and flattening a hierarchical chart into a table misrepresents it, so we take
+the `mc:Fallback`, which is a picture of the chart Word already rendered.
+
+## Constructs with no Typst counterpart
+
+Where Typst has no primitive, the importer keeps the *information* and reports
+the approximation rather than dropping content:
+
+| Word | imported as |
+| --- | --- |
+| chart (`c:chartSpace`) | the cached data as a `#figure(table(..))` |
+| text box / shape text | `#box[..]` inlined at the anchor, geometry dropped |
+| endnote | `#footnote[..]` (Typst has no end-of-document note store) |
+| ruby / furigana | a generated `#let ruby(base, gloss)` preamble helper |
+| `PAGE`/`NUMPAGES` field | live `#context counter(page)` calls |
+| any other field | its cached result — what Word last rendered |
+
+## Emitter constraints worth knowing
+
+Typst markup has three traps that produce source which does not *parse*, and
+the escaper handles all three:
+
+- `[` and `]` delimit content blocks. Literal brackets are common in prose.
+- `//` opens a line comment, which eats the rest of the line — including the
+  closing `]`. Prose URLs hit this constantly.
+- `*`/`_` are only read as delimiters at a word boundary. Word applies
+  character formatting mid-word routinely, so those spans fall back to
+  `#strong[..]`/`#emph[..]`, which always parse.
 
 ## Known gaps
 
@@ -135,7 +182,11 @@ nested-table DoS fixture. Each returns a clean error.
 - `w:pgMar/@w:header` / `@w:footer` clearances aren't mapped to page margins.
 - Tab-stop layout (the "left⇥centre⇥right" header idiom) becomes plain spaced
   text, not a three-column grid.
-- Charts, VML shapes and text-box content aren't extracted.
-- Footnote/endnote *text* is not pulled in (references survive, bodies don't).
+- A figure or chart anchored on a list item ends the list and starts a new one
+  after it: Typst can't place a block between two items of one list.
+- Scatter/bubble charts (`c:xVal`/`c:yVal`) aren't extracted; a chart relying
+  on live formula references rather than a cached values yields an empty table.
+- A drawing nested inside a hyperlink or a field's cached result isn't
+  discovered as its paragraph's figure.
 - Adjacent runs sharing an identical style are emitted as separate `#text(..)`
   wrappers rather than merged — correct, but more verbose than necessary.

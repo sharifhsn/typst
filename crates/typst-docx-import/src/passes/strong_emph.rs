@@ -6,7 +6,7 @@
 //! that still carries a font/size/color/underline/etc. is left alone; it
 //! needs a real `#text(..)` call.
 
-use crate::tdoc::{Block, Figure, Inline, Inlines, List, Table, TextStyle, TypstDoc};
+use crate::tdoc::{Block, Chart, Figure, Inline, Inlines, List, Table, TextStyle, TypstDoc};
 
 /// Entry point: rewrite bold/italic-only styled runs into `Strong`/`Emph`
 /// throughout `doc.body`.
@@ -39,6 +39,18 @@ fn walk_block(block: &mut Block) {
         Block::Figure(Figure { caption, .. }) => {
             if let Some(caption) = caption {
                 promote_in_place(caption);
+            }
+        }
+        // See the matching arm (and its comment) in `collapse_style` — a
+        // chart's cells are plain text today, but get the same walk as
+        // `Block::Table`'s cells for the same two reasons.
+        Block::Chart(Chart { table: Table { rows, .. }, .. }) => {
+            for row in rows {
+                for cell in &mut row.cells {
+                    for inner in &mut cell.body {
+                        walk_block(inner);
+                    }
+                }
             }
         }
         Block::CodeBlock { .. }
@@ -77,6 +89,28 @@ fn promote_inline(inline: Inline, out: &mut Inlines) {
                 Some((false, true)) => out.push(Inline::Emph(body)),
                 Some((false, false)) | None => out.push(Inline::Styled { style, body }),
             }
+        }
+        // See the matching arm in `collapse_style` for why a footnote's body
+        // is walked as its own block sequence rather than inline content.
+        Inline::Footnote(mut blocks) => {
+            for block in &mut blocks {
+                walk_block(block);
+            }
+            out.push(Inline::Footnote(blocks));
+        }
+        // Both halves of a ruby are ordinary inline runs.
+        Inline::Ruby { base, gloss } => {
+            out.push(Inline::Ruby {
+                base: promote_inlines(base),
+                gloss: promote_inlines(gloss),
+            })
+        }
+        // Same reasoning — a text box's body is its own block sequence too.
+        Inline::TextBox(mut blocks) => {
+            for block in &mut blocks {
+                walk_block(block);
+            }
+            out.push(Inline::TextBox(blocks));
         }
         other @ (Inline::Text(_)
         | Inline::Space
@@ -165,6 +199,65 @@ mod tests {
             Block::Paragraph { body, .. } => match &body[0] {
                 Inline::Strong(inner) => assert!(matches!(&inner[0], Inline::Emph(_))),
                 other => panic!("expected Strong(Emph(..)), got {other:?}"),
+            },
+            _ => panic!("expected paragraph"),
+        }
+    }
+
+    /// A footnote's body hangs off an inline, not off `TypstDoc::body`
+    /// directly, so it only gets tier-2 treatment if the inline walker
+    /// descends into it explicitly.
+    #[test]
+    fn footnote_body_gets_bold_italic_promoted_too() {
+        let mut d = doc(vec![Block::Paragraph {
+            style: Default::default(),
+            body: vec![Inline::Footnote(vec![Block::Paragraph {
+                style: Default::default(),
+                body: vec![Inline::Styled {
+                    style: TextStyle { bold: true, ..Default::default() },
+                    body: vec![Inline::Text("snoska".into())],
+                }],
+            }])],
+        }]);
+        run(&mut d);
+        match &d.body[0] {
+            Block::Paragraph { body, .. } => match &body[0] {
+                Inline::Footnote(blocks) => match &blocks[0] {
+                    Block::Paragraph { body, .. } => {
+                        assert!(matches!(&body[0], Inline::Strong(_)));
+                    }
+                    other => panic!("expected paragraph, got {other:?}"),
+                },
+                other => panic!("expected a footnote, got {other:?}"),
+            },
+            _ => panic!("expected paragraph"),
+        }
+    }
+
+    /// Same reasoning — a text box's body hangs off an inline too, and needs
+    /// the same explicit descent.
+    #[test]
+    fn text_box_body_gets_bold_italic_promoted_too() {
+        let mut d = doc(vec![Block::Paragraph {
+            style: Default::default(),
+            body: vec![Inline::TextBox(vec![Block::Paragraph {
+                style: Default::default(),
+                body: vec![Inline::Styled {
+                    style: TextStyle { bold: true, ..Default::default() },
+                    body: vec![Inline::Text("boxed".into())],
+                }],
+            }])],
+        }]);
+        run(&mut d);
+        match &d.body[0] {
+            Block::Paragraph { body, .. } => match &body[0] {
+                Inline::TextBox(blocks) => match &blocks[0] {
+                    Block::Paragraph { body, .. } => {
+                        assert!(matches!(&body[0], Inline::Strong(_)));
+                    }
+                    other => panic!("expected paragraph, got {other:?}"),
+                },
+                other => panic!("expected a text box, got {other:?}"),
             },
             _ => panic!("expected paragraph"),
         }

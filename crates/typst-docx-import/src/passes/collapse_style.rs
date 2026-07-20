@@ -10,7 +10,7 @@
 //! marker itself, so `size`/`bold`/`font`/`color` are cleared unconditionally
 //! inside [`Block::Heading`] bodies, not just when they match the doc default.
 
-use crate::tdoc::{Block, Figure, Inline, Inlines, List, Stmt, Table, TextStyle, TypstDoc};
+use crate::tdoc::{Block, Chart, Figure, Inline, Inlines, List, Stmt, Table, TextStyle, TypstDoc};
 
 /// Entry point: collapse every run in the document — body *and* header/footer
 /// content — against the preamble's default text style.
@@ -56,6 +56,20 @@ fn walk_block(block: &mut Block, default: &TextStyle) {
                 collapse_in_place(caption, default, false);
             }
         }
+        // A chart's table cells are built directly as plain `Inline::Text`
+        // (see `mappers::chart`), so there's no styling left to collapse —
+        // but they still get the same walk as `Block::Table`'s cells above,
+        // both to keep this match exhaustive and on the chance a future
+        // change gives a cell richer content.
+        Block::Chart(Chart { table: Table { rows, .. }, .. }) => {
+            for row in rows {
+                for cell in &mut row.cells {
+                    for inner in &mut cell.body {
+                        walk_block(inner, default);
+                    }
+                }
+            }
+        }
         Block::CodeBlock { .. }
         | Block::Equation { .. }
         | Block::Rule
@@ -96,6 +110,33 @@ fn collapse_inline(inline: Inline, default: &TextStyle, in_heading: bool, out: &
             } else {
                 out.push(Inline::Styled { style: reduced, body });
             }
+        }
+        // A footnote's body is a block sequence of its own, not part of the
+        // surrounding inline run — collapse it against the same document
+        // default, the same way `Block::Table`'s cell bodies are walked
+        // below, rather than against whatever `in_heading` happened to be at
+        // the reference site (the note's content isn't part of a heading
+        // just because its marker sits inside one).
+        Inline::Footnote(mut blocks) => {
+            for block in &mut blocks {
+                walk_block(block, default);
+            }
+            out.push(Inline::Footnote(blocks));
+        }
+        // Both halves of a ruby are ordinary inline runs; the gloss is
+        // re-sized by the helper, so collapsing its redundant styling here is
+        // as safe as anywhere else.
+        Inline::Ruby { base, gloss } => out.push(Inline::Ruby {
+            base: collapse_inlines(base, default, in_heading),
+            gloss: collapse_inlines(gloss, default, in_heading),
+        }),
+        // A text box's body is a block sequence of its own too — same
+        // reasoning as the footnote arm just above.
+        Inline::TextBox(mut blocks) => {
+            for block in &mut blocks {
+                walk_block(block, default);
+            }
+            out.push(Inline::TextBox(blocks));
         }
         other @ (Inline::Text(_)
         | Inline::Space
@@ -214,6 +255,95 @@ mod tests {
                 assert!(matches!(&body[0], Inline::Text(s) if s == "Introduccion"));
             }
             _ => panic!("expected heading"),
+        }
+    }
+
+    /// A footnote's body hangs off an inline, not off `TypstDoc::body`
+    /// directly, so it only gets tier-2 treatment if the inline walker
+    /// descends into it explicitly.
+    #[test]
+    fn footnote_body_is_collapsed_like_any_other_block_tree() {
+        let default = TextStyle {
+            font: Some("libertinus serif".into()),
+            size_pt: Some(11.0),
+            color: Some([0, 0, 0]),
+            ..Default::default()
+        };
+        let mut doc = default_doc(
+            default,
+            vec![Block::Paragraph {
+                style: Default::default(),
+                body: vec![Inline::Footnote(vec![Block::Paragraph {
+                    style: Default::default(),
+                    body: vec![Inline::Styled {
+                        style: TextStyle {
+                            font: Some("libertinus serif".into()),
+                            size_pt: Some(11.0),
+                            color: Some([0, 0, 0]),
+                            ..Default::default()
+                        },
+                        body: vec![Inline::Text("snoska".into())],
+                    }],
+                }])],
+            }],
+        );
+        run(&mut doc);
+        match &doc.body[0] {
+            Block::Paragraph { body, .. } => match &body[0] {
+                Inline::Footnote(blocks) => match &blocks[0] {
+                    Block::Paragraph { body, .. } => {
+                        assert_eq!(body.len(), 1);
+                        assert!(matches!(&body[0], Inline::Text(s) if s == "snoska"));
+                    }
+                    other => panic!("expected paragraph, got {other:?}"),
+                },
+                other => panic!("expected a footnote, got {other:?}"),
+            },
+            _ => panic!("expected paragraph"),
+        }
+    }
+
+    /// A text box's body hangs off an inline too, and gets the same explicit
+    /// descent as a footnote's — see the matching arm in `collapse_inline`.
+    #[test]
+    fn text_box_body_is_collapsed_like_any_other_block_tree() {
+        let default = TextStyle {
+            font: Some("libertinus serif".into()),
+            size_pt: Some(11.0),
+            color: Some([0, 0, 0]),
+            ..Default::default()
+        };
+        let mut doc = default_doc(
+            default,
+            vec![Block::Paragraph {
+                style: Default::default(),
+                body: vec![Inline::TextBox(vec![Block::Paragraph {
+                    style: Default::default(),
+                    body: vec![Inline::Styled {
+                        style: TextStyle {
+                            font: Some("libertinus serif".into()),
+                            size_pt: Some(11.0),
+                            color: Some([0, 0, 0]),
+                            ..Default::default()
+                        },
+                        body: vec![Inline::Text("boxed".into())],
+                    }],
+                }])],
+            }],
+        );
+        run(&mut doc);
+        match &doc.body[0] {
+            Block::Paragraph { body, .. } => match &body[0] {
+                Inline::TextBox(blocks) => match &blocks[0] {
+                    Block::Paragraph { body, .. } => {
+                        assert_eq!(body.len(), 1);
+                        assert!(matches!(&body[0], Inline::Text(s) if s == "boxed"));
+                    }
+                    other => panic!("expected paragraph, got {other:?}"),
+                },
+                other => panic!("expected a text box, got {other:?}"),
+            },
+            _ => panic!("expected paragraph"),
         }
     }
 

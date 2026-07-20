@@ -65,6 +65,10 @@ pub enum Block {
     Table(Table),
     /// An image plus optional caption (a `#figure`).
     Figure(Figure),
+    /// A Word chart, imported as the data table behind it. Typst cannot draw
+    /// Word's chart types, but the part carries the full cached dataset, so
+    /// the information survives even though the plot doesn't.
+    Chart(Chart),
     /// A fenced code block (` ```lang … ``` `).
     CodeBlock { lang: Option<EcoString>, text: EcoString },
     /// A block equation — Typst math source (or an OMML fallback string).
@@ -106,6 +110,18 @@ pub enum Inline {
     Styled { style: TextStyle, body: Inlines },
     /// Inline equation source (`$…$`).
     Math(EcoString),
+    /// `#ruby[base][gloss]` — a phonetic guide (furigana). Typst has no ruby
+    /// primitive, so the emitter defines a `ruby` helper in the preamble when
+    /// a document uses one.
+    Ruby { base: Inlines, gloss: Inlines },
+    /// `#footnote[…]` — the note's content inlined at the reference site,
+    /// which is how Typst models footnotes (there is no separate note store).
+    Footnote(Vec<Block>),
+    /// `#box[…]` — a Word text box's content, inlined at its anchor. Word
+    /// floats a text box at an arbitrary page position; Typst has no
+    /// equivalent that survives reflow, so the content is kept inline and the
+    /// geometry is dropped.
+    TextBox(Vec<Block>),
     /// Raw Typst source, emitted verbatim (escape hatch).
     Verbatim(EcoString),
 }
@@ -197,6 +213,14 @@ pub struct TableCell {
     pub rowspan: usize,
     pub fill: Option<[u8; 3]>,
     pub body: Vec<Block>,
+}
+
+/// A Word chart, lowered to the data table behind it (see
+/// [`crate::wml::model::ChartData`]) — [`Block::Chart`]'s payload.
+#[derive(Debug, Clone)]
+pub struct Chart {
+    pub title: Option<EcoString>,
+    pub table: Table,
 }
 
 #[derive(Debug, Clone)]

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::opts::ImportOptions;
 use crate::tdoc::{
-    Align, Block, BreakKind, Figure, Furniture, Inline, Inlines, List, Margins, PageSetup,
+    Align, Block, BreakKind, Chart, Figure, Furniture, Inline, Inlines, List, Margins, PageSetup,
     ParStyle, Script, Stmt, Table, TableCell, TextStyle, TypstDoc,
 };
 use crate::wml::model::WmlPackage;
@@ -31,6 +31,7 @@ pub fn emit(
         options,
         assets: Vec::new(),
         seen_assets: HashSet::new(),
+        used_ruby: false,
     };
 
     let mut out = String::new();
@@ -54,6 +55,12 @@ pub fn emit(
         out.push('\n');
     }
 
+    // Helper definitions go above everything, and only once it's known which
+    // ones the rendered body actually called for.
+    if emitter.used_ruby {
+        out.insert_str(0, &format!("{RUBY_HELPER}\n\n"));
+    }
+
     (out, emitter.assets)
 }
 
@@ -64,17 +71,31 @@ struct Emitter<'a> {
     options: &'a ImportOptions,
     assets: Vec<(PathBuf, Vec<u8>)>,
     seen_assets: HashSet<PathBuf>,
+    /// Set when an [`Inline::Ruby`] is rendered, so [`RUBY_HELPER`] is emitted
+    /// only for documents that actually use it.
+    used_ruby: bool,
 }
+
+/// Word's `w:ruby` has no Typst counterpart, so documents that use furigana
+/// get this definition prepended.
+///
+/// The reading is *placed* above the base rather than stacked with it: a stack
+/// lifts the base off the surrounding baseline and inflates the line, while
+/// `place` leaves the sentence sitting exactly where it would without the
+/// annotation — which is what furigana is supposed to look like. Verified by
+/// rendering both against a real Japanese sentence.
+const RUBY_HELPER: &str =
+    "#let ruby(base, gloss) = box(place(top + center, dy: -0.85em, text(size: 0.5em, gloss)) + base)";
 
 impl Emitter<'_> {
     fn render_block(&mut self, block: &Block) -> String {
         match block {
             Block::Heading { level, body } => {
                 let marker = "=".repeat((*level).max(1) as usize);
-                format!("{marker} {}", render_inlines(body))
+                format!("{marker} {}", self.render_inlines(body))
             }
             Block::Paragraph { style, body } => {
-                let text = render_inlines(body);
+                let text = self.render_inlines(body);
                 match style.align {
                     Some(Align::Center) => format!("#align(center)[{text}]"),
                     Some(Align::Right) => format!("#align(right)[{text}]"),
@@ -82,9 +103,10 @@ impl Emitter<'_> {
                     Some(Align::Left) | None => text,
                 }
             }
-            Block::List(list) => render_list(list),
-            Block::Table(table) => self.render_table(table),
+            Block::List(list) => self.render_list(list),
+            Block::Table(table) => format!("#{}", self.render_table(table)),
             Block::Figure(figure) => self.render_figure(figure),
+            Block::Chart(chart) => self.render_chart(chart),
             Block::CodeBlock { lang, text } => {
                 let lang = lang.as_deref().unwrap_or("");
                 format!("```{lang}\n{text}\n```")
@@ -97,9 +119,14 @@ impl Emitter<'_> {
         }
     }
 
+    /// Render a `table(..)` *expression* — deliberately without the leading
+    /// `#` a bare block-level table needs, since [`Self::render_chart`] also
+    /// uses this to embed the table as an argument to `figure(..)`, where a
+    /// `#` would be a syntax error. [`Self::render_block`]'s `Block::Table`
+    /// arm adds the `#` itself for the stand-alone case.
     fn render_table(&mut self, table: &Table) -> String {
         let columns_arg = table_columns_arg(table);
-        let mut lines = vec!["#table(".to_string(), format!("  columns: {columns_arg},")];
+        let mut lines = vec!["table(".to_string(), format!("  columns: {columns_arg},")];
 
         let mut header_used = false;
         for row in &table.rows {
@@ -254,10 +281,25 @@ impl Emitter<'_> {
 
         match &figure.caption {
             Some(caption) => {
-                let caption = render_inlines(caption);
+                let caption = self.render_inlines(caption);
                 format!("#figure({image_call}, caption: [{caption}])")
             }
             None => format!("#{image_call}"),
+        }
+    }
+
+    /// A [`Chart`] renders as its data table — the bare `table(..)`
+    /// expression from [`Self::render_table`], captioned with the chart's
+    /// title if it has one, exactly like [`Self::render_figure`] wraps an
+    /// `image(..)` call. The title is plain text (see
+    /// [`crate::wml::parse::parse_chart_title`]), not structured `Inlines`,
+    /// so it's markup-escaped directly rather than routed through
+    /// [`Self::render_inlines`].
+    fn render_chart(&mut self, chart: &Chart) -> String {
+        let table_expr = self.render_table(&chart.table);
+        match &chart.title {
+            Some(title) => format!("#figure({table_expr}, caption: [{}])", escape_markup(title)),
+            None => format!("#{table_expr}"),
         }
     }
 
@@ -316,16 +358,18 @@ fn table_columns_arg(table: &Table) -> String {
     }
 }
 
-fn render_list(list: &List) -> String {
-    list.items
-        .iter()
-        .map(|item| {
-            let indent = "  ".repeat(item.level as usize);
-            let marker = if item.ordered { "+" } else { "-" };
-            format!("{indent}{marker} {}", render_inlines(&item.body))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+impl Emitter<'_> {
+    fn render_list(&mut self, list: &List) -> String {
+        list.items
+            .iter()
+            .map(|item| {
+                let indent = "  ".repeat(item.level as usize);
+                let marker = if item.ordered { "+" } else { "-" };
+                format!("{indent}{marker} {}", self.render_inlines(&item.body))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// Append a (possibly multi-line) rendered argument to the `#set page(..)`
@@ -382,38 +426,52 @@ fn render_set_par(style: &ParStyle) -> String {
     format!("#set par({})", args.join(", "))
 }
 
-fn render_inlines(inlines: &Inlines) -> String {
-    // Render every inline up front: whether a `*`/`_` shorthand is safe
-    // depends on the characters either side of it, so the neighbours have to
-    // exist before the decision can be made. A `Strong`/`Emph` piece always
-    // begins with `*`, `_` or `#` — never alphanumeric — so using the
-    // shorthand rendering to probe the *next* piece's first character gives
-    // the same answer as the form eventually chosen for it.
-    let pieces: Vec<String> = inlines.iter().map(render_inline).collect();
+impl Emitter<'_> {
+    fn render_inlines(&mut self, inlines: &Inlines) -> String {
+        // Render every inline up front: whether a `*`/`_` shorthand is safe
+        // depends on the characters either side of it, so the neighbours have
+        // to exist before the decision can be made. A `Strong`/`Emph` piece
+        // always begins with `*`, `_` or `#` — never alphanumeric — so using
+        // the shorthand rendering to probe the *next* piece's first character
+        // gives the same answer as the form eventually chosen for it.
+        let pieces: Vec<String> = inlines.iter().map(|inline| self.render_inline(inline)).collect();
 
-    let mut out = String::new();
-    for (i, (inline, piece)) in inlines.iter().zip(&pieces).enumerate() {
-        let (body, delim, function) = match inline {
-            Inline::Strong(body) => (body, '*', "strong"),
-            Inline::Emph(body) => (body, '_', "emph"),
-            _ => {
-                out.push_str(piece);
-                continue;
+        let mut out = String::new();
+        for (i, (inline, piece)) in inlines.iter().zip(&pieces).enumerate() {
+            let (body, delim, function) = match inline {
+                Inline::Strong(body) => (body, '*', "strong"),
+                Inline::Emph(body) => (body, '_', "emph"),
+                _ => {
+                    out.push_str(piece);
+                    // Two text boxes are independent floating objects that
+                    // Word anchors at unrelated page positions; they were
+                    // never adjacent *text*. Inlining them back to back would
+                    // fuse the last word of one onto the first word of the
+                    // next, so consecutive boxes get a separator. (Ordinary
+                    // runs deliberately don't: Word splits words across run
+                    // boundaries mid-word all the time.)
+                    if matches!(inline, Inline::TextBox(_))
+                        && matches!(inlines.get(i + 1), Some(Inline::TextBox(_)))
+                    {
+                        out.push(' ');
+                    }
+                    continue;
+                }
+            };
+
+            let prev = out.chars().next_back();
+            let next = pieces[i + 1..].iter().find_map(|p| p.chars().next());
+            let rendered = self.render_inlines(body);
+            if shorthand_is_safe(prev, next, &rendered) {
+                out.push(delim);
+                out.push_str(&rendered);
+                out.push(delim);
+            } else {
+                out.push_str(&format!("#{function}[{rendered}]"));
             }
-        };
-
-        let prev = out.chars().next_back();
-        let next = pieces[i + 1..].iter().find_map(|p| p.chars().next());
-        let rendered = render_inlines(body);
-        if shorthand_is_safe(prev, next, &rendered) {
-            out.push(delim);
-            out.push_str(&rendered);
-            out.push(delim);
-        } else {
-            out.push_str(&format!("#{function}[{rendered}]"));
         }
+        out
     }
-    out
 }
 
 /// Whether the `*`/`_` markup shorthand parses as a delimiter in this position.
@@ -435,72 +493,101 @@ fn shorthand_is_safe(prev: Option<char>, next: Option<char>, body: &str) -> bool
         && !body.ends_with(char::is_whitespace)
 }
 
-fn render_inline(inline: &Inline) -> String {
-    match inline {
-        Inline::Text(s) => escape_markup(s),
-        Inline::Space => " ".to_string(),
-        Inline::Linebreak => " \\\n".to_string(),
-        Inline::Strong(body) => format!("*{}*", render_inlines(body)),
-        Inline::Emph(body) => format!("_{}_", render_inlines(body)),
-        Inline::Raw(s) => {
-            if s.contains('`') {
-                format!("#raw({})", string_literal(s))
-            } else {
-                format!("`{s}`")
+impl Emitter<'_> {
+    fn render_inline(&mut self, inline: &Inline) -> String {
+        match inline {
+            Inline::Text(s) => escape_markup(s),
+            Inline::Space => " ".to_string(),
+            Inline::Linebreak => " \\\n".to_string(),
+            Inline::Strong(body) => format!("*{}*", self.render_inlines(body)),
+            Inline::Emph(body) => format!("_{}_", self.render_inlines(body)),
+            Inline::Raw(s) => {
+                if s.contains('`') {
+                    format!("#raw({})", string_literal(s))
+                } else {
+                    format!("`{s}`")
+                }
             }
+            Inline::Link { dest, body } => {
+                format!("#link({})[{}]", string_literal(dest), self.render_inlines(body))
+            }
+            Inline::Styled { style, body } => self.render_styled(style, body),
+            Inline::Math(s) => format!("${s}$"),
+            // The note's content, rendered as a content block exactly like a
+            // table cell's or a furniture body's — see `render_cell_body`.
+            // Typst's own `#footnote[..]` call inlines the body right here;
+            // there is no separate note store to route it through.
+            Inline::Footnote(blocks) => {
+                let content = self.render_cell_body(blocks);
+                format!("#footnote[{content}]")
+            }
+            // Typst has no ruby primitive, so this calls a helper the emitter
+            // defines in the preamble (see `RUBY_HELPER`). Rendering the call
+            // is what marks the helper as needed.
+            Inline::Ruby { base, gloss } => {
+                self.used_ruby = true;
+                let base = self.render_inlines(base);
+                let gloss = self.render_inlines(gloss);
+                format!("#ruby[{base}][{gloss}]")
+            }
+            // A text box's content, rendered the same way — see the
+            // `Footnote` arm just above. `#box[..]` is the closest Typst
+            // primitive: it happily takes multi-paragraph content (verified
+            // by hand before wiring this in), even though — like a footnote
+            // — it's built for a shorter inline body; the geometry Word
+            // floated this at is simply gone.
+            Inline::TextBox(blocks) => {
+                let content = self.render_cell_body(blocks);
+                format!("#box[{content}]")
+            }
+            Inline::Verbatim(s) => s.to_string(),
         }
-        Inline::Link { dest, body } => {
-            format!("#link({})[{}]", string_literal(dest), render_inlines(body))
+    }
+
+    fn render_styled(&mut self, style: &TextStyle, body: &Inlines) -> String {
+        if style.is_empty() {
+            return self.render_inlines(body);
         }
-        Inline::Styled { style, body } => render_styled(style, body),
-        Inline::Math(s) => format!("${s}$"),
-        Inline::Verbatim(s) => s.to_string(),
-    }
-}
 
-fn render_styled(style: &TextStyle, body: &Inlines) -> String {
-    if style.is_empty() {
-        return render_inlines(body);
-    }
+        let mut content = self.render_inlines(body);
 
-    let mut content = render_inlines(body);
+        content = match style.script {
+            Some(Script::Super) => format!("#super[{content}]"),
+            Some(Script::Sub) => format!("#sub[{content}]"),
+            None => content,
+        };
+        if style.smallcaps {
+            content = format!("#smallcaps[{content}]");
+        }
+        if style.strike {
+            content = format!("#strike[{content}]");
+        }
+        if style.underline {
+            content = format!("#underline[{content}]");
+        }
 
-    content = match style.script {
-        Some(Script::Super) => format!("#super[{content}]"),
-        Some(Script::Sub) => format!("#sub[{content}]"),
-        None => content,
-    };
-    if style.smallcaps {
-        content = format!("#smallcaps[{content}]");
-    }
-    if style.strike {
-        content = format!("#strike[{content}]");
-    }
-    if style.underline {
-        content = format!("#underline[{content}]");
-    }
+        let mut args = Vec::new();
+        if let Some(font) = &style.font {
+            args.push(format!("font: {}", string_literal(font)));
+        }
+        if let Some(size) = style.size_pt {
+            args.push(format!("size: {}", pt(size)));
+        }
+        if style.bold {
+            args.push("weight: \"bold\"".to_string());
+        }
+        if style.italic {
+            args.push("style: \"italic\"".to_string());
+        }
+        if let Some(color) = style.color {
+            args.push(format!("fill: {}", rgb_lit(color)));
+        }
 
-    let mut args = Vec::new();
-    if let Some(font) = &style.font {
-        args.push(format!("font: {}", string_literal(font)));
-    }
-    if let Some(size) = style.size_pt {
-        args.push(format!("size: {}", pt(size)));
-    }
-    if style.bold {
-        args.push("weight: \"bold\"".to_string());
-    }
-    if style.italic {
-        args.push("style: \"italic\"".to_string());
-    }
-    if let Some(color) = style.color {
-        args.push(format!("fill: {}", rgb_lit(color)));
-    }
-
-    if args.is_empty() {
-        content
-    } else {
-        format!("#text({})[{content}]", args.join(", "))
+        if args.is_empty() {
+            content
+        } else {
+            format!("#text({})[{content}]", args.join(", "))
+        }
     }
 }
 
@@ -700,6 +787,77 @@ mod tests {
         };
         let d = doc(vec![], vec![Block::List(list)]);
         assert_eq!(run(&d), "- one\n  - two\n");
+    }
+
+    #[test]
+    fn footnote_renders_as_a_footnote_call_with_its_body_inlined() {
+        let body = vec![
+            Inline::Text("before".into()),
+            Inline::Footnote(vec![Block::Paragraph {
+                style: ParStyle::default(),
+                body: vec![Inline::Text("snoska".into())],
+            }]),
+            Inline::Text("after".into()),
+        ];
+        let d = doc(vec![], vec![Block::Paragraph { style: ParStyle::default(), body }]);
+        assert_eq!(run(&d), "before#footnote[snoska]after\n");
+    }
+
+    /// A footnote body with more than one block joins them the same way
+    /// `render_cell_body` joins a multi-block table cell — blank-line
+    /// separated — since that's exactly what it delegates to.
+    #[test]
+    fn footnote_with_multiple_blocks_joins_them_like_a_cell_body() {
+        let body = vec![Inline::Footnote(vec![
+            Block::Paragraph {
+                style: ParStyle::default(),
+                body: vec![Inline::Text("first".into())],
+            },
+            Block::Paragraph {
+                style: ParStyle::default(),
+                body: vec![Inline::Text("second".into())],
+            },
+        ])];
+        let d = doc(vec![], vec![Block::Paragraph { style: ParStyle::default(), body }]);
+        assert_eq!(run(&d), "#footnote[first\n\nsecond]\n");
+    }
+
+    /// A text box renders as `#box[..]`, inlined at its anchor — the closest
+    /// Typst has, since the floating position/size can't come along.
+    #[test]
+    fn text_box_renders_as_a_box_call_with_its_content_inlined() {
+        let body = vec![
+            Inline::Text("before".into()),
+            Inline::TextBox(vec![Block::Paragraph {
+                style: ParStyle::default(),
+                body: vec![Inline::Text("boxed".into())],
+            }]),
+            Inline::Text("after".into()),
+        ];
+        let d = doc(vec![], vec![Block::Paragraph { style: ParStyle::default(), body }]);
+        assert_eq!(run(&d), "before#box[boxed]after\n");
+    }
+
+    /// A text box's content with more than one block — several paragraphs,
+    /// or block-level content like a heading or a list — joins the same way
+    /// a multi-block table cell or footnote body does (verified by hand with
+    /// `typst compile` that `#box[..]` accepts this before wiring it in: it
+    /// compiles even though, like a footnote, it's built for a shorter
+    /// inline body).
+    #[test]
+    fn text_box_with_multiple_blocks_joins_them_like_a_cell_body() {
+        let body = vec![Inline::TextBox(vec![
+            Block::Paragraph {
+                style: ParStyle::default(),
+                body: vec![Inline::Text("first".into())],
+            },
+            Block::Paragraph {
+                style: ParStyle::default(),
+                body: vec![Inline::Text("second".into())],
+            },
+        ])];
+        let d = doc(vec![], vec![Block::Paragraph { style: ParStyle::default(), body }]);
+        assert_eq!(run(&d), "#box[first\n\nsecond]\n");
     }
 
     #[test]

@@ -161,6 +161,7 @@ fn is_visually_empty(blocks: &[Block]) -> bool {
         Block::Paragraph { body, .. } | Block::Heading { body, .. } => !inlines_have_text(body),
         Block::List(_)
         | Block::Table(_)
+        | Block::Chart(_)
         | Block::Figure(_)
         | Block::CodeBlock { .. }
         | Block::Equation { .. } => false,
