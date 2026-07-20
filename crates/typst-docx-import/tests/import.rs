@@ -1809,3 +1809,74 @@ fn malformed_equation_and_duplicate_attribute_degrade_instead_of_aborting_the_im
         );
     }
 }
+
+/// `w:outlineLvl` numbers heading levels 1..=9 as 0..=8, and reserves **9 for
+/// body text**. A style that says "I am body text" must not import as a
+/// heading — `lo-sw-tdf128245.docx` has eight paragraphs in a `Body` style
+/// carrying `outlineLvl 9`, and every one of them was becoming a heading.
+#[test]
+fn outline_level_nine_means_body_text_not_a_heading() {
+    const STYLES: &str = r#"<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Body"><w:name w:val="Body"/>
+    <w:pPr><w:outlineLvl w:val="9"/></w:pPr></w:style>
+  <w:style w:type="paragraph" w:styleId="H2"><w:name w:val="Custom Section"/>
+    <w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style>
+</w:styles>"#;
+
+    let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+  <w:p><w:pPr><w:pStyle w:val="Body"/></w:pPr><w:r><w:t>Ordinary prose</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>A Real Heading</w:t></w:r></w:p>
+</w:body></w:document>"#;
+
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", doc.into());
+    package.add_xml("word/styles.xml", "application/xml", STYLES.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+    assert!(
+        !src.contains("= Ordinary prose") && !src.contains("====== Ordinary prose"),
+        "body text imported as a heading:\n{src}"
+    );
+    assert!(src.contains("Ordinary prose"), "body text lost:\n{src}");
+    // An outline level that really is a heading level still works.
+    assert!(src.contains("== A Real Heading"), "real heading lost:\n{src}");
+}
+
+/// A literal comma is an argument separator inside every maths call, so one
+/// arriving as *text* silently changes the call's arity. Much of the world
+/// writes decimals with a comma, and this surfaced on Russian documents whose
+/// `frac(1, 565 , 49 …)` became a three-argument `frac`. A half-open interval
+/// is the matching fence bug: a bare `(` paired with a `]` leaves the `lr(..)`
+/// call unbalanced, so mismatched fences both become symbols.
+#[test]
+fn literal_commas_and_mismatched_fences_stay_valid_maths() {
+    // `m:d` with begChr "(" and endChr "]", containing "0,5" as text.
+    let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body>
+  <w:p><m:oMath>
+    <m:d>
+      <m:dPr><m:begChr m:val="("/><m:endChr m:val="]"/></m:dPr>
+      <m:e><m:r><m:t>0,5</m:t></m:r></m:e>
+    </m:d>
+  </m:oMath></w:p>
+</w:body></w:document>"#;
+
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", doc.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+    assert!(src.contains("comma"), "literal comma left as a separator:\n{src}");
+    assert!(!src.contains("0,5"), "raw decimal comma survived into maths:\n{src}");
+    // Mismatched fences must both be symbols, so nothing is left unbalanced.
+    assert!(src.contains("paren.l"), "unmatched `(` fence left bare:\n{src}");
+    assert!(src.contains("bracket.r"), "`]` fence not symbolised:\n{src}");
+}

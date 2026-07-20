@@ -37,3 +37,4 @@ package-lock.json
 tools/docx-import-corpus/wide-docs/
 tools/docx-import-corpus/wide-out/
 tools/docx-import-corpus/wide-results.json
+tools/docx-import-corpus/roundtrip-out/

@@ -1951,11 +1951,19 @@ fn parse_style(node: Node) -> Style {
             "basedOn" => style.based_on = attr(child, "val").map(EcoString::from),
             "rPr" => style.run = parse_run_props(child),
             "pPr" => {
+                // `w:outlineLvl` numbers heading levels 1..=9 as 0..=8; **9 is
+                // the sentinel for "body text"**, not a tenth heading level.
+                // Recording it verbatim made every paragraph of a style that
+                // says "I am body text" — which is exactly what a style like
+                // `Body` says — come out as a heading. Normalised away here,
+                // beside the other OOXML sentinels (see `parse_hex_color`'s
+                // handling of `"auto"`), so the Word IR means what it says.
                 style.outline_level = child
                     .children()
                     .find(|n| is_element(*n, "outlineLvl"))
                     .and_then(|n| attr(n, "val"))
-                    .and_then(|v| v.parse::<u8>().ok());
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .filter(|&level| level <= 8);
                 style.para = parse_para_props(child);
             }
             _ => {}

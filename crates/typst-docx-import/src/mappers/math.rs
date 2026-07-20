@@ -424,6 +424,12 @@ fn math_syntax_symbol(c: char) -> Option<&'static str> {
         '[' => "bracket.l",
         ']' => "bracket.r",
         ';' => "semi",
+        // A comma is an argument separator inside every maths call — `frac`,
+        // `lr`, `mat` — so a *literal* one from a text run has to be a symbol
+        // or it silently changes the arity. This is not exotic: much of the
+        // world writes decimals with a comma, and `frac(1, 565 , 49 ...)`
+        // from a Russian document is what surfaced it.
+        ',' => "comma",
         '#' => "hash",
         '$' => "dollar",
         _ => return None,
@@ -451,16 +457,26 @@ fn math_syntax_symbol(c: char) -> Option<&'static str> {
 /// `s` is expected to be a single character (OMML's own convention for
 /// these attributes); anything else — empty, or, rarely, a producer-specific
 /// multi-character value — passes through unchanged.
-fn escape_delim_glyph(s: &str) -> EcoString {
+fn escape_delim_glyph(s: &str, partner: &str) -> EcoString {
     let mut chars = s.chars();
     match (chars.next(), chars.next()) {
-        (Some('(' | ')'), None) => EcoString::from(s),
+        // A bare paren reads as ordinary grouping inside `lr(..)` and keeps
+        // the common case legible (`lr(( x ))` rather than
+        // `lr(paren.l x paren.r)`) — but only while the *other* fence is its
+        // match. A half-open interval like `(a, b]` pairs a bare `(` with a
+        // `bracket.r`, leaving the paren unclosed and the call unbalanced, so
+        // there both fences become symbols.
+        (Some('(' | ')'), None) if is_paren(partner) => EcoString::from(s),
         (Some(c), None) => match math_syntax_symbol(c) {
             Some(name) => EcoString::from(name),
             None => EcoString::from(c),
         },
         _ => EcoString::from(s),
     }
+}
+
+fn is_paren(s: &str) -> bool {
+    matches!(s, "(" | ")")
 }
 
 /// Glues a recovered `^digits`/`_digits` onto the previous atom (a script
@@ -985,7 +1001,8 @@ fn convert_delim(node: Node, report: &mut ImportReport, depth: usize) -> EcoStri
     // math syntax as any other bare character (see `math_syntax_symbol`'s
     // doc comment; the French-interval corpus example reaches this exact
     // path via an explicit `m:begChr`/`m:endChr` of `[`).
-    let sep = escape_delim_glyph(sep_raw);
+    // A separator has no partner fence — always symbolise it.
+    let sep = escape_delim_glyph(sep_raw, "");
     let inner_cells: Vec<EcoString> =
         cells.iter().map(|e| convert_row(*e, report, depth)).collect();
     let inner = inner_cells
@@ -994,8 +1011,12 @@ fn convert_delim(node: Node, report: &mut ImportReport, depth: usize) -> EcoStri
         .collect::<Vec<_>>()
         .join(&format!("{sep} "));
 
-    let beg = beg.as_deref().map(escape_delim_glyph);
-    let end = end.as_deref().map(escape_delim_glyph);
+    // Each fence is escaped against the *other*, so a bare paren survives only
+    // when its partner matches it (see `escape_delim_glyph`).
+    let beg_raw = beg.as_deref().unwrap_or("");
+    let end_raw = end.as_deref().unwrap_or("");
+    let beg = beg.as_deref().map(|b| escape_delim_glyph(b, end_raw));
+    let end = end.as_deref().map(|e| escape_delim_glyph(e, beg_raw));
     match (&beg, &end) {
         (Some(b), Some(e)) => eco_format!("lr({b} {inner} {e})"),
         // One side has no delimiter char at all: an unbalanced `lr(..)` isn't
