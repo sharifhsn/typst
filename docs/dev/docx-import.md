@@ -96,10 +96,21 @@ routinely violates:
 
 The acceptance gate is the **Apache POI test-data corpus** — 128 genuinely
 real-world `.docx` (real Word and LibreOffice output, deliberately including
-fuzzer, truncated, encrypted and torture files). Runner: `run.py` in the corpus
-directory. Per document it measures import status, whether the emitted Typst
-compiles, and **text coverage** — the word-set overlap between a LibreOffice
-render of the source and a Typst render of the import.
+fuzzer, truncated, encrypted and torture files). Per document it measures import
+status, whether the emitted Typst compiles, and **text coverage** — the word-set
+overlap between a LibreOffice render of the source and a Typst render of the
+import.
+
+```sh
+cargo build --release
+cargo build -p typst-docx-import --example import
+python3 tools/docx-import-corpus/corpus.py --fetch   # first run only, ~8 MB
+python3 tools/docx-import-corpus/corpus.py
+```
+
+It exits non-zero if any document that imported produced source that does not
+compile — the one outcome that is always a genuine defect. Pass `--baseline
+results.json` to diff a run against a saved one.
 
 Text coverage is the importer's primary metric, the counterpart to the
 exporter's page-fidelity metric: the first question is not "does it look
