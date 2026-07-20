@@ -9,4 +9,5 @@ pub mod note;
 pub mod para;
 pub mod run;
 pub mod section;
+pub mod shape;
 pub mod table;

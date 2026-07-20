@@ -139,6 +139,28 @@ pub enum RunContent {
     /// [`WmlPackage::charts`]), not inline here, so lowering it to a table
     /// keeps the information instead of dropping it — see [`ChartData`].
     Chart(DrawingRef),
+    /// WordArt (`v:textpath`'s `string` attribute) — genuine document text
+    /// with no Typst equivalent for the curved/warped path it's drawn along,
+    /// so it's kept as plain text and the styling loss is reported once at
+    /// lower time (see `mappers::run`). A VML *picture* (`v:imagedata`)
+    /// needs no variant of its own here — it resolves through the same
+    /// relationship-id lookup as a DrawingML picture, so it's folded
+    /// straight into [`Self::Drawing`] at parse time (see `wml::parse`'s
+    /// `vml_shape_content`).
+    VmlText(EcoString),
+    /// A VML `v:rect`/`v:oval`/`v:roundrect`/`v:line` — a shape Typst *can*
+    /// draw natively, unlike the custom-geometry case [`Self::VmlUnsupported`]
+    /// covers. See `mappers::shape` for the width/height/color parsing and
+    /// the `#rect`/`#circle`/`#ellipse`/`#line` mapping.
+    VmlShape(VmlShape),
+    /// A VML `v:shape` with nothing this importer can extract: no picture,
+    /// no text box, no WordArt text — typically one with custom
+    /// `v:path`/`v:formulas` geometry (a callout, a star, …), which would
+    /// need a drawing package to render faithfully. Recorded as a drop at
+    /// lower time rather than silently vanishing (see `wml::parse`'s
+    /// `vml_shape_content` for why a shape holding *only* a plain text box
+    /// never reaches this variant).
+    VmlUnsupported,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -151,10 +173,51 @@ pub enum BreakType {
 #[derive(Debug, Clone)]
 pub struct DrawingRef {
     pub rel_id: EcoString,
-    /// Extent in EMU, if present (`wp:extent`).
+    /// Extent in EMU, if present (`wp:extent`, or — for a VML picture — its
+    /// `style` attribute's `width`/`height`, converted once at parse time so
+    /// this field keeps a single unit contract regardless of which markup
+    /// produced it).
     pub cx_emu: Option<i64>,
     pub cy_emu: Option<i64>,
     pub alt: Option<EcoString>,
+}
+
+// --- VML shapes (`v:rect`/`v:oval`/`v:roundrect`/`v:line`, in a `w:pict`) ----
+
+/// A VML `v:rect`/`v:oval`/`v:roundrect`/`v:line`, parsed raw: `style` is
+/// kept as the whole CSS-ish attribute string (`crate::wml::parse::
+/// vml_length_pt` pulls `width`/`height` out of it), and the fill/stroke
+/// colors are kept as whatever VML wrote (`#rrggbb` or a color name) —
+/// `crate::mappers::shape` resolves both, mirroring how [`RunProps::color`]
+/// stores a raw hex string for `crate::lower::parse_hex_color` to resolve
+/// later rather than doing it here.
+#[derive(Debug, Clone)]
+pub struct VmlShape {
+    pub kind: VmlShapeKind,
+    /// `style="width:120pt;height:80pt;..."`, verbatim.
+    pub style: EcoString,
+    /// `fillcolor`, or a `v:fill` child's `color` — VML's two spellings for
+    /// the same thing.
+    pub fill_color: Option<EcoString>,
+    /// `filled="f"` → `false`; VML's own default (the attribute absent, or
+    /// any value other than `"f"`) is `true`.
+    pub filled: bool,
+    /// `strokecolor`, or a `v:stroke` child's `color`.
+    pub stroke_color: Option<EcoString>,
+    /// `stroked="f"` → `false`; default `true`, mirroring `filled`.
+    pub stroked: bool,
+    /// [`VmlShapeKind::Line`]'s endpoints, each a raw `"x,y"` pair — absent
+    /// for every other kind.
+    pub from: Option<EcoString>,
+    pub to: Option<EcoString>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum VmlShapeKind {
+    Rect,
+    Oval,
+    RoundRect,
+    Line,
 }
 
 // --- Paragraph properties (`w:pPr`) -----------------------------------------

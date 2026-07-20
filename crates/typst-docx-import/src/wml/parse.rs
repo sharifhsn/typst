@@ -19,7 +19,7 @@ use crate::wml::model::{
     Body, BodyItem, BreakType, Cell, ChartData, ChartKind, ChartSeries, DrawingRef, Field,
     FurnitureKind, FurnitureRef, LegendPos, LevelFormat, NumRef, Numbering, ParaProps, Paragraph,
     Relationship, Row, Run, RunContent, RunItem, RunProps, SectPr, Style, StyleKind, Styles,
-    Table, WmlPackage,
+    Table, VmlShape, VmlShapeKind, WmlPackage,
 };
 
 /// Open the `.docx` and parse `word/document.xml`, `styles.xml`,
@@ -781,14 +781,23 @@ fn parse_run(node: Node, tb_depth: usize) -> Run {
             // `mc:AlternateContent` (already resolved away from the
             // `mc:Choice` branch by `splice_node`, so this arm only ever
             // sees it when there's no `mc:Choice` at all — a document
-            // authored VML-only, or the corpus's older fixtures). A real VML
-            // *picture* (`v:imagedata`) has no text content and so no
-            // `w:txbxContent` inside it, so this arm does nothing for one,
-            // same as it did before this arm existed.
+            // authored VML-only, or the corpus's older fixtures).
+            //
+            // Text boxes are found first, exactly as before this arm grew
+            // the rest of VML: a blanket scan for `w:txbxContent` anywhere
+            // inside, regardless of which VML element wraps it (there are
+            // more spellings than `collect_vml_content` enumerates — a bare
+            // `v:textbox` with no wrapping shape is one real one). Pictures
+            // (`v:imagedata`), WordArt (`v:textpath`), and native shapes
+            // (`v:rect`/`v:oval`/`v:roundrect`/`v:line`, possibly grouped
+            // via `v:group`) are collected on top of that, unconditionally —
+            // see `collect_vml_content`'s doc comment for why the two scans
+            // stay separate rather than merging into one walk.
             "pict" => {
                 for txbx in direct_txbx_contents(child) {
                     run.content.push(RunContent::TextBox(parse_txbx_content(txbx, tb_depth)));
                 }
+                collect_vml_content(child, 0, &mut run.content);
             }
             "oMath" => run.content.push(RunContent::Math(raw_xml(child))),
             "ruby" => run.content.push(parse_ruby(child, tb_depth)),
@@ -922,6 +931,181 @@ fn collect_direct_txbx_contents<'a>(node: Node<'a, 'a>, out: &mut Vec<Node<'a, '
             collect_direct_txbx_contents(child, out);
         }
     }
+}
+
+// --- VML shapes (`v:shape`/`v:rect`/`v:oval`/`v:roundrect`/`v:line`/`v:group`,
+//     found inside a `w:pict`) -------------------------------------------------
+
+/// How deep a `v:group` nesting [`collect_vml_content`] will follow before
+/// giving up — the VML counterpart of [`MAX_WRAPPER_DEPTH`]; real documents
+/// never nest a canvas group more than a level or two.
+const MAX_VML_GROUP_DEPTH: usize = 32;
+
+/// Walk a `w:pict` (or, recursively, a `v:group`'s children) for everything
+/// *besides* text boxes: pictures (`v:imagedata`), WordArt (`v:textpath`),
+/// and native shapes (`v:rect`/`v:oval`/`v:roundrect`/`v:line`). Text boxes
+/// are deliberately handled elsewhere — the blanket, unconditional
+/// [`direct_txbx_contents`] scan the `"pict"` arm already ran before calling
+/// this — rather than being folded into this same walk, because that scan
+/// finds a `w:txbxContent` regardless of which VML element wraps it, and
+/// there are more wrapping spellings than this function enumerates (a bare
+/// `v:textbox` with no shape around it at all, seen in the wild, is one).
+/// Keeping the two scans separate means a VML tag this function doesn't
+/// recognize still can't lose a text box inside it — only the new
+/// picture/WordArt/shape handling is confined to the tags it actually knows.
+///
+/// A `v:group` can hold several shapes side by side (a canvas with a picture
+/// *and* a caption, `WordWithAttachments.docx` in the POI corpus has exactly
+/// this), so every child is visited, not just the first.
+fn collect_vml_content(node: Node, depth: usize, out: &mut Vec<RunContent>) {
+    if depth >= MAX_VML_GROUP_DEPTH {
+        return;
+    }
+    for child in node.children().filter(|n| n.is_element()) {
+        match child.tag_name().name() {
+            "group" => collect_vml_content(child, depth + 1, out),
+            "shape" => vml_shape_content(child, out),
+            "rect" => out.push(vml_primitive_shape(child, VmlShapeKind::Rect)),
+            "oval" => out.push(vml_primitive_shape(child, VmlShapeKind::Oval)),
+            "roundrect" => out.push(vml_primitive_shape(child, VmlShapeKind::RoundRect)),
+            "line" => out.push(vml_primitive_shape(child, VmlShapeKind::Line)),
+            // `v:shapetype`/`v:path`/`v:formulas`/`v:f`/`v:handles` are shape
+            // *definitions* (a little geometry language), not instances —
+            // out of scope per this feature's design, and correctly inert
+            // here since they never match any arm above.
+            _ => {}
+        }
+    }
+}
+
+/// A generic `v:shape`'s own content: a picture (`v:imagedata`), WordArt
+/// text (`v:textpath` with a `string`), or neither — in which case it's a
+/// shape with custom `v:path`/`v:formulas` geometry (a callout, a star, …)
+/// that this importer can't draw, *unless* its text box was already picked
+/// up by the blanket scan in `parse_run` (a `v:shape` legitimately holding
+/// only a plain rectangular text box — the overwhelmingly common case,
+/// `type="#_x0000_t202"` — must not also get an "unsupported geometry" drop
+/// note next to it). A shape's picture and WordArt text are mutually
+/// exclusive in practice (Word never writes both), so the first match wins.
+fn vml_shape_content(shape: Node, out: &mut Vec<RunContent>) {
+    if let Some(imagedata) = shape.children().find(|n| is_element(*n, "imagedata"))
+        && let Some(drawing) = parse_vml_imagedata(imagedata, shape)
+    {
+        out.push(RunContent::Drawing(drawing));
+        return;
+    }
+    if let Some(textpath) = shape.children().find(|n| is_element(*n, "textpath"))
+        && let Some(s) = attr(textpath, "string")
+        && !s.is_empty()
+    {
+        out.push(RunContent::VmlText(s.into()));
+        return;
+    }
+    if direct_txbx_contents(shape).is_empty() {
+        out.push(RunContent::VmlUnsupported);
+    }
+}
+
+/// A VML `v:imagedata`'s relationship id, and (from the owning `v:shape`'s
+/// `style` attribute) its authored size — the same [`DrawingRef`] shape a
+/// DrawingML picture parses to (see [`parse_drawing`]), so it flows through
+/// the identical `mappers::drawing::lower_drawing` → `Figure` pipeline,
+/// unsupported-format guard included, with no second image path. `None`
+/// only for a `v:imagedata` with no `r:id` at all (malformed; not seen in
+/// practice — VML always writes one).
+fn parse_vml_imagedata(imagedata: Node, shape: Node) -> Option<DrawingRef> {
+    let rel_id = attr_ns(imagedata, ns::R, "id")?.into();
+    let style = attr(shape, "style").unwrap_or_default();
+    Some(DrawingRef {
+        rel_id,
+        cx_emu: vml_length_pt(style, "width").map(pt_to_emu),
+        cy_emu: vml_length_pt(style, "height").map(pt_to_emu),
+        alt: None,
+    })
+}
+
+/// A `v:rect`/`v:oval`/`v:roundrect`/`v:line` element's own attributes,
+/// captured raw — `crate::mappers::shape` does the unit conversion and color
+/// resolution.
+fn vml_primitive_shape(node: Node, kind: VmlShapeKind) -> RunContent {
+    RunContent::VmlShape(VmlShape {
+        kind,
+        style: attr(node, "style").unwrap_or_default().into(),
+        fill_color: vml_color_attr(node, "fillcolor", "fill"),
+        filled: attr(node, "filled") != Some("f"),
+        stroke_color: vml_color_attr(node, "strokecolor", "stroke"),
+        stroked: attr(node, "stroked") != Some("f"),
+        from: attr(node, "from").map(EcoString::from),
+        to: attr(node, "to").map(EcoString::from),
+    })
+}
+
+/// `fillcolor`/`strokecolor`, or — VML's other equivalent spelling — the
+/// `color` attribute of a `v:fill`/`v:stroke` child, whichever is present;
+/// the direct attribute wins on the rare document that (redundantly) writes
+/// both.
+fn vml_color_attr(node: Node, attr_name: &str, child_name: &str) -> Option<EcoString> {
+    attr(node, attr_name)
+        .or_else(|| {
+            node.children().find(|n| is_element(*n, child_name)).and_then(|n| attr(n, "color"))
+        })
+        .map(EcoString::from)
+}
+
+/// A single CSS-style length token (e.g. `"120pt"`, `"0.75in"`) → points.
+/// Recognizes `pt` (identity), `px` (CSS px is 1/96in and pt is 1/72in, so
+/// `pt = px * 0.75`), `in`, `cm`, `mm` — the units real documents actually
+/// use. A bare number with no unit suffix is deliberately left unparsed
+/// rather than assumed to be points: Word writes exactly `width:0` (no unit
+/// — moot anyway, since every unit of zero is the same zero) on an
+/// auto-stretch horizontal-rule shape's width, and treating that literal `0`
+/// as a real `0pt` would draw an invisible shape — worse than omitting the
+/// argument and letting Typst size it instead.
+fn vml_length_value(value: &str) -> Option<f64> {
+    let value = value.trim();
+    let split_at = value.find(|c: char| c.is_ascii_alphabetic())?;
+    let (number, unit) = value.split_at(split_at);
+    let number: f64 = number.parse().ok()?;
+    let pt = match unit {
+        "pt" => number,
+        "px" => number * 0.75,
+        "in" => number * 72.0,
+        "cm" => number * 72.0 / 2.54,
+        "mm" => number * 72.0 / 25.4,
+        _ => return None,
+    };
+    Some(pt)
+}
+
+/// One `width`/`height` declaration out of a VML `style="width:120pt;
+/// height:80pt;margin-left:0"` CSS-ish attribute, in points. `None` for a
+/// missing declaration or one [`vml_length_value`] can't parse either —
+/// both are fine, since every caller threads the result straight into an
+/// `Option` field ([`DrawingRef`]'s extent, or an argument
+/// `crate::mappers::shape` may simply omit).
+pub(crate) fn vml_length_pt(style: &str, prop: &str) -> Option<f64> {
+    let value = style.split(';').find_map(|decl| {
+        let (name, value) = decl.split_once(':')?;
+        (name.trim() == prop).then_some(value)
+    })?;
+    vml_length_value(value)
+}
+
+/// A `v:line` endpoint (`from`/`to`, e.g. `"252pt,146.8pt"`) → `(x, y)` in
+/// points. `None` if either component doesn't parse under
+/// [`vml_length_value`]'s rules — see `mappers::shape::line_length` for why
+/// that means the whole line is dropped rather than guessed at.
+pub(crate) fn vml_coord_pt(s: &str) -> Option<(f64, f64)> {
+    let (x, y) = s.split_once(',')?;
+    Some((vml_length_value(x)?, vml_length_value(y)?))
+}
+
+/// Points → EMU (English Metric Units, exactly 12700 per point) — the unit
+/// [`DrawingRef::cx_emu`]/`cy_emu` are always in. A VML picture's CSS-pt size
+/// is converted once here, right where it's parsed, so `DrawingRef` keeps a
+/// single unit contract regardless of which markup produced it.
+fn pt_to_emu(pt: f64) -> i64 {
+    (pt * 12700.0).round() as i64
 }
 
 // --- Paragraph / run properties -----------------------------------------------
@@ -2501,10 +2685,35 @@ mod tests {
         assert_eq!(body_items_text(items), "VML box text");
     }
 
-    /// A real VML *picture* (no text box at all) must still produce nothing
-    /// for this run, exactly as before the `w:pict` arm existed.
+    /// A real VML *picture* (`v:imagedata`, no text box at all) must produce
+    /// the same [`RunContent::Drawing`] a DrawingML picture would — real
+    /// content that used to be dropped on the floor entirely.
     #[test]
-    fn vml_picture_without_a_text_box_produces_no_content() {
+    fn vml_picture_without_a_text_box_produces_a_drawing() {
+        let p = parse_test_paragraph(
+            r#"<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"
+                            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                 <v:shape style="width:54pt;height:38.25pt"><v:imagedata r:id="rId8"/></v:shape>
+               </w:pict></w:r>"#,
+        );
+
+        assert_eq!(p.runs.len(), 1);
+        let RunItem::Run(r) = &p.runs[0] else { panic!("expected a run") };
+        assert_eq!(r.content.len(), 1);
+        let RunContent::Drawing(d) = &r.content[0] else { panic!("expected a drawing") };
+        assert_eq!(d.rel_id, "rId8");
+        // 54pt/38.25pt converted to EMU (12700 per point).
+        assert_eq!(d.cx_emu, Some(54 * 12700));
+        assert_eq!(d.cy_emu, Some((38.25_f64 * 12700.0).round() as i64));
+    }
+
+    /// A `v:shape` with no `r:id` on its `v:imagedata` (malformed — never
+    /// seen in practice, but must not panic or silently fabricate a
+    /// relationship id) and no text box falls all the way through to
+    /// [`RunContent::VmlUnsupported`], the same as any other shape with
+    /// nothing this importer can extract.
+    #[test]
+    fn vml_imagedata_without_a_relationship_id_is_unsupported() {
         let p = parse_test_paragraph(
             r#"<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml">
                  <v:shape><v:imagedata/></v:shape>
@@ -2513,7 +2722,8 @@ mod tests {
 
         assert_eq!(p.runs.len(), 1);
         let RunItem::Run(r) = &p.runs[0] else { panic!("expected a run") };
-        assert!(r.content.is_empty(), "a text-less VML picture shouldn't produce content");
+        assert_eq!(r.content.len(), 1);
+        assert!(matches!(&r.content[0], RunContent::VmlUnsupported));
     }
 
     /// A bare `mc:AlternateContent` with only an `mc:Fallback` — no

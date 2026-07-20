@@ -812,6 +812,143 @@ fn nested_text_boxes_survive_the_full_pipeline() {
     assert_eq!(src.matches("#box[").count(), 2, "expected two nested boxes:\n{src}");
 }
 
+// --- VML shapes (`v:imagedata`/`v:textpath`/`v:rect`/`v:oval`/`v:line`/`v:group`) --
+
+/// `v:imagedata` names a relationship exactly like a DrawingML blip does —
+/// real content (`WordWithAttachments.docx`/`drawing.docx` in the POI
+/// corpus both use it) that used to be dropped on the floor entirely. This
+/// must resolve through the *same* `Figure`/asset pipeline a DrawingML
+/// picture does — size included — and actually extract the asset bytes, not
+/// just reference the file name.
+#[test]
+fn vml_imagedata_picture_is_imported_and_extracted_as_an_asset() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:v="urn:schemas-microsoft-com:vml">
+  <w:body>
+    <w:p><w:r><w:pict>
+      <v:shape style="width:54pt;height:38.25pt"><v:imagedata r:id="rId1"/></v:shape>
+    </w:pict></w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut rels = Rels::new();
+    let image_rid = rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        "media/picture.png",
+        RelMode::Internal,
+    );
+    assert_eq!(image_rid, "rId1");
+
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_media("word/media/picture.png", "png", "image/png", vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    package.add_relationships("word/document.xml", &rels).unwrap();
+    let docx = package.finish(&Rels::new()).unwrap();
+
+    let result = import_docx(&docx).expect("import should succeed");
+    assert!(result.source.contains("#image("), "missing image call:\n{}", result.source);
+    assert!(result.source.contains("picture.png"), "wrong asset name:\n{}", result.source);
+    assert!(result.source.contains("width: 54pt"), "missing size:\n{}", result.source);
+
+    let (_, bytes) = result
+        .assets
+        .iter()
+        .find(|(path, _)| path.to_str().unwrap().contains("picture.png"))
+        .expect("picture.png should have been extracted as an asset");
+    assert_eq!(bytes, &[0xDE, 0xAD, 0xBE, 0xEF]);
+}
+
+/// `v:textpath`'s `string` attribute is WordArt's actual text — genuine
+/// document content, currently lost. It must survive as plain text, with the
+/// lost curved/warped styling recorded once.
+#[test]
+fn vml_textpath_wordart_becomes_plain_text_with_a_note() {
+    let doc_body = r#"<w:p><w:r><w:pict>
+      <v:shape><v:textpath string="My Text Here"/></v:shape>
+    </w:pict></w:r></w:p>"#;
+    let docx = docx_with_body(doc_body);
+
+    let result = import_docx(&docx).expect("import should succeed");
+    assert!(result.source.contains("My Text Here"), "missing WordArt text:\n{}", result.source);
+    assert!(
+        result.report.notes.iter().any(|n| n.what == "WordArt"),
+        "expected a WordArt approximation note: {:?}",
+        result.report.notes
+    );
+}
+
+#[test]
+fn vml_rect_becomes_a_native_rect_call() {
+    let doc_body = r##"<w:p><w:r><w:pict>
+      <v:rect style="width:100pt;height:50pt" fillcolor="#FF0000"/>
+    </w:pict></w:r></w:p>"##;
+    let docx = docx_with_body(doc_body);
+
+    let src = import_docx(&docx).expect("import should succeed").source;
+    assert!(
+        src.contains("#rect(width: 100pt, height: 50pt, fill: rgb(\"FF0000\"))"),
+        "missing rect call:\n{src}"
+    );
+}
+
+#[test]
+fn vml_line_becomes_a_native_line_call() {
+    let doc_body = r#"<w:p><w:r><w:pict>
+      <v:line from="0pt,0pt" to="100pt,0pt"/>
+    </w:pict></w:r></w:p>"#;
+    let docx = docx_with_body(doc_body);
+
+    let src = import_docx(&docx).expect("import should succeed").source;
+    assert!(src.contains("#line(length: 100pt)"), "missing line call:\n{src}");
+}
+
+/// A `v:group` can hold several shapes side by side; every one of them must
+/// survive, not just the first — the same hazard `direct_txbx_contents`
+/// already guards against for text boxes, now exercised for native shapes.
+#[test]
+fn vml_group_yields_every_shape_not_just_the_first() {
+    let doc_body = r#"<w:p><w:r><w:pict>
+      <v:group>
+        <v:rect style="width:10pt;height:10pt"/>
+        <v:oval style="width:20pt;height:20pt"/>
+      </v:group>
+    </w:pict></w:r></w:p>"#;
+    let docx = docx_with_body(doc_body);
+
+    let src = import_docx(&docx).expect("import should succeed").source;
+    assert!(src.contains("#rect("), "missing the group's rect:\n{src}");
+    assert!(src.contains("#circle("), "missing the group's oval:\n{src}");
+}
+
+/// A `v:shape` with custom `v:path`/`v:formulas` geometry and no text box —
+/// out of scope by design, since Typst has no drawing-package-free way to
+/// render it — must still degrade gracefully: the surrounding text survives,
+/// and the dropped geometry is recorded rather than silently vanishing.
+#[test]
+fn vml_shape_with_custom_geometry_and_no_text_box_is_dropped_with_a_note() {
+    let doc_body = r##"<w:p>
+      <w:r><w:t xml:space="preserve">before </w:t></w:r>
+      <w:r><w:pict><v:shape type="#_x0000_t100"><v:path/></v:shape></w:pict></w:r>
+      <w:r><w:t xml:space="preserve"> after</w:t></w:r>
+    </w:p>"##;
+    let docx = docx_with_body(doc_body);
+
+    let result = import_docx(&docx).expect("import should succeed");
+    assert!(
+        result.source.contains("before") && result.source.contains("after"),
+        "surrounding text should survive:\n{}",
+        result.source
+    );
+    assert!(
+        result.report.notes.iter().any(|n| n.what == "VML shape" && n.detail.contains("geometry")),
+        "expected a dropped-geometry note: {:?}",
+        result.report.notes
+    );
+}
+
 // --- Math (OMML) ---------------------------------------------------------
 
 /// End-to-end: a real `m:oMath` fragment — the exporter's own shape for

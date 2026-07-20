@@ -167,6 +167,9 @@ the approximation rather than dropping content:
 | text box / shape text | `#box[..]` inlined at the anchor, geometry dropped |
 | endnote | `#footnote[..]` (Typst has no end-of-document note store) |
 | ruby / furigana | a generated `#let ruby(base, gloss)` preamble helper |
+| VML shape (`v:rect`/`v:oval`/`v:line`) | native `#rect`/`#circle`/`#line`, inlined at the anchor |
+| WordArt (`v:textpath`) | its `string` attribute as plain text |
+| OMML equation | real Typst maths — see below |
 | `PAGE`/`NUMPAGES` field | live `#context counter(page)` calls |
 | any other field | its cached result — what Word last rendered |
 
@@ -227,6 +230,30 @@ the escaper handles all three:
   character formatting mid-word routinely, so those spans fall back to
   `#strong[..]`/`#emph[..]`, which always parse.
 
+## Maths
+
+OMML converts structurally to native Typst maths — no package needed, Typst's
+own maths is expressive enough. Fractions, radicals, scripts, pre-scripts,
+n-ary operators with limits, delimiters, matrices, equation arrays, accents,
+bars, group characters, functions and limits all map; anything unrecognised
+recurses into its children rather than being dropped.
+
+Two constraints dominate `mappers/math.rs`, and both are easy to get wrong:
+
+- **A multi-letter run is a hard error**, not a word: `$abc$` is
+  `unknown variable: abc`. Letters are therefore emitted space-separated as the
+  variables they are, unless the run is genuinely upright text, which becomes a
+  quoted string.
+- **Word writes variables as mathematical-alphanumeric codepoints** — `𝑥` is
+  U+1D465, because the character itself carries the italic. These fold back to
+  their base letters (along with U+2212 minus and the invisible
+  times/function-application characters), or the output is unreadable.
+
+The gate is a round-trip through this repo's own exporter — Typst maths → OMML
+→ Typst maths → compile — which produces realistic OMML and gives an exact
+oracle for what the import should mean. The POI corpus contains no OMML at all,
+so it cannot exercise any of this.
+
 ## Known gaps
 
 - Only the body-level (final) `w:sectPr` is honoured — a multi-section document
@@ -243,5 +270,10 @@ the escaper handles all three:
   than drawing — the fallback is at least honest, not a crash or a lie.
 - A drawing nested inside a hyperlink or a field's cached result isn't
   discovered as its paragraph's figure.
+- `w:object` (OLE-embedded objects) isn't handled; in this corpus every one of
+  them wraps a `.wmf`/`.emf` preview image Typst can't decode anyway.
+- A `v:shape` with custom `v:path`/`v:formulas` geometry keeps only its text
+  box content; the geometry is a coordinate language that would need a drawing
+  package to reproduce.
 - Adjacent runs sharing an identical style are emitted as separate `#text(..)`
   wrappers rather than merged — correct, but more verbose than necessary.

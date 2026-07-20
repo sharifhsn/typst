@@ -8,7 +8,7 @@
 use typst_ooxml_core::units::half_point_to_pt;
 
 use crate::lower::{lower_items, parse_hex_color, LowerCtx};
-use crate::mappers::{field, math, note};
+use crate::mappers::{field, math, note, shape};
 use crate::resolve::styles::effective_run;
 use crate::tdoc::{Inline, Inlines, Script, TextStyle};
 use crate::wml::model::{BreakType, Paragraph, Run, RunContent, RunItem, RunProps};
@@ -123,6 +123,35 @@ fn lower_run(r: &Run, para_style_id: Option<&str>, ctx: &mut LowerCtx) -> Inline
                     "text box",
                     "floating position and size not preserved; content inlined at the \
                      anchor point",
+                );
+            }
+            // WordArt: genuine document text, just with no Typst equivalent
+            // for the curved/warped path it was drawn along — kept as plain
+            // text rather than lost, with the styling loss reported once.
+            RunContent::VmlText(s) => {
+                content.push(Inline::Text(s.clone()));
+                ctx.report.approximate(
+                    "WordArt",
+                    "curved/styled text path not reproduced; kept as plain text",
+                );
+            }
+            // A native VML shape (`v:rect`/`v:oval`/`v:roundrect`/`v:line`) —
+            // see `mappers::shape` for the `#rect`/`#circle`/`#ellipse`/
+            // `#line` mapping and its own report notes (a position note on
+            // success, a drop note for a `v:line` that can't be lowered).
+            RunContent::VmlShape(vml_shape) => {
+                if let Some(inline) = shape::lower_vml_shape(vml_shape, &mut *ctx.report) {
+                    content.push(inline);
+                }
+            }
+            // A VML shape with custom `v:path`/`v:formulas` geometry (or
+            // anything else this importer found nothing extractable in) —
+            // out of scope by design (see `mappers::shape`'s module doc for
+            // why), recorded as a drop rather than silently vanishing.
+            RunContent::VmlUnsupported => {
+                ctx.report.drop(
+                    "VML shape",
+                    "custom geometry (v:path/v:formulas) is not reproduced",
                 );
             }
         }

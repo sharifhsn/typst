@@ -775,7 +775,12 @@ fn legend_arg(pos: Option<LegendPos>) -> &'static str {
     }
 }
 
-fn rgb_lit(color: [u8; 3]) -> String {
+/// `pub(crate)` (rather than private) because `mappers::shape` builds its
+/// `#rect`/`#circle`/`#ellipse`/`#line` calls as ready-made strings — the
+/// same [`Inline::Verbatim`] escape hatch `mappers::field` uses — and needs
+/// the exact same color-literal formatting this emitter already uses
+/// everywhere else, rather than a second, drifting copy of it.
+pub(crate) fn rgb_lit(color: [u8; 3]) -> String {
     format!("rgb(\"{:02X}{:02X}{:02X}\")", color[0], color[1], color[2])
 }
 
@@ -792,7 +797,8 @@ fn fmt_pt(value: f64) -> String {
 }
 
 /// A point value with the `pt` unit suffix, e.g. `11pt` / `71.5pt`.
-fn pt(value: f64) -> String {
+/// `pub(crate)` for the same reason as [`rgb_lit`] just above.
+pub(crate) fn pt(value: f64) -> String {
     format!("{}pt", fmt_pt(value))
 }
 
