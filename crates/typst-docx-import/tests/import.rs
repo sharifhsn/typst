@@ -812,6 +812,43 @@ fn nested_text_boxes_survive_the_full_pipeline() {
     assert_eq!(src.matches("#box[").count(), 2, "expected two nested boxes:\n{src}");
 }
 
+// --- Math (OMML) ---------------------------------------------------------
+
+/// End-to-end: a real `m:oMath` fragment — the exporter's own shape for
+/// `x^2 + sqrt(y) - frac(a, b)` (three constructs, `sSup`/`rad`/`f`, at
+/// once) — sitting inline among ordinary paragraph text, through the full
+/// parse -> lower -> emit pipeline. `mappers::math`'s own unit tests cover
+/// each construct in isolation; this checks the mapper is actually wired up
+/// end to end and that the equation lands as real Typst math, not the old
+/// linearized-to-text fallback (which would have produced unrelated,
+/// unstructured text here instead of `sqrt`/`frac`/`^`).
+#[test]
+fn omml_equation_lowers_to_real_typst_math_inline() {
+    let doc_body = r#"<w:p>
+      <w:r><w:t xml:space="preserve">The result is </w:t></w:r>
+      <m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+        <m:sSup><m:e><m:r><m:rPr><m:nor/></m:rPr><m:t>𝑥</m:t></m:r></m:e>
+                <m:sup><m:r><m:rPr><m:nor/></m:rPr><m:t>2</m:t></m:r></m:sup></m:sSup>
+        <m:r><m:rPr><m:nor/></m:rPr><m:t>+</m:t></m:r>
+        <m:rad><m:radPr><m:degHide m:val="on"/></m:radPr><m:deg/>
+          <m:e><m:r><m:rPr><m:nor/></m:rPr><m:t>𝑦</m:t></m:r></m:e></m:rad>
+        <m:r><m:rPr><m:nor/></m:rPr><m:t>−</m:t></m:r>
+        <m:f><m:num><m:r><m:rPr><m:nor/></m:rPr><m:t>𝑎</m:t></m:r></m:num>
+             <m:den><m:r><m:rPr><m:nor/></m:rPr><m:t>𝑏</m:t></m:r></m:den></m:f>
+      </m:oMath>
+      <w:r><w:t>.</w:t></w:r>
+    </w:p>"#;
+    let docx = docx_with_body(doc_body);
+
+    let src = import_docx(&docx).expect("import should succeed").source;
+    assert!(
+        src.contains("$x^2 + sqrt(y) - frac(a, b)$"),
+        "expected real Typst math (sSup/rad/f folded to plain letters), not the old \
+         linearized fallback:\n{src}"
+    );
+    assert!(src.contains("The result is"), "surrounding paragraph text must survive:\n{src}");
+}
+
 // --- Charts (c:chart / ChartEx) -----------------------------------------------
 
 /// Builds a `.docx` with one paragraph containing a `w:drawing` chart
