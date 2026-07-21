@@ -88,7 +88,7 @@ impl RenderedTile {
 }
 
 /// A gradient stop.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct GradientStop {
     pub pos_100k: i32,
     pub color: [u8; 4],
@@ -918,7 +918,13 @@ fn write_gradient_stops(w: &mut XmlWriter, stops: &[GradientStop]) {
     w.close();
 }
 
-fn radial_focus_rect_100k(focal_center: [i32; 2], focal_radius: i32) -> [i32; 4] {
+/// The DrawingML `a:fillToRect` rectangle (percent×1000, may run negative or
+/// past 100k) that reproduces a focal circle at `focal_center`/`focal_radius`.
+/// Shared by this module's own `a:gradFill` writer
+/// ([`write_fill_with_tile_resolver`]) and the `typst-docx` crate's
+/// `w14:gradFill` writer (`props::write_text_fill`), which both express a
+/// radial gradient's focus rectangle the same way.
+pub fn radial_focus_rect_100k(focal_center: [i32; 2], focal_radius: i32) -> [i32; 4] {
     let [x, y] = focal_center;
     [
         x - focal_radius,

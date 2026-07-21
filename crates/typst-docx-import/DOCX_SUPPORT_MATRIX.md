@@ -83,7 +83,7 @@ A cell may combine a symbol for the *mechanism* with a note for the *loss*. "Non
 | Strike | ✅ | ✅ | Export: boolean (strike's own color/style dropped). |
 | Double-strike (`w:dstrike`) | — | ◐ | Typst has no double strike; import draws a single `#strike` and reports it. |
 | Super / subscript | ✅ | ✅ | |
-| Text color | ◐ | ✅ | Export: solid paint only — **gradient/tiling text fill is dropped**, run stays default. Import: solid hex, `auto` → none. |
+| Text color | ✅ | ✅ | Export: a solid paint is `w:color`; a **gradient** is `w14:textFill/w14:gradFill` with the real stop list, *always* alongside a flat first-stop `w:color` — the w14 element is MCE-ignorable, so a consumer that skips it must still see a sensible colour rather than black (verified: LibreOffice renders the first stop). A tiling text fill has no Word primitive and is reported. Import: solid hex, `auto` → none. |
 | Highlight | ✅/◐ | ✅ | Import maps the 16 named colors through the **exporter's own table**, so a marker round-trips to the RGB it started with. |
 | Font family | ✅ | ◐ | Export splits runs by per-char font coverage (mirrors shaping) and fills ascii/hAnsi/cs/eastAsia; import reads `@ascii` only. |
 | Font size | ✅ | ✅ | Export hoists the common size to docDefaults. |
@@ -286,8 +286,8 @@ Export walks the resolved `MathItem` IR and emits `m:` OMML directly; a whole eq
 | Alpha / opacity | ⊘ | — | Export composites translucent colors onto white (Word has no alpha primitive). |
 | Linear gradient (shapes) | ✅ native | ✅ | Export → `a:gradFill` (stops sampled); import reads the stop list and `a:lin@ang` back into `gradient.linear`. |
 | Radial gradient | ✅ | ✅ | Export emits `a:gradFill` with a reparameterised stop list; import recovers it from `a:path`'s `a:fillToRect`. **Conic** still rasterizes in both directions — no OOXML path sweeps by angle. |
-| Gradient text / paragraph / cell fill | ◐ / ⊘ | ✗ | Export: block/highlight → first-stop shade; cells → mean-of-stops; **text gradient dropped**. |
-| Tiling / pattern fill | 🖼 / ⊘ | ✗ | Export: shapes → rasterized PNG tile; cells/text dropped. |
+| Gradient text / paragraph / cell fill | ✅ / ◐ | ✗ | Export: **text is now native** (`w14:textFill`, sharing `dml::gradient_fill`'s Oklab stop sampling and angle/focus maths with the shape exporter, so the two cannot drift); block/highlight → first-stop shade; cells → mean-of-stops. |
+| Tiling / pattern fill | 🖼 / ⊘ | ✗ | Export: shapes → rasterized PNG tile; cells dropped; **text dropped but now reported** (`tiling text fill`) — no Word primitive tiles glyphs. |
 | Solid stroke | ✅ | ◐ | Export → `a:ln` (dash → nearest preset); import: VML hex only. |
 
 ## 20. Boxes, blocks, containers *(Typst-source constructs — export-centric)*

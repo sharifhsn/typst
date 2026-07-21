@@ -9,7 +9,7 @@ use typst_library::foundations::{Content, Output, StyleChain, Target};
 use typst_library::introspection::{Introspector, Location, Tag};
 use typst_library::model::{Document, DocumentInfo};
 pub use typst_ooxml_core::dml::{
-    FillSpec as ShapeFill, PathSegment, StrokeSpec as ShapeStroke,
+    FillSpec as ShapeFill, GradientStop, PathSegment, StrokeSpec as ShapeStroke,
 };
 pub use typst_ooxml_core::media::MediaPart;
 use typst_syntax::Span;
@@ -448,6 +448,16 @@ pub struct RunProps {
     /// `<w:noProof/>` — disables spelling/grammar proofing for code/raw runs.
     pub no_proof: bool,
     pub color: Option<[u8; 3]>,
+    /// Office 2010 gradient text fill extension data (`w14:textFill`), set
+    /// alongside `color` when the resolved fill is a gradient DrawingML can
+    /// express as linear or radial. Reuses the shape exporter's DrawingML
+    /// gradient maths (`typst_ooxml_core::dml::gradient_fill`); `None` for a
+    /// solid/absent/tiling fill, or a gradient with no DrawingML analogue
+    /// (a conic sweep, an off-center radial outer circle, no stops). `color`
+    /// always still holds the flat first-stop fallback in that case, since
+    /// `w14:textFill` is MCE-ignorable and a consumer that skips it (older
+    /// Word, LibreOffice) must still see a sensible solid colour.
+    pub text_fill: Option<TextFill>,
     /// Keep an explicitly styled hyperlink colour as direct formatting even
     /// when it matches a hoisted document/heading default. The Hyperlink
     /// character style defines its own blue and would otherwise override it.
@@ -480,6 +490,21 @@ pub struct RunProps {
     /// Default false.
     pub cs: bool,
     pub lang: Option<EcoString>,
+}
+
+/// Office 2010 gradient text fill geometry (`w14:textFill`/`w14:gradFill`).
+/// Mirrors the two DrawingML `a:gradFill` shapes the shape exporter emits
+/// (see `typst_ooxml_core::dml::FillSpec`); a conic gradient or an off-center
+/// radial outer circle has no DrawingML analogue and lowers to `None` instead
+/// (`crate::props::text_fill_from_gradient`).
+#[derive(Clone, PartialEq)]
+pub enum TextFill {
+    Linear { angle_60k: i32, stops: Vec<GradientStop> },
+    Radial {
+        stops: Vec<GradientStop>,
+        focal_center_100k: [i32; 2],
+        focal_radius_100k: i32,
+    },
 }
 
 #[derive(Copy, Clone, PartialEq)]

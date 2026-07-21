@@ -2,10 +2,13 @@
 //! numeric/color conversions.
 
 use typst_library::layout::Abs;
-use typst_library::visualize::Color;
+use typst_library::visualize::{Color, Gradient};
+use typst_ooxml_core::dml::{self, GradientStop};
 use typst_ooxml_core::{color as ooxml_color, units};
 
-use crate::dom::{Indent, Jc, ParaBorders, ParaProps, RunProps, Spacing, VertAlign};
+use crate::dom::{
+    Indent, Jc, ParaBorders, ParaProps, RunProps, Spacing, TextFill, VertAlign,
+};
 use crate::xml::{self, XmlWriter};
 
 // ---------------------------------------------------------------------------
@@ -80,6 +83,29 @@ pub fn gradient_shade_hex(
     gradient.stops_ref().first().map(|(c, _)| color_to_hex(c))
 }
 
+/// Lowers a gradient text fill to Office 2010 `w14:textFill` extension data,
+/// reusing the exact DrawingML gradient maths the shape exporter's
+/// `a:gradFill` uses (`typst_ooxml_core::dml::gradient_fill`) for stop
+/// sampling, the linear angle, and the radial focus rectangle — only the
+/// WordprocessingML element names and attribute qualification differ (see
+/// `write_text_fill`). `None` for a gradient DrawingML itself cannot express
+/// (a conic sweep, an off-center radial outer circle, or no stops); the run
+/// then keeps only the flat `gradient_shade_hex` fallback in `RunProps::color`.
+pub fn text_fill_from_gradient(gradient: &Gradient) -> Option<TextFill> {
+    match dml::gradient_fill(gradient, dml::AlphaMode::Preserve)? {
+        dml::FillSpec::LinearGradient { angle_60k, stops } => {
+            Some(TextFill::Linear { angle_60k, stops })
+        }
+        dml::FillSpec::RadialGradient {
+            stops,
+            focal_center_100k,
+            focal_radius_100k,
+            ..
+        } => Some(TextFill::Radial { stops, focal_center_100k, focal_radius_100k }),
+        dml::FillSpec::Solid(_) | dml::FillSpec::Tile { .. } => None,
+    }
+}
+
 /// Formats an `RRGGBB` byte triple as uppercase hex.
 pub fn hex(rgb: [u8; 3]) -> String {
     ooxml_color::hex_rgb(rgb)
@@ -102,6 +128,7 @@ impl RunProps {
             && !self.strike
             && !self.no_proof
             && self.color.is_none()
+            && self.text_fill.is_none()
             && self.tracking.is_none()
             && self.position_half_pt.is_none()
             && self.size_half_pt.is_none()
@@ -260,7 +287,85 @@ impl RunProps {
         if let Some(lang) = &self.lang {
             write_language(w, xml::W_LANG, lang);
         }
+        // 20. w14:textFill — the Office 2010 gradient text fill extension.
+        // Unlike everything above, this is not part of the base ECMA-376
+        // `CT_RPr` sequence at all: Word's own extended schema
+        // (`EG_RPrTextEffects` in the `wordml/2010` namespace) appends it —
+        // and its `w14:textOutline`/`w14:glow`/`w14:shadow`/… siblings we
+        // don't emit — after every element declared above, and real Word
+        // output always places it last. `mc:Ignorable="w14"` (already on
+        // every part root) tells an older/non-Word consumer to skip it, so
+        // its position relative to the canonical rPr sequence is otherwise
+        // unconstrained; last matches Word's own emission order.
+        if let Some(fill) = &self.text_fill {
+            write_text_fill(w, fill);
+        }
 
+        w.close();
+    }
+}
+
+/// Writes `<w14:textFill><w14:gradFill>…</w14:gradFill></w14:textFill>`.
+///
+/// Mirrors the structure `typst_ooxml_core::dml::write_fill_with_tile_resolver`
+/// emits for a shape's `a:gradFill`, but in the `w14` namespace: unlike
+/// DrawingML, the WordprocessingML 2010 extension schema qualifies every
+/// attribute (`w14:pos`, `w14:ang`, `w14:val`, …), and `w14:gradFill` itself
+/// has no `rotWithShape` attribute (`CT_GradientFillProperties` in
+/// `wml-2010.xsd` takes none).
+fn write_text_fill(w: &mut XmlWriter, fill: &TextFill) {
+    w.open("w14:textFill").start_children();
+    match fill {
+        TextFill::Linear { angle_60k, stops } => {
+            w.open("w14:gradFill").start_children();
+            write_w14_gradient_stops(w, stops);
+            w.open("w14:lin")
+                .attr("w14:ang", &angle_60k.to_string())
+                .attr("w14:scaled", "0")
+                .empty();
+            w.close(); // w14:gradFill
+        }
+        TextFill::Radial { stops, focal_center_100k, focal_radius_100k } => {
+            let [l, t, r, b] =
+                dml::radial_focus_rect_100k(*focal_center_100k, *focal_radius_100k);
+            w.open("w14:gradFill").start_children();
+            write_w14_gradient_stops(w, stops);
+            w.open("w14:path").attr("w14:path", "circle").start_children();
+            w.open("w14:fillToRect")
+                .attr("w14:l", &l.to_string())
+                .attr("w14:t", &t.to_string())
+                .attr("w14:r", &r.to_string())
+                .attr("w14:b", &b.to_string())
+                .empty();
+            w.close(); // w14:path
+            w.close(); // w14:gradFill
+        }
+    }
+    w.close(); // w14:textFill
+}
+
+fn write_w14_gradient_stops(w: &mut XmlWriter, stops: &[GradientStop]) {
+    w.open("w14:gsLst").start_children();
+    for stop in stops {
+        w.open("w14:gs").attr("w14:pos", &stop.pos_100k.to_string()).start_children();
+        write_w14_srgb(w, stop.color);
+        w.close();
+    }
+    w.close();
+}
+
+/// Emits a `w14:srgbClr` child, including `w14:alpha` when not opaque —
+/// the same shape as `typst_ooxml_core::dml::write_srgb`'s DrawingML
+/// `a:srgbClr`/`a:alpha`, qualified for the `w14` namespace.
+fn write_w14_srgb(w: &mut XmlWriter, rgba: [u8; 4]) {
+    let [r, g, b, a] = rgba;
+    if a == 255 {
+        w.open("w14:srgbClr").attr("w14:val", &hex([r, g, b])).empty();
+    } else {
+        w.open("w14:srgbClr").attr("w14:val", &hex([r, g, b])).start_children();
+        w.open("w14:alpha")
+            .attr("w14:val", &ooxml_color::alpha_to_100k(a).to_string())
+            .empty();
         w.close();
     }
 }
@@ -456,4 +561,100 @@ fn write_indent(w: &mut XmlWriter, ind: &Indent) {
         w.attr("w:hanging", &h.to_string());
     }
     w.empty();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use typst_library::foundations::Smart;
+    use typst_library::layout::{Angle, Axes, Ratio};
+    use typst_library::visualize::{
+        ConicGradient, LinearGradient, ProcessColor, ProcessColorSpace, Rgb,
+    };
+
+    use super::*;
+
+    fn red() -> Color {
+        Color::Process(ProcessColor::Rgb(Rgb::new(1.0, 0.0, 0.0, 1.0)))
+    }
+
+    fn blue() -> Color {
+        Color::Process(ProcessColor::Rgb(Rgb::new(0.0, 0.0, 1.0, 1.0)))
+    }
+
+    /// `gradient.linear(red, blue)`, sRGB-interpolated so no extra stops are
+    /// sampled between the two authored ones.
+    fn linear_red_blue() -> Gradient {
+        Gradient::Linear(Arc::new(LinearGradient {
+            stops: vec![(red(), Ratio::zero()), (blue(), Ratio::one())],
+            angle: Angle::deg(90.0),
+            space: typst_library::visualize::ColorSpace::Process(
+                ProcessColorSpace::Srgb,
+            ),
+            relative: Smart::Auto,
+            anti_alias: false,
+        }))
+    }
+
+    #[test]
+    fn linear_gradient_lowers_to_a_w14_text_fill_with_the_real_stop_list() {
+        let gradient = linear_red_blue();
+        let Some(TextFill::Linear { angle_60k, stops }) =
+            text_fill_from_gradient(&gradient)
+        else {
+            panic!("expected a linear w14:textFill");
+        };
+        // 90° clockwise from east, in 60,000ths of a degree.
+        assert_eq!(angle_60k, 90 * 60_000);
+        assert_eq!(stops.first().unwrap().color, [255, 0, 0, 255]);
+        assert_eq!(stops.last().unwrap().color, [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn conic_gradient_has_no_w14_analogue() {
+        // No OOXML gradient path sweeps by angle, so DrawingML — and
+        // therefore its `w14:textFill` mirror — has nothing to reuse.
+        let gradient = Gradient::Conic(Arc::new(ConicGradient {
+            stops: vec![(red(), Ratio::zero()), (blue(), Ratio::one())],
+            angle: Angle::zero(),
+            center: Axes::new(Ratio::new(0.5), Ratio::new(0.5)),
+            space: typst_library::visualize::ColorSpace::Process(
+                ProcessColorSpace::Srgb,
+            ),
+            relative: Smart::Auto,
+            anti_alias: false,
+        }));
+        assert!(text_fill_from_gradient(&gradient).is_none());
+    }
+
+    #[test]
+    fn gradient_text_run_keeps_a_flat_color_fallback_before_the_w14_extension() {
+        let gradient = linear_red_blue();
+        let props = RunProps {
+            color: gradient_shade_hex(&gradient),
+            text_fill: text_fill_from_gradient(&gradient),
+            ..RunProps::default()
+        };
+
+        let mut w = XmlWriter::new(false);
+        props.write_rpr(&mut w);
+        let xml = w.finish();
+
+        // The first stop's flat color always survives for a consumer that
+        // ignores the MCE-ignorable `w14` extension.
+        assert!(xml.contains(r#"<w:color w:val="FF0000"/>"#), "{xml}");
+        // The gradient's real stop list and angle are also present…
+        assert!(xml.contains("<w14:textFill>"), "{xml}");
+        assert!(xml.contains("<w14:gradFill>"), "{xml}");
+        assert!(xml.contains(r#"<w14:gs w14:pos="0">"#), "{xml}");
+        assert!(xml.contains(r#"<w14:srgbClr w14:val="FF0000"/>"#), "{xml}");
+        assert!(xml.contains(r#"<w14:srgbClr w14:val="0000FF"/>"#), "{xml}");
+        assert!(xml.contains(r#"<w14:lin w14:ang="5400000" w14:scaled="0"/>"#), "{xml}");
+        // … and `w14:textFill` comes after `w:color`, matching real Word
+        // output (an MCE extension appended as `w:rPr`'s last child).
+        let color_at = xml.find("<w:color").unwrap();
+        let text_fill_at = xml.find("<w14:textFill>").unwrap();
+        assert!(color_at < text_fill_at, "{xml}");
+    }
 }

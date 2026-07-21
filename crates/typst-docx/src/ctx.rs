@@ -1059,13 +1059,26 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         // Colour. Record the resolved value, including black. The document pass
         // strips it only when it matches the governing style/default; this lets a
         // black run remain black when `Normal` is non-black.
-        if let typst_library::visualize::Paint::Solid(color) =
-            styles.get_ref(TextElem::fill)
-        {
-            p.color = Some(props::color_to_hex(color));
-            if p.style.as_deref() == Some("Hyperlink") && styles.has(TextElem::fill) {
-                p.preserve_color = true;
+        match styles.get_ref(TextElem::fill) {
+            Paint::Solid(color) => {
+                p.color = Some(props::color_to_hex(color));
+                if p.style.as_deref() == Some("Hyperlink") && styles.has(TextElem::fill) {
+                    p.preserve_color = true;
+                }
             }
+            Paint::Gradient(gradient) => {
+                // Always also set the flat first-stop fallback: `w14:textFill`
+                // (below) is MCE-ignorable, so a consumer that doesn't
+                // understand it (LibreOffice, older Word) must still see a
+                // sensible colour instead of default black.
+                p.color = props::gradient_shade_hex(gradient);
+                p.text_fill = props::text_fill_from_gradient(gradient);
+            }
+            // No Word primitive can tile text glyphs. Left dropped (byte-
+            // identical to before this fill was distinguished from a
+            // gradient); reported with a source span at the `TextElem` call
+            // site below, where one is available.
+            Paint::Tiling(_) => {}
         }
 
         // Font (first family). The most common one is later hoisted into
@@ -1940,6 +1953,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         } else if let Some(elem) = child.to_packed::<TextElem>() {
             let text = self.apply_case(styles, &elem.text);
             let mut rp = self.resolve_text_props(styles, props.clone());
+            if matches!(styles.get_ref(TextElem::fill), Paint::Tiling(_)) {
+                self.warn_ignored("tiling text fill", elem.span());
+            }
             if self.span_is_raw(elem.span()) {
                 rp.no_proof = true;
             }
