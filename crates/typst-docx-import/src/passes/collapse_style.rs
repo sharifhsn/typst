@@ -167,6 +167,15 @@ fn collapse_inline(inline: Inline, default: &TextStyle, in_heading: bool, out: &
             }
             out.push(Inline::TextBox(blocks));
         }
+        // A shape's own call is a finished expression with no styling to
+        // collapse, but the text Word put *inside* the shape is ordinary
+        // content and gets the same treatment as a text box's.
+        Inline::Shape { call, mut body } => {
+            for block in &mut body {
+                walk_block(block, default);
+            }
+            out.push(Inline::Shape { call, body });
+        }
         other @ (Inline::Text(_)
         | Inline::Space
         | Inline::Linebreak

@@ -297,7 +297,7 @@ pub(crate) fn lower_items(items: &[BodyItem], ctx: &mut LowerCtx) -> Vec<Block> 
                 // slightly worse than Word's layout, but it keeps the image.
                 if let Some(block) = anchored {
                     if let Some(pending) = pending_list.take() {
-                        blocks.push(pending.finish(&ctx.package.numbering));
+                        blocks.push(pending.finish(&ctx.package.numbering, &mut *ctx.report));
                     }
                     blocks.push(block);
                 }
@@ -317,7 +317,7 @@ pub(crate) fn lower_items(items: &[BodyItem], ctx: &mut LowerCtx) -> Vec<Block> 
                         if !continues
                             && let Some(pending) = pending_list.take()
                         {
-                            blocks.push(pending.finish(&ctx.package.numbering));
+                            blocks.push(pending.finish(&ctx.package.numbering, &mut *ctx.report));
                         }
                         match pending_list.as_mut() {
                             Some(pending) => pending.push(item),
@@ -326,7 +326,7 @@ pub(crate) fn lower_items(items: &[BodyItem], ctx: &mut LowerCtx) -> Vec<Block> 
                     }
                     other => {
                         if let Some(pending) = pending_list.take() {
-                            blocks.push(pending.finish(&ctx.package.numbering));
+                            blocks.push(pending.finish(&ctx.package.numbering, &mut *ctx.report));
                         }
                         push_para_kind(&mut blocks, other);
                     }
@@ -334,14 +334,14 @@ pub(crate) fn lower_items(items: &[BodyItem], ctx: &mut LowerCtx) -> Vec<Block> 
             }
             BodyItem::Table(t) => {
                 if let Some(pending) = pending_list.take() {
-                    blocks.push(pending.finish(&ctx.package.numbering));
+                    blocks.push(pending.finish(&ctx.package.numbering, &mut *ctx.report));
                 }
                 blocks.push(Block::Table(mappers::table::lower_table(t, ctx)));
             }
         }
     }
     if let Some(pending) = pending_list.take() {
-        blocks.push(pending.finish(&ctx.package.numbering));
+        blocks.push(pending.finish(&ctx.package.numbering, &mut *ctx.report));
     }
     blocks
 }
@@ -363,7 +363,9 @@ struct PendingList {
 impl PendingList {
     fn new(item: ListItem, num_id: Option<i64>) -> Self {
         let deepest = item.level;
-        PendingList { list: List { items: vec![item], numbering: None, start: None }, num_id, deepest }
+        let list =
+            List { items: vec![item], numbering: None, start: None, markers: Vec::new() };
+        PendingList { list, num_id, deepest }
     }
 
     fn push(&mut self, item: ListItem) {
@@ -371,18 +373,83 @@ impl PendingList {
         self.list.items.push(item);
     }
 
-    fn finish(self, numbering: &Numbering) -> Block {
+    fn finish(self, numbering: &Numbering, report: &mut ImportReport) -> Block {
         let mut list = self.list;
-        if let Some(num_id) = self.num_id
-            && list.items.iter().any(|item| item.ordered)
-        {
-            list.numbering = enum_numbering(numbering, num_id, self.deepest);
-            // Typst already counts from 1, so only a different start is worth
-            // stating.
-            list.start = numbering.start(num_id, 0).filter(|&start| start != 1);
+        if let Some(num_id) = self.num_id {
+            if list.items.iter().any(|item| item.ordered) {
+                list.numbering = enum_numbering(numbering, num_id, self.deepest);
+                // Typst already counts from 1, so only a different start is
+                // worth stating.
+                list.start = numbering.start(num_id, 0).filter(|&start| start != 1);
+            }
+            if list.items.iter().any(|item| !item.ordered) {
+                list.markers = bullet_markers(numbering, num_id, self.deepest, report);
+            }
         }
         Block::List(list)
     }
+}
+
+/// Typst's own default bullet cycle, in depth order. A Word list whose markers
+/// already match these needs no `#set list(marker:)` at all — emitting one
+/// would be pure noise in the output.
+const DEFAULT_MARKERS: [&str; 3] = ["\u{2022}", "\u{2023}", "\u{2013}"];
+
+/// The authored bullet glyph for each nesting depth a list actually uses.
+///
+/// Typst cycles `list(marker:)` by depth and Word stores one `w:lvlText` per
+/// `w:ilvl`, so the two line up as written — but only up to the deepest level
+/// the list *uses*, since a Word `abstractNum` always defines all nine and
+/// stating markers for levels no item reaches would be noise.
+///
+/// Returns an empty vector — leaving Typst's defaults in place — when no level
+/// states a usable glyph, or when the glyphs Word states are the ones Typst
+/// would have drawn anyway. A level whose glyph is unusable (a Wingdings
+/// private-use placeholder; see [`Numbering::bullet_marker`]) falls back to
+/// Typst's own marker for that depth and is reported, rather than dragging the
+/// levels that *are* expressible down with it.
+fn bullet_markers(
+    numbering: &Numbering,
+    num_id: i64,
+    deepest: u8,
+    report: &mut ImportReport,
+) -> Vec<EcoString> {
+    let mut markers = Vec::with_capacity(usize::from(deepest) + 1);
+    let mut any_authored = false;
+    let mut any_refused = false;
+
+    for ilvl in 0..=i64::from(deepest) {
+        let default = DEFAULT_MARKERS[ilvl as usize % DEFAULT_MARKERS.len()];
+        match numbering.bullet_marker(num_id, ilvl) {
+            Some(glyph) => {
+                any_authored = true;
+                markers.push(glyph.clone());
+            }
+            None => {
+                // Only a level that *is* a bullet and *did* state a glyph
+                // counts as a loss. A numbered level in a mixed list has no
+                // marker to lose, and one that states none (or an empty one)
+                // never asked for a particular glyph in the first place.
+                any_refused |= numbering.level(num_id, ilvl).is_some_and(|level| {
+                    level.num_fmt == "bullet"
+                        && level.lvl_text.as_ref().is_some_and(|text| !text.is_empty())
+                });
+                markers.push(default.into());
+            }
+        }
+    }
+
+    if any_refused {
+        report.approximate(
+            "list bullet",
+            "a symbol-font bullet (Wingdings/Symbol) has no portable glyph; \
+             the default bullet is used",
+        );
+    }
+    if !any_authored || markers.iter().zip(DEFAULT_MARKERS).all(|(m, d)| m == d) {
+        return Vec::new();
+    }
+    markers
 }
 
 /// Typst's counting symbol for one Word `w:numFmt`.
@@ -615,7 +682,7 @@ mod tests {
         let mut instances = FxHashMap::default();
         instances.insert(1, 100);
         let mut level_fmt = FxHashMap::default();
-        level_fmt.insert(0, LevelFormat { num_fmt: "bullet".into(), start: None });
+        level_fmt.insert(0, LevelFormat { num_fmt: "bullet".into(), start: None, lvl_text: None });
         let mut abstract_nums = FxHashMap::default();
         abstract_nums.insert(100, level_fmt);
 
@@ -907,7 +974,7 @@ mod tests {
         instances.insert(1, 100);
         let mut levels = FxHashMap::default();
         for (ilvl, fmt) in formats.iter().enumerate() {
-            levels.insert(ilvl as i64, LevelFormat { num_fmt: (*fmt).into(), start: None });
+            levels.insert(ilvl as i64, LevelFormat { num_fmt: (*fmt).into(), start: None, lvl_text: None });
         }
         let mut abstract_nums = FxHashMap::default();
         abstract_nums.insert(100, levels);

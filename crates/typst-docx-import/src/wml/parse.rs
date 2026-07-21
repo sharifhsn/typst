@@ -17,10 +17,11 @@ use crate::ImportError;
 use crate::report::ImportReport;
 use crate::wml::model::{
     BorderEdge, Body, BodyItem, BreakType, Cell, CellBorders, CellMargins, ChartData, ChartKind,
-    ChartSeries, DocumentMeta, DrawingRef, Field,
+    ChartSeries, DmlDash, DmlFill, DmlGeometry, DmlGradient, DmlGradientKind, DmlSeg, DmlShape,
+    DmlStroke, DocumentMeta, DrawingRef, Field,
     FurnitureKind, FurnitureRef, LegendPos, LevelFormat, NumRef, Numbering, ParaProps, Paragraph,
-    Relationship, Row, Run, RunContent, RunItem, RunProps, Section, SectPr, SectionStart, Style,
-    StyleKind, Styles, Table, VmlShape, VmlShapeKind, WmlPackage,
+    PresetGeom, Relationship, Row, Run, RunContent, RunItem, RunProps, Section, SectPr,
+    SectionStart, SrcRect, Style, StyleKind, Styles, Table, VmlShape, VmlShapeKind, WmlPackage,
 };
 
 // ===========================================================================
@@ -1300,24 +1301,22 @@ fn parse_run(node: Node, tb_depth: usize) -> Run {
                 if let Some(drawing) = parse_drawing(child) {
                     run.content.push(RunContent::Drawing(drawing));
                 } else {
-                    // No raster image — a shape, chart, or (what we're after
-                    // here) a text box. `direct_txbx_contents` finds every
-                    // `w:txbxContent` that's a sibling shape of this drawing
-                    // (a group can hold more than one), so a picture-with-
-                    // caption drawing (blip present) never reaches this
-                    // branch at all: the image wins and its caption box, if
-                    // any, is simply not looked for — not contorting this
-                    // for a case real documents rarely combine.
-                    let txbx_contents = direct_txbx_contents(child);
-                    if !txbx_contents.is_empty() {
-                        for txbx in txbx_contents {
-                            run.content
-                                .push(RunContent::TextBox(parse_txbx_content(txbx, tb_depth)));
-                        }
-                    } else if let Some(rel_id) = parse_chart_ref(child) {
-                        // Checked last: a chart reference has neither a blip
-                        // nor a text box of its own, so this only fires once
-                        // both of those have come up empty.
+                    // No raster image — a shape, a chart, or a text box.
+                    // `collect_dml_content` walks the graphic frame for all
+                    // three shapes of shape content (see its doc comment); a
+                    // picture-with-caption drawing (blip present) never
+                    // reaches this branch at all, since the image wins above
+                    // and its caption box, if any, is simply not looked for —
+                    // not contorting this for a case real documents rarely
+                    // combine.
+                    let before = run.content.len();
+                    collect_dml_content(child, 0, tb_depth, &mut run.content);
+                    if run.content.len() == before
+                        && let Some(rel_id) = parse_chart_ref(child)
+                    {
+                        // Checked last: a chart reference has neither a blip,
+                        // a shape, nor a text box of its own, so this only
+                        // fires once all of those have come up empty.
                         run.content.push(RunContent::Chart(rel_id));
                     }
                 }
@@ -1388,8 +1387,10 @@ fn math_run(node: Node, display: bool) -> Run {
 }
 
 /// A `w:drawing`'s embedded raster image: the blip's relationship id, its
-/// extent, and alt text. `None` if no `a:blip` is present (a shape, chart, or
-/// text box with no raster image — dropped for v1).
+/// extent, alt text, and the frame Word draws it through (a shaped
+/// `a:prstGeom` outline and/or an `a:srcRect` crop). `None` if no `a:blip` is
+/// present (a shape, chart, or text box with no raster image — see the
+/// `"drawing"` arm of [`parse_run`] for where those go instead).
 fn parse_drawing(node: Node) -> Option<DrawingRef> {
     let blip = node.descendants().find(|n| is_element(*n, "blip"))?;
     let rel_id = attr_ns(blip, ns::R, "embed")?.into();
@@ -1407,7 +1408,52 @@ fn parse_drawing(node: Node) -> Option<DrawingRef> {
         .and_then(|n| n.children().find(|c| is_element(*c, "align")))
         .and_then(|n| n.text())
         .map(|text| EcoString::from(text.trim()));
-    Some(DrawingRef { rel_id, cx_emu, cy_emu, alt, align })
+
+    // Both of these are scoped to the `pic:pic` that owns *this* blip rather
+    // than scanned across the whole `w:drawing`: a group can hold a picture
+    // beside a shape, and reading the shape's `a:prstGeom` as the picture's
+    // frame would round the wrong thing off.
+    let pic = blip.ancestors().find(|n| is_element(*n, "pic"));
+    let prst_geom = pic
+        .and_then(|pic| pic.descendants().find(|n| is_element(*n, "prstGeom")))
+        .and_then(parse_preset_geom)
+        // A plain `rect` is the shape of an *unframed* picture — the default
+        // Word writes for every ordinary image — so recording it would put a
+        // pointless `#box(clip: true)` around almost every imported picture.
+        .filter(|geom| geom.prst != "rect");
+    let src_rect = blip
+        .ancestors()
+        .find(|n| is_element(*n, "blipFill"))
+        .and_then(|fill| fill.children().find(|c| is_element(*c, "srcRect")))
+        .map(parse_src_rect)
+        .filter(|rect| !rect.is_empty());
+
+    Some(DrawingRef { rel_id, cx_emu, cy_emu, alt, align, prst_geom, src_rect })
+}
+
+/// An `a:prstGeom` element: its preset name plus the first adjustment guide in
+/// its `a:avLst`. Only the first is read because every preset this importer
+/// maps takes at most one (`roundRect`'s corner radius); a preset with several
+/// isn't reproduced at all, so its remaining guides have nothing to inform.
+fn parse_preset_geom(node: Node) -> Option<PresetGeom> {
+    let prst = attr(node, "prst")?.into();
+    let adj = node
+        .descendants()
+        .find(|n| is_element(*n, "gd"))
+        // `fmla="val 16667"` — the only formula form an adjustment *value*
+        // ever takes. Anything else is a computed guide, which needs the
+        // preset's own geometry definition to evaluate and is left unread.
+        .and_then(|n| attr(n, "fmla"))
+        .and_then(|fmla| fmla.strip_prefix("val "))
+        .and_then(|value| parse_i64(value.trim()));
+    Some(PresetGeom { prst, adj })
+}
+
+/// An `a:srcRect`. Every side defaults to zero (no crop on that edge), which
+/// is also what an absent attribute means.
+fn parse_src_rect(node: Node) -> SrcRect {
+    let side = |name| attr(node, name).and_then(parse_i64).unwrap_or(0);
+    SrcRect { l: side("l"), t: side("t"), r: side("r"), b: side("b") }
 }
 
 /// A `w:drawing`'s chart reference: the `r:id` of its `c:chart` graphic-data
@@ -1426,7 +1472,7 @@ fn parse_chart_ref(node: Node) -> Option<DrawingRef> {
     let extent = node.descendants().find(|n| is_element(*n, "extent"));
     let cx_emu = extent.and_then(|n| attr(n, "cx")).and_then(parse_i64);
     let cy_emu = extent.and_then(|n| attr(n, "cy")).and_then(parse_i64);
-    Some(DrawingRef { rel_id, cx_emu, cy_emu, alt: None, align: None })
+    Some(DrawingRef { rel_id, cx_emu, cy_emu, ..Default::default() })
 }
 
 // --- Text boxes (`wps:txbx`/`v:textbox`'s `w:txbxContent`) --------------------
@@ -1488,6 +1534,315 @@ fn collect_direct_txbx_contents<'a>(node: Node<'a, 'a>, out: &mut Vec<Node<'a, '
             collect_direct_txbx_contents(child, out);
         }
     }
+}
+
+// --- DrawingML shapes (`wps:wsp`/`wpg:wgp`, found inside a `w:drawing`) ------
+
+/// How deep [`collect_dml_content`] follows the graphic-frame wrappers and
+/// `wpg:wgp` group nesting inside one `w:drawing` — the DrawingML counterpart
+/// of [`MAX_VML_GROUP_DEPTH`], bounded for the same reason.
+const MAX_DML_DEPTH: usize = 32;
+
+/// Walk a `w:drawing`'s graphic frame for the two things it can hold besides a
+/// picture or a chart: DrawingML shapes (`wps:wsp`, singly or nested in a
+/// `wpg:wgp` group) and any `w:txbxContent` reached by some other route.
+///
+/// Deliberately *one* walk, unlike the VML side — where [`collect_vml_content`]
+/// runs beside a separate blanket `w:txbxContent` scan. A DrawingML shape
+/// carries its geometry and its text in the same element (`wps:wsp`), and a
+/// painted one lowers to a single `#rect(..)[text]`-shaped call with that text
+/// as its *body*, so a second, independent text-box scan would emit the text
+/// twice. Stopping the walk at every `w:txbxContent` it does reach keeps the
+/// property that blanket scan exists for: a wrapper element this function
+/// doesn't recognise still cannot lose the text inside it.
+///
+/// Each level goes through [`unwrap_wrappers`] rather than plain `children()`:
+/// Word nests a *second* `mc:AlternateContent` inside a drawing whenever a
+/// group holds a shape with more than one spelling, and descending into both
+/// its branches would find the same text box twice — once as the `mc:Choice`
+/// shape's own, once as the `mc:Fallback`'s `v:textbox`. That is exactly the
+/// duplication `splice_node` exists to prevent, so this walk uses it too.
+fn collect_dml_content(node: Node, depth: usize, tb_depth: usize, out: &mut Vec<RunContent>) {
+    if depth >= MAX_DML_DEPTH {
+        return;
+    }
+    for child in unwrap_wrappers(node) {
+        match child.tag_name().name() {
+            // `wps:wsp` in a document, `wpg:sp`/`pic:sp` in a group — same
+            // element by another prefix.
+            "wsp" | "sp" => collect_dml_shape(child, tb_depth, out),
+            "txbxContent" => {
+                out.push(RunContent::TextBox(parse_txbx_content(child, tb_depth)))
+            }
+            _ => collect_dml_content(child, depth + 1, tb_depth, out),
+        }
+    }
+}
+
+/// One `wps:wsp` — a shape, a text box, or both.
+///
+/// A shape that paints nothing this importer can resolve (no `a:srgbClr` fill
+/// or line colour: an unfilled frame, or one coloured from the document theme,
+/// which needs `theme1.xml`'s palette to mean anything) is treated as *only*
+/// its text box. That is the overwhelmingly common form of a Word text box,
+/// and it is precisely what [`RunContent::TextBox`] already models; drawing a
+/// Typst shape around it instead would put a default black border around text
+/// Word left unboxed. A shape that does paint something keeps its geometry and
+/// takes its text box as its body.
+///
+/// A painting-nothing shape with no text either is recorded — [`RunContent::
+/// DmlUnsupported`] — rather than vanishing, which is what it used to do.
+fn collect_dml_shape(wsp: Node, tb_depth: usize, out: &mut Vec<RunContent>) {
+    let sp_pr = wsp.children().find(|n| is_element(*n, "spPr"));
+    let geom = sp_pr.and_then(parse_dml_geometry);
+    let fill = sp_pr.map(parse_dml_fill).unwrap_or_default();
+    let stroke = sp_pr
+        .and_then(|n| n.children().find(|c| is_element(*c, "ln")))
+        .map(parse_dml_stroke);
+
+    let paints = matches!(fill, DmlFill::Solid(_) | DmlFill::Gradient(_))
+        || stroke.as_ref().is_some_and(|s| !s.no_fill && s.color.is_some());
+
+    let txbx = direct_txbx_contents(wsp);
+    match geom {
+        Some(geom) if paints => {
+            let (cx_emu, cy_emu) = dml_extent(wsp);
+            let body = txbx
+                .into_iter()
+                .flat_map(|node| parse_txbx_content(node, tb_depth))
+                .collect();
+            out.push(RunContent::DmlShape(DmlShape {
+                geom,
+                cx_emu,
+                cy_emu,
+                fill,
+                stroke,
+                body,
+            }));
+        }
+        geom if txbx.is_empty() => {
+            if geom.is_some() {
+                out.push(RunContent::DmlUnsupported);
+            }
+        }
+        _ => {
+            for node in txbx {
+                out.push(RunContent::TextBox(parse_txbx_content(node, tb_depth)));
+            }
+        }
+    }
+}
+
+/// A shape's own size: its `a:xfrm/a:ext`, or — for a shape that states no
+/// transform of its own — the size of the whole drawing it sits in
+/// (`wp:extent`), which for the single-shape drawing that produces is the same
+/// thing.
+fn dml_extent(wsp: Node) -> (Option<i64>, Option<i64>) {
+    let ext = wsp
+        .children()
+        .find(|n| is_element(*n, "spPr"))
+        .and_then(|n| n.children().find(|c| is_element(*c, "xfrm")))
+        .and_then(|n| n.children().find(|c| is_element(*c, "ext")))
+        .or_else(|| {
+            wsp.ancestors()
+                .find(|n| is_element(*n, "inline") || is_element(*n, "anchor"))
+                .and_then(|n| n.children().find(|c| is_element(*c, "extent")))
+        });
+    match ext {
+        Some(ext) => (
+            attr(ext, "cx").and_then(parse_i64),
+            attr(ext, "cy").and_then(parse_i64),
+        ),
+        None => (None, None),
+    }
+}
+
+/// A `wps:spPr`'s geometry: `a:prstGeom` (a named preset) or `a:custGeom` (an
+/// explicit path).
+fn parse_dml_geometry(sp_pr: Node) -> Option<DmlGeometry> {
+    for child in sp_pr.children().filter(|n| n.is_element()) {
+        match child.tag_name().name() {
+            "prstGeom" => return parse_preset_geom(child).map(DmlGeometry::Preset),
+            "custGeom" => return parse_custom_geom(child),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// An `a:custGeom`'s `a:pathLst`.
+///
+/// Every `a:path` in the list contributes its segments to one Typst `#curve`
+/// (a fresh `curve.move` starts each subpath, which is how Typst spells a
+/// multi-subpath curve anyway), but only the *first* path's `@w`/`@h` define
+/// the coordinate space. A list whose paths declare different spaces would
+/// need per-subpath scaling that no producer this importer has seen actually
+/// emits — `typst-docx`'s own `write_custom_geom` writes exactly one path.
+fn parse_custom_geom(node: Node) -> Option<DmlGeometry> {
+    let path_lst = node.children().find(|n| is_element(*n, "pathLst"))?;
+    let paths: Vec<Node> = path_lst.children().filter(|n| is_element(*n, "path")).collect();
+    let first = paths.first()?;
+    let path_w = attr(*first, "w").and_then(parse_i64).unwrap_or(0);
+    let path_h = attr(*first, "h").and_then(parse_i64).unwrap_or(0);
+
+    let mut segments = Vec::new();
+    for path in paths {
+        for cmd in path.children().filter(|n| n.is_element()) {
+            let pts: Vec<(i64, i64)> = cmd
+                .children()
+                .filter(|n| is_element(*n, "pt"))
+                .filter_map(|pt| {
+                    Some((attr(pt, "x").and_then(parse_i64)?, attr(pt, "y").and_then(parse_i64)?))
+                })
+                .collect();
+            match (cmd.tag_name().name(), pts.as_slice()) {
+                ("moveTo", [(x, y)]) => segments.push(DmlSeg::MoveTo(*x, *y)),
+                ("lnTo", [(x, y)]) => segments.push(DmlSeg::LineTo(*x, *y)),
+                ("cubicBezTo", [(x1, y1), (x2, y2), (x, y)]) => {
+                    segments.push(DmlSeg::CubicTo(*x1, *y1, *x2, *y2, *x, *y))
+                }
+                ("close", _) => segments.push(DmlSeg::Close),
+                // `a:arcTo`/`a:quadBezTo` have no direct `#curve` counterpart
+                // (an arc would have to be flattened to cubics against the
+                // preceding point, which this parse has no state for). The
+                // path is abandoned rather than silently drawn with a gap
+                // where the missing segment was.
+                _ => return None,
+            }
+        }
+    }
+    Some(DmlGeometry::Custom { path_w, path_h, segments })
+}
+
+/// A `wps:spPr`'s fill. Only the forms with a Typst counterpart are recorded;
+/// a pattern (`a:pattFill`) or picture (`a:blipFill`) fill on a *shape* leaves
+/// the fill [`DmlFill::Unstated`], which reads as "not reproduced" rather than
+/// as "no fill" — the two are visually opposite.
+fn parse_dml_fill(sp_pr: Node) -> DmlFill {
+    for child in sp_pr.children().filter(|n| n.is_element()) {
+        match child.tag_name().name() {
+            "noFill" => return DmlFill::None,
+            "solidFill" => {
+                return match parse_dml_color(child) {
+                    Some(rgba) => DmlFill::Solid(rgba),
+                    None => DmlFill::Unstated,
+                };
+            }
+            "gradFill" => {
+                if let Some(gradient) = parse_dml_gradient(child) {
+                    return DmlFill::Gradient(gradient);
+                }
+                return DmlFill::Unstated;
+            }
+            _ => {}
+        }
+    }
+    DmlFill::Unstated
+}
+
+/// An `a:gradFill`. `None` when it states no stops, or when its geometry is
+/// neither of the two DrawingML spells that Typst's `gradient` has a
+/// counterpart for (`a:lin` and a circular `a:path`).
+fn parse_dml_gradient(node: Node) -> Option<DmlGradient> {
+    let stops: Vec<(i64, [u8; 4])> = node
+        .children()
+        .find(|n| is_element(*n, "gsLst"))?
+        .children()
+        .filter(|n| is_element(*n, "gs"))
+        .filter_map(|gs| {
+            Some((attr(gs, "pos").and_then(parse_i64)?, parse_dml_color(gs)?))
+        })
+        .collect();
+    if stops.len() < 2 {
+        return None;
+    }
+
+    for child in node.children().filter(|n| n.is_element()) {
+        match child.tag_name().name() {
+            "lin" => {
+                let angle_60k = attr(child, "ang").and_then(parse_i64).unwrap_or(0);
+                return Some(DmlGradient { stops, kind: DmlGradientKind::Linear { angle_60k } });
+            }
+            "path" if attr(child, "path") == Some("circle") => {
+                let rect = child.children().find(|n| is_element(*n, "fillToRect"));
+                let side = |name| {
+                    rect.and_then(|n| attr(n, name)).and_then(parse_i64).unwrap_or(0)
+                };
+                let fill_to_rect = [side("l"), side("t"), side("r"), side("b")];
+                return Some(DmlGradient {
+                    stops,
+                    kind: DmlGradientKind::Radial { fill_to_rect },
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// An `a:ln`.
+fn parse_dml_stroke(node: Node) -> DmlStroke {
+    let mut stroke = DmlStroke {
+        w_emu: attr(node, "w").and_then(parse_i64),
+        ..Default::default()
+    };
+    for child in node.children().filter(|n| n.is_element()) {
+        match child.tag_name().name() {
+            "noFill" => stroke.no_fill = true,
+            "solidFill" => stroke.color = parse_dml_color(child),
+            "prstDash" => {
+                stroke.dash = attr(child, "val").map(|val| DmlDash::Preset(val.into()))
+            }
+            "custDash" => {
+                let stops: Vec<(i64, i64)> = child
+                    .children()
+                    .filter(|n| is_element(*n, "ds"))
+                    .filter_map(|ds| {
+                        Some((
+                            attr(ds, "d").and_then(parse_i64)?,
+                            attr(ds, "sp").and_then(parse_i64)?,
+                        ))
+                    })
+                    .collect();
+                if !stops.is_empty() {
+                    stroke.dash = Some(DmlDash::Custom(stops));
+                }
+            }
+            _ => {}
+        }
+    }
+    stroke
+}
+
+/// The `a:srgbClr` inside a colour-bearing element (`a:solidFill`, `a:gs`),
+/// with its optional `a:alpha` folded into the fourth channel.
+///
+/// `None` for every other colour spelling — `a:schemeClr` above all, which
+/// names a slot in `theme1.xml`'s palette rather than a colour, and which this
+/// importer does not resolve. Returning `None` there is what keeps a
+/// theme-coloured shape on the text-box path (see [`collect_dml_shape`])
+/// instead of drawing it in an invented colour.
+fn parse_dml_color(node: Node) -> Option<[u8; 4]> {
+    let clr = node.children().find(|n| is_element(*n, "srgbClr"))?;
+    let hex = attr(clr, "val")?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    // `a:alpha/@val` is 1000ths of a percent of full opacity; its absence is
+    // fully opaque.
+    let alpha = clr
+        .children()
+        .find(|n| is_element(*n, "alpha"))
+        .and_then(|n| attr(n, "val"))
+        .and_then(parse_i64);
+    let a = match alpha {
+        Some(val) => (val.clamp(0, 100_000) as f64 / 100_000.0 * 255.0).round() as u8,
+        None => 255,
+    };
+    Some([r, g, b, a])
 }
 
 // --- VML shapes (`v:shape`/`v:rect`/`v:oval`/`v:roundrect`/`v:line`/`v:group`,
@@ -1577,8 +1932,7 @@ fn parse_vml_imagedata(imagedata: Node, shape: Node) -> Option<DrawingRef> {
         rel_id,
         cx_emu: vml_length_pt(style, "width").map(pt_to_emu),
         cy_emu: vml_length_pt(style, "height").map(pt_to_emu),
-        alt: None,
-        align: None,
+        ..Default::default()
     })
 }
 
@@ -1784,11 +2138,32 @@ fn parse_table(node: Node, depth: usize, tb_depth: usize) -> Table {
                     }
                 }
             }
+            "tblPr" => parse_table_props(child, &mut table),
             "tr" => table.rows.push(parse_row(child, depth, tb_depth)),
             _ => {}
         }
     }
     table
+}
+
+/// The table-level properties this importer can express: how the table sits
+/// between the margins (`w:jc`) and how far it is pushed off the left one
+/// (`w:tblInd`). Everything else in `w:tblPr` — the table style, borders, and
+/// widths — is either resolved per cell already or out of scope.
+fn parse_table_props(node: Node, table: &mut Table) {
+    for prop in node.children().filter(|n| n.is_element()) {
+        match prop.tag_name().name() {
+            "jc" => table.jc = attr(prop, "val").map(EcoString::from),
+            // Only `dxa` (twips) is an absolute length. `pct` measures against
+            // the text width and `auto`/`nil` against the table's own layout,
+            // neither of which is resolvable here, so they are left unread
+            // rather than silently reinterpreted as twips.
+            "tblInd" if attr(prop, "type").unwrap_or("dxa") == "dxa" => {
+                table.indent_twips = attr(prop, "w").and_then(parse_i64);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn parse_row(node: Node, depth: usize, tb_depth: usize) -> Row {
@@ -2341,7 +2716,16 @@ fn parse_numbering(document: Document) -> Numbering {
                         .find(|n| is_element(*n, "start"))
                         .and_then(|n| attr(n, "val"))
                         .and_then(parse_i64);
-                    levels.insert(ilvl, LevelFormat { num_fmt, start });
+                    // Read off the *level element itself*, not resolved
+                    // through any style chain: a bullet's glyph is authored
+                    // per level here, and it is the only record of what Word
+                    // actually prints in front of an item.
+                    let lvl_text = lvl
+                        .children()
+                        .find(|n| is_element(*n, "lvlText"))
+                        .and_then(|n| attr(n, "val"))
+                        .map(EcoString::from);
+                    levels.insert(ilvl, LevelFormat { num_fmt, start, lvl_text });
                 }
                 numbering.abstract_nums.insert(abstract_num_id, levels);
             }

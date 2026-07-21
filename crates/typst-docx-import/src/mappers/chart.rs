@@ -220,7 +220,9 @@ fn chart_table(data: &ChartData) -> Table {
         }
     }
 
-    Table { columns, column_widths: Vec::new(), rows }
+    // No placement of its own: a chart's data table is embedded in a
+    // `figure(..)`, which is what carries the chart's own positioning.
+    Table { columns, column_widths: Vec::new(), rows, align: None, indent_pt: None }
 }
 
 fn text_cell(text: &str) -> TableCell {
@@ -244,7 +246,7 @@ mod tests {
     /// A chart reference with no extent — the plot then falls back to
     /// `lilaq`'s own default size, which is what these tests exercise.
     fn chart_ref(rel_id: &str) -> DrawingRef {
-        DrawingRef { rel_id: rel_id.into(), cx_emu: None, cy_emu: None, alt: None, align: None }
+        DrawingRef { rel_id: rel_id.into(), ..Default::default() }
     }
 
     fn package_with(chart_name: &str, data: ChartData) -> WmlPackage {

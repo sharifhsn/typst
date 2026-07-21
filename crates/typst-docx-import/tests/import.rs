@@ -731,6 +731,8 @@ fn docx_with_body(doc_body: &str) -> Vec<u8> {
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
             xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+            xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
             xmlns:v="urn:schemas-microsoft-com:vml">
 <w:body>{doc_body}</w:body>
 </w:document>"#
@@ -2062,4 +2064,389 @@ fn single_section_document_is_unaffected() {
     assert_eq!(src.matches("#set page(").count(), 1, "{src}");
     assert!(!src.contains("#pagebreak()"), "no section boundary should mean no break:\n{src}");
     assert!(!src.contains("#columns("), "single section should never wrap in columns:\n{src}");
+}
+
+// --- DrawingML shapes (`wps:wsp`/`wpg:wgp` inside a `w:drawing`) --------------
+
+/// A `wps:wsp` used to return `None` from the drawing parse and vanish
+/// entirely unless it happened to hold a text box. A painted preset shape must
+/// now come back as the Typst primitive it names, at the size Word gave it.
+#[test]
+fn drawingml_preset_shape_becomes_a_native_shape_call() {
+    let doc_body = r#"<w:p><w:r><w:drawing><wp:inline
+        xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">
+      <wp:extent cx="2540000" cy="558800"/>
+      <wps:wsp><wps:spPr>
+        <a:xfrm><a:ext cx="2540000" cy="558800"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+        <a:solidFill><a:srgbClr val="C0392B"/></a:solidFill>
+      </wps:spPr></wps:wsp>
+    </wp:inline></w:drawing></w:r></w:p>"#;
+    let docx = docx_with_body(doc_body);
+
+    let result = import_docx(&docx).expect("import should succeed");
+    assert!(
+        result.source.contains("#rect(width: 200pt, height: 44pt, fill: rgb(\"C0392B\"))"),
+        "missing rect call:\n{}",
+        result.source
+    );
+    assert!(
+        result.report.notes.iter().any(|n| n.what == "DrawingML shape"),
+        "the lost floating position must be recorded: {:?}",
+        result.report.notes
+    );
+}
+
+/// `a:custGeom` is the geometry VML's counterpart deliberately gives up on,
+/// and it maps onto `#curve` command for command. The path's own coordinate
+/// space (`a:path/@w`/`@h`) has to be scaled onto the shape's extent, not read
+/// as points.
+#[test]
+fn drawingml_custom_geometry_becomes_a_curve() {
+    let doc_body = r#"<w:p><w:r><w:drawing><wps:wsp><wps:spPr>
+        <a:xfrm><a:ext cx="1270000" cy="1270000"/></a:xfrm>
+        <a:custGeom><a:pathLst><a:path w="1270000" h="1270000">
+          <a:moveTo><a:pt x="0" y="0"/></a:moveTo>
+          <a:lnTo><a:pt x="1270000" y="0"/></a:lnTo>
+          <a:lnTo><a:pt x="1270000" y="1270000"/></a:lnTo>
+          <a:close/>
+        </a:path></a:pathLst></a:custGeom>
+        <a:solidFill><a:srgbClr val="2ECC40"/></a:solidFill>
+      </wps:spPr></wps:wsp></w:drawing></w:r></w:p>"#;
+    let docx = docx_with_body(doc_body);
+
+    let src = import_docx(&docx).expect("import should succeed").source;
+    assert!(
+        src.contains(
+            "#curve(fill: rgb(\"2ECC40\"), curve.move((0pt, 0pt)), curve.line((100pt, 0pt)), \
+             curve.line((100pt, 100pt)), curve.close())"
+        ),
+        "missing curve call:\n{src}"
+    );
+}
+
+/// A shape that both paints and holds text is *one* element in Word and must
+/// stay one call in Typst — the text as the shape's body, not beside it, and
+/// never emitted twice (the hazard the single-walk `collect_dml_content`
+/// exists to avoid).
+#[test]
+fn a_painted_shape_takes_its_text_box_as_its_body() {
+    let doc_body = r#"<w:p><w:r><w:drawing><wps:wsp>
+      <wps:spPr>
+        <a:xfrm><a:ext cx="2540000" cy="558800"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+        <a:noFill/>
+        <a:ln w="25400"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>
+      </wps:spPr>
+      <wps:txbx><w:txbxContent><w:p><w:r><w:t>Dashed border</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+    </wps:wsp></w:drawing></w:r></w:p>"#;
+    let docx = docx_with_body(doc_body);
+
+    let src = import_docx(&docx).expect("import should succeed").source;
+    assert!(src.contains("#rect("), "missing rect call:\n{src}");
+    assert!(src.contains(")[Dashed border]"), "text should be the shape's body:\n{src}");
+    assert_eq!(src.matches("Dashed border").count(), 1, "text emitted twice:\n{src}");
+}
+
+/// The regression guard for the rule above: Word's ordinary text box is a
+/// `wps:wsp` that paints *nothing*. It must stay a plain `#box[..]` rather
+/// than growing a default black border it never had.
+#[test]
+fn an_unpainted_shape_stays_a_plain_text_box() {
+    let doc_body = r#"<w:p><w:r><w:drawing><wps:wsp>
+      <wps:spPr>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+        <a:noFill/><a:ln><a:noFill/></a:ln>
+      </wps:spPr>
+      <wps:txbx><w:txbxContent><w:p><w:r><w:t>just words</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+    </wps:wsp></w:drawing></w:r></w:p>"#;
+    let docx = docx_with_body(doc_body);
+
+    let src = import_docx(&docx).expect("import should succeed").source;
+    assert!(src.contains("#box[just words]"), "expected a plain text box:\n{src}");
+    assert!(!src.contains("#rect("), "an unpainted shape must not become a rect:\n{src}");
+}
+
+/// A `wpg:wgp` group holds several shapes side by side; every one must
+/// survive, not just the first — the same hazard the VML group walk guards
+/// against.
+#[test]
+fn drawingml_group_yields_every_shape() {
+    let doc_body = r#"<w:p><w:r><w:drawing><wpg:wgp>
+      <wps:wsp><wps:spPr>
+        <a:xfrm><a:ext cx="635000" cy="635000"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+        <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+      </wps:spPr></wps:wsp>
+      <wps:wsp><wps:spPr>
+        <a:xfrm><a:ext cx="635000" cy="635000"/></a:xfrm>
+        <a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>
+        <a:solidFill><a:srgbClr val="0000FF"/></a:solidFill>
+      </wps:spPr></wps:wsp>
+    </wpg:wgp></w:drawing></w:r></w:p>"#;
+    let docx = docx_with_body(doc_body);
+
+    let src = import_docx(&docx).expect("import should succeed").source;
+    assert!(src.contains("#rect(width: 50pt, height: 50pt, fill: rgb(\"FF0000\"))"), "{src}");
+    assert!(src.contains("#circle(radius: 25pt, fill: rgb(\"0000FF\"))"), "{src}");
+}
+
+/// A shape whose colors this importer can't resolve (a theme color) and which
+/// holds no text has nothing left to draw — but it must be *recorded* rather
+/// than vanishing, which is what it used to do.
+#[test]
+fn an_unresolvable_empty_shape_is_dropped_with_a_note() {
+    let doc_body = r#"<w:p><w:r><w:drawing><wps:wsp><wps:spPr>
+        <a:xfrm><a:ext cx="635000" cy="635000"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+        <a:solidFill><a:schemeClr val="accent1"/></a:solidFill>
+      </wps:spPr></wps:wsp></w:drawing></w:r></w:p>"#;
+    let docx = docx_with_body(doc_body);
+
+    let result = import_docx(&docx).expect("import should succeed");
+    assert!(!result.source.contains("#rect("), "{}", result.source);
+    assert!(
+        result.report.notes.iter().any(|n| n.what == "DrawingML shape"),
+        "{:?}",
+        result.report.notes
+    );
+}
+
+// --- Picture frames (`a:prstGeom` + `a:srcRect` on a `pic:pic`) ---------------
+
+/// The inverse of `typst-docx`'s native clipped picture: a `roundRect` frame
+/// plus an `a:srcRect` crop. The frame becomes a clipping `#box(radius: ..)`,
+/// and the crop — which Typst's `image` cannot state directly — becomes an
+/// oversized, offset image inside it.
+#[test]
+fn a_round_rect_picture_frame_and_crop_survive() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+  <w:body>
+    <w:p><w:r><w:drawing><wp:inline>
+      <wp:extent cx="1524000" cy="1016000"/>
+      <a:graphic><a:graphicData>
+        <pic:pic>
+          <pic:blipFill>
+            <a:blip r:embed="rId1"/>
+            <a:srcRect l="0" t="1515" r="0" b="1515"/>
+          </pic:blipFill>
+          <pic:spPr>
+            <a:prstGeom prst="roundRect"><a:avLst>
+              <a:gd name="adj" fmla="val 15000"/>
+            </a:avLst></a:prstGeom>
+          </pic:spPr>
+        </pic:pic>
+      </a:graphicData></a:graphic>
+    </wp:inline></w:drawing></w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut rels = Rels::new();
+    rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        "media/swatch.png",
+        RelMode::Internal,
+    );
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_media("word/media/swatch.png", "png", "image/png", vec![0x89, b'P', b'N', b'G']);
+    package.add_relationships("word/document.xml", &rels).unwrap();
+    let docx = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&docx).expect("import should succeed").source;
+    // 15000/100000 of the shorter (80pt) side.
+    assert!(src.contains("radius: 12pt"), "missing corner radius:\n{src}");
+    assert!(src.contains("clip: true"), "the frame must clip:\n{src}");
+    // 80pt showing all but 2 × 1.515% of the picture's height ⇒ 82.5pt tall,
+    // slid up by the hidden 1.515% band.
+    assert!(src.contains("height: 82.5pt"), "image not oversized for the crop:\n{src}");
+    assert!(src.contains("dy: -1.25pt"), "image not offset for the crop:\n{src}");
+}
+
+/// A picture Word framed with an outline Typst's clipping `#box` cannot draw
+/// is left unframed and recorded — never approximated by a rounded rectangle,
+/// which would be a different shape.
+#[test]
+fn an_unmappable_picture_frame_is_reported_rather_than_guessed() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+  <w:body>
+    <w:p><w:r><w:drawing>
+      <pic:pic>
+        <pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill>
+        <pic:spPr><a:prstGeom prst="star5"><a:avLst/></a:prstGeom></pic:spPr>
+      </pic:pic>
+    </w:drawing></w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut rels = Rels::new();
+    rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        "media/swatch.png",
+        RelMode::Internal,
+    );
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_media("word/media/swatch.png", "png", "image/png", vec![0x89, b'P', b'N', b'G']);
+    package.add_relationships("word/document.xml", &rels).unwrap();
+    let docx = package.finish(&Rels::new()).unwrap();
+
+    let result = import_docx(&docx).expect("import should succeed");
+    assert!(!result.source.contains("clip: true"), "{}", result.source);
+    assert!(
+        result.report.notes.iter().any(|n| n.what == "picture frame"),
+        "{:?}",
+        result.report.notes
+    );
+}
+
+// --- Table placement (`w:tblPr/w:jc`, `w:tblPr/w:tblInd`) ---------------------
+
+/// A table's own `w:jc` places the whole table between the margins — a
+/// different element from the paragraph `w:jc` inside its cells, and the one
+/// that closes the round-trip with `typst-docx`'s `#align(center)[table]`.
+#[test]
+fn a_centered_table_is_wrapped_in_an_align() {
+    let doc_body = r#"<w:tbl>
+      <w:tblPr><w:jc w:val="center"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+      <w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr>
+    </w:tbl>"#;
+    let docx = docx_with_body(doc_body);
+
+    let src = import_docx(&docx).expect("import should succeed").source;
+    assert!(src.contains("#align(center)[#table("), "table not centred:\n{src}");
+}
+
+/// `w:tblInd` is a left indent in twips, which becomes a `#pad`.
+#[test]
+fn a_table_indent_becomes_a_pad() {
+    let doc_body = r#"<w:tbl>
+      <w:tblPr><w:tblInd w:w="720" w:type="dxa"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+      <w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr>
+    </w:tbl>"#;
+    let docx = docx_with_body(doc_body);
+
+    let src = import_docx(&docx).expect("import should succeed").source;
+    assert!(src.contains("#pad(left: 36pt)[#table("), "table not indented:\n{src}");
+}
+
+/// Word itself ignores a table's indent once the table is centred, so the two
+/// must not both be emitted and fight each other.
+#[test]
+fn a_centered_table_drops_its_indent_with_a_note() {
+    let doc_body = r#"<w:tbl>
+      <w:tblPr><w:jc w:val="center"/><w:tblInd w:w="720" w:type="dxa"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+      <w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr>
+    </w:tbl>"#;
+    let docx = docx_with_body(doc_body);
+
+    let result = import_docx(&docx).expect("import should succeed");
+    assert!(result.source.contains("#align(center)["), "{}", result.source);
+    assert!(!result.source.contains("#pad(left:"), "{}", result.source);
+    assert!(
+        result.report.notes.iter().any(|n| n.what == "table indent"),
+        "{:?}",
+        result.report.notes
+    );
+}
+
+// --- Custom bullet markers (`w:lvlText` on a bullet level) -------------------
+
+/// A bullet level's `w:lvlText` is the authored marker glyph, and the only
+/// record of it. Without this every custom bullet came back as Typst's
+/// default dot.
+#[test]
+fn an_authored_bullet_glyph_becomes_a_list_marker() {
+    let doc_body = r#"
+      <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+        <w:r><w:t>first</w:t></w:r></w:p>
+      <w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr>
+        <w:r><w:t>second</w:t></w:r></w:p>"#;
+    let numbering = r#"<?xml version="1.0"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="&#x2023;"/></w:lvl>
+    <w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/><w:lvlText w:val="&#xB7;"/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+</w:numbering>"#;
+    let src = import_docx(&docx_with_body_and_numbering(doc_body, numbering))
+        .expect("import should succeed")
+        .source;
+    assert!(src.contains("#set list(marker: ([\u{2023}], [\u{b7}]))"), "{src}");
+}
+
+/// Word stores a Symbol/Wingdings bullet as a private-use codepoint that only
+/// means anything alongside that level's font. Emitted literally it renders as
+/// tofu, so it must fall back to the default bullet and say so.
+#[test]
+fn a_private_use_bullet_falls_back_to_the_default_marker() {
+    let doc_body = r#"
+      <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+        <w:r><w:t>first</w:t></w:r></w:p>"#;
+    let numbering = r#"<?xml version="1.0"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="&#xF0B7;"/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+</w:numbering>"#;
+    let result = import_docx(&docx_with_body_and_numbering(doc_body, numbering))
+        .expect("import should succeed");
+    assert!(!result.source.contains("#set list(marker:"), "{}", result.source);
+    assert!(!result.source.contains('\u{f0b7}'), "{}", result.source);
+    assert!(
+        result.report.notes.iter().any(|n| n.what == "list bullet"),
+        "{:?}",
+        result.report.notes
+    );
+}
+
+/// A list whose markers already *are* Typst's defaults needs no set rule —
+/// emitting one would be pure noise in the output.
+#[test]
+fn default_bullet_glyphs_emit_no_set_rule() {
+    let doc_body = r#"
+      <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+        <w:r><w:t>first</w:t></w:r></w:p>"#;
+    let numbering = r#"<?xml version="1.0"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="&#x2022;"/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+</w:numbering>"#;
+    let src = import_docx(&docx_with_body_and_numbering(doc_body, numbering))
+        .expect("import should succeed")
+        .source;
+    assert!(!src.contains("#set list(marker:"), "{src}");
+    assert!(src.contains("- first"), "{src}");
+}
+
+/// A document body plus its own `word/numbering.xml` — the numbering-bearing
+/// counterpart of [`docx_with_body`].
+fn docx_with_body_and_numbering(doc_body: &str, numbering_xml: &str) -> Vec<u8> {
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let document_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>{doc_body}</w:body>
+</w:document>"#
+    );
+    package.add_xml("word/document.xml", "application/xml", document_xml);
+    package.add_xml("word/numbering.xml", "application/xml", numbering_xml.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    package.finish(&Rels::new()).unwrap()
 }

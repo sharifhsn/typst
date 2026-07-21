@@ -5,8 +5,8 @@ use ecow::{eco_format, EcoString};
 use typst_ooxml_core::units::emu_to_abs;
 
 use crate::report::ImportReport;
-use crate::tdoc::{Align, Figure};
-use crate::wml::model::{DrawingRef, WmlPackage};
+use crate::tdoc::{Align, Crop, Figure};
+use crate::wml::model::{DrawingRef, SrcRect, WmlPackage};
 
 /// Resolve a drawing's relationship + media part into a [`Figure`]. Returns
 /// `None` (recording a [`ImportReport::drop`]) if the relationship or the
@@ -71,10 +71,15 @@ pub fn lower_drawing(
         None => media_key.clone(),
     };
 
+    let width_pt = d.cx_emu.map(|cx| emu_to_abs(cx as f64).to_pt());
+    let height_pt = d.cy_emu.map(|cy| emu_to_abs(cy as f64).to_pt());
+    let radius_pt = corner_radius_pt(d, width_pt, height_pt, report);
+    let crop = source_crop(d, width_pt, height_pt, report);
+
     Some(Figure {
         image_path,
-        width_pt: d.cx_emu.map(|cx| emu_to_abs(cx as f64).to_pt()),
-        height_pt: d.cy_emu.map(|cy| emu_to_abs(cy as f64).to_pt()),
+        width_pt,
+        height_pt,
         alt: d.alt.clone(),
         // Word's named float placement is the one part of a floating
         // drawing's geometry Typst's flow can honour; the absolute offset and
@@ -86,7 +91,68 @@ pub fn lower_drawing(
             _ => None,
         }),
         caption: None,
+        radius_pt,
+        crop,
     })
+}
+
+/// The corner radius of the outline Word frames this picture with, in points.
+///
+/// The exact inverse of `typst_ooxml_core::dml::round_rect_adj`, which writes
+/// the radius as 1000ths of a percent of the shape's *shorter* side. Anything
+/// but `roundRect` is reported and left unframed: Typst's clipping `#box` has
+/// only a corner radius, so a `triangle`/`star` picture frame has no
+/// approximation short of inventing a mask, and a wrong frame is worse than
+/// none. (A plain `rect` never reaches here — see `wml::parse::parse_drawing`,
+/// which filters out the unframed default.)
+fn corner_radius_pt(
+    d: &DrawingRef,
+    width_pt: Option<f64>,
+    height_pt: Option<f64>,
+    report: &mut ImportReport,
+) -> Option<f64> {
+    let geom = d.prst_geom.as_ref()?;
+    if geom.prst != "roundRect" {
+        report.approximate(
+            "picture frame",
+            eco_format!("`{}` outline has no Typst equivalent; drawn unframed", geom.prst),
+        );
+        return None;
+    }
+    // Word's own default for a `roundRect` with no adjustment guide.
+    let adj = geom.adj.unwrap_or(16667).clamp(0, 50_000) as f64;
+    let shorter = width_pt?.min(height_pt?);
+    (shorter > 0.0).then(|| adj / 100_000.0 * shorter)
+}
+
+/// An `a:srcRect` as per-side fractions of the source image.
+///
+/// Needs the frame's own size to be expressible at all (the crop is written
+/// relative to the *image*, and Typst can only state the oversized image's
+/// dimensions against the box that clips it), so a picture with no
+/// `wp:extent` reports the crop as lost rather than guessing a base for it.
+fn source_crop(
+    d: &DrawingRef,
+    width_pt: Option<f64>,
+    height_pt: Option<f64>,
+    report: &mut ImportReport,
+) -> Option<Crop> {
+    let rect = d.src_rect.filter(|rect| !rect.is_empty())?;
+    if width_pt.is_none_or(|w| w <= 0.0) || height_pt.is_none_or(|h| h <= 0.0) {
+        report.drop("picture crop", "the picture states no size to crop against");
+        return None;
+    }
+    // A side at (or past) 100% would leave nothing of the image showing, which
+    // is a malformed file rather than a crop worth reproducing — and would
+    // divide by zero below.
+    let frac = |value: i64| value.clamp(0, 100_000) as f64 / 100_000.0;
+    let SrcRect { l, t, r, b } = rect;
+    let crop = Crop { left: frac(l), top: frac(t), right: frac(r), bottom: frac(b) };
+    if crop.left + crop.right >= 1.0 || crop.top + crop.bottom >= 1.0 {
+        report.drop("picture crop", "crops away the whole image; ignored");
+        return None;
+    }
+    Some(crop)
 }
 
 /// The raster/vector formats Typst's `image` function can decode. Anything
@@ -186,7 +252,7 @@ mod tests {
     }
 
     fn drawing() -> DrawingRef {
-        DrawingRef { rel_id: "rId1".into(), cx_emu: None, cy_emu: None, alt: None, align: None }
+        DrawingRef { rel_id: "rId1".into(), ..Default::default() }
     }
 
     #[test]

@@ -8,7 +8,7 @@
 use typst_ooxml_core::units::{half_point_to_pt, twip_to_abs};
 
 use crate::lower::{lower_items, parse_hex_color, LowerCtx};
-use crate::mappers::{field, math, note, shape};
+use crate::mappers::{dml_shape, field, math, note, shape};
 use crate::report::ImportReport;
 use crate::resolve::styles::effective_run;
 use crate::tdoc::{Inline, Inlines, Lang, Script, TextStyle, Underline};
@@ -184,6 +184,17 @@ fn lower_run(r: &Run, para_style_id: Option<&str>, ctx: &mut LowerCtx) -> Inline
                     "VML shape",
                     "custom geometry (v:path/v:formulas) is not reproduced",
                 );
+            }
+            // A DrawingML shape — the modern spelling, which unlike VML states
+            // arbitrary paths in a form Typst's `#curve` mirrors exactly. See
+            // `mappers::dml_shape`, which appends (it can produce a shape
+            // *and* the text that wouldn't fit inside it) rather than
+            // returning one inline.
+            RunContent::DmlShape(shape) => {
+                dml_shape::lower_dml_shape(shape, ctx, &mut content)
+            }
+            RunContent::DmlUnsupported => {
+                dml_shape::report_unsupported(&mut *ctx.report)
             }
         }
     }

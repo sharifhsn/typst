@@ -227,6 +227,17 @@ pub enum RunContent {
     /// `vml_shape_content` for why a shape holding *only* a plain text box
     /// never reaches this variant).
     VmlUnsupported,
+    /// A DrawingML shape (`wps:wsp`) — the modern spelling of everything
+    /// [`Self::VmlShape`] covers, plus the arbitrary vector geometry VML only
+    /// ever reached through the `v:path` mini-language this importer declines
+    /// to interpret. See [`DmlShape`] and `mappers::dml_shape`.
+    DmlShape(DmlShape),
+    /// A `wps:wsp` with geometry but nothing this importer can paint it with:
+    /// no `a:srgbClr` fill or line colour (a theme-coloured shape, whose
+    /// palette lives in `theme1.xml`), and no text box to fall back on. The
+    /// DrawingML twin of [`Self::VmlUnsupported`], and recorded as a drop at
+    /// lower time for the same reason — these used to vanish silently.
+    DmlUnsupported,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -236,7 +247,7 @@ pub enum BreakType {
     Column,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct DrawingRef {
     pub rel_id: EcoString,
     /// Extent in EMU, if present (`wp:extent`, or — for a VML picture — its
@@ -252,6 +263,150 @@ pub struct DrawingRef {
     /// it is page-relative geometry with no equivalent in Typst's flow, and
     /// guessing at it would move images somewhere Word never put them.
     pub align: Option<EcoString>,
+    /// `pic:spPr/a:prstGeom` — the outline Word frames the picture with. A
+    /// plain `rect` (the overwhelmingly common case) is the *absence* of a
+    /// frame and is not recorded here; only a shaped one is, because only a
+    /// shaped one has to become a `#box(radius: .., clip: true)` around the
+    /// image. See [`crate::mappers::drawing`] for the mapping.
+    pub prst_geom: Option<PresetGeom>,
+    /// `pic:blipFill/a:srcRect` — which sub-rectangle of the *source* image
+    /// shows through the frame, i.e. a crop. `None` means the whole image.
+    pub src_rect: Option<SrcRect>,
+}
+
+/// An `a:prstGeom`: the preset name plus its first adjustment guide
+/// (`a:avLst/a:gd/@fmla="val N"`), which for `roundRect` is the corner radius
+/// as 1000ths of a percent of the shape's *shorter* side — the inverse of
+/// `typst_ooxml_core::dml::round_rect_adj`.
+#[derive(Debug, Default, Clone)]
+pub struct PresetGeom {
+    pub prst: EcoString,
+    pub adj: Option<i64>,
+}
+
+/// An `a:srcRect`: how much of each side of the source image is cropped away,
+/// each in 1000ths of a percent **of the original image's own extent** (so
+/// `l="10000"` hides the leftmost 10% of the picture). The exporter's
+/// `cover_src_rect` writes exactly this; [`crate::mappers::drawing`] inverts it.
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub struct SrcRect {
+    pub l: i64,
+    pub t: i64,
+    pub r: i64,
+    pub b: i64,
+}
+
+impl SrcRect {
+    /// Whether this rectangle crops nothing at all — the form Word writes for
+    /// an uncropped picture, which must not turn into a pointless oversize-
+    /// and-offset construction.
+    pub fn is_empty(&self) -> bool {
+        *self == SrcRect::default()
+    }
+}
+
+// --- DrawingML shapes (`wps:wsp`, in a `w:drawing`) -------------------------
+
+/// A DrawingML shape: geometry, fill, stroke, and — for a shape Word also gave
+/// a text box — the content inside it.
+///
+/// Kept raw the same way [`VmlShape`] is (EMU lengths, 1000ths-of-a-percent
+/// ratios, packed RGBA); `crate::mappers::dml_shape` does every conversion.
+/// Unlike VML, DrawingML states arbitrary vector paths in a form Typst's
+/// `#curve` mirrors one-for-one, so this variant can carry geometry VML's
+/// counterpart deliberately gives up on.
+// Not `Clone`, for the same reason [`RunContent`] isn't: `body` holds
+// [`BodyItem`]s, and the Word IR is walked once and consumed rather than
+// copied around.
+#[derive(Debug)]
+pub struct DmlShape {
+    pub geom: DmlGeometry,
+    /// The shape's own `a:xfrm/a:ext`, falling back to the drawing's
+    /// `wp:extent`, in EMU. `None` when neither is present.
+    pub cx_emu: Option<i64>,
+    pub cy_emu: Option<i64>,
+    pub fill: DmlFill,
+    /// `a:ln`. `None` means the element is absent entirely, which is not the
+    /// same as an `a:ln` holding `a:noFill` (see [`DmlStroke::no_fill`]).
+    pub stroke: Option<DmlStroke>,
+    /// `wps:txbx/w:txbxContent` — the shape's text, as ordinary body content.
+    /// Empty for a shape with no text box.
+    pub body: Vec<BodyItem>,
+}
+
+/// A shape's outline: one of DrawingML's named presets, or an explicit path.
+#[derive(Debug, Clone)]
+pub enum DmlGeometry {
+    Preset(PresetGeom),
+    /// `a:custGeom`'s single `a:path`. `path_w`/`path_h` are the path's own
+    /// coordinate space (`a:path/@w`/`@h`), which is *not* required to equal
+    /// the shape's extent — the two are proportional, so the segment
+    /// coordinates need scaling by `ext / path` before they mean anything in
+    /// document space.
+    Custom { path_w: i64, path_h: i64, segments: Vec<DmlSeg> },
+}
+
+/// One `a:path` command. Named for the DrawingML elements, which map 1:1 onto
+/// Typst's `curve.move`/`curve.line`/`curve.cubic`/`curve.close`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum DmlSeg {
+    MoveTo(i64, i64),
+    LineTo(i64, i64),
+    /// `a:cubicBezTo`: two control points then the end point.
+    CubicTo(i64, i64, i64, i64, i64, i64),
+    Close,
+}
+
+/// A shape's fill. The `Unstated` / `None` distinction matters: Word's own
+/// default for an absent fill element is the theme's, while `a:noFill` is an
+/// explicit "draw nothing" that must suppress Typst's own default.
+#[derive(Debug, Default, Clone)]
+pub enum DmlFill {
+    #[default]
+    Unstated,
+    /// `a:noFill`.
+    None,
+    /// `a:solidFill/a:srgbClr`, with `a:alpha` folded into the fourth channel.
+    Solid([u8; 4]),
+    Gradient(DmlGradient),
+}
+
+/// An `a:gradFill`.
+#[derive(Debug, Clone)]
+pub struct DmlGradient {
+    /// `a:gsLst`: `(position in 1000ths of a percent, RGBA)`, in file order.
+    pub stops: Vec<(i64, [u8; 4])>,
+    pub kind: DmlGradientKind,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum DmlGradientKind {
+    /// `a:lin/@ang`, in 60000ths of a degree clockwise from "to the right".
+    Linear { angle_60k: i64 },
+    /// `a:path path="circle"`'s `a:fillToRect`, each side in 1000ths of a
+    /// percent — the inset of the gradient's *focal* rectangle.
+    Radial { fill_to_rect: [i64; 4] },
+}
+
+/// An `a:ln`.
+#[derive(Debug, Default, Clone)]
+pub struct DmlStroke {
+    /// `@w` in EMU. `None` leaves the thickness to Typst's default.
+    pub w_emu: Option<i64>,
+    /// `a:solidFill/a:srgbClr` with alpha folded in, when the line states one.
+    pub color: Option<[u8; 4]>,
+    /// `a:ln/a:noFill` — the line is explicitly invisible.
+    pub no_fill: bool,
+    pub dash: Option<DmlDash>,
+}
+
+#[derive(Debug, Clone)]
+pub enum DmlDash {
+    /// `a:prstDash/@val`.
+    Preset(EcoString),
+    /// `a:custDash`'s `a:ds` runs: `(dash, space)` pairs, each in 1000ths of a
+    /// percent **of the line's own width** (100000 = one line width).
+    Custom(Vec<(i64, i64)>),
 }
 
 // --- VML shapes (`v:rect`/`v:oval`/`v:roundrect`/`v:line`, in a `w:pict`) ----
@@ -402,6 +557,16 @@ pub struct Table {
     /// `w:tblGrid` column widths in twips.
     pub grid: Vec<i64>,
     pub rows: Vec<Row>,
+    /// `w:tblPr/w:jc` — how the whole table sits between the margins
+    /// ("center"/"right"/"end"). A table is a block, not a paragraph, so this
+    /// is *not* the same element as [`ParaProps::jc`] and never reaches a
+    /// paragraph's alignment.
+    pub jc: Option<EcoString>,
+    /// `w:tblPr/w:tblInd/@w:w` in twips, but only when `@w:type="dxa"` — the
+    /// other types (`pct`, `auto`, `nil`) measure against a base this
+    /// importer has no way to resolve, so they're left unread rather than
+    /// misread as an absolute length.
+    pub indent_twips: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -675,6 +840,13 @@ pub struct LevelFormat {
     pub num_fmt: EcoString,
     /// `w:start/@w:val` — the number this level counts from.
     pub start: Option<i64>,
+    /// `w:lvlText/@w:val` — the literal text Word prints in front of an item.
+    /// For a *numbered* level this is a template with `%1`-style placeholders
+    /// (already covered by the `enum(numbering:)` pattern `lower` builds from
+    /// `num_fmt`, so it goes unread there); for a **bullet** level it is the
+    /// authored marker glyph itself, which is the only place that glyph is
+    /// recorded. See [`Numbering::bullet_marker`].
+    pub lvl_text: Option<EcoString>,
 }
 
 impl Numbering {
@@ -690,6 +862,34 @@ impl Numbering {
     pub fn is_ordered(&self, num_id: i64, ilvl: i64) -> bool {
         self.level(num_id, ilvl)
             .is_some_and(|fmt| fmt.num_fmt != "bullet" && fmt.num_fmt != "none")
+    }
+
+    /// The marker glyph an *unordered* `(numId, ilvl)` level prints, when it
+    /// states a usable one.
+    ///
+    /// `None` for a numbered level (whose `w:lvlText` is a `%1`-style template,
+    /// not a glyph), for a level that states no `w:lvlText` at all, and — the
+    /// case that matters most in practice — for Word's **private-use**
+    /// placeholders. Word writes a Symbol/Wingdings bullet as a codepoint in
+    /// the Unicode private-use area (`U+F0B7` for the classic Symbol dot),
+    /// which only means anything alongside the `w:rFonts` that level also
+    /// carries; emitted as a literal Typst marker it renders as tofu, so it is
+    /// deliberately refused here and the caller falls back to the default
+    /// bullet (recording the loss — see `lower::PendingList::finish`).
+    pub fn bullet_marker(&self, num_id: i64, ilvl: i64) -> Option<&EcoString> {
+        let level = self.level(num_id, ilvl)?;
+        if level.num_fmt != "bullet" {
+            return None;
+        }
+        let text = level.lvl_text.as_ref()?;
+        let usable = !text.is_empty()
+            && !text.chars().any(|c| {
+                // The BMP private-use area plus the two supplementary planes
+                // reserved for it — nothing outside a private agreement
+                // between producer and font can be rendered from any of them.
+                matches!(c, '\u{e000}'..='\u{f8ff}' | '\u{f0000}'..='\u{10fffd}')
+            });
+        usable.then_some(text)
     }
 
     /// The number a `(numId, ilvl)` reference counts from: the instance's own

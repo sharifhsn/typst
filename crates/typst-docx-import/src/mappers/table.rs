@@ -148,7 +148,43 @@ pub(crate) fn lower_table(table: &WmlTable, ctx: &mut LowerCtx) -> tdoc::Table {
         rows.push(TableRow { header: row.is_header, cells });
     }
 
-    tdoc::Table { columns, column_widths, rows }
+    // Word's `w:jc` on a *table* places the whole table between the margins;
+    // `w:tblInd` pushes it off the left one. Word applies the indent only to a
+    // table it is actually laying out from the left edge — a centred or
+    // right-aligned table is placed by its alignment and its indent goes
+    // unused — so the two are resolved against each other here rather than
+    // both being emitted and fighting in the output.
+    let align = table.jc.as_deref().and_then(lower_table_jc);
+    let indent_pt = match align {
+        None | Some(tdoc::Align::Left) => table
+            .indent_twips
+            .filter(|&twips| twips > 0)
+            .map(|twips| twip_to_abs(twips as f64).to_pt()),
+        _ => {
+            if table.indent_twips.is_some_and(|twips| twips > 0) {
+                ctx.report.drop(
+                    "table indent",
+                    "Word ignores a table's indent once the table is centred or \
+                     right-aligned; the alignment is kept instead",
+                );
+            }
+            None
+        }
+    };
+
+    tdoc::Table { columns, column_widths, rows, align, indent_pt }
+}
+
+/// `w:tblPr/w:jc` → the Typst alignment the table is wrapped in. `both`/
+/// `distribute` are paragraph justifications with no meaning for a table, and
+/// are left unread rather than turned into an alignment Word never asked for.
+fn lower_table_jc(jc: &str) -> Option<tdoc::Align> {
+    match jc {
+        "center" => Some(tdoc::Align::Center),
+        "right" | "end" => Some(tdoc::Align::Right),
+        "left" | "start" => Some(tdoc::Align::Left),
+        _ => None,
+    }
 }
 
 fn lower_cell(cell: &Cell, rowspan: usize, ctx: &mut LowerCtx) -> TableCell {
@@ -229,6 +265,8 @@ mod tests {
     #[test]
     fn a_page_break_inside_a_table_cell_is_dropped_not_emitted() {
         let table = WmlTable {
+            jc: None,
+            indent_twips: None,
             grid: vec![1000],
             rows: vec![Row {
                 is_header: false,
@@ -287,6 +325,8 @@ mod tests {
     #[test]
     fn a_vertical_merge_becomes_a_rowspan_and_drops_its_continuations() {
         let table = WmlTable {
+            jc: None,
+            indent_twips: None,
             grid: vec![1000, 1000],
             rows: vec![
                 Row {
@@ -324,6 +364,8 @@ mod tests {
     #[test]
     fn an_orphan_continuation_is_kept_as_an_ordinary_cell() {
         let table = WmlTable {
+            jc: None,
+            indent_twips: None,
             grid: vec![1000, 1000],
             rows: vec![Row {
                 is_header: false,
@@ -351,6 +393,8 @@ mod tests {
         wide_continue.grid_span = 2;
 
         let table = WmlTable {
+            jc: None,
+            indent_twips: None,
             grid: vec![1000, 1000, 1000],
             rows: vec![
                 Row { is_header: false, cells: vec![wide, merge_cell("side", None)] },

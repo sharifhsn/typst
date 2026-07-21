@@ -2,6 +2,7 @@
 //! `mappers/`. Called by [`crate::lower`].
 
 pub mod chart;
+pub mod dml_shape;
 pub mod drawing;
 pub mod field;
 pub mod math;

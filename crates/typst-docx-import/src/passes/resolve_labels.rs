@@ -106,7 +106,9 @@ fn collect_inlines(inlines: &Inlines, out: &mut Labels) {
                 collect_inlines(base, out);
                 collect_inlines(gloss, out);
             }
-            Inline::Footnote(blocks) | Inline::TextBox(blocks) => {
+            Inline::Footnote(blocks)
+            | Inline::TextBox(blocks)
+            | Inline::Shape { body: blocks, .. } => {
                 for block in blocks {
                     collect_block(block, out);
                 }
@@ -217,6 +219,12 @@ fn rewrite_inlines(inlines: Inlines, emitted: &Labels, downgraded: &mut bool) ->
                 }
                 out.push(Inline::TextBox(blocks));
             }
+            Inline::Shape { call, mut body } => {
+                for block in &mut body {
+                    rewrite_block(block, emitted, downgraded);
+                }
+                out.push(Inline::Shape { call, body });
+            }
             other => out.push(other),
         }
     }
@@ -314,6 +322,8 @@ mod tests {
             preamble: vec![],
             body: vec![
                 Block::Table(Table {
+                    align: None,
+                    indent_pt: None,
                     columns: 1,
                     column_widths: vec![None],
                     rows: vec![TableRow { header: false, cells: vec![cell] }],

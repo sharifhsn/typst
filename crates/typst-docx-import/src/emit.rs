@@ -124,7 +124,23 @@ impl Emitter<'_> {
             }
             Block::Paragraph { style, body } => self.render_paragraph(style, body),
             Block::List(list) => self.render_list(list),
-            Block::Table(table) => format!("#{}", self.render_table(table)),
+            Block::Table(table) => {
+                // Word's table-level placement (`w:tblPr/w:jc`/`w:tblInd`)
+                // wraps the table rather than being an argument to it, and
+                // only applies to a table standing on its own — the
+                // `render_table` a chart embeds in a `figure(..)` takes the
+                // figure's placement instead, which is why this lives here
+                // and not in `render_table`.
+                let mut out = format!("#{}", self.render_table(table));
+                if let Some(indent) = table.indent_pt {
+                    out = format!("#pad(left: {})[{out}]", pt(indent));
+                }
+                match table.align {
+                    Some(Align::Center) => format!("#align(center)[{out}]"),
+                    Some(Align::Right) => format!("#align(right)[{out}]"),
+                    Some(Align::Left | Align::Justify) | None => out,
+                }
+            }
             Block::Figure(figure) => self.render_figure(figure),
             Block::Chart(chart) => self.render_chart(chart),
             Block::CodeBlock { lang, text } => {
@@ -466,18 +482,7 @@ impl Emitter<'_> {
 
     fn render_figure(&mut self, figure: &Figure) -> String {
         let path = self.resolve_asset(&figure.image_path);
-
-        let mut args = vec![string_literal(&path)];
-        if let Some(width) = figure.width_pt {
-            args.push(format!("width: {}", pt(width)));
-        }
-        if let Some(height) = figure.height_pt {
-            args.push(format!("height: {}", pt(height)));
-        }
-        if let Some(alt) = &figure.alt {
-            args.push(format!("alt: {}", string_literal(alt)));
-        }
-        let image_call = format!("image({})", args.join(", "));
+        let image_call = clipped_image_call(figure, &path);
 
         let block = match &figure.caption {
             Some(caption) => {
@@ -637,6 +642,67 @@ fn file_stem(name: &str) -> &str {
     name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name)
 }
 
+/// A figure's picture as a bare Typst *expression* — an `image(..)` call,
+/// wrapped in the clipping `#box` its Word frame calls for.
+///
+/// Three shapes come out of here, in rising order of how much Word asked for:
+///
+/// 1. no frame and no crop — a plain `image(..)`, unchanged;
+/// 2. a rounded outline only — `box(radius: R, clip: true, image(..))`, the
+///    exact inverse of the `box(radius: .., clip: true)[image]` idiom
+///    `typst-docx` exports as a `roundRect` picture frame;
+/// 3. a crop as well — Typst's `image` has no crop parameter, so the crop is
+///    expressed geometrically: the box is the *visible* frame, and the image
+///    inside it is scaled up to its full uncropped size and slid so the kept
+///    region lands in the frame. Word states each side of `a:srcRect` as a
+///    fraction of the **original** image, so a frame `W` wide showing all but
+///    the outer `l + r` of the picture implies a full width of
+///    `W / (1 - l - r)`, and the hidden left band `l · full` is exactly how
+///    far left the image has to start. `#place` is what lets it hang outside
+///    the box without pushing the box open; `clip: true` cuts off the rest.
+fn clipped_image_call(figure: &Figure, path: &str) -> String {
+    let mut args = vec![string_literal(path)];
+    let (mut image_w, mut image_h) = (figure.width_pt, figure.height_pt);
+    if let Some(crop) = figure.crop {
+        image_w = image_w.map(|w| w / (1.0 - crop.left - crop.right));
+        image_h = image_h.map(|h| h / (1.0 - crop.top - crop.bottom));
+    }
+    if let Some(width) = image_w {
+        args.push(format!("width: {}", pt(width)));
+    }
+    if let Some(height) = image_h {
+        args.push(format!("height: {}", pt(height)));
+    }
+    if let Some(alt) = &figure.alt {
+        args.push(format!("alt: {}", string_literal(alt)));
+    }
+    let mut inner = format!("image({})", args.join(", "));
+
+    if figure.radius_pt.is_none() && figure.crop.is_none() {
+        return inner;
+    }
+
+    let mut box_args = Vec::new();
+    if let Some(crop) = figure.crop {
+        // The box has to state the visible frame explicitly: its content is
+        // now `place`d, which contributes no size of its own.
+        if let Some(width) = figure.width_pt {
+            box_args.push(format!("width: {}", pt(width)));
+        }
+        if let Some(height) = figure.height_pt {
+            box_args.push(format!("height: {}", pt(height)));
+        }
+        let dx = -crop.left * image_w.unwrap_or(0.0);
+        let dy = -crop.top * image_h.unwrap_or(0.0);
+        inner = format!("place(top + left, dx: {}, dy: {}, {inner})", pt(dx), pt(dy));
+    }
+    if let Some(radius) = figure.radius_pt {
+        box_args.push(format!("radius: {}", pt(radius)));
+    }
+    box_args.push("clip: true".to_string());
+    format!("box({}, {inner})", box_args.join(", "))
+}
+
 fn table_columns_arg(table: &Table) -> String {
     let all_auto =
         table.column_widths.is_empty() || table.column_widths.iter().all(Option::is_none);
@@ -671,16 +737,29 @@ impl Emitter<'_> {
             .collect::<Vec<_>>()
             .join("\n");
 
-        // Typst states an enum's numbering once for the whole list rather than
-        // per item, so a list that isn't plain decimal is wrapped in a content
-        // block carrying the set rules. The block scopes them to this list
-        // instead of leaking a document-wide default onto every later enum.
+        // Typst states an enum's numbering — and a bullet list's markers —
+        // once for the whole list rather than per item, so a list that isn't
+        // Typst's default in either respect is wrapped in a content block
+        // carrying the set rules. The block scopes them to this list instead
+        // of leaking a document-wide default onto every later list.
         let mut sets = Vec::new();
         if let Some(numbering) = &list.numbering {
             sets.push(format!("#set enum(numbering: {})", string_literal(numbering)));
         }
         if let Some(start) = list.start {
             sets.push(format!("#set enum(start: {start})"));
+        }
+        if !list.markers.is_empty() {
+            // Typst takes a single marker bare and several as a tuple that it
+            // cycles by depth — the same cycling Word gets from one
+            // `w:lvlText` per `w:ilvl`, so the levels line up as written.
+            let markers: Vec<String> =
+                list.markers.iter().map(|m| format!("[{}]", escape_markup(m))).collect();
+            let arg = match markers.as_slice() {
+                [single] => single.clone(),
+                many => format!("({})", many.join(", ")),
+            };
+            sets.push(format!("#set list(marker: {arg})"));
         }
         if sets.is_empty() {
             return body;
@@ -970,6 +1049,20 @@ impl Emitter<'_> {
             Inline::TextBox(blocks) => {
                 let content = self.render_cell_body(blocks);
                 format!("#box[{content}]")
+            }
+            // A drawn shape. The call arrives ready-made from
+            // `mappers::dml_shape`; all that's left is to hand it the text
+            // Word put inside the shape, as a trailing content block — the
+            // same `render_cell_body` rendering a text box gets, because it
+            // *is* the same kind of content. A shape with no text emits the
+            // call alone, since `#line(..)[]` isn't even valid.
+            Inline::Shape { call, body } => {
+                if body.is_empty() {
+                    call.to_string()
+                } else {
+                    let content = self.render_cell_body(body);
+                    format!("{call}[{content}]")
+                }
             }
             Inline::Verbatim(s) => s.to_string(),
         }
@@ -1284,6 +1377,26 @@ pub(crate) fn pt(value: f64) -> String {
     format!("{}pt", fmt_pt(value))
 }
 
+/// A bare number, formatted like [`pt`] but without the unit — for
+/// `mappers::dml_shape`'s gradient percentages and rotation angles, which are
+/// the same "up to two decimals, no trailing zeros" shape but are not lengths.
+pub(crate) fn num(value: f64) -> String {
+    fmt_pt(value)
+}
+
+/// A color literal including its alpha channel when the color is translucent:
+/// Typst reads an eight-digit hex string as `RRGGBBAA`. Solid colors go
+/// through [`rgb_lit`] unchanged, so nothing that was already opaque grows a
+/// redundant `FF`.
+pub(crate) fn rgba_lit(color: [u8; 4]) -> String {
+    let [r, g, b, a] = color;
+    if a == 255 {
+        rgb_lit([r, g, b])
+    } else {
+        format!("rgb(\"{r:02X}{g:02X}{b:02X}{a:02X}\")")
+    }
+}
+
 /// A series' `label:` argument (`, label: [name]`), or an empty string for an
 /// unnamed series — the one bit [`Emitter::render_xy_marks`] and
 /// [`render_bar_marks`] share, since a bar mark's argument list otherwise
@@ -1358,6 +1471,8 @@ mod tests {
     #[test]
     fn a_row_fully_covered_by_a_merge_emits_no_line() {
         let table = Table {
+            align: None,
+            indent_pt: None,
             columns: 1,
             column_widths: vec![None],
             rows: vec![
@@ -1468,6 +1583,7 @@ mod tests {
         let list = List {
             numbering: None,
             start: None,
+            markers: Vec::new(),
             items: vec![
                 ListItem { ordered: false, level: 0, body: vec![Inline::Text("one".into())] },
                 ListItem { ordered: false, level: 1, body: vec![Inline::Text("two".into())] },
@@ -1551,6 +1667,8 @@ mod tests {
     #[test]
     fn simple_table_with_header_and_fill() {
         let table = Table {
+            align: None,
+            indent_pt: None,
             columns: 2,
             column_widths: vec![],
             rows: vec![
@@ -1791,6 +1909,8 @@ mod tests {
     #[test]
     fn table_chart_renders_like_before_with_no_lilaq_import() {
         let table = Table {
+            align: None,
+            indent_pt: None,
             columns: 1,
             column_widths: vec![],
             rows: vec![TableRow {
@@ -1956,7 +2076,8 @@ mod tests {
     /// import at all — nothing in the source actually needs it.
     #[test]
     fn no_lilaq_import_when_every_chart_is_a_table() {
-        let table = Table { columns: 1, column_widths: vec![], rows: vec![] };
+        let table =
+            Table { columns: 1, column_widths: vec![], rows: vec![], align: None, indent_pt: None };
         let d = doc(
             vec![],
             vec![Block::Chart(Chart { title: None, content: ChartContent::Table(table) })],

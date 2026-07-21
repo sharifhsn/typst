@@ -136,6 +136,13 @@ fn promote_inline(inline: Inline, out: &mut Inlines) {
             }
             out.push(Inline::TextBox(blocks));
         }
+        // Same reasoning for the text inside a drawn shape.
+        Inline::Shape { call, mut body } => {
+            for block in &mut body {
+                walk_block(block);
+            }
+            out.push(Inline::Shape { call, body });
+        }
         other @ (Inline::Text(_)
         | Inline::Space
         | Inline::Linebreak

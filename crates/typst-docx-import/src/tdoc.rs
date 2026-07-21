@@ -220,6 +220,16 @@ pub enum Inline {
     /// equivalent that survives reflow, so the content is kept inline and the
     /// geometry is dropped.
     TextBox(Vec<Block>),
+    /// A drawn shape: a ready-made Typst call (`#rect(..)`, `#curve(..)`, …)
+    /// plus, for a shape Word also gave a text box, the content that goes
+    /// inside it.
+    ///
+    /// The call arrives pre-rendered because a shape is a closed expression
+    /// with nothing for a tier-2 pass to promote — the same reasoning behind
+    /// [`Self::Verbatim`], which the VML shape mapper still uses. It is a
+    /// variant of its own only because `body` cannot ride inside a string:
+    /// those are real blocks, and the passes have to reach them.
+    Shape { call: EcoString, body: Vec<Block> },
     /// Raw Typst source, emitted verbatim (escape hatch).
     Verbatim(EcoString),
 }
@@ -338,6 +348,12 @@ pub struct List {
     pub numbering: Option<EcoString>,
     /// The number the list counts from, when it isn't 1.
     pub start: Option<i64>,
+    /// A Typst `list(marker:)` cycle — one authored bullet glyph per nesting
+    /// depth, shallowest first — when the Word list's markers differ from
+    /// Typst's own. Empty keeps Typst's defaults. Cycling by depth is exactly
+    /// how Typst reads the argument, and exactly how Word stores it (one
+    /// `w:lvlText` per `w:ilvl`), so the two line up without reinterpretation.
+    pub markers: Vec<EcoString>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -354,6 +370,13 @@ pub struct Table {
     /// Per-column widths in points; `None` = auto.
     pub column_widths: Vec<Option<f64>>,
     pub rows: Vec<TableRow>,
+    /// How the table sits between the margins (`w:tblPr/w:jc`) — emitted as an
+    /// `#align(..)` wrapper. `None` leaves it where the flow puts it.
+    pub align: Option<Align>,
+    /// A left indent (`w:tblPr/w:tblInd`) in points, emitted as `#pad(left:)`.
+    /// Only ever set for a table Word left at its default (left) alignment:
+    /// Word itself ignores the indent on a centred or right-aligned table.
+    pub indent_pt: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -511,6 +534,29 @@ pub struct Figure {
     /// Horizontal placement, for a drawing Word floated with a named
     /// alignment. `None` leaves the figure in the flow's own alignment.
     pub align: Option<Align>,
+    /// A rounded outline Word framed the picture with
+    /// (`pic:spPr/a:prstGeom prst="roundRect"`), as a corner radius in points
+    /// — emitted as the `radius:` of a clipping `#box` around the image, the
+    /// exact inverse of what `typst-docx` writes for
+    /// `box(radius: .., clip: true)[image]`.
+    pub radius_pt: Option<f64>,
+    /// A crop (`pic:blipFill/a:srcRect`). Typst's `image` has no crop
+    /// parameter, so this is expressed by oversizing the image inside the
+    /// clipping box and offsetting it — see `emit::Emitter::render_figure`,
+    /// which is where the arithmetic lives.
+    pub crop: Option<Crop>,
+}
+
+/// How much of each side of a picture Word cropped away, as a *fraction* of
+/// the original image's own extent (`0.1` = the leading tenth is hidden).
+/// [`crate::wml::model::SrcRect`]'s 1000ths-of-a-percent are converted once,
+/// at lower time, so the emitter deals in one unit.
+#[derive(Debug, Default, Copy, Clone, PartialEq)]
+pub struct Crop {
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
 }
 
 /// Page geometry (`#set page(..)`), from a `w:sectPr`.

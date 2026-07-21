@@ -272,6 +272,11 @@ pub(crate) fn inlines_have_text(inlines: &Inlines) -> bool {
         // whole box along with it — the exact regression this construct
         // exists to fix.
         Inline::TextBox(_) => true,
+        // A drawn shape is visible ink in its own right, whether or not Word
+        // also put text inside it — the same reasoning as a text box, and the
+        // same consequence: a paragraph whose only content is a shape must not
+        // be classified `ParaKind::Empty` and dropped.
+        Inline::Shape { .. } => true,
         Inline::Verbatim(s) => !s.is_empty(),
     })
 }
