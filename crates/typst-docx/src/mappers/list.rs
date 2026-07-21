@@ -70,7 +70,12 @@ pub fn list(
     let ilvl = depth.min(8) as u8;
     let paragraph_spacing = ctx.word_paragraph_boundary_spacing(styles);
 
-    let markers = resolve_bullet_glyphs(styles.get_ref(ListElem::marker));
+    // Read the marker off the *element*, which falls back to the style chain —
+    // the same accessor Typst's own list layout uses. Reading the style chain
+    // alone (`styles.get_ref(..)`) silently ignores a marker passed directly on
+    // the call, `#list(marker: .., ..)`, which is how markers are usually
+    // written; only `#set list(marker: ..)` would have been honoured.
+    let markers = resolve_bullet_glyphs(elem.marker.get_ref(styles));
     if markers.approximated {
         // The glyph a level shows is generated, not authored text, so no source
         // character is at risk — only the marker's appearance.
