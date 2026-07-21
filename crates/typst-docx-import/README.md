@@ -15,6 +15,9 @@ cargo run -p typst-docx-import --example import -- in.docx out.typ
 cargo run -p typst-docx-import --example import -- --charts=plot in.docx out.typ
 ```
 
+Some constructs — images, and a recovered bibliography — are written *beside*
+the `.typ` as assets, so the emitted source only compiles next to them.
+
 ## Two IRs
 
 ```text
@@ -42,7 +45,7 @@ bold/italic to `*`/`_`, and hoists a preamble.
 | `w:sectPr` | `#set page` |
 | headers / footers | `header:` / `footer:`, page-class variants as one `context` |
 | `w:footnoteReference` | `#footnote[…]` |
-| endnotes | `#footnote[…]` — Typst has no end-of-document note store |
+| endnotes | a superscript mark, bodies collected and numbered at the document's end — Word's own placement |
 | OMML (`m:oMath`) | native Typst maths |
 | `w:ruby` | a generated `#let ruby(base, gloss)` helper |
 | `PAGE` / `NUMPAGES` fields | live `#context counter(page)` calls |
@@ -51,11 +54,39 @@ bold/italic to `*`/`_`, and hoists a preamble.
 | text boxes, shapes | `#box`, `#rect`/`#circle`/`#line`, inlined at the anchor |
 | WordArt (`v:textpath`) | its text, styling dropped |
 | charts | the cached data as a `#figure(table(..))`, or a real plot opt-in |
-| tracked changes | accepted — insertions kept, deletions dropped |
+| `w:comment` + ranges | an invisible `#metadata` anchor pair — see below |
+| tracked changes | rendered as accepted; the record kept as `#metadata` — see below |
+| `b:Sources` + `CITATION` | a hayagriva `bibliography.yml` sidecar + live `#cite(<tag>)` |
+| `w:object` (OLE) | the payload can't be revived, but Word's preview picture is kept and the producer is named |
+| linked styles (`w:link`) | resolved as one style — a paragraph style inherits the run formatting of its character twin |
 
 Wrapper elements that carry no content of their own — `w:sdt` content
-controls, `mc:AlternateContent`, `w:smartTag`, `w:bdo`/`w:dir`, `w:ins` — are
+controls, `mc:AlternateContent`, `w:smartTag`, `w:bdo`/`w:dir` — are
 transparent. Each of them used to swallow whatever it contained.
+
+### Annotations that must not reach the page
+
+A comment and a tracked change are *annotations*: printing them would change
+the document. Dropping them loses real authored information. Both therefore
+lower to a labelled `#metadata`, the one Typst element that is invisible,
+carries an arbitrary value, and stays reachable through `#query` — so the
+rendered output is identical to an import without them, and a `#show` rule can
+opt into displaying them.
+
+```typst
+#metadata((kind: "comment", author: "Ada", date: "…", body: [Check this.])) <comment-7>
+```
+
+Since a label attaches to a single element, a *span* becomes two anchors —
+`<comment-7>` … `<comment-7-end>` — bracketing the words it is about. An
+insertion works the same way around live text; a **deletion** instead carries
+its removed text inside the anchor's own value, because there is nothing left
+in the document to bracket.
+
+`ImportOptions::tracked` chooses between `Preserve` (the default) and
+`Accept`. Both render identically — insertions shown, deletions hidden, which
+is Word's own "all changes accepted" view. They differ only in whether the
+record survives beside it.
 
 ## Not supported
 
@@ -78,9 +109,14 @@ If a Rust WMF/EMF → SVG converter matures, the seam to plug it into is
 `mappers::drawing`, which already sniffs the real format from the leading bytes
 and decides support there.
 
-Also unsupported: `w:object` (OLE embeddings), `v:shape` custom `v:path`
-geometry, multi-section `w:sectPr` (only the final section's page setup and
-furniture is applied), and scatter/bubble chart series (`c:xVal`/`c:yVal`).
+Also unsupported: an OLE embedding's *payload* (only Word's preview picture
+survives, and 95.9% of those previews are themselves metafiles), `v:shape`
+custom `v:path` geometry, tracked **formatting** changes (`w:rPrChange` /
+`w:pPrChange`, which record what the formatting used to be), and
+scatter/bubble chart series (`c:xVal`/`c:yVal`).
+
+For the full picture in both directions, see
+[`DOCX_SUPPORT_MATRIX.md`](DOCX_SUPPORT_MATRIX.md).
 
 ## Testing
 

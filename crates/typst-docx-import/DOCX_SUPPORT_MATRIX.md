@@ -104,7 +104,7 @@ A cell may combine a symbol for the *mechanism* with a note for the *loss*. "Non
 | Character styles | ✅ | ✅ | Import layers para-style-run → char-style → direct formatting. |
 | `basedOn` resolution | ✅ | ✅ | Import: root-first chain, cycle-safe, cap 32 hops. |
 | docDefaults | ✅ | ✅ | Export derives by length-weighted majority vote over body prose; import parses `w:docDefaults`. |
-| Linked styles (`w:link`) | ✅ | ✗ | Export pairs each heading char style via `w:link`; import resolves para and char styles independently. |
+| Linked styles (`w:link`) | ✅ | ✅ | Export pairs each heading char style via `w:link`. Import resolves the two halves as the **one style Word treats them as**: a linked style's run formatting may live in either half, so the character twin is merged in underneath the paragraph style's own run properties (which still win). This was not cosmetic — 740 paragraph styles across the wide corpus keep their run formatting *only* in the character half, among them the `Header`/`Footer` pairs Word itself writes, and every one of them was arriving unformatted. The link is followed for exactly one hop, paragraph → character: it is symmetric, so following it further would bounce between the halves forever. |
 
 ## 6. Headings & outline
 
@@ -375,10 +375,10 @@ Two severities: **Approximate** ("mapped, detail lost") and **Drop** ("content d
 The two directions are **not** inverses. Most of the gaps that used to matter
 have since been closed (see the changelog below); what remains:
 
-**Export-rich, import-blind** — export writes it, import cannot read it back:
-- Linked styles (`w:link`) — cosmetic: import resolves paragraph and character
-  styles independently, which loses the pairing but no formatting. The only
-  one left.
+**Export-rich, import-blind** — *nothing left.* Every construct the exporter
+writes that the importer once ignored has been closed: table borders, row
+heights, paragraph borders, keeps, furniture bands, mirrored margins, shapes,
+image crops, the bibliography, and linked styles.
 
 **Import-capable, export-absent** — import reads it, export has no counterpart:
 - Word charts (`c:chart` / `cx:chart`) — import gives a table or an opt-in
@@ -479,18 +479,58 @@ marker read off the style chain instead of the element, and adjacent lists
 merged across a `w:numId` change, which silently renumbered roman lists to
 arabic.
 
+### Third pass — annotations, the bibliography, and the last asymmetry
+
+The constructs that are not *content* but are still information.
+
+**Comments round-trip in both directions.** A comment is an annotation:
+printing it would change the document, dropping it would lose real authored
+text. Both directions therefore route through a labelled `#metadata` — the one
+Typst element that is invisible, holds an arbitrary value, and stays reachable
+via `#query`. Import lowers `word/comments.xml` into it; export finds it again
+in the tag stream and writes the part back out. A span is two anchors, since a
+Typst label attaches to one element.
+
+**Tracked changes are kept rather than merely accepted** (`TrackedChanges::
+Preserve`, the default). Both modes render the accepted view; Preserve keeps
+the record beside it. Preserve is the default because it is a strict
+information superset at *zero* visual cost — verified by hash: a paragraph
+holding only `#metadata` renders pixel-identically to no paragraph at all. An
+insertion is two anchors around live text; a deletion is one anchor carrying
+the removed text, because there is nothing left to bracket.
+
+**The bibliography comes back.** `b:Sources` becomes a hayagriva sidecar and
+`CITATION` fields become live `#cite`. 95.4% type accuracy, measured across
+15,241 real entries.
+
+**Linked styles were the last export-rich/import-blind construct** — and not
+cosmetic after all: 740 paragraph styles in the wide corpus keep their run
+formatting *only* in their character twin, and were arriving unformatted.
+
+Two defects in this pass came from checking real documents rather than
+fixtures, and both had already shipped:
+
+- A label at the end of a **heading** binds to the heading, not to the
+  `#metadata` it follows — leaving the record unreachable by `#query`. Lists,
+  ordinary paragraphs and table cells all bind correctly; headings alone are
+  the exception. Anchors on a heading are now hoisted to a preceding block.
+- On the export side, a comment anchor that is the first thing in a logical
+  paragraph run arrives as a bare top-level tag rather than inside the
+  following paragraph, on a path the interception missed entirely.
+
 Still open, and deliberately so:
 
-- **Bibliography round-trip** — export writes real `b:Sources` and `CITATION`
-  fields; import parses neither back into `#cite`/`#bibliography`. This needs
-  an inverse of the hayagriva → Word-17-types mapping plus a sidecar `.yml`,
-  and the direction it would run in is the lossy one.
-- **OLE objects (`w:object`)** — neither direction. An embedded application
-  cannot be revived, but these almost always carry a `v:shape` preview image,
-  so importing *that* would beat today's silent nothing.
 - **`w:cantSplit`, `atLeast` row heights, per-column widths, `w:keepNext`** —
   each reported rather than mapped, because Typst has no property that means
   the same thing. See the rows above for the individual reasoning.
-- **Comments, conic gradients, gradient text fill** — genuinely blocked in at
-  least one direction; conic has no OOXML path that sweeps by angle, and Typst
-  has no comment construct for the exporter to find.
+- **An OLE payload** — a foreign application's document cannot be revived.
+  Word's preview picture is kept, but 95.9% of those previews are themselves
+  metafiles.
+- **EMF/WMF metafiles** — no mature Rust decoder, and a metafile is a stream
+  of GDI drawing commands rather than an image. 41% of all media parts.
+- **Conic gradients** — no OOXML path sweeps by angle.
+- **Per-column widths** — Typst's `#columns` is equal-width only.
+- **Tracked changes as visible markup on export** — `w:ins`/`w:del` must *wrap
+  and replace* a span, which point markers cannot express. That is the
+  structural difference from comments, which only ever *point* at a position,
+  and it is why comments round-trip and these do not.

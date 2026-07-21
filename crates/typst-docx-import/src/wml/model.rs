@@ -996,6 +996,13 @@ pub struct Style {
     pub name: Option<EcoString>,
     pub kind: StyleKind,
     pub based_on: Option<EcoString>,
+    /// `w:link` — the *other half* of a linked style. Word treats a linked
+    /// style as one style usable either way round: a paragraph style names
+    /// its character twin here, and the twin names it back. Crucially the run
+    /// formatting may live in **either** half, so resolving the two
+    /// independently loses it whenever the paragraph half is the empty one —
+    /// which is the case for 740 styles across the wide corpus.
+    pub link: Option<EcoString>,
     /// The heading outline level (`w:pPr/w:outlineLvl`, 0-based), if any.
     pub outline_level: Option<u8>,
     pub run: RunProps,

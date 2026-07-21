@@ -520,6 +520,7 @@ mod tests {
                 outline_level: Some(0),
                 run: RunProps::default(),
                 para: ParaProps::default(),
+                ..Default::default()
             },
         );
         let package = WmlPackage {

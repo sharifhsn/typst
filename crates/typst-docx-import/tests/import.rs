@@ -3079,3 +3079,85 @@ fn a_citation_with_no_matching_source_keeps_its_cached_text() {
     assert!(!result.source.contains("#bibliography"), "emitted an empty bibliography");
     assert!(result.assets.is_empty(), "wrote a sidecar nothing refers to");
 }
+
+/// A *linked* style is one style Word lets you apply either as a paragraph
+/// style or as a character style, and its run formatting may live in either
+/// half. Word's own `Header`/`Footer` pairs routinely put it in the character
+/// half, so resolving the two independently lost the formatting outright —
+/// 740 styles across the wide corpus are shaped this way.
+#[test]
+fn a_paragraph_style_inherits_the_run_formatting_of_its_linked_character_style() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:pPr><w:pStyle w:val="Header"/></w:pPr>
+      <w:r><w:t>Running head</w:t></w:r></w:p>
+  </w:body></w:document>"#;
+
+    // The paragraph half carries only paragraph properties; every run
+    // property lives in the linked character half.
+    const STYLES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Header">
+    <w:name w:val="header"/><w:link w:val="HeaderChar"/>
+    <w:pPr><w:jc w:val="center"/></w:pPr>
+  </w:style>
+  <w:style w:type="character" w:styleId="HeaderChar">
+    <w:name w:val="Header Char"/><w:link w:val="Header"/>
+    <w:rPr><w:b/><w:sz w:val="36"/><w:color w:val="C00000"/></w:rPr>
+  </w:style>
+</w:styles>"#;
+
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_xml("word/styles.xml", "application/xml", STYLES_XML.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+    assert!(src.contains("Running head"), "text lost:\n{src}");
+    assert!(src.contains("18pt"), "size from the linked style lost:\n{src}");
+    assert!(src.contains("C00000") || src.contains("c00000"), "colour lost:\n{src}");
+    assert!(src.contains("weight: \"bold\""), "bold from the linked style lost:\n{src}");
+    // The paragraph half's own properties still apply.
+    assert!(src.contains("#align(center)"), "paragraph property lost:\n{src}");
+}
+
+/// The paragraph half wins where both halves state the same property — it is
+/// the one actually applied, the link only fills gaps.
+#[test]
+fn the_paragraph_half_of_a_linked_style_wins_over_the_character_half() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:pPr><w:pStyle w:val="Body"/></w:pPr>
+      <w:r><w:t>Text</w:t></w:r></w:p>
+  </w:body></w:document>"#;
+
+    const STYLES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Body">
+    <w:name w:val="Body"/><w:link w:val="BodyChar"/>
+    <w:rPr><w:sz w:val="24"/></w:rPr>
+  </w:style>
+  <w:style w:type="character" w:styleId="BodyChar">
+    <w:name w:val="Body Char"/><w:link w:val="Body"/>
+    <w:rPr><w:sz w:val="72"/><w:i/></w:rPr>
+  </w:style>
+</w:styles>"#;
+
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_xml("word/styles.xml", "application/xml", STYLES_XML.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+    assert!(src.contains("12pt"), "paragraph half's size should win:\n{src}");
+    assert!(!src.contains("36pt"), "character half overrode the paragraph half:\n{src}");
+    // A property only the character half states still comes through.
+    let italic = src.contains("style: \"italic\"");
+    assert!(italic, "italic only in the linked half was lost:\n{src}");
+}

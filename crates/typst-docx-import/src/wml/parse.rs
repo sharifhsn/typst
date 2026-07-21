@@ -3058,6 +3058,7 @@ fn parse_style(node: Node) -> Style {
         match child.tag_name().name() {
             "name" => style.name = attr(child, "val").map(EcoString::from),
             "basedOn" => style.based_on = attr(child, "val").map(EcoString::from),
+            "link" => style.link = attr(child, "val").map(EcoString::from),
             "rPr" => style.run = parse_run_props(child),
             "pPr" => {
                 // `w:outlineLvl` numbers heading levels 1..=9 as 0..=8; **9 is

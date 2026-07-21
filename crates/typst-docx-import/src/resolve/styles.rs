@@ -1,7 +1,9 @@
 //! Resolve a run/paragraph's *effective* properties by walking `basedOn`
 //! chains + docDefaults + direct formatting.
 
-use crate::wml::model::{BorderEdge, Borders, ParaProps, RunProps, Style, Styles};
+use crate::wml::model::{
+    BorderEdge, Borders, ParaProps, RunProps, Style, StyleKind, Styles,
+};
 
 /// Maximum `basedOn` hops to walk before giving up — guards against a cyclic
 /// style chain (which would otherwise loop forever).
@@ -104,6 +106,15 @@ pub fn effective_run(styles: &Styles, para_style_id: Option<&str>, direct: &RunP
 
     if let Some(pid) = para_style_id {
         for style in style_chain(styles, pid) {
+            // A *linked* style is one style Word lets you apply either as a
+            // paragraph style or as a character style, and its run formatting
+            // may sit in either half. Resolving the halves independently
+            // therefore loses that formatting entirely whenever the paragraph
+            // half is the empty one — the case for 740 styles across the wide
+            // corpus, among them the `Header`/`Footer` pairs Word itself
+            // writes. So the linked character style is merged in underneath
+            // the paragraph style's own run properties, which still win.
+            acc = merge_run(&acc, &linked_run(styles, style));
             acc = merge_run(&acc, &style.run);
         }
     }
@@ -115,6 +126,21 @@ pub fn effective_run(styles: &Styles, para_style_id: Option<&str>, direct: &RunP
     }
 
     merge_run(&acc, direct)
+}
+
+/// The run properties of `style`'s linked character style, if it has one.
+///
+/// Followed for exactly one hop and only from a paragraph style to a
+/// character style. The link is symmetric — each half names the other — so
+/// following it further, or in the other direction, would bounce between the
+/// two forever; and a character style's own `basedOn` chain is already walked
+/// when that style is applied directly through `w:rStyle`.
+fn linked_run(styles: &Styles, style: &Style) -> RunProps {
+    let Some(link) = style.link.as_deref() else { return RunProps::default() };
+    match styles.by_id.get(link) {
+        Some(linked) if linked.kind == StyleKind::Character => linked.run.clone(),
+        _ => RunProps::default(),
+    }
 }
 
 /// Effective paragraph properties: direct `pPr` over paragraph-style (with
