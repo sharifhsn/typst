@@ -11,9 +11,10 @@
 //! document's visible content and dropping it would be a much bigger
 //! fidelity hit than leaving it non-live.
 
-use ecow::EcoString;
+use ecow::{eco_format, EcoString};
 
 use crate::lower::LowerCtx;
+use crate::mappers::bibliography;
 use crate::mappers::run::lower_run_items;
 use crate::tdoc::{Inline, Inlines};
 use crate::wml::model::Field;
@@ -48,6 +49,10 @@ pub(crate) fn lower_field(field: &Field, ctx: &mut LowerCtx) -> Inlines {
         // Cross-references become live again — a real jump and a recomputed
         // page number — rather than staying frozen at whatever Word last
         // rendered, provided the bookmark they name actually exists.
+        // A Word citation names a `b:Tag` in the Source Manager, which is
+        // exactly the key the sidecar uses — so it becomes a live `#cite`
+        // rather than staying frozen at whatever Word last rendered.
+        "CITATION" => lower_citation(&field_type, field, ctx),
         "REF" => lower_reference(&field_type, field, ctx),
         "PAGEREF" => lower_page_reference(&field_type, field, ctx),
         _ => lower_fallback(&field_type, field, ctx),
@@ -335,4 +340,25 @@ mod tests {
         assert!(inlines.is_empty());
         assert!(report.notes.is_empty());
     }
+}
+
+/// ` CITATION Kra06 \l 1033 ` → `#cite(<Kra06>)`.
+///
+/// Falls back to Word's cached text when the field names no tag, or names one
+/// with no matching `b:Source` — a citation pointing at nothing would make
+/// `#bibliography` fail the compile, and a frozen citation still reads
+/// correctly.
+fn lower_citation(field_type: &str, field: &Field, ctx: &mut LowerCtx) -> Inlines {
+    let tag = field
+        .instr
+        .split_whitespace()
+        .nth(1)
+        .filter(|t| !t.starts_with('\\'))
+        .unwrap_or_default()
+        .to_string();
+    if tag.is_empty() || !bibliography::has_source(&ctx.package.sources, &tag) {
+        return lower_fallback(field_type, field, ctx);
+    }
+    ctx.cite();
+    vec![Inline::Verbatim(eco_format!("#cite(<{tag}>)"))]
 }

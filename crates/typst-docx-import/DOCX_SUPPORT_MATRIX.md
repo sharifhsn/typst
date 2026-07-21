@@ -232,7 +232,7 @@ Export walks the resolved `MathItem` IR and emits `m:` OMML directly; a whole eq
 | Feature | Export T→D | Import D→T | Notes |
 |---|---|---|---|
 | In-body citation / bibliography text | ✅ | — | **Major asymmetry.** Export keeps fully-realized CSL-formatted output with clickable back-references. Import: a `w:sdt` bibliography is unwrapped and survives only as its **last-rendered plain text**. |
-| Native Word Source Manager (`b:Sources`) | ✅ | ✗ | Export writes real `b:Sources/b:Source` in `customXml` (hayagriva ~29 → Word 17 source types, coarse) + a deterministic-GUID datastore. Import does not parse `b:Sources`, CITATION fields, or bibliography SDTs into `#cite`/`#bibliography`. |
+| Native Word Source Manager (`b:Sources`) | ✅ | ✅ | Export writes real `b:Sources/b:Source` in `customXml` (hayagriva ~29 → Word 17 source types, coarse) + a deterministic-GUID datastore. **Import inverts it**: the store — found by *content*, since Word numbers `customXml/itemN.xml` by insertion order — becomes a hayagriva `bibliography.yml` sidecar emitted as an asset, and each `CITATION` field becomes a live `#cite(<b:Tag>)`. The seventeen-into-thirty collapse cannot be undone, so each Word type maps to the hayagriva type it most often came from: **95.4% correct** across 15,241 entries from 1,213 real `.bib` files, with the loss concentrated in `Report`, a near coin-flip between report and thesis (313 vs 261). A Word-authored document does better still, since Word uses types like `JournalArticle` that map back exactly. A citation naming a tag with no matching source keeps Word's cached text — a `#cite` pointing at nothing fails the whole compile. The sidecar is written only when something actually cites it (452 corpus documents carry a store; only **17 hold any sources**). |
 | Lossless BibLaTeX sidecar | ✅ | — | Export writes an inert private-namespace `word/typstBibliography.xml` for external tools. |
 
 ## 15. Shapes & drawing
@@ -376,11 +376,9 @@ The two directions are **not** inverses. Most of the gaps that used to matter
 have since been closed (see the changelog below); what remains:
 
 **Export-rich, import-blind** — export writes it, import cannot read it back:
-- The exporter's own bibliography (`b:Sources` + `CITATION` fields) — a
-  round-tripped bibliography comes back as plain text. The largest remaining
-  asymmetry by far.
 - Linked styles (`w:link`) — cosmetic: import resolves paragraph and character
-  styles independently, which loses the pairing but no formatting.
+  styles independently, which loses the pairing but no formatting. The only
+  one left.
 
 **Import-capable, export-absent** — import reads it, export has no counterpart:
 - Word charts (`c:chart` / `cx:chart`) — import gives a table or an opt-in

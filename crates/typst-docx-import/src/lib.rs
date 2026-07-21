@@ -100,7 +100,15 @@ pub fn import_docx_with(
     }
 
     // 4. Emit source, collecting the assets referenced by figures.
-    let (source, assets) = emit::emit(&doc, &package, options);
+    let (source, mut assets) = emit::emit(&doc, &package, options);
+
+    // The bibliography sidecar rides out as another asset — the emitted
+    // `#bibliography(..)` names it, so it has to land beside the `.typ`.
+    // Written only when a citation actually referred to it (see `lower`).
+    if source.contains(mappers::bibliography::SIDECAR) {
+        let yaml = mappers::bibliography::render_yaml(&package.sources);
+        assets.push((PathBuf::from(mappers::bibliography::SIDECAR), yaml.into_bytes()));
+    }
 
     Ok(ImportResult { source, assets, report })
 }

@@ -2993,3 +2993,89 @@ fn an_anchor_on_a_heading_is_hoisted_so_its_label_still_binds_to_the_record() {
     );
     assert!(src.contains("author: \"Reviewer\""), "payload lost:\n{src}");
 }
+
+/// Word's Source Manager lives in a `customXml` part, keyed by a `b:Tag` that
+/// is exactly what a `CITATION` field names — and exactly what `#cite` needs.
+/// So the store becomes a hayagriva sidecar and the citations become live.
+#[test]
+fn word_sources_become_a_hayagriva_sidecar_with_live_citations() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:r><w:t xml:space="preserve">As shown </w:t></w:r>
+      <w:fldSimple w:instr=" CITATION Kra06 \l 1033 ">
+        <w:r><w:t>(Kramer &amp; Chen, 2006)</w:t></w:r>
+      </w:fldSimple>
+      <w:r><w:t>.</w:t></w:r>
+    </w:p>
+  </w:body></w:document>"#;
+
+    const SOURCES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<b:Sources xmlns:b="http://schemas.openxmlformats.org/officeDocument/2006/bibliography">
+  <b:Source>
+    <b:Tag>Kra06</b:Tag><b:SourceType>Book</b:SourceType>
+    <b:Author><b:Author><b:NameList>
+      <b:Person><b:Last>Kramer</b:Last><b:First>James</b:First><b:Middle>D</b:Middle></b:Person>
+      <b:Person><b:Last>Chen</b:Last><b:First>Jackey</b:First></b:Person>
+    </b:NameList></b:Author></b:Author>
+    <b:Title>How to Write Bibliographies</b:Title>
+    <b:Year>2006</b:Year><b:City>Chicago</b:City>
+    <b:Publisher>Adventure Works Press</b:Publisher>
+  </b:Source>
+</b:Sources>"#;
+
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_xml("customXml/item1.xml", "application/xml", SOURCES_XML.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let result = import_docx(&bytes).expect("import should succeed");
+    let src = &result.source;
+    // The citation is live, not Word's frozen "(Kramer & Chen, 2006)".
+    assert!(src.contains("#cite(<Kra06>)"), "citation not made live:\n{src}");
+    assert!(src.contains("#bibliography(\"bibliography.yml\")"), "no bibliography:\n{src}");
+
+    // ...and the sidecar it names rides out as an asset, or the emitted
+    // source would not compile.
+    let (path, bytes) = result
+        .assets
+        .iter()
+        .find(|(p, _)| p.to_string_lossy() == "bibliography.yml")
+        .expect("sidecar not emitted");
+    assert_eq!(path.to_string_lossy(), "bibliography.yml");
+    let yaml = String::from_utf8(bytes.clone()).expect("sidecar should be utf-8");
+    assert!(yaml.contains("\nKra06:\n"), "{yaml}");
+    assert!(yaml.contains("  type: book\n"), "{yaml}");
+    assert!(yaml.contains("    - \"Kramer, James D\"\n"), "{yaml}");
+    assert!(yaml.contains("    name: \"Adventure Works Press\"\n"), "{yaml}");
+}
+
+/// A `CITATION` naming a tag with no matching `b:Source` must keep Word's
+/// cached text: a `#cite` pointing at nothing fails the whole compile, which
+/// is a far worse outcome than a citation that no longer updates.
+#[test]
+fn a_citation_with_no_matching_source_keeps_its_cached_text() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:fldSimple w:instr=" CITATION Ghost99 \l 1033 ">
+        <w:r><w:t>(Ghost, 1999)</w:t></w:r>
+      </w:fldSimple>
+    </w:p>
+  </w:body></w:document>"#;
+
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let result = import_docx(&bytes).expect("import should succeed");
+    assert!(result.source.contains("(Ghost, 1999)"), "cached text lost:\n{}", result.source);
+    assert!(!result.source.contains("#cite("), "cited a source that does not exist");
+    // No citation resolved, so no bibliography and no sidecar to go with it.
+    assert!(!result.source.contains("#bibliography"), "emitted an empty bibliography");
+    assert!(result.assets.is_empty(), "wrote a sidecar nothing refers to");
+}

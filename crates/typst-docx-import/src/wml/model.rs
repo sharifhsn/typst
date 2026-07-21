@@ -80,6 +80,11 @@ pub struct WmlPackage {
     /// `word/comments.xml` by `w:id`. Unlike a note, a comment carries its own
     /// authorship, so this is a struct rather than a bare item list.
     pub comments: FxHashMap<i64, Comment>,
+    /// Word's Source Manager entries (`b:Sources` in a `customXml` item).
+    /// Empty for the overwhelming majority of documents: Word writes the
+    /// store routinely but usually leaves it empty (452 of the wide corpus's
+    /// documents carry one; only 17 hold any actual sources).
+    pub sources: Vec<WordSource>,
     /// Parsed chart parts by zip name (`word/charts/chart1.xml` → data). A
     /// chart's `r:id` reference (see [`RunContent::Chart`]) resolves through
     /// [`Self::rels`] to a target *name*; this map is keyed by the full zip
@@ -98,6 +103,40 @@ pub struct Comment {
     /// `@w:date`, a W3CDTF timestamp, kept verbatim.
     pub date: Option<EcoString>,
     pub body: Vec<BodyItem>,
+}
+
+/// One `b:Source` from Word's Source Manager — a bibliography entry, stored
+/// in a `customXml` part rather than in the document body.
+///
+/// Kept as raw strings, like every other property struct here; the mapping to
+/// hayagriva's vocabulary happens in [`crate::mappers::bibliography`].
+#[derive(Debug, Default, Clone)]
+pub struct WordSource {
+    /// `b:Tag` — the citation key, which is exactly what a `CITATION` field
+    /// names and therefore what `#cite(<key>)` needs.
+    pub tag: EcoString,
+    /// `b:SourceType` — one of Word's seventeen.
+    pub source_type: EcoString,
+    /// `b:Author/b:Author/b:NameList/b:Person`, each `(last, first, middle)`.
+    pub persons: Vec<(EcoString, Option<EcoString>, Option<EcoString>)>,
+    /// `b:Author/b:Author/b:Corporate` — mutually exclusive with `persons`.
+    pub corporate: Option<EcoString>,
+    pub title: Option<EcoString>,
+    pub year: Option<EcoString>,
+    pub month: Option<EcoString>,
+    pub day: Option<EcoString>,
+    pub publisher: Option<EcoString>,
+    pub city: Option<EcoString>,
+    /// `b:JournalName`/`b:BookTitle`/`b:PeriodicalTitle` — whichever container
+    /// title this source type uses. They are mutually exclusive per type, so
+    /// one field holds whichever was present.
+    pub container: Option<EcoString>,
+    pub volume: Option<EcoString>,
+    pub issue: Option<EcoString>,
+    pub pages: Option<EcoString>,
+    pub url: Option<EcoString>,
+    pub doi: Option<EcoString>,
+    pub edition: Option<EcoString>,
 }
 
 #[derive(Debug, Clone)]

@@ -44,6 +44,11 @@ pub(crate) struct LowerCtx<'a> {
     /// (`#outline()` renders every heading, including the one that contains
     /// it — "maximum show rule depth exceeded").
     in_heading: bool,
+    /// Whether any `CITATION` field became a live `#cite`. The bibliography
+    /// sidecar is only emitted when something actually cites it — Word writes
+    /// an empty Source Manager into most documents, and a `#bibliography`
+    /// nothing refers to is noise at best.
+    cited: bool,
     /// How many revision anchors have been emitted, so each gets a unique
     /// label. Word's own `w:id`s are per-revision and not reliably unique
     /// across a document's parts, so they aren't reused.
@@ -86,6 +91,7 @@ impl<'a> LowerCtx<'a> {
             options,
             report,
             note_stack: Vec::new(),
+            cited: false,
             revision_counter: 0,
             open_revisions: Vec::new(),
             in_container: false,
@@ -98,6 +104,12 @@ impl<'a> LowerCtx<'a> {
 
     /// Claim `label` for emission, or `false` if it has already been emitted
     /// elsewhere in the document — see [`Self::emitted_labels`].
+    /// Record that a citation was emitted, so `lower` knows to write the
+    /// bibliography sidecar and the `#bibliography(..)` call.
+    pub(crate) fn cite(&mut self) {
+        self.cited = true;
+    }
+
     pub(crate) fn claim_label(&mut self, label: &EcoString) -> bool {
         self.emitted_labels.insert(label.clone())
     }
@@ -270,6 +282,20 @@ pub(crate) fn lower(ctx: &mut LowerCtx) -> TypstDoc {
         for (index, body) in endnotes.into_iter().enumerate() {
             doc.body.extend(numbered_endnote(index + 1, body));
         }
+    }
+
+    // Word renders its bibliography through a field wherever the author put
+    // one; Typst renders `#bibliography` where it is called. Emitting it at
+    // the document's end — after the endnotes, which is also where Word puts
+    // those — is where a bibliography almost always sits, and it is the one
+    // position that needs no guess about which field was the bibliography's.
+    //
+    // Only when something actually cited it: Word writes an empty Source
+    // Manager into most documents, and even a populated one is often left
+    // over from an earlier draft with no live citation pointing at it.
+    if ctx.cited {
+        let call = eco_format!("#bibliography({:?})", mappers::bibliography::SIDECAR);
+        doc.body.push(Block::Verbatim(call));
     }
 
     doc

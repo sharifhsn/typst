@@ -1,6 +1,7 @@
 //! WML → Typst-IR mappers, one per Word construct. Mirror of the exporter's
 //! `mappers/`. Called by [`crate::lower`].
 
+pub mod bibliography;
 pub mod chart;
 pub mod comment;
 pub mod dml_shape;

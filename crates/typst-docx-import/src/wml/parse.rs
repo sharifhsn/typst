@@ -17,7 +17,7 @@ use crate::ImportError;
 use crate::report::ImportReport;
 use crate::wml::model::{
     BorderEdge, Borders, Body, BodyItem, BreakType, Cell, CellMargins, ChartData,
-    ChartKind, Comment, RevisionInfo,
+    ChartKind, Comment, RevisionInfo, WordSource,
     ChartSeries, DmlDash, DmlFill, DmlGeometry, DmlGradient, DmlGradientKind, DmlSeg, DmlShape,
     DmlStroke, DocumentMeta, DrawingRef, Field,
     FurnitureKind, FurnitureRef, LegendPos, LevelFormat, NumRef, Numbering, ParaProps, Paragraph,
@@ -372,6 +372,7 @@ pub fn parse_package(
         parse_notes_part(&mut reader, &mut rels, "word/footnotes.xml", "footnote", report);
     let endnotes = parse_notes_part(&mut reader, &mut rels, "word/endnotes.xml", "endnote", report);
     let comments = parse_comments_part(&mut reader, &mut rels, report);
+    let sources = parse_bibliography(&mut reader, report);
     let charts = parse_chart_parts(&mut reader, report);
 
     let bookmarks = collect_bookmarks(&body);
@@ -390,6 +391,7 @@ pub fn parse_package(
         footnotes,
         endnotes,
         comments,
+        sources,
         charts,
     })
 }
@@ -951,7 +953,9 @@ fn parse_furniture_parts(
         // downstream by `mappers::section`'s own "visually empty" check)
         // rather than aborting the rest of the document — same policy as
         // every other companion part.
-        let Some(xml) = read_optional_part(reader, &name, &name, report) else { continue };
+        let Some(xml) = read_optional_part(reader, &name, &name, report) else {
+            continue;
+        };
         let mut items = parse_xml(&xml, &name, report, Vec::new(), parse_furniture_part);
         namespace_rel_ids(&mut items, &name);
 
@@ -1044,6 +1048,110 @@ fn namespace_run_items(items: &mut [RunItem], part: &str) {
 }
 
 // --- word/footnotes.xml, word/endnotes.xml ------------------------------------
+
+/// Parse Word's Source Manager (`b:Sources`) out of whichever `customXml`
+/// item holds it.
+///
+/// Unlike every other part this module reads, the bibliography has no fixed
+/// name: Word numbers `customXml/itemN.xml` by insertion order, so the store
+/// is found by *content* — the first item whose root is `b:Sources`. Matching
+/// on the local name keeps that producer-agnostic, exactly as elsewhere here.
+///
+/// Word writes the store routinely and usually leaves it empty, so an empty
+/// result is the normal case, not a failure.
+fn parse_bibliography(reader: &mut Reader, report: &mut ImportReport) -> Vec<WordSource> {
+    let names: Vec<EcoString> = reader
+        .names()
+        .iter()
+        .filter(|n| n.starts_with("customXml/item") && n.ends_with(".xml"))
+        .cloned()
+        .collect();
+
+    for name in names {
+        let Some(xml) = read_optional_part(reader, &name, &name, report) else {
+            continue;
+        };
+        let sources = parse_xml(&xml, &name, report, Vec::new(), |document| {
+            let root = document.root_element();
+            if root.tag_name().name() != "Sources" {
+                return Vec::new();
+            }
+            root.children()
+                .filter(|n| is_element(*n, "Source"))
+                .filter_map(parse_source)
+                .collect()
+        });
+        if !sources.is_empty() {
+            return sources;
+        }
+    }
+    Vec::new()
+}
+
+/// One `b:Source`. `None` without a `b:Tag`: that is the citation key, and an
+/// entry nothing can cite is not worth carrying into the sidecar.
+fn parse_source(node: Node) -> Option<WordSource> {
+    let mut source = WordSource::default();
+    for child in node.children().filter(|n| n.is_element()) {
+        let text = || child.text().map(EcoString::from).filter(|t| !t.is_empty());
+        match child.tag_name().name() {
+            "Tag" => source.tag = text()?,
+            "SourceType" => source.source_type = text().unwrap_or_default(),
+            "Title" => source.title = text(),
+            "Year" => source.year = text(),
+            "Month" => source.month = text(),
+            "Day" => source.day = text(),
+            "Publisher" => source.publisher = text(),
+            "City" => source.city = text(),
+            // Word uses a different container element per source type, and
+            // they are mutually exclusive, so one field holds whichever came.
+            "JournalName" | "BookTitle" | "PeriodicalTitle" | "ConferenceName"
+            | "ProductionCompany" => {
+                source.container = source.container.clone().or_else(text);
+            }
+            "Volume" => source.volume = text(),
+            "Issue" => source.issue = text(),
+            "Pages" => source.pages = text(),
+            "URL" => source.url = text(),
+            "DOI" => source.doi = text(),
+            "Edition" => source.edition = text(),
+            "Author" => parse_source_authors(child, &mut source),
+            _ => {}
+        }
+    }
+    (!source.tag.is_empty()).then_some(source)
+}
+
+/// `b:Author` nests a second `b:Author` inside itself (Word's schema
+/// distinguishes the *role* from the names), holding either a `b:NameList` of
+/// people or a single `b:Corporate` name — never both.
+fn parse_source_authors(node: Node, source: &mut WordSource) {
+    for role in node.children().filter(|n| n.is_element()) {
+        for inner in role.children().filter(|n| n.is_element()) {
+            match inner.tag_name().name() {
+                "Corporate" => {
+                    source.corporate = inner.text().map(EcoString::from);
+                }
+                "NameList" => {
+                    for person in inner.children().filter(|n| is_element(*n, "Person")) {
+                        let part = |name| {
+                            person
+                                .children()
+                                .find(|n| is_element(*n, name))
+                                .and_then(|n| n.text())
+                                .map(EcoString::from)
+                                .filter(|t| !t.is_empty())
+                        };
+                        if let Some(last) = part("Last") {
+                            source.persons.push((last, part("First"), part("Middle")));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
 
 /// Parse `word/comments.xml` into a map of `w:id` → [`Comment`].
 ///
@@ -2567,7 +2675,9 @@ fn parse_chart_parts(
         // drawing then simply has no chart data to resolve, same as any
         // other unresolvable reference) — same policy as every other
         // companion part.
-        let Some(xml) = read_optional_part(reader, &name, &name, report) else { continue };
+        let Some(xml) = read_optional_part(reader, &name, &name, report) else {
+            continue;
+        };
         let chart = parse_xml(&xml, &name, report, None, |document| {
             let root = document.root_element();
             (root.tag_name().name() == "chartSpace").then(|| parse_chart_space(root))
