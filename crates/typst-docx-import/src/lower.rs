@@ -305,6 +305,20 @@ pub(crate) fn lower_items(items: &[BodyItem], ctx: &mut LowerCtx) -> Vec<Block> 
                 match kind {
                     ParaKind::ListItem { ordered, level, body, num_id } => {
                         let item = ListItem { ordered, level, body };
+                        // A different `w:numId` is a different Word list, so it
+                        // starts a new Typst list instead of merging into the
+                        // one before it. Merging is also what made the
+                        // numbering ambiguous: a Typst list states one format
+                        // for the whole run, so a bullet list immediately
+                        // followed by a roman one resolved its format from the
+                        // bullet — and silently lost the roman numerals.
+                        let continues =
+                            pending_list.as_ref().is_some_and(|p| p.num_id == num_id);
+                        if !continues
+                            && let Some(pending) = pending_list.take()
+                        {
+                            blocks.push(pending.finish(&ctx.package.numbering));
+                        }
                         match pending_list.as_mut() {
                             Some(pending) => pending.push(item),
                             None => pending_list = Some(PendingList::new(item, num_id)),
