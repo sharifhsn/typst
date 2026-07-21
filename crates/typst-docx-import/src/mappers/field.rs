@@ -45,8 +45,70 @@ pub(crate) fn lower_field(field: &Field, ctx: &mut LowerCtx) -> Inlines {
         // other unmapped field already uses instead.
         "TOC" if ctx.in_heading() => lower_fallback(&field_type, field, ctx),
         "TOC" => vec![Inline::Verbatim("#outline()".into())],
+        // Cross-references become live again — a real jump and a recomputed
+        // page number — rather than staying frozen at whatever Word last
+        // rendered, provided the bookmark they name actually exists.
+        "REF" => lower_reference(&field_type, field, ctx),
+        "PAGEREF" => lower_page_reference(&field_type, field, ctx),
         _ => lower_fallback(&field_type, field, ctx),
     }
+}
+
+/// The bookmark a `REF`/`PAGEREF` names: the first instruction token after
+/// the field type that isn't a `\switch`.
+fn bookmark_argument(instr: &str) -> Option<EcoString> {
+    let mut skip_switch_argument = false;
+    for token in instr.split_whitespace().skip(1) {
+        if let Some(switch) = token.strip_prefix('\\') {
+            // The formatting switches take a following argument
+            // (`\* MERGEFORMAT`); the flag switches (`\h`, `\p`, `\n`) don't,
+            // so only the former may swallow the next token.
+            skip_switch_argument = matches!(switch, "*" | "#" | "@");
+            continue;
+        }
+        if skip_switch_argument {
+            skip_switch_argument = false;
+            continue;
+        }
+        return Some(token.trim_matches('"').into());
+    }
+    None
+}
+
+/// `REF bookmark` → `#link(<label>)[cached text]`.
+///
+/// The displayed text deliberately stays Word's cached result: `REF` shows the
+/// *content* of the bookmarked range, and Typst has no equivalent for that
+/// (`@label` renders a numbered reference, not the referenced text). So the
+/// text is kept as-is and only the jump is made live — a strictly smaller loss
+/// than the generic fallback, which keeps the text but no link at all.
+fn lower_reference(field_type: &str, field: &Field, ctx: &mut LowerCtx) -> Inlines {
+    let Some(label) =
+        bookmark_argument(&field.instr).and_then(|name| ctx.package.bookmarks.get(&name).cloned())
+    else {
+        return lower_fallback(field_type, field, ctx);
+    };
+    let mut body = lower_run_items(&field.result, None, ctx);
+    if body.is_empty() {
+        body = vec![Inline::Text(label.clone())];
+    }
+    ctx.report.approximate(
+        "field REF",
+        "displayed text is Word's cached text; the jump itself is live",
+    );
+    vec![Inline::LabelLink { label, body }]
+}
+
+/// `PAGEREF bookmark` → `#context counter(page).at(<label>).first()`, which
+/// recomputes the page number under Typst's own pagination instead of
+/// repeating whatever Word last cached — the same reasoning as `PAGE`.
+fn lower_page_reference(field_type: &str, field: &Field, ctx: &mut LowerCtx) -> Inlines {
+    let Some(label) =
+        bookmark_argument(&field.instr).and_then(|name| ctx.package.bookmarks.get(&name).cloned())
+    else {
+        return lower_fallback(field_type, field, ctx);
+    };
+    vec![Inline::PageRef(label)]
 }
 
 /// `HYPERLINK "dest" \o "tooltip" ...` → `#link(dest)[body]`, with `body`
@@ -80,6 +142,26 @@ fn lower_fallback(field_type: &str, field: &Field, ctx: &mut LowerCtx) -> Inline
         );
     }
     body
+}
+
+#[cfg(test)]
+mod bookmark_argument_tests {
+    use super::bookmark_argument;
+
+    /// The bookmark is the first token after the field type that isn't a
+    /// `\switch` — switches routinely precede it in real instructions.
+    #[test]
+    fn reads_the_bookmark_past_any_switches() {
+        assert_eq!(bookmark_argument(" REF _Ref47 \\h ").as_deref(), Some("_Ref47"));
+        assert_eq!(bookmark_argument(" PAGEREF \\h _Toc9 ").as_deref(), Some("_Toc9"));
+        assert_eq!(bookmark_argument(r#" REF "_Ref47" "#).as_deref(), Some("_Ref47"));
+        assert_eq!(bookmark_argument(" REF ").as_deref(), None);
+        // `\*` takes an argument, so `MERGEFORMAT` is not the bookmark.
+        assert_eq!(
+            bookmark_argument(" REF \\* MERGEFORMAT _Ref9 ").as_deref(),
+            Some("_Ref9")
+        );
+    }
 }
 
 /// The first whitespace-separated token of a field instruction, uppercased —

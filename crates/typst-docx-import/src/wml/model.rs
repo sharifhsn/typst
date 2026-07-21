@@ -11,12 +11,46 @@
 use ecow::EcoString;
 use rustc_hash::FxHashMap;
 
+/// `docProps/core.xml` — the package's core properties (Word's File → Info
+/// panel). Typst carries the same set on `#set document(..)` and `typst-docx`
+/// already writes them on export, so importing them closes the round-trip
+/// rather than leaving metadata as an export-only nicety.
+///
+/// Values are kept verbatim as Word wrote them; the list-shaped ones are split
+/// at lower time (see `lower::document_info`), mirroring how [`RunProps`]
+/// keeps raw hex colors for the mappers to resolve.
+#[derive(Debug, Default, Clone)]
+pub struct DocumentMeta {
+    /// `dc:title`.
+    pub title: Option<EcoString>,
+    /// `dc:creator` — one semicolon-separated string when there are several
+    /// authors, which is exactly the form `typst-docx` writes.
+    pub creator: Option<EcoString>,
+    /// `dc:description`. Typst's `document` has no counterpart, so this is
+    /// reported as a drop rather than silently discarded.
+    pub description: Option<EcoString>,
+    /// `cp:keywords` — comma-separated, Word's own convention.
+    pub keywords: Option<EcoString>,
+    /// `dcterms:created`, a W3CDTF timestamp.
+    pub created: Option<EcoString>,
+}
+
 /// Everything parsed out of the package that the importer consumes.
 #[derive(Debug, Default)]
 pub struct WmlPackage {
     pub body: Body,
     pub styles: Styles,
     pub numbering: Numbering,
+    /// `docProps/core.xml`, if the package has one.
+    pub meta: DocumentMeta,
+    /// Every `w:bookmarkStart` name in the document, mapped to the Typst label
+    /// it lowers to. Built once after parsing (see
+    /// [`crate::wml::parse::collect_bookmarks`]) because resolution runs in
+    /// both directions: a paragraph needs the label to *emit*, while a
+    /// `REF`/`PAGEREF` field or an internal hyperlink elsewhere in the
+    /// document — possibly earlier than the bookmark itself — needs to know
+    /// the target exists before it can link to it.
+    pub bookmarks: FxHashMap<EcoString, EcoString>,
     /// `rId` → relationship target (image part name, hyperlink URL, …).
     /// Header/footer parts number their own `rId`s independently of
     /// `document.xml` (see [`Self::furniture`]), so an id resolved from a
@@ -103,6 +137,11 @@ pub enum RunItem {
     /// where the hyperlink supplies the jump target and a nested
     /// PAGEREF/REF field supplies the displayed page number.
     Hyperlink { rel_id: Option<EcoString>, anchor: Option<EcoString>, runs: Vec<RunItem> },
+    /// `w:bookmarkStart` — a named anchor. Word writes a bookmark as a
+    /// start/end pair *around* a range, but Typst has only point labels, so
+    /// only the start is modelled: it is the position a `REF`/`PAGEREF` field
+    /// or an internal hyperlink jumps to, which is all a jump target needs.
+    Bookmark(EcoString),
     /// A Word field. Both OOXML spellings — the `w:fldSimple` element and the
     /// flattened `w:fldChar` begin/separate/end run sequence — are folded
     /// back into this one logical item at parse time, so lowering sees a
@@ -138,7 +177,13 @@ pub enum RunContent {
     /// A `w:drawing` inline/anchored image → the `rId` of its blip.
     Drawing(DrawingRef),
     /// OMML math (`m:oMath`) captured as a raw XML fragment.
-    Math(EcoString),
+    ///
+    /// `display` marks an equation Word set as its own block — one that came
+    /// from an `m:oMathPara` wrapper rather than sitting inline among text.
+    /// The wrapper is flattened at parse time (one fragment per `m:oMath`), so
+    /// without this flag the block/inline distinction would be lost and every
+    /// equation would come back as inline `$..$`.
+    Math { xml: EcoString, display: bool },
     /// `w:ruby` — a phonetic guide (furigana): `gloss` is the small reading
     /// set above `base`. Both halves hold ordinary runs, and `w:ruby` sits
     /// *inside* a `w:r`, which is why it is run content rather than a
@@ -201,6 +246,12 @@ pub struct DrawingRef {
     pub cx_emu: Option<i64>,
     pub cy_emu: Option<i64>,
     pub alt: Option<EcoString>,
+    /// `wp:anchor/wp:positionH/wp:align` — a floating drawing's *named*
+    /// horizontal placement ("left"/"center"/"right"). An inline drawing has
+    /// none. The absolute `wp:posOffset` spelling is deliberately not read:
+    /// it is page-relative geometry with no equivalent in Typst's flow, and
+    /// guessing at it would move images somewhere Word never put them.
+    pub align: Option<EcoString>,
 }
 
 // --- VML shapes (`v:rect`/`v:oval`/`v:roundrect`/`v:line`, in a `w:pict`) ----
@@ -253,10 +304,25 @@ pub struct ParaProps {
     pub num: Option<NumRef>,
     /// `w:spacing/@w:before` in twips.
     pub spacing_before: Option<i64>,
+    /// `w:spacing/@w:after` in twips.
+    pub spacing_after: Option<i64>,
     /// `w:spacing/@w:line` in twips.
     pub line: Option<i64>,
     /// `w:ind/@w:left` (or `@w:start`) in twips.
     pub indent_left: Option<i64>,
+    /// `w:ind/@w:right` (or `@w:end`) in twips.
+    pub indent_right: Option<i64>,
+    /// `w:ind/@w:firstLine` in twips — an extra indent on the first line only.
+    /// Mutually exclusive with [`Self::indent_hanging`] in practice: Word
+    /// writes one or the other, never both.
+    pub indent_first_line: Option<i64>,
+    /// `w:ind/@w:hanging` in twips — the first line pulled *back* out of the
+    /// left indent.
+    pub indent_hanging: Option<i64>,
+    /// `w:shd/@w:fill` — the paragraph's background shading, hex `RRGGBB` (or
+    /// "auto"). The cell-level spelling of the same element is
+    /// [`Cell::shd_fill`].
+    pub shd_fill: Option<EcoString>,
     /// Run properties on the paragraph mark (`w:pPr/w:rPr`) — the default for
     /// bare runs and empty paragraphs.
     pub mark_props: RunProps,
@@ -289,17 +355,42 @@ pub struct RunProps {
     pub bold: Toggle,
     pub italic: Toggle,
     pub strike: Toggle,
+    /// `w:dstrike` — a double strikethrough. Typst has only one strike, so
+    /// this lowers to the same `#strike` with the doubling reported as an
+    /// approximation rather than being dropped outright.
+    pub dstrike: Toggle,
     pub smallcaps: Toggle,
+    /// `w:caps` — all-capitals *display* (the stored text is unchanged, which
+    /// is why this is a run property rather than a rewrite of the text).
+    pub caps: Toggle,
     /// `w:u/@w:val` (e.g. "single", "none").
     pub underline: Option<EcoString>,
+    /// `w:u/@w:color` — hex `RRGGBB` (or "auto"), the underline's own color,
+    /// which Word tracks independently of the text color.
+    pub underline_color: Option<EcoString>,
+    /// `w:highlight/@w:val` — one of Word's sixteen *named* marker colors
+    /// (never a hex value; arbitrary backgrounds are `w:shd` instead). Kept as
+    /// the raw name for [`crate::mappers::run`] to resolve, mirroring how
+    /// [`Self::color`] keeps a raw hex string.
+    pub highlight: Option<EcoString>,
     /// `w:color/@w:val` — hex `RRGGBB` (or "auto").
     pub color: Option<EcoString>,
     /// `w:sz/@w:val` in half-points.
     pub size_half_pt: Option<i64>,
+    /// `w:spacing/@w:val` on a *run* — inter-character tracking in twips
+    /// (signed; negative tightens). Not to be confused with
+    /// [`ParaProps::spacing_before`], which is the same element name on a
+    /// paragraph meaning something entirely different.
+    pub letter_spacing: Option<i64>,
     /// `w:rFonts/@w:ascii`.
     pub font: Option<EcoString>,
+    /// `w:lang/@w:val` — a BCP-47-ish tag ("en-US"), split into Typst's
+    /// separate `lang`/`region` arguments at lower time.
+    pub lang: Option<EcoString>,
     /// `w:vertAlign/@w:val` ("superscript"/"subscript").
     pub vert_align: Option<EcoString>,
+    /// `w:rtl` — right-to-left run direction.
+    pub rtl: Toggle,
     /// `w:vanish` — hidden text.
     pub vanish: Toggle,
 }
@@ -327,7 +418,63 @@ pub struct Cell {
     pub v_merge: Option<bool>,
     /// `w:shd/@w:fill` hex.
     pub shd_fill: Option<EcoString>,
+    /// `w:tcBorders` — the cell's own border overrides.
+    pub borders: CellBorders,
+    /// `w:vAlign/@w:val` ("top"/"center"/"bottom").
+    pub v_align: Option<EcoString>,
+    /// `w:tcMar` — the cell's inner margins.
+    pub margins: CellMargins,
     pub content: Vec<BodyItem>,
+}
+
+/// `w:tcBorders` — a cell's four border sides, kept raw (`w:sz` in eighths of
+/// a point, colors as hex strings) for [`crate::mappers::table`] to resolve,
+/// the same contract [`RunProps`] follows.
+///
+/// A side left `None` means Word said nothing about it, which is *not* the
+/// same as Word explicitly switching it off — see [`BorderEdge::is_none`].
+#[derive(Debug, Default, Clone)]
+pub struct CellBorders {
+    pub top: Option<BorderEdge>,
+    pub bottom: Option<BorderEdge>,
+    pub left: Option<BorderEdge>,
+    pub right: Option<BorderEdge>,
+}
+
+/// One side of a [`CellBorders`].
+#[derive(Debug, Clone)]
+pub struct BorderEdge {
+    /// `@w:val` — "single", "double", …, or "nil"/"none" for no border at all.
+    pub val: EcoString,
+    /// `@w:sz` in eighths of a point.
+    pub sz_eighth_pt: Option<i64>,
+    /// `@w:color` — hex `RRGGBB` (or "auto").
+    pub color: Option<EcoString>,
+}
+
+impl BorderEdge {
+    /// Whether this side explicitly draws *no* border.
+    pub fn is_none(&self) -> bool {
+        self.val == "nil" || self.val == "none"
+    }
+}
+
+/// `w:tcMar` — a cell's four inner margins, in twips.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CellMargins {
+    pub top: Option<i64>,
+    pub bottom: Option<i64>,
+    pub left: Option<i64>,
+    pub right: Option<i64>,
+}
+
+impl CellMargins {
+    pub fn is_empty(&self) -> bool {
+        self.top.is_none()
+            && self.bottom.is_none()
+            && self.left.is_none()
+            && self.right.is_none()
+    }
 }
 
 // --- Charts (`word/charts/*.xml`) -------------------------------------------
@@ -514,21 +661,43 @@ pub struct Numbering {
     pub instances: FxHashMap<i64, i64>,
     /// `abstractNumId` → per-level format.
     pub abstract_nums: FxHashMap<i64, FxHashMap<i64, LevelFormat>>,
+    /// `(numId, ilvl)` → `w:lvlOverride/w:startOverride`. Kept separate from
+    /// [`Self::abstract_nums`] because an override belongs to the *instance*:
+    /// several `w:num`s routinely share one `abstractNum` and restart at
+    /// different numbers, so folding the override into the shared definition
+    /// would leak one list's starting number into every sibling list.
+    pub start_overrides: FxHashMap<(i64, i64), i64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct LevelFormat {
     /// `w:numFmt/@w:val` ("bullet", "decimal", …).
     pub num_fmt: EcoString,
+    /// `w:start/@w:val` — the number this level counts from.
+    pub start: Option<i64>,
 }
 
 impl Numbering {
-    /// Whether a `(numId, ilvl)` reference is an ordered (numbered) list.
-    pub fn is_ordered(&self, num_id: i64, ilvl: i64) -> bool {
+    /// The resolved level definition behind a `(numId, ilvl)` reference.
+    pub fn level(&self, num_id: i64, ilvl: i64) -> Option<&LevelFormat> {
         self.instances
             .get(&num_id)
             .and_then(|abs| self.abstract_nums.get(abs))
             .and_then(|levels| levels.get(&ilvl))
+    }
+
+    /// Whether a `(numId, ilvl)` reference is an ordered (numbered) list.
+    pub fn is_ordered(&self, num_id: i64, ilvl: i64) -> bool {
+        self.level(num_id, ilvl)
             .is_some_and(|fmt| fmt.num_fmt != "bullet" && fmt.num_fmt != "none")
+    }
+
+    /// The number a `(numId, ilvl)` reference counts from: the instance's own
+    /// `w:startOverride` if it has one, else the shared definition's `w:start`.
+    pub fn start(&self, num_id: i64, ilvl: i64) -> Option<i64> {
+        self.start_overrides
+            .get(&(num_id, ilvl))
+            .copied()
+            .or_else(|| self.level(num_id, ilvl).and_then(|level| level.start))
     }
 }

@@ -40,7 +40,7 @@ fn walk_block(block: &mut Block, default: &TextStyle) {
     match block {
         Block::Heading { body, .. } => collapse_in_place(body, default, true),
         Block::Paragraph { body, .. } => collapse_in_place(body, default, false),
-        Block::List(List { items }) => {
+        Block::List(List { items, .. }) => {
             for item in items {
                 collapse_in_place(&mut item.body, default, false);
             }
@@ -122,6 +122,10 @@ fn collapse_inline(inline: Inline, default: &TextStyle, in_heading: bool, out: &
             out.push(Inline::Strong(collapse_inlines(body, default, in_heading)))
         }
         Inline::Emph(body) => out.push(Inline::Emph(collapse_inlines(body, default, in_heading))),
+        Inline::LabelLink { label, body } => out.push(Inline::LabelLink {
+            label,
+            body: collapse_inlines(body, default, in_heading),
+        }),
         Inline::Link { dest, body } => out.push(Inline::Link {
             dest,
             body: collapse_inlines(body, default, in_heading),
@@ -168,14 +172,20 @@ fn collapse_inline(inline: Inline, default: &TextStyle, in_heading: bool, out: &
         | Inline::Linebreak
         | Inline::Raw(_)
         | Inline::Math(_)
+        | Inline::Label(_)
+        | Inline::PageRef(_)
         | Inline::Verbatim(_)) => out.push(other),
     }
 }
 
 /// Diff `style` against `default`, clearing whatever field is redundant.
-/// `bold`/`italic`/`underline`/`strike`/`smallcaps`/`script` are left as-is
-/// (the doc default is essentially always off for these), except inside a
-/// heading where size/weight/font/color are implied by the heading itself.
+/// The decoration flags (`bold`/`italic`/`underline`/`strike`/`smallcaps`/
+/// `caps`/`script`/`highlight`/`rtl`) are left as-is — the doc default is
+/// essentially always off for these — except inside a heading where
+/// size/weight/font/color are implied by the heading itself.
+///
+/// `lang` *is* reduced: Word stamps a language onto nearly every run, so
+/// leaving it would put a redundant `lang:` argument on all of them.
 fn reduce_style(style: &TextStyle, default: &TextStyle, in_heading: bool) -> TextStyle {
     let mut reduced = style.clone();
 
@@ -187,6 +197,9 @@ fn reduce_style(style: &TextStyle, default: &TextStyle, in_heading: bool) -> Tex
     }
     if reduced.color == default.color {
         reduced.color = None;
+    }
+    if reduced.lang == default.lang {
+        reduced.lang = None;
     }
 
     if in_heading {

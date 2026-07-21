@@ -189,6 +189,7 @@ fn run_item_has_tab(item: &RunItem) -> bool {
         RunItem::Run(r) => r.content.iter().any(|c| matches!(c, RunContent::Tab)),
         RunItem::Hyperlink { runs, .. } => runs.iter().any(run_item_has_tab),
         RunItem::Field(f) => f.result.iter().any(run_item_has_tab),
+        RunItem::Bookmark(_) => false,
     }
 }
 

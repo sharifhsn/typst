@@ -679,10 +679,11 @@ fn self_referential_footnote_does_not_hang_the_importer() {
     );
 }
 
-/// Typst has no end-of-document note store, so an endnote is lowered as a
-/// footnote at its reference site — a real, reported approximation.
+/// Typst has no end-of-document note store, so an endnote leaves a superscript
+/// mark at its reference and its body is collected at the document's end —
+/// a real, reported approximation, but one that keeps Word's placement.
 #[test]
-fn endnote_lowers_to_a_footnote_with_the_approximation_recorded() {
+fn endnote_is_marked_in_place_and_collected_at_the_document_end() {
     let doc_body = r#"<w:p>
       <w:r><w:t xml:space="preserve">Body text. </w:t></w:r>
       <w:r><w:endnoteReference w:id="1"/></w:r>
@@ -692,8 +693,18 @@ fn endnote_lowers_to_a_footnote_with_the_approximation_recorded() {
 
     let result = import_docx(&docx).expect("import should succeed");
     assert!(
-        result.source.contains("#footnote[end note text]"),
-        "endnote not lowered to a footnote call:\n{}",
+        result.source.contains("#super[1]"),
+        "endnote reference did not leave a mark:\n{}",
+        result.source
+    );
+    assert!(
+        result.source.contains("1. end note text"),
+        "endnote body not collected at the document's end:\n{}",
+        result.source
+    );
+    assert!(
+        !result.source.contains("#footnote[end note text]"),
+        "endnote must not render at a page foot:\n{}",
         result.source
     );
     let is_endnote_approximation = |n: &typst_docx_import::report::Note| {

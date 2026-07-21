@@ -5,7 +5,7 @@ use ecow::{eco_format, EcoString};
 use typst_ooxml_core::units::emu_to_abs;
 
 use crate::report::ImportReport;
-use crate::tdoc::Figure;
+use crate::tdoc::{Align, Figure};
 use crate::wml::model::{DrawingRef, WmlPackage};
 
 /// Resolve a drawing's relationship + media part into a [`Figure`]. Returns
@@ -76,6 +76,15 @@ pub fn lower_drawing(
         width_pt: d.cx_emu.map(|cx| emu_to_abs(cx as f64).to_pt()),
         height_pt: d.cy_emu.map(|cy| emu_to_abs(cy as f64).to_pt()),
         alt: d.alt.clone(),
+        // Word's named float placement is the one part of a floating
+        // drawing's geometry Typst's flow can honour; the absolute offset and
+        // the text wrap around it can't be, and stay reported as lost.
+        align: d.align.as_deref().and_then(|align| match align {
+            "left" => Some(Align::Left),
+            "center" => Some(Align::Center),
+            "right" => Some(Align::Right),
+            _ => None,
+        }),
         caption: None,
     })
 }
@@ -177,7 +186,7 @@ mod tests {
     }
 
     fn drawing() -> DrawingRef {
-        DrawingRef { rel_id: "rId1".into(), cx_emu: None, cy_emu: None, alt: None }
+        DrawingRef { rel_id: "rId1".into(), cx_emu: None, cy_emu: None, alt: None, align: None }
     }
 
     #[test]

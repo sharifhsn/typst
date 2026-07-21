@@ -25,7 +25,7 @@ fn walk_block(block: &mut Block) {
     match block {
         Block::Heading { body, .. } => promote_in_place(body),
         Block::Paragraph { body, .. } => promote_in_place(body),
-        Block::List(List { items }) => {
+        Block::List(List { items, .. }) => {
             for item in items {
                 promote_in_place(&mut item.body);
             }
@@ -102,6 +102,9 @@ fn promote_inline(inline: Inline, out: &mut Inlines) {
         Inline::Link { dest, body } => {
             out.push(Inline::Link { dest, body: promote_inlines(body) })
         }
+        Inline::LabelLink { label, body } => {
+            out.push(Inline::LabelLink { label, body: promote_inlines(body) })
+        }
         Inline::Styled { style, body } => {
             let body = promote_inlines(body);
             match bold_italic_only(&style) {
@@ -138,21 +141,45 @@ fn promote_inline(inline: Inline, out: &mut Inlines) {
         | Inline::Linebreak
         | Inline::Raw(_)
         | Inline::Math(_)
+        | Inline::Label(_)
+        | Inline::PageRef(_)
         | Inline::Verbatim(_)) => out.push(other),
     }
 }
 
 /// If `style` sets nothing beyond `bold`/`italic`, return `(bold, italic)`.
+///
+/// Destructured exhaustively on purpose: promoting a run to `*..*`/`_.._`
+/// throws the rest of the style away, so a newly added [`TextStyle`] field
+/// must fail to compile here rather than silently fall through and let the
+/// markup swallow formatting it cannot express.
 fn bold_italic_only(style: &TextStyle) -> Option<(bool, bool)> {
-    let TextStyle { font, size_pt, color, bold, italic, underline, strike, smallcaps, script } =
-        style;
+    let TextStyle {
+        font,
+        size_pt,
+        color,
+        bold,
+        italic,
+        underline,
+        strike,
+        smallcaps,
+        caps,
+        script,
+        highlight,
+        tracking_pt,
+        lang,
+    } = style;
     if font.is_none()
         && size_pt.is_none()
         && color.is_none()
-        && !underline
+        && underline.is_none()
         && !strike
         && !smallcaps
+        && !caps
         && script.is_none()
+        && highlight.is_none()
+        && tracking_pt.is_none()
+        && lang.is_none()
         && (*bold || *italic)
     {
         Some((*bold, *italic))

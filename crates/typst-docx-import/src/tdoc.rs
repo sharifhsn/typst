@@ -83,10 +83,38 @@ pub(crate) fn push_furniture_trees<'a>(page: &'a mut PageSetup, trees: &mut Vec<
 // to the one variant every document actually has.
 #[allow(clippy::large_enum_variant)]
 pub enum Stmt {
+    SetDocument(DocumentInfo),
     SetPage(PageSetup),
     SetText(TextStyle),
     SetPar(ParStyle),
     Verbatim(EcoString),
+}
+
+/// Document metadata (`#set document(..)`), lowered from the package's core
+/// properties. Word's single-string fields are already split into the shapes
+/// Typst wants: an author list, a keyword list, and a calendar date.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct DocumentInfo {
+    pub title: Option<EcoString>,
+    pub authors: Vec<EcoString>,
+    pub keywords: Vec<EcoString>,
+    pub date: Option<Date>,
+}
+
+impl DocumentInfo {
+    pub fn is_empty(&self) -> bool {
+        *self == DocumentInfo::default()
+    }
+}
+
+/// A calendar date — the year/month/day Typst's `datetime` constructor takes.
+/// Word stores a full W3CDTF timestamp, but `#set document(date:)` is only
+/// ever displayed as a date, so the time of day is deliberately dropped.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct Date {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
 }
 
 /// A block-level item — one line/unit of Typst markup.
@@ -159,13 +187,27 @@ pub enum Inline {
     Emph(Inlines),
     /// Inline raw/code span (`` `…` ``).
     Raw(EcoString),
-    /// `#link("dest")[body]`.
+    /// `#link("dest")[body]` — an external target.
     Link { dest: EcoString, body: Inlines },
+    /// `#link(<label>)[body]` — a jump to a bookmark elsewhere in the
+    /// document. Distinct from [`Self::Link`] because Typst takes a label as a
+    /// bare `<..>` term, not a quoted string, so the two can't share one
+    /// destination field without smuggling markup through it.
+    LabelLink { label: EcoString, body: Inlines },
     /// Direct character formatting the semantic wrappers don't capture
     /// (font/size/color/underline/…): `#text(..)[body]`.
     Styled { style: TextStyle, body: Inlines },
     /// Inline equation source (`$…$`).
     Math(EcoString),
+    /// A live page number for a bookmark (`PAGEREF`). Structured rather than
+    /// `Verbatim` so `passes::resolve_labels` can find and downgrade it when
+    /// the label turns out never to have been emitted.
+    PageRef(EcoString),
+    /// `<name>` — a Typst label, lowered from a `w:bookmarkStart`. A label
+    /// attaches to whatever *precedes* it, so `mappers::para` hoists these to
+    /// the end of their block: Word writes a bookmark at the start of the
+    /// paragraph it marks, which in Typst markup would label the block before.
+    Label(EcoString),
     /// `#ruby[base][gloss]` — a phonetic guide (furigana). Typst has no ruby
     /// primitive, so the emitter defines a `ruby` helper in the preamble when
     /// a document uses one.
@@ -193,16 +235,47 @@ pub struct TextStyle {
     pub color: Option<[u8; 3]>,
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
+    pub underline: Option<Underline>,
     pub strike: bool,
     pub smallcaps: bool,
+    /// All-capitals display (`w:caps`) → `#upper[..]`.
+    pub caps: bool,
     pub script: Option<Script>,
+    /// A marker background (`w:highlight`) → `#highlight(fill: ..)`.
+    pub highlight: Option<[u8; 3]>,
+    /// Inter-character tracking in points (`w:rPr/w:spacing`); may be negative.
+    pub tracking_pt: Option<f64>,
+    /// A language tag split into Typst's two arguments: `("en", Some("US"))`.
+    pub lang: Option<Lang>,
 }
 
 impl TextStyle {
     pub fn is_empty(&self) -> bool {
         *self == TextStyle::default()
     }
+}
+
+/// An underline's stroke. Word's `w:u` carries a line pattern and its own
+/// color, both of which Typst expresses through `#underline(stroke: ..)`.
+/// Patterns Typst has no dash for (Word's `wave`/`double`) are reported as
+/// approximations by [`crate::mappers::run`] and drawn as a plain line — the
+/// underline itself is never dropped just because its pattern is unusual.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Underline {
+    pub color: Option<[u8; 3]>,
+    /// A Typst stroke `dash:` name, when Word asked for a patterned line.
+    /// `None` draws a solid line.
+    pub dash: Option<&'static str>,
+    /// `w:u/@w:val="thick"` — drawn with a heavier stroke.
+    pub thick: bool,
+}
+
+/// A resolved language tag: Typst splits what Word stores as one `w:lang`
+/// value ("en-US") into separate `lang:`/`region:` arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lang {
+    pub lang: EcoString,
+    pub region: Option<EcoString>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -212,6 +285,15 @@ pub enum Script {
 }
 
 /// Paragraph-level formatting.
+///
+/// Word and Typst disagree about paragraph spacing: Word gives a paragraph an
+/// independent space *before* and *after*, while Typst has a single
+/// `par.spacing` for the gap *between* paragraphs. Both Word values are kept
+/// here rather than pre-collapsed, because the two consumers need them
+/// differently — a hoisted document default sums them into one `spacing:`
+/// (see `emit::render_set_par`), while a paragraph that deviates from that
+/// default keeps them apart as a block's `above:`/`below:` (see
+/// `emit::render_paragraph`).
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct ParStyle {
     pub align: Option<Align>,
@@ -219,7 +301,18 @@ pub struct ParStyle {
     pub leading_pt: Option<f64>,
     /// Space before the paragraph, in points.
     pub spacing_before_pt: Option<f64>,
+    /// Space after the paragraph, in points.
+    pub spacing_after_pt: Option<f64>,
+    /// Left indent in points.
     pub indent_pt: Option<f64>,
+    /// Right indent in points.
+    pub indent_right_pt: Option<f64>,
+    /// Extra indent on the first line only (`w:ind/@w:firstLine`).
+    pub first_line_indent_pt: Option<f64>,
+    /// First line pulled back out of the left indent (`w:ind/@w:hanging`).
+    pub hanging_indent_pt: Option<f64>,
+    /// Paragraph background shading (`w:pPr/w:shd`).
+    pub fill: Option<[u8; 3]>,
 }
 
 impl ParStyle {
@@ -239,6 +332,12 @@ pub enum Align {
 #[derive(Debug, Clone, PartialEq)]
 pub struct List {
     pub items: Vec<ListItem>,
+    /// A Typst `enum(numbering:)` pattern when the Word list uses formats
+    /// other than plain decimal (`"i."`, `"1.a."`, …). `None` keeps Typst's
+    /// default numbering.
+    pub numbering: Option<EcoString>,
+    /// The number the list counts from, when it isn't 1.
+    pub start: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -268,7 +367,80 @@ pub struct TableCell {
     pub colspan: usize,
     pub rowspan: usize,
     pub fill: Option<[u8; 3]>,
+    /// Per-side borders (`w:tcBorders`).
+    pub stroke: CellStroke,
+    /// Vertical alignment within the cell (`w:vAlign`). Horizontal alignment
+    /// isn't here: it comes from the `w:jc` on the cell's own paragraphs,
+    /// which lower through the ordinary paragraph path.
+    pub align: Option<VAlign>,
+    /// Inner padding (`w:tcMar`).
+    pub inset: Option<Sides>,
     pub body: Vec<Block>,
+}
+
+impl TableCell {
+    /// An ordinary single-slot cell with no formatting of its own — the
+    /// filler used to pad a short row out to the grid width.
+    pub fn empty() -> Self {
+        TableCell {
+            colspan: 1,
+            rowspan: 1,
+            fill: None,
+            stroke: CellStroke::default(),
+            align: None,
+            inset: None,
+            body: Vec::new(),
+        }
+    }
+}
+
+/// A cell's four border sides. A side left `None` says Word stated nothing and
+/// the table's own stroke should show through — which is *not* the same as
+/// [`Border::None`], Word explicitly drawing no line there.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct CellStroke {
+    pub top: Option<Border>,
+    pub bottom: Option<Border>,
+    pub left: Option<Border>,
+    pub right: Option<Border>,
+}
+
+impl CellStroke {
+    pub fn is_empty(&self) -> bool {
+        *self == CellStroke::default()
+    }
+}
+
+/// One cell border side.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Border {
+    /// Word explicitly draws no border here (`w:val="nil"`).
+    None,
+    Line { thickness_pt: f64, color: Option<[u8; 3]> },
+}
+
+/// Four per-side lengths in points — Typst's `inset:`/`pad`-style dictionary.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Sides {
+    pub top: Option<f64>,
+    pub bottom: Option<f64>,
+    pub left: Option<f64>,
+    pub right: Option<f64>,
+}
+
+impl Sides {
+    pub fn is_empty(&self) -> bool {
+        *self == Sides::default()
+    }
+}
+
+/// Vertical alignment inside a table cell. Named for the Typst alignments they
+/// emit as, since `w:vAlign="center"` is Typst's `horizon`, not `center`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum VAlign {
+    Top,
+    Horizon,
+    Bottom,
 }
 
 /// A Word chart — [`Block::Chart`]'s payload. Brought across either as the
@@ -336,6 +508,9 @@ pub struct Figure {
     pub height_pt: Option<f64>,
     pub alt: Option<EcoString>,
     pub caption: Option<Inlines>,
+    /// Horizontal placement, for a drawing Word floated with a named
+    /// alignment. `None` leaves the figure in the flow's own alignment.
+    pub align: Option<Align>,
 }
 
 /// Page geometry (`#set page(..)`), from a `w:sectPr`.

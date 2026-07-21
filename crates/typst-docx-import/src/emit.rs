@@ -10,9 +10,10 @@ use std::path::PathBuf;
 
 use crate::opts::ImportOptions;
 use crate::tdoc::{
-    Align, Block, BreakKind, Chart, ChartContent, Figure, Furniture, Inline, Inlines, List,
+    Align, Block, Border, BreakKind, CellStroke, Chart, ChartContent, DocumentInfo, Figure,
+    Furniture, Inline, Inlines, List, Sides, VAlign,
     LegendPos, Margins, PageSetup, ParStyle, Plot, PlotKind, PlotSeries, Script, Section,
-    SectionStart, Stmt, Table, TableCell, TextStyle, TypstDoc,
+    SectionStart, Stmt, Table, TableCell, TextStyle, TypstDoc, Underline,
 };
 use crate::wml::model::WmlPackage;
 
@@ -121,15 +122,7 @@ impl Emitter<'_> {
                 let marker = "=".repeat((*level).max(1) as usize);
                 format!("{marker} {}", self.render_inlines(body))
             }
-            Block::Paragraph { style, body } => {
-                let text = self.render_inlines(body);
-                match style.align {
-                    Some(Align::Center) => format!("#align(center)[{text}]"),
-                    Some(Align::Right) => format!("#align(right)[{text}]"),
-                    Some(Align::Justify) => format!("#par(justify: true)[{text}]"),
-                    Some(Align::Left) | None => text,
-                }
-            }
+            Block::Paragraph { style, body } => self.render_paragraph(style, body),
             Block::List(list) => self.render_list(list),
             Block::Table(table) => format!("#{}", self.render_table(table)),
             Block::Figure(figure) => self.render_figure(figure),
@@ -156,16 +149,33 @@ impl Emitter<'_> {
         let columns_arg = table_columns_arg(table);
         let mut lines = vec!["table(".to_string(), format!("  columns: {columns_arg},")];
 
-        let mut header_used = false;
-        for row in &table.rows {
+        // Every *leading* header row goes into one `table.header(..)`: Typst
+        // takes a flat cell list there and re-flows it by column count, so a
+        // multi-row header repeats across pages as a unit. A header row
+        // appearing further down isn't a repeating header at all, so it stays
+        // an ordinary row.
+        let leading = table.rows.iter().take_while(|row| row.header).count();
+        let (headers, body) = table.rows.split_at(leading);
+
+        let header_cells: Vec<String> = headers
+            .iter()
+            .flat_map(|row| row.cells.iter())
+            .map(|cell| self.render_cell(cell))
+            .collect();
+        if !header_cells.is_empty() {
+            lines.push(format!("  table.header({}),", header_cells.join(", ")));
+        }
+        for row in body {
+            // A row every one of whose cells was absorbed by a vertical merge
+            // from above contributes nothing to Typst's cell flow — the
+            // rowspans already cover it. Emitting a line for it would leave a
+            // bare `,` behind, which is a syntax error.
+            if row.cells.is_empty() {
+                continue;
+            }
             let cells: Vec<String> =
                 row.cells.iter().map(|cell| self.render_cell(cell)).collect();
-            if row.header && !header_used {
-                lines.push(format!("  table.header({}),", cells.join(", ")));
-                header_used = true;
-            } else {
-                lines.push(format!("  {},", cells.join(", ")));
-            }
+            lines.push(format!("  {},", cells.join(", ")));
         }
 
         lines.push(")".to_string());
@@ -184,6 +194,20 @@ impl Emitter<'_> {
         }
         if cell.rowspan > 1 {
             args.push(format!("rowspan: {}", cell.rowspan));
+        }
+        if let Some(align) = cell.align {
+            let align = match align {
+                VAlign::Top => "top",
+                VAlign::Horizon => "horizon",
+                VAlign::Bottom => "bottom",
+            };
+            args.push(format!("align: {align}"));
+        }
+        if !cell.stroke.is_empty() {
+            args.push(format!("stroke: {}", stroke_dict(&cell.stroke)));
+        }
+        if let Some(inset) = cell.inset {
+            args.push(format!("inset: {}", sides_dict(&inset)));
         }
 
         if args.is_empty() {
@@ -211,6 +235,7 @@ impl Emitter<'_> {
                 self.current_page = page.clone();
                 self.render_set_page(page)
             }
+            Stmt::SetDocument(info) => render_set_document(info),
             Stmt::SetText(style) => render_set_text(style),
             Stmt::SetPar(style) => render_set_par(style),
             Stmt::Verbatim(s) => s.to_string(),
@@ -454,12 +479,20 @@ impl Emitter<'_> {
         }
         let image_call = format!("image({})", args.join(", "));
 
-        match &figure.caption {
+        let block = match &figure.caption {
             Some(caption) => {
                 let caption = self.render_inlines(caption);
                 format!("#figure({image_call}, caption: [{caption}])")
             }
             None => format!("#{image_call}"),
+        };
+
+        // A drawing Word floated with a named placement keeps that placement;
+        // `Align::Left` is the flow's own default and needs no wrapper.
+        match figure.align {
+            Some(Align::Center) => format!("#align(center)[{block}]"),
+            Some(Align::Right) => format!("#align(right)[{block}]"),
+            Some(Align::Left | Align::Justify) | None => block,
         }
     }
 
@@ -627,7 +660,8 @@ fn table_columns_arg(table: &Table) -> String {
 
 impl Emitter<'_> {
     fn render_list(&mut self, list: &List) -> String {
-        list.items
+        let body = list
+            .items
             .iter()
             .map(|item| {
                 let indent = "  ".repeat(item.level as usize);
@@ -635,7 +669,23 @@ impl Emitter<'_> {
                 format!("{indent}{marker} {}", self.render_inlines(&item.body))
             })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n");
+
+        // Typst states an enum's numbering once for the whole list rather than
+        // per item, so a list that isn't plain decimal is wrapped in a content
+        // block carrying the set rules. The block scopes them to this list
+        // instead of leaking a document-wide default onto every later enum.
+        let mut sets = Vec::new();
+        if let Some(numbering) = &list.numbering {
+            sets.push(format!("#set enum(numbering: {})", string_literal(numbering)));
+        }
+        if let Some(start) = list.start {
+            sets.push(format!("#set enum(start: {start})"));
+        }
+        if sets.is_empty() {
+            return body;
+        }
+        format!("#[\n{}\n{body}\n]", sets.join("\n"))
     }
 }
 
@@ -708,7 +758,46 @@ fn render_set_text(style: &TextStyle) -> String {
     if let Some(color) = style.color {
         args.push(format!("fill: {}", rgb_lit(color)));
     }
+    // Must stay in step with `passes::collapse_style::reduce_style`, which
+    // clears a run's `lang` when it matches this default — if the default
+    // weren't emitted here, the language would vanish from the document
+    // entirely rather than being hoisted.
+    if let Some(lang) = &style.lang {
+        args.push(format!("lang: {}", string_literal(&lang.lang)));
+        if let Some(region) = &lang.region {
+            args.push(format!("region: {}", string_literal(region)));
+        }
+    }
     format!("#set text({})", args.join(", "))
+}
+
+/// Render `#set document(..)` from the package's core properties.
+///
+/// A single author or keyword is emitted as a bare string rather than a
+/// one-element array — both are valid, and the string form is what someone
+/// writing this by hand would type.
+fn render_set_document(info: &DocumentInfo) -> String {
+    let mut args = Vec::new();
+    if let Some(title) = &info.title {
+        args.push(format!("title: {}", string_literal(title)));
+    }
+    for (name, values) in [("author", &info.authors), ("keywords", &info.keywords)] {
+        match values.as_slice() {
+            [] => {}
+            [single] => args.push(format!("{name}: {}", string_literal(single))),
+            many => {
+                let items: Vec<String> = many.iter().map(|v| string_literal(v)).collect();
+                args.push(format!("{name}: ({})", items.join(", ")));
+            }
+        }
+    }
+    if let Some(date) = info.date {
+        args.push(format!(
+            "date: datetime(year: {}, month: {}, day: {})",
+            date.year, date.month, date.day
+        ));
+    }
+    format!("#set document({})", args.join(", "))
 }
 
 fn render_set_par(style: &ParStyle) -> String {
@@ -719,7 +808,14 @@ fn render_set_par(style: &ParStyle) -> String {
     if let Some(leading) = style.leading_pt {
         args.push(format!("leading: {}", pt(leading)));
     }
-    if let Some(spacing) = style.spacing_before_pt {
+    // Word tracks space before and after a paragraph separately; Typst has a
+    // single `spacing` for the gap *between* two paragraphs, which is exactly
+    // where both of Word's values land. Summing is the faithful collapse: the
+    // gap between consecutive paragraphs is the first's `after` plus the
+    // second's `before`.
+    if style.spacing_before_pt.is_some() || style.spacing_after_pt.is_some() {
+        let spacing =
+            style.spacing_before_pt.unwrap_or(0.0) + style.spacing_after_pt.unwrap_or(0.0);
         args.push(format!("spacing: {}", pt(spacing)));
     }
     format!("#set par({})", args.join(", "))
@@ -839,6 +935,15 @@ impl Emitter<'_> {
             }
             Inline::Styled { style, body } => self.render_styled(style, body),
             Inline::Math(s) => format!("${s}$"),
+            // Hoisted to the end of its block by `mappers::para`, so the
+            // label attaches to that block rather than the one before it.
+            Inline::Label(name) => format!(" <{name}>"),
+            Inline::PageRef(label) => {
+                format!("#context counter(page).at(<{label}>).first()")
+            }
+            Inline::LabelLink { label, body } => {
+                format!("#link(<{label}>)[{}]", self.render_inlines(body))
+            }
             // The note's content, rendered as a content block exactly like a
             // table cell's or a furniture body's — see `render_cell_body`.
             // Typst's own `#footnote[..]` call inlines the body right here;
@@ -870,6 +975,73 @@ impl Emitter<'_> {
         }
     }
 
+    /// Render a paragraph and whatever wrappers its formatting needs, applied
+    /// innermost-out so each one governs what it should:
+    ///
+    /// `#pad` (indents) → `#block` (shading + spacing) → `#align` → `#par`.
+    ///
+    /// Indentation wraps outermost because in Word it moves the *whole*
+    /// paragraph, shading included; `#par` sits innermost because its
+    /// properties describe how the text itself is set. Every wrapper is
+    /// omitted when the corresponding field is unset, so an ordinary paragraph
+    /// still emits as bare markup — the hoisting pass
+    /// (`passes::hoist_par`) is what clears the fields that merely repeat the
+    /// document default, so this only ever wraps genuine deviations.
+    fn render_paragraph(&mut self, style: &ParStyle, body: &Inlines) -> String {
+        let mut content = self.render_inlines(body);
+
+        let mut par_args = Vec::new();
+        if style.align == Some(Align::Justify) {
+            par_args.push("justify: true".to_string());
+        }
+        if let Some(first_line) = style.first_line_indent_pt {
+            par_args.push(format!("first-line-indent: {}", pt(first_line)));
+        }
+        if let Some(hanging) = style.hanging_indent_pt {
+            par_args.push(format!("hanging-indent: {}", pt(hanging)));
+        }
+        if !par_args.is_empty() {
+            content = format!("#par({})[{content}]", par_args.join(", "));
+        }
+
+        // Justification is a `par` property, already handled above.
+        content = match style.align {
+            Some(Align::Center) => format!("#align(center)[{content}]"),
+            Some(Align::Right) => format!("#align(right)[{content}]"),
+            Some(Align::Justify | Align::Left) | None => content,
+        };
+
+        let mut block_args = Vec::new();
+        if let Some(fill) = style.fill {
+            block_args.push(format!("fill: {}", rgb_lit(fill)));
+            // Word's paragraph shading spans the text column rather than
+            // hugging the glyphs, so the block has to take the full width.
+            block_args.push("width: 100%".to_string());
+        }
+        if let Some(above) = style.spacing_before_pt {
+            block_args.push(format!("above: {}", pt(above)));
+        }
+        if let Some(below) = style.spacing_after_pt {
+            block_args.push(format!("below: {}", pt(below)));
+        }
+        if !block_args.is_empty() {
+            content = format!("#block({})[{content}]", block_args.join(", "));
+        }
+
+        let mut pad_args = Vec::new();
+        if let Some(left) = style.indent_pt {
+            pad_args.push(format!("left: {}", pt(left)));
+        }
+        if let Some(right) = style.indent_right_pt {
+            pad_args.push(format!("right: {}", pt(right)));
+        }
+        if !pad_args.is_empty() {
+            content = format!("#pad({})[{content}]", pad_args.join(", "));
+        }
+
+        content
+    }
+
     fn render_styled(&mut self, style: &TextStyle, body: &Inlines) -> String {
         if style.is_empty() {
             return self.render_inlines(body);
@@ -877,6 +1049,12 @@ impl Emitter<'_> {
 
         let mut content = self.render_inlines(body);
 
+        // Applied innermost-out: `#upper` rewrites the text itself, so it goes
+        // closest to the content, with the decorations layered around it and
+        // `#text(..)` — which only sets style properties — outermost.
+        if style.caps {
+            content = format!("#upper[{content}]");
+        }
         content = match style.script {
             Some(Script::Super) => format!("#super[{content}]"),
             Some(Script::Sub) => format!("#sub[{content}]"),
@@ -888,8 +1066,14 @@ impl Emitter<'_> {
         if style.strike {
             content = format!("#strike[{content}]");
         }
-        if style.underline {
-            content = format!("#underline[{content}]");
+        if let Some(underline) = &style.underline {
+            content = match underline_stroke_arg(underline) {
+                Some(stroke) => format!("#underline(stroke: {stroke})[{content}]"),
+                None => format!("#underline[{content}]"),
+            };
+        }
+        if let Some(fill) = style.highlight {
+            content = format!("#highlight(fill: {})[{content}]", rgb_lit(fill));
         }
 
         let mut args = Vec::new();
@@ -908,13 +1092,81 @@ impl Emitter<'_> {
         if let Some(color) = style.color {
             args.push(format!("fill: {}", rgb_lit(color)));
         }
-
+        if let Some(tracking) = style.tracking_pt {
+            args.push(format!("tracking: {}", pt(tracking)));
+        }
+        if let Some(lang) = &style.lang {
+            args.push(format!("lang: {}", string_literal(&lang.lang)));
+            if let Some(region) = &lang.region {
+                args.push(format!("region: {}", string_literal(region)));
+            }
+        }
         if args.is_empty() {
             content
         } else {
             format!("#text({})[{content}]", args.join(", "))
         }
     }
+}
+
+/// Render a [`CellStroke`] as Typst's `stroke:` dictionary. Only the sides
+/// Word actually stated appear, so the table's own stroke keeps showing
+/// through everywhere else — a side Word never mentioned must not be
+/// silently switched off.
+fn stroke_dict(stroke: &CellStroke) -> String {
+    let parts: Vec<String> = [
+        ("top", stroke.top),
+        ("bottom", stroke.bottom),
+        ("left", stroke.left),
+        ("right", stroke.right),
+    ]
+    .into_iter()
+    .filter_map(|(side, border)| border.map(|border| format!("{side}: {}", border_lit(&border))))
+    .collect();
+    format!("({})", parts.join(", "))
+}
+
+fn border_lit(border: &Border) -> String {
+    match border {
+        Border::None => "none".to_string(),
+        Border::Line { thickness_pt, color } => match color {
+            Some(color) => format!("{} + {}", pt(*thickness_pt), rgb_lit(*color)),
+            None => pt(*thickness_pt),
+        },
+    }
+}
+
+/// Render per-side lengths as Typst's `(top: .., bottom: ..)` dictionary.
+fn sides_dict(sides: &Sides) -> String {
+    let parts: Vec<String> = [
+        ("top", sides.top),
+        ("bottom", sides.bottom),
+        ("left", sides.left),
+        ("right", sides.right),
+    ]
+    .into_iter()
+    .filter_map(|(side, value)| value.map(|value| format!("{side}: {}", pt(value))))
+    .collect();
+    format!("({})", parts.join(", "))
+}
+
+/// Render an [`Underline`]'s stroke as a Typst `stroke:` argument, or `None`
+/// when it carries no detail beyond "underlined" and a bare `#underline[..]`
+/// says the same thing more readably.
+fn underline_stroke_arg(underline: &Underline) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(color) = underline.color {
+        parts.push(format!("paint: {}", rgb_lit(color)));
+    }
+    if let Some(dash) = underline.dash {
+        parts.push(format!("dash: \"{dash}\""));
+    }
+    if underline.thick {
+        // Relative to the font size rather than an absolute width, so a thick
+        // underline stays proportionate at any text size.
+        parts.push("thickness: 0.1em".to_string());
+    }
+    (!parts.is_empty()).then(|| format!("({})", parts.join(", ")))
 }
 
 /// Escape literal text for insertion as Typst *markup* (not a string
@@ -1099,6 +1351,36 @@ mod tests {
         emit(doc, &package, &options).0
     }
 
+    /// A row whose cells were *all* absorbed by a vertical merge from above
+    /// contributes nothing to Typst's cell flow, so it must emit no line at
+    /// all. It used to leave a bare `,` behind — a syntax error that broke a
+    /// real corpus document (POI's `bug65649`).
+    #[test]
+    fn a_row_fully_covered_by_a_merge_emits_no_line() {
+        let table = Table {
+            columns: 1,
+            column_widths: vec![None],
+            rows: vec![
+                TableRow {
+                    header: false,
+                    cells: vec![TableCell {
+                        rowspan: 2,
+                        body: vec![para("spans both rows")],
+                        ..TableCell::empty()
+                    }],
+                },
+                TableRow { header: false, cells: Vec::new() },
+            ],
+        };
+        let out = run(&doc(vec![], vec![Block::Table(table)]));
+
+        assert!(
+            !out.lines().any(|line| line.trim() == ","),
+            "expected no bare-comma row:\n{out}"
+        );
+        assert!(out.contains("rowspan: 2"), "{out}");
+    }
+
     #[test]
     fn empty_doc_is_empty() {
         let d = doc(vec![], vec![]);
@@ -1184,6 +1466,8 @@ mod tests {
     #[test]
     fn unordered_list() {
         let list = List {
+            numbering: None,
+            start: None,
             items: vec![
                 ListItem { ordered: false, level: 0, body: vec![Inline::Text("one".into())] },
                 ListItem { ordered: false, level: 1, body: vec![Inline::Text("two".into())] },
@@ -1274,22 +1558,18 @@ mod tests {
                     header: true,
                     cells: vec![
                         TableCell {
-                            colspan: 1,
-                            rowspan: 1,
-                            fill: None,
                             body: vec![Block::Paragraph {
                                 style: ParStyle::default(),
                                 body: vec![Inline::Text("A".into())],
                             }],
+                            ..TableCell::empty()
                         },
                         TableCell {
-                            colspan: 1,
-                            rowspan: 1,
-                            fill: None,
                             body: vec![Block::Paragraph {
                                 style: ParStyle::default(),
                                 body: vec![Inline::Text("B".into())],
                             }],
+                            ..TableCell::empty()
                         },
                     ],
                 },
@@ -1297,22 +1577,19 @@ mod tests {
                     header: false,
                     cells: vec![
                         TableCell {
-                            colspan: 1,
-                            rowspan: 1,
                             fill: Some([255, 0, 0]),
                             body: vec![Block::Paragraph {
                                 style: ParStyle::default(),
                                 body: vec![Inline::Text("1".into())],
                             }],
+                            ..TableCell::empty()
                         },
                         TableCell {
-                            colspan: 1,
-                            rowspan: 1,
-                            fill: None,
                             body: vec![Block::Paragraph {
                                 style: ParStyle::default(),
                                 body: vec![Inline::Text("2".into())],
                             }],
+                            ..TableCell::empty()
                         },
                     ],
                 },
@@ -1518,12 +1795,7 @@ mod tests {
             column_widths: vec![],
             rows: vec![TableRow {
                 header: false,
-                cells: vec![TableCell {
-                    colspan: 1,
-                    rowspan: 1,
-                    fill: None,
-                    body: vec![para("1")],
-                }],
+                cells: vec![TableCell { body: vec![para("1")], ..TableCell::empty() }],
             }],
         };
         let chart = Chart { title: Some("Sales".into()), content: ChartContent::Table(table) };

@@ -216,7 +216,7 @@ fn chart_table(data: &ChartData) -> Table {
     let columns = rows.iter().map(|r| r.cells.len()).max().unwrap_or(1).max(1);
     for row in &mut rows {
         while row.cells.len() < columns {
-            row.cells.push(TableCell { colspan: 1, rowspan: 1, fill: None, body: Vec::new() });
+            row.cells.push(TableCell::empty());
         }
     }
 
@@ -229,7 +229,7 @@ fn text_cell(text: &str) -> TableCell {
     } else {
         vec![Block::Paragraph { style: ParStyle::default(), body: vec![Inline::Text(text.into())] }]
     };
-    TableCell { colspan: 1, rowspan: 1, fill: None, body }
+    TableCell { body, ..TableCell::empty() }
 }
 
 #[cfg(test)]
@@ -244,7 +244,7 @@ mod tests {
     /// A chart reference with no extent — the plot then falls back to
     /// `lilaq`'s own default size, which is what these tests exercise.
     fn chart_ref(rel_id: &str) -> DrawingRef {
-        DrawingRef { rel_id: rel_id.into(), cx_emu: None, cy_emu: None, alt: None }
+        DrawingRef { rel_id: rel_id.into(), cx_emu: None, cy_emu: None, alt: None, align: None }
     }
 
     fn package_with(chart_name: &str, data: ChartData) -> WmlPackage {

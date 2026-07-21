@@ -3,8 +3,79 @@
 use typst_ooxml_core::units::twip_to_abs;
 
 use crate::lower::{lower_items, parse_hex_color, LowerCtx};
-use crate::tdoc::{self, TableCell, TableRow};
-use crate::wml::model::{Cell, Row, Table as WmlTable};
+use crate::tdoc::{self, Border, CellStroke, Sides, TableCell, TableRow, VAlign};
+use crate::wml::model::{BorderEdge, Cell, CellBorders, CellMargins, Row, Table as WmlTable};
+
+/// A source cell resolved against the table's vertical merges.
+#[derive(Debug, Clone, Copy)]
+struct Merged {
+    /// Where the cell starts in *Word's* own grid: cells laid left to right by
+    /// `w:gridSpan`, counting `w:vMerge` continuations, since Word physically
+    /// writes one into every row a merge covers.
+    column: usize,
+    /// How many rows the cell spans; 1 unless it starts a merge run.
+    rowspan: usize,
+    /// A continuation absorbed by the restart above it. Typst models a
+    /// vertical merge as a `rowspan` on the *first* cell with the covered
+    /// slots simply absent, so these are dropped rather than emitted as the
+    /// stray empty cells they used to become.
+    absorbed: bool,
+}
+
+/// Resolve `w:vMerge` runs into Typst rowspans.
+///
+/// Word writes a vertical merge as a `restart` cell followed by one `continue`
+/// cell per row beneath, each physically present in its row; Typst gives the
+/// first cell a `rowspan` and expects the covered slots to be absent. This
+/// walks each restart straight down its own column, absorbing the
+/// continuations under it.
+///
+/// A continuation with no restart above it — malformed, but real documents do
+/// it — stays unabsorbed and lowers as an ordinary cell, so no content is lost
+/// to a merge that was never opened.
+fn resolve_vertical_merges(rows: &[Row]) -> Vec<Vec<Merged>> {
+    let mut merged: Vec<Vec<Merged>> = rows
+        .iter()
+        .map(|row| {
+            let mut column = 0;
+            row.cells
+                .iter()
+                .map(|cell| {
+                    let starts_at = column;
+                    column += cell.grid_span.max(1);
+                    Merged { column: starts_at, rowspan: 1, absorbed: false }
+                })
+                .collect()
+        })
+        .collect();
+
+    for row in 0..rows.len() {
+        for index in 0..rows[row].cells.len() {
+            if rows[row].cells[index].v_merge != Some(true) {
+                continue;
+            }
+            let column = merged[row][index].column;
+            let mut rowspan = 1;
+            for below in (row + 1)..rows.len() {
+                // The merge only continues while the row beneath has a
+                // `continue` cell starting at exactly the same column.
+                let Some(under) = merged[below].iter().position(|m| m.column == column) else {
+                    break;
+                };
+                if rows[below].cells[under].v_merge != Some(false)
+                    || merged[below][under].absorbed
+                {
+                    break;
+                }
+                merged[below][under].absorbed = true;
+                rowspan += 1;
+            }
+            merged[row][index].rowspan = rowspan;
+        }
+    }
+
+    merged
+}
 
 pub(crate) fn lower_table(table: &WmlTable, ctx: &mut LowerCtx) -> tdoc::Table {
     // The column count must accommodate the WIDEST row's total span, not just
@@ -29,7 +100,7 @@ pub(crate) fn lower_table(table: &WmlTable, ctx: &mut LowerCtx) -> tdoc::Table {
         .collect();
     column_widths.resize(columns, None);
 
-    let mut rows: Vec<TableRow> = table.rows.iter().map(|row| lower_row(row, ctx)).collect();
+    let merged = resolve_vertical_merges(&table.rows);
 
     // Typst's `#table` auto-flows cells into a fixed-width grid with no notion
     // of "rows": a row whose cells span fewer than `columns` leaves the flow
@@ -39,31 +110,48 @@ pub(crate) fn lower_table(table: &WmlTable, ctx: &mut LowerCtx) -> tdoc::Table {
     // each row fills the grid exactly and the next row starts aligned at
     // column 0. (A single cell can never exceed `columns`, since `columns` is
     // at least the widest row's total span.)
-    if columns > 0 {
-        for row in &mut rows {
-            let span: usize = row.cells.iter().map(|c| c.colspan.max(1)).sum();
-            for _ in span..columns {
-                row.cells.push(TableCell {
-                    colspan: 1,
-                    rowspan: 1,
-                    fill: None,
-                    body: Vec::new(),
-                });
+    //
+    // A slot covered by a `rowspan` from an earlier row needs *no* padding —
+    // Typst fills those itself — so `occupied` tracks how many more rows each
+    // column is still spanned for, and those columns are discounted from the
+    // row's width before padding.
+    let mut occupied = vec![0usize; columns];
+    let mut rows = Vec::with_capacity(table.rows.len());
+    for (index, row) in table.rows.iter().enumerate() {
+        let carried = occupied.iter().filter(|&&remaining| remaining > 0).count();
+        for remaining in occupied.iter_mut() {
+            *remaining = remaining.saturating_sub(1);
+        }
+
+        let mut cells = Vec::with_capacity(row.cells.len());
+        for (position, cell) in row.cells.iter().enumerate() {
+            let merge = merged[index][position];
+            if merge.absorbed {
+                continue;
+            }
+            if merge.rowspan > 1 {
+                let colspan = cell.grid_span.max(1);
+                let start = merge.column.min(occupied.len());
+                let end = (merge.column + colspan).min(occupied.len());
+                occupied[start..end].fill(merge.rowspan - 1);
+            }
+            cells.push(lower_cell(cell, merge.rowspan, ctx));
+        }
+
+        if columns > 0 {
+            let span: usize = cells.iter().map(|c| c.colspan.max(1)).sum();
+            for _ in (span + carried)..columns {
+                cells.push(TableCell::empty());
             }
         }
+
+        rows.push(TableRow { header: row.is_header, cells });
     }
 
     tdoc::Table { columns, column_widths, rows }
 }
 
-fn lower_row(row: &Row, ctx: &mut LowerCtx) -> TableRow {
-    let cells = row.cells.iter().map(|cell| lower_cell(cell, ctx)).collect();
-    TableRow { header: row.is_header, cells }
-}
-
-fn lower_cell(cell: &Cell, ctx: &mut LowerCtx) -> TableCell {
-    // `vMerge == Some(false)` (a "continue" cell) still needs its slot filled
-    // — pragmatic v1: emit it like any other cell (usually empty content).
+fn lower_cell(cell: &Cell, rowspan: usize, ctx: &mut LowerCtx) -> TableCell {
     // A page/column break is meaningless inside a table cell (Typst rejects
     // it outright — "pagebreaks are not allowed inside of containers"), so
     // `lower_paragraph` needs to know it's lowering one; see
@@ -73,10 +161,56 @@ fn lower_cell(cell: &Cell, ctx: &mut LowerCtx) -> TableCell {
     ctx.exit_container(was_in_container);
     TableCell {
         colspan: cell.grid_span.max(1),
-        rowspan: 1,
+        rowspan,
         fill: parse_hex_color(cell.shd_fill.as_deref()),
+        stroke: lower_borders(&cell.borders),
+        align: cell.v_align.as_deref().and_then(lower_v_align),
+        inset: lower_margins(&cell.margins),
         body,
     }
+}
+
+fn lower_v_align(val: &str) -> Option<VAlign> {
+    match val {
+        "top" => Some(VAlign::Top),
+        "center" => Some(VAlign::Horizon),
+        "bottom" => Some(VAlign::Bottom),
+        _ => None,
+    }
+}
+
+/// Word measures a border's width in eighths of a point, defaulting to Word's
+/// own half-point line when `w:sz` is absent.
+fn lower_border(edge: &BorderEdge) -> Border {
+    if edge.is_none() {
+        return Border::None;
+    }
+    Border::Line {
+        thickness_pt: edge.sz_eighth_pt.unwrap_or(4) as f64 / 8.0,
+        color: parse_hex_color(edge.color.as_deref()),
+    }
+}
+
+fn lower_borders(borders: &CellBorders) -> CellStroke {
+    CellStroke {
+        top: borders.top.as_ref().map(lower_border),
+        bottom: borders.bottom.as_ref().map(lower_border),
+        left: borders.left.as_ref().map(lower_border),
+        right: borders.right.as_ref().map(lower_border),
+    }
+}
+
+fn lower_margins(margins: &CellMargins) -> Option<Sides> {
+    if margins.is_empty() {
+        return None;
+    }
+    let twips = |t: Option<i64>| t.map(|t| twip_to_abs(t as f64).to_pt());
+    Some(Sides {
+        top: twips(margins.top),
+        bottom: twips(margins.bottom),
+        left: twips(margins.left),
+        right: twips(margins.right),
+    })
 }
 
 #[cfg(test)]
@@ -100,8 +234,6 @@ mod tests {
                 is_header: false,
                 cells: vec![Cell {
                     grid_span: 1,
-                    v_merge: None,
-                    shd_fill: None,
                     content: vec![BodyItem::Paragraph(Paragraph {
                         props: Default::default(),
                         runs: vec![RunItem::Run(Run {
@@ -109,6 +241,7 @@ mod tests {
                             content: vec![RunContent::Break(BreakType::Page)],
                         })],
                     })],
+                    ..Default::default()
                 }],
             }],
         };
@@ -130,5 +263,111 @@ mod tests {
         // cell's own body is done lowering — it isn't itself inside another
         // container.
         assert!(!ctx.in_container());
+    }
+
+    fn merge_cell(text: &str, v_merge: Option<bool>) -> Cell {
+        Cell {
+            grid_span: 1,
+            v_merge,
+            content: vec![BodyItem::Paragraph(Paragraph {
+                props: Default::default(),
+                runs: vec![RunItem::Run(Run {
+                    props: RunProps::default(),
+                    content: vec![RunContent::Text(text.into())],
+                })],
+            })],
+            ..Default::default()
+        }
+    }
+
+    /// Word writes a vertical merge as a `restart` plus one `continue` cell per
+    /// row beneath; Typst wants a `rowspan` on the first cell and no cell at
+    /// all in the rows it covers. The continuations used to survive as stray
+    /// empty cells, which is what made merged tables come back wrong.
+    #[test]
+    fn a_vertical_merge_becomes_a_rowspan_and_drops_its_continuations() {
+        let table = WmlTable {
+            grid: vec![1000, 1000],
+            rows: vec![
+                Row {
+                    is_header: false,
+                    cells: vec![merge_cell("spans", Some(true)), merge_cell("one", None)],
+                },
+                Row {
+                    is_header: false,
+                    cells: vec![merge_cell("", Some(false)), merge_cell("two", None)],
+                },
+                Row {
+                    is_header: false,
+                    cells: vec![merge_cell("", Some(false)), merge_cell("three", None)],
+                },
+            ],
+        };
+        let package = WmlPackage::default();
+        let mut report = ImportReport::default();
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
+        let lowered = lower_table(&table, &mut ctx);
+
+        assert_eq!(lowered.rows[0].cells[0].rowspan, 3);
+        assert_eq!(lowered.rows[0].cells.len(), 2);
+        // The covered rows keep only their own remaining cell. If the padding
+        // didn't discount the spanned column they would each gain a stray
+        // empty cell and push the table out of shape.
+        assert_eq!(lowered.rows[1].cells.len(), 1);
+        assert_eq!(lowered.rows[2].cells.len(), 1);
+    }
+
+    /// A `continue` with no `restart` above it is malformed, but real
+    /// documents contain it — it must lower as an ordinary cell rather than
+    /// being absorbed into a merge that was never opened.
+    #[test]
+    fn an_orphan_continuation_is_kept_as_an_ordinary_cell() {
+        let table = WmlTable {
+            grid: vec![1000, 1000],
+            rows: vec![Row {
+                is_header: false,
+                cells: vec![merge_cell("orphan", Some(false)), merge_cell("beside", None)],
+            }],
+        };
+        let package = WmlPackage::default();
+        let mut report = ImportReport::default();
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
+        let lowered = lower_table(&table, &mut ctx);
+
+        assert_eq!(lowered.rows[0].cells.len(), 2);
+        assert_eq!(lowered.rows[0].cells[0].rowspan, 1);
+    }
+
+    /// A merge that starts partway down the table must not swallow the rows
+    /// above it, and a merge column wider than one grid column must reserve
+    /// every column it covers.
+    #[test]
+    fn a_wide_merge_reserves_all_the_columns_it_covers() {
+        let mut wide = merge_cell("wide", Some(true));
+        wide.grid_span = 2;
+        let mut wide_continue = merge_cell("", Some(false));
+        wide_continue.grid_span = 2;
+
+        let table = WmlTable {
+            grid: vec![1000, 1000, 1000],
+            rows: vec![
+                Row { is_header: false, cells: vec![wide, merge_cell("side", None)] },
+                Row { is_header: false, cells: vec![wide_continue, merge_cell("under", None)] },
+            ],
+        };
+        let package = WmlPackage::default();
+        let mut report = ImportReport::default();
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
+        let lowered = lower_table(&table, &mut ctx);
+
+        assert_eq!(lowered.columns, 3);
+        assert_eq!(lowered.rows[0].cells[0].colspan, 2);
+        assert_eq!(lowered.rows[0].cells[0].rowspan, 2);
+        // Two of the three columns are spanned from above, so the second row
+        // needs no padding beyond its own single cell.
+        assert_eq!(lowered.rows[1].cells.len(), 1);
     }
 }

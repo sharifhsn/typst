@@ -10,13 +10,14 @@
 
 use ecow::{EcoString, eco_format};
 use roxmltree::{Document, Node, TextPos};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use typst_ooxml_core::{ns, opc::Reader};
 
 use crate::ImportError;
 use crate::report::ImportReport;
 use crate::wml::model::{
-    Body, BodyItem, BreakType, Cell, ChartData, ChartKind, ChartSeries, DrawingRef, Field,
+    BorderEdge, Body, BodyItem, BreakType, Cell, CellBorders, CellMargins, ChartData, ChartKind,
+    ChartSeries, DocumentMeta, DrawingRef, Field,
     FurnitureKind, FurnitureRef, LegendPos, LevelFormat, NumRef, Numbering, ParaProps, Paragraph,
     Relationship, Row, Run, RunContent, RunItem, RunProps, Section, SectPr, SectionStart, Style,
     StyleKind, Styles, Table, VmlShape, VmlShapeKind, WmlPackage,
@@ -353,6 +354,13 @@ pub fn parse_package(
         None => Numbering::default(),
     };
 
+    let meta = match read_optional_part(&mut reader, CORE_PROPS_PART, CORE_PROPS_PART, report) {
+        Some(xml) => {
+            parse_xml(&xml, CORE_PROPS_PART, report, DocumentMeta::default(), parse_core_properties)
+        }
+        None => DocumentMeta::default(),
+    };
+
     // Guaranteed present by the `has` check above.
     let doc_xml = reader.xml_part("word/document.xml")?.unwrap_or_default();
     let body = parse_document(&doc_xml, report)?;
@@ -363,10 +371,14 @@ pub fn parse_package(
     let endnotes = parse_notes_part(&mut reader, &mut rels, "word/endnotes.xml", "endnote", report);
     let charts = parse_chart_parts(&mut reader, report);
 
+    let bookmarks = collect_bookmarks(&body);
+
     Ok(WmlPackage {
         body,
         styles,
         numbering,
+        meta,
+        bookmarks,
         rels,
         media,
         furniture,
@@ -375,6 +387,168 @@ pub fn parse_package(
         endnotes,
         charts,
     })
+}
+
+// --- Bookmarks ---------------------------------------------------------------
+
+/// Rewrite a Word bookmark name into something Typst's `<..>` label syntax
+/// accepts. A label may not contain whitespace or `>` (which would close it);
+/// everything outside a conservative safe set becomes `-`.
+fn sanitize_label(name: &str) -> EcoString {
+    let label: EcoString = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':') { c } else { '-' })
+        .collect();
+    if label.is_empty() { "bookmark".into() } else { label }
+}
+
+/// Map every `w:bookmarkStart` in the document to a unique Typst label.
+///
+/// Word's own names are unique per document, but sanitising can collide two
+/// distinct names onto one label, and a duplicate label makes a Typst
+/// reference ambiguous — so collisions take a numeric suffix. Word's hidden
+/// `_GoBack` bookmark is skipped: it records where the editor's cursor last
+/// was, not a target anyone authored.
+fn collect_bookmarks(body: &Body) -> FxHashMap<EcoString, EcoString> {
+    let mut labels = FxHashMap::default();
+    let mut used = FxHashSet::default();
+    for section in &body.sections {
+        collect_bookmarks_in_items(&section.items, &mut labels, &mut used);
+    }
+    labels
+}
+
+type Labels = FxHashMap<EcoString, EcoString>;
+type UsedLabels = FxHashSet<EcoString>;
+
+fn collect_bookmarks_in_items(items: &[BodyItem], labels: &mut Labels, used: &mut UsedLabels) {
+    for item in items {
+        match item {
+            BodyItem::Paragraph(p) => {
+                for run_item in &p.runs {
+                    collect_bookmarks_in_run_item(run_item, labels, used);
+                }
+            }
+            BodyItem::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        collect_bookmarks_in_items(&cell.content, labels, used);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_bookmarks_in_run_item(item: &RunItem, labels: &mut Labels, used: &mut UsedLabels) {
+    match item {
+        RunItem::Bookmark(name) => register_bookmark(name, labels, used),
+        RunItem::Hyperlink { runs, .. } => {
+            for run_item in runs {
+                collect_bookmarks_in_run_item(run_item, labels, used);
+            }
+        }
+        RunItem::Field(field) => {
+            for run_item in &field.result {
+                collect_bookmarks_in_run_item(run_item, labels, used);
+            }
+        }
+        // A text box's body is ordinary content and can carry bookmarks too.
+        RunItem::Run(run) => {
+            for content in &run.content {
+                if let RunContent::TextBox(items) = content {
+                    collect_bookmarks_in_items(items, labels, used);
+                }
+            }
+        }
+    }
+}
+
+fn register_bookmark(name: &EcoString, labels: &mut Labels, used: &mut UsedLabels) {
+    if name == "_GoBack" || labels.contains_key(name) {
+        return;
+    }
+    let base = sanitize_label(name);
+    let mut label = base.clone();
+    let mut suffix = 2;
+    while !used.insert(label.clone()) {
+        label = eco_format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    labels.insert(name.clone(), label);
+}
+
+#[cfg(test)]
+mod bookmark_tests {
+    use super::*;
+
+    fn bookmarked(names: &[&str]) -> Body {
+        let runs = names.iter().map(|n| RunItem::Bookmark((*n).into())).collect();
+        Body {
+            sections: vec![Section {
+                items: vec![BodyItem::Paragraph(Paragraph { props: Default::default(), runs })],
+                props: SectPr::default(),
+            }],
+        }
+    }
+
+    /// A name Typst's `<..>` syntax can't hold becomes a safe label.
+    #[test]
+    fn an_unusable_name_is_sanitised() {
+        assert_eq!(sanitize_label("odd name/with*chars"), "odd-name-with-chars");
+        assert_eq!(sanitize_label("_Toc12345"), "_Toc12345");
+        assert_eq!(sanitize_label(""), "bookmark");
+    }
+
+    /// Sanitising can collide two distinct Word names onto one label, and a
+    /// duplicate label makes a Typst reference ambiguous.
+    #[test]
+    fn colliding_names_get_distinct_labels() {
+        let labels = collect_bookmarks(&bookmarked(&["a b", "a/b"]));
+        assert_eq!(labels.len(), 2);
+        let mut resolved: Vec<_> = labels.values().cloned().collect();
+        resolved.sort();
+        assert_eq!(resolved, ["a-b", "a-b-2"]);
+    }
+
+    /// `_GoBack` records where the editor's cursor last was — it is never a
+    /// target anyone authored, so it must not become a label.
+    #[test]
+    fn the_hidden_goback_bookmark_is_skipped() {
+        let labels = collect_bookmarks(&bookmarked(&["_GoBack", "Real"]));
+        assert_eq!(labels.len(), 1);
+        assert!(labels.contains_key("Real"));
+    }
+}
+
+// --- Core properties (`docProps/core.xml`) -----------------------------------
+
+/// The package part holding the document's core properties. Named once so the
+/// part path and the label used in report notes can't drift apart.
+const CORE_PROPS_PART: &str = "docProps/core.xml";
+
+/// Parse `docProps/core.xml` into [`DocumentMeta`].
+///
+/// Matched on local names, so it reads Word's `dc:`/`cp:`/`dcterms:` prefixes
+/// and any other producer's equally well — the same producer-agnostic rule the
+/// rest of this parser follows. An absent or unreadable part is simply no
+/// metadata; it never fails an import.
+fn parse_core_properties(doc: Document) -> DocumentMeta {
+    let mut meta = DocumentMeta::default();
+    for child in doc.root_element().children().filter(|n| n.is_element()) {
+        let Some(text) = child.text().map(str::trim).filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        match child.tag_name().name() {
+            "title" => meta.title = Some(text.into()),
+            "creator" => meta.creator = Some(text.into()),
+            "description" => meta.description = Some(text.into()),
+            "keywords" => meta.keywords = Some(text.into()),
+            "created" => meta.created = Some(text.into()),
+            _ => {}
+        }
+    }
+    meta
 }
 
 // --- Relationships -----------------------------------------------------------
@@ -734,6 +908,9 @@ fn namespace_rel_ids(items: &mut [BodyItem], part: &str) {
 fn namespace_run_items(items: &mut [RunItem], part: &str) {
     for item in items {
         match item {
+            // A bookmark name is document-global, not a per-part relationship
+            // id, so it needs no namespacing.
+            RunItem::Bookmark(_) => {}
             RunItem::Run(r) => {
                 for c in &mut r.content {
                     match c {
@@ -897,6 +1074,11 @@ struct FieldFrame {
 /// inside a run overrides whatever else that run might contain, mirroring
 /// Word's own convention that a marker run carries no other meaningful
 /// content.
+// Same non-issue as `wml::model::BodyItem`'s own allow: a `RunKind` is a
+// short-lived local produced one per run and immediately destructured, never
+// stored in bulk, so the marker variants costing less than `Content` buys
+// nothing — and boxing the run would add an allocation to the common case.
+#[allow(clippy::large_enum_variant)]
 enum RunKind {
     /// An ordinary run — its fully parsed [`Run`].
     Content(Run),
@@ -1004,10 +1186,21 @@ fn fold_field_children<'a>(
             },
             "fldSimple" => push_item(&mut stack, &mut top, parse_fld_simple(child, tb_depth)),
             "hyperlink" => push_item(&mut stack, &mut top, parse_hyperlink(child, tb_depth)),
-            "oMath" => push_item(&mut stack, &mut top, RunItem::Run(math_run(child))),
+            // A named anchor. Word writes bookmarks at the *start* of the
+            // paragraph they mark, so position is meaningless here; the
+            // paragraph mapper hoists the label to where Typst wants it.
+            "bookmarkStart" => {
+                if let Some(name) = attr(child, "name").filter(|n| !n.is_empty()) {
+                    push_item(&mut stack, &mut top, RunItem::Bookmark(name.into()));
+                }
+            }
+            "oMath" => push_item(&mut stack, &mut top, RunItem::Run(math_run(child, false))),
+            // An `m:oMathPara` is Word's *block* equation wrapper. Flattening
+            // it to its `m:oMath` children keeps one fragment per equation,
+            // and the flag preserves the block-ness the wrapper carried.
             "oMathPara" => {
                 for m in child.children().filter(|n| is_element(*n, "oMath")) {
-                    push_item(&mut stack, &mut top, RunItem::Run(math_run(m)));
+                    push_item(&mut stack, &mut top, RunItem::Run(math_run(m, true)));
                 }
             }
             _ => {}
@@ -1152,7 +1345,9 @@ fn parse_run(node: Node, tb_depth: usize) -> Run {
                 }
                 collect_vml_content(child, 0, &mut run.content);
             }
-            "oMath" => run.content.push(RunContent::Math(raw_xml(child))),
+            "oMath" => {
+                run.content.push(RunContent::Math { xml: raw_xml(child), display: false })
+            }
             "ruby" => run.content.push(parse_ruby(child, tb_depth)),
             // The marker in the body text; the note's own content lives in
             // `word/footnotes.xml`/`word/endnotes.xml`, resolved later by
@@ -1185,8 +1380,11 @@ fn parse_run(node: Node, tb_depth: usize) -> Run {
 /// A `m:oMath` captured as a single-content run, used when the equation
 /// appears directly in paragraph/hyperlink content (its normal position —
 /// `m:oMath` is a sibling of `w:r`, not a child of one).
-fn math_run(node: Node) -> Run {
-    Run { props: RunProps::default(), content: vec![RunContent::Math(raw_xml(node))] }
+fn math_run(node: Node, display: bool) -> Run {
+    Run {
+        props: RunProps::default(),
+        content: vec![RunContent::Math { xml: raw_xml(node), display }],
+    }
 }
 
 /// A `w:drawing`'s embedded raster image: the blip's relationship id, its
@@ -1203,7 +1401,13 @@ fn parse_drawing(node: Node) -> Option<DrawingRef> {
         .find(|n| is_element(*n, "docPr"))
         .and_then(|n| attr(n, "descr"))
         .map(EcoString::from);
-    Some(DrawingRef { rel_id, cx_emu, cy_emu, alt })
+    let align = node
+        .descendants()
+        .find(|n| is_element(*n, "positionH"))
+        .and_then(|n| n.children().find(|c| is_element(*c, "align")))
+        .and_then(|n| n.text())
+        .map(|text| EcoString::from(text.trim()));
+    Some(DrawingRef { rel_id, cx_emu, cy_emu, alt, align })
 }
 
 /// A `w:drawing`'s chart reference: the `r:id` of its `c:chart` graphic-data
@@ -1222,7 +1426,7 @@ fn parse_chart_ref(node: Node) -> Option<DrawingRef> {
     let extent = node.descendants().find(|n| is_element(*n, "extent"));
     let cx_emu = extent.and_then(|n| attr(n, "cx")).and_then(parse_i64);
     let cy_emu = extent.and_then(|n| attr(n, "cy")).and_then(parse_i64);
-    Some(DrawingRef { rel_id, cx_emu, cy_emu, alt: None })
+    Some(DrawingRef { rel_id, cx_emu, cy_emu, alt: None, align: None })
 }
 
 // --- Text boxes (`wps:txbx`/`v:textbox`'s `w:txbxContent`) --------------------
@@ -1374,6 +1578,7 @@ fn parse_vml_imagedata(imagedata: Node, shape: Node) -> Option<DrawingRef> {
         cx_emu: vml_length_pt(style, "width").map(pt_to_emu),
         cy_emu: vml_length_pt(style, "height").map(pt_to_emu),
         alt: None,
+        align: None,
     })
 }
 
@@ -1474,6 +1679,9 @@ fn parse_para_props(node: Node) -> ParaProps {
                 if let Some(before) = attr(child, "before").and_then(parse_i64) {
                     props.spacing_before = Some(before);
                 }
+                if let Some(after) = attr(child, "after").and_then(parse_i64) {
+                    props.spacing_after = Some(after);
+                }
                 if let Some(line) = attr(child, "line").and_then(parse_i64) {
                     props.line = Some(line);
                 }
@@ -1482,7 +1690,13 @@ fn parse_para_props(node: Node) -> ParaProps {
                 props.indent_left = attr(child, "left")
                     .or_else(|| attr(child, "start"))
                     .and_then(parse_i64);
+                props.indent_right = attr(child, "right")
+                    .or_else(|| attr(child, "end"))
+                    .and_then(parse_i64);
+                props.indent_first_line = attr(child, "firstLine").and_then(parse_i64);
+                props.indent_hanging = attr(child, "hanging").and_then(parse_i64);
             }
+            "shd" => props.shd_fill = attr(child, "fill").map(EcoString::from),
             "pBdr" => {
                 props.bottom_border =
                     child.children().any(|n| is_element(n, "bottom"));
@@ -1518,12 +1732,24 @@ fn parse_run_props(node: Node) -> RunProps {
         bold: toggle(child("b")),
         italic: toggle(child("i")),
         strike: toggle(child("strike")),
+        dstrike: toggle(child("dstrike")),
         smallcaps: toggle(child("smallCaps")),
-        underline: child("u").and_then(|n| attr(n, "val")).map(EcoString::from),
+        caps: toggle(child("caps")),
+        // A bare `<w:u/>` means a single underline; only an explicit
+        // `w:val="none"` turns one off. Defaulting here keeps "no `w:u` at
+        // all" (`None`) distinguishable from "underlined, style unstated".
+        underline: child("u").map(|n| EcoString::from(attr(n, "val").unwrap_or("single"))),
+        underline_color: child("u").and_then(|n| attr(n, "color")).map(EcoString::from),
+        highlight: child("highlight").and_then(|n| attr(n, "val")).map(EcoString::from),
         color: child("color").and_then(|n| attr(n, "val")).map(EcoString::from),
         size_half_pt: child("sz").and_then(|n| attr(n, "val")).and_then(parse_i64),
+        // `w:rPr/w:spacing` is tracking; the identically-named element on a
+        // `w:pPr` is paragraph spacing (see `parse_para_props`).
+        letter_spacing: child("spacing").and_then(|n| attr(n, "val")).and_then(parse_i64),
         font: child("rFonts").and_then(|n| attr(n, "ascii")).map(EcoString::from),
+        lang: child("lang").and_then(|n| attr(n, "val")).map(EcoString::from),
         vert_align: child("vertAlign").and_then(|n| attr(n, "val")).map(EcoString::from),
+        rtl: toggle(child("rtl")),
         vanish: toggle(child("vanish")),
     }
 }
@@ -1582,7 +1808,7 @@ fn parse_row(node: Node, depth: usize, tb_depth: usize) -> Row {
 
 fn parse_cell(node: Node, depth: usize, tb_depth: usize) -> Cell {
     let mut cell =
-        Cell { grid_span: 1, v_merge: None, shd_fill: None, content: Vec::new() };
+        Cell { grid_span: 1, ..Default::default() };
     for child in unwrap_wrappers(node) {
         match child.tag_name().name() {
             "tcPr" => parse_cell_props(child, &mut cell),
@@ -1612,9 +1838,50 @@ fn parse_cell_props(node: Node, cell: &mut Cell) {
             "shd" => {
                 cell.shd_fill = attr(prop, "fill").map(EcoString::from);
             }
+            "tcBorders" => cell.borders = parse_cell_borders(prop),
+            "vAlign" => cell.v_align = attr(prop, "val").map(EcoString::from),
+            "tcMar" => cell.margins = parse_cell_margins(prop),
             _ => {}
         }
     }
+}
+
+/// Parse `w:tcBorders`. Word names the horizontal sides `start`/`end` in its
+/// newer, direction-neutral spelling as well as `left`/`right`; both are
+/// accepted, mirroring how `w:ind` is read (see `parse_para_props`).
+fn parse_cell_borders(node: Node) -> CellBorders {
+    let mut borders = CellBorders::default();
+    for side in node.children().filter(|n| n.is_element()) {
+        let edge = BorderEdge {
+            val: attr(side, "val").unwrap_or("single").into(),
+            sz_eighth_pt: attr(side, "sz").and_then(parse_i64),
+            color: attr(side, "color").map(EcoString::from),
+        };
+        match side.tag_name().name() {
+            "top" => borders.top = Some(edge),
+            "bottom" => borders.bottom = Some(edge),
+            "left" | "start" => borders.left = Some(edge),
+            "right" | "end" => borders.right = Some(edge),
+            _ => {}
+        }
+    }
+    borders
+}
+
+/// Parse `w:tcMar`. Each side carries its measurement on `@w:w`, not `@w:val`.
+fn parse_cell_margins(node: Node) -> CellMargins {
+    let mut margins = CellMargins::default();
+    for side in node.children().filter(|n| n.is_element()) {
+        let value = attr(side, "w").and_then(parse_i64);
+        match side.tag_name().name() {
+            "top" => margins.top = value,
+            "bottom" => margins.bottom = value,
+            "left" | "start" => margins.left = value,
+            "right" | "end" => margins.right = value,
+            _ => {}
+        }
+    }
+    margins
 }
 
 // --- Charts (`word/charts/*.xml`) ---------------------------------------------
@@ -2069,7 +2336,12 @@ fn parse_numbering(document: Document) -> Numbering {
                         .and_then(|n| attr(n, "val"))
                         .unwrap_or("decimal")
                         .into();
-                    levels.insert(ilvl, LevelFormat { num_fmt });
+                    let start = lvl
+                        .children()
+                        .find(|n| is_element(*n, "start"))
+                        .and_then(|n| attr(n, "val"))
+                        .and_then(parse_i64);
+                    levels.insert(ilvl, LevelFormat { num_fmt, start });
                 }
                 numbering.abstract_nums.insert(abstract_num_id, levels);
             }
@@ -2084,6 +2356,21 @@ fn parse_numbering(document: Document) -> Numbering {
                     .and_then(parse_i64)
                 {
                     numbering.instances.insert(num_id, abstract_num_id);
+                }
+                // A `w:lvlOverride` restarts this *instance* at its own
+                // number without disturbing the shared `abstractNum`.
+                for over in child.children().filter(|n| is_element(*n, "lvlOverride")) {
+                    let Some(ilvl) = attr(over, "ilvl").and_then(parse_i64) else {
+                        continue;
+                    };
+                    if let Some(start) = over
+                        .children()
+                        .find(|n| is_element(*n, "startOverride"))
+                        .and_then(|n| attr(n, "val"))
+                        .and_then(parse_i64)
+                    {
+                        numbering.start_overrides.insert((num_id, ilvl), start);
+                    }
                 }
             }
             _ => {}
@@ -2343,7 +2630,7 @@ mod tests {
         assert_eq!(d.alt.as_deref(), Some("a picture"));
 
         let RunItem::Run(r5) = &p.runs[5] else { panic!("expected a run") };
-        let RunContent::Math(raw) = &r5.content[0] else { panic!("expected math") };
+        let RunContent::Math { xml: raw, .. } = &r5.content[0] else { panic!("expected math") };
         assert!(raw.starts_with("<m:oMath>"));
         assert!(raw.contains("x+y"));
 

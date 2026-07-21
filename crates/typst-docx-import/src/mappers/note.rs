@@ -3,12 +3,15 @@
 //! [`WmlPackage::footnotes`]/[`WmlPackage::endnotes`], → the Typst IR's
 //! [`Inline::Footnote`].
 //!
-//! Typst has no separate end-of-document note store — `#footnote[..]` always
-//! inlines the note's content at the reference site and renders it at the
-//! foot of *that* page. A footnote maps onto this directly; an endnote does
-//! not (Word collects endnotes at the document's end), so lowering one as a
-//! footnote is a real, reported approximation rather than a silent
-//! equivalence — see [`lower_note_ref`]'s `endnote` branch.
+//! Typst has no separate note store — `#footnote[..]` always inlines the
+//! note's content at the reference site and renders it at the foot of *that*
+//! page. A footnote maps onto this directly. An endnote does not: Word
+//! collects endnotes at the document's end, so only a superscript mark is
+//! left at the reference and the body is handed to [`LowerCtx::collect_endnote`]
+//! for `lower::lower` to emit, in order, after the body — a reported
+//! approximation rather than a silent equivalence.
+
+use ecow::eco_format;
 
 use crate::lower::{lower_items, LowerCtx};
 use crate::tdoc::Inline;
@@ -33,6 +36,13 @@ pub(crate) fn lower_note_ref(endnote: bool, id: i64, ctx: &mut LowerCtx) -> Opti
         return None;
     };
 
+    // A second reference to one endnote reuses its number rather than
+    // collecting the body again — checked before the cycle guard, since a
+    // repeat reference never lowers anything and so can't recurse.
+    if endnote && let Some(number) = ctx.endnote_number(id) {
+        return Some(endnote_mark(number));
+    }
+
     if !ctx.enter_note(endnote, id) {
         ctx.report.drop(
             what,
@@ -45,9 +55,8 @@ pub(crate) fn lower_note_ref(endnote: bool, id: i64, ctx: &mut LowerCtx) -> Opti
     if endnote {
         ctx.report.approximate(
             "endnote",
-            "imported as a footnote; Typst has no end-of-document note store, so it renders \
-             at the foot of its own page rather than collected with the document's other \
-             endnotes",
+            "Typst has no end-of-document note store; collected at the document's end as \
+             ordinary numbered content instead",
         );
     }
 
@@ -59,7 +68,22 @@ pub(crate) fn lower_note_ref(endnote: bool, id: i64, ctx: &mut LowerCtx) -> Opti
     ctx.exit_container(was_in_container);
     ctx.exit_note();
 
+    if endnote {
+        // The body goes to the collection emitted at the document's end
+        // (see `lower::lower`); only the mark stays here.
+        let number = ctx.collect_endnote(id, blocks);
+        return Some(endnote_mark(number));
+    }
+
     Some(Inline::Footnote(blocks))
+}
+
+/// The superscript number left in the text where an endnote was referenced.
+/// A literal number rather than a Typst counter: the importer already knows
+/// every endnote's position, so numbering them here keeps the marks and the
+/// collected entries in step without pulling a counter into the output.
+fn endnote_mark(number: usize) -> Inline {
+    Inline::Verbatim(eco_format!("#super[{number}]"))
 }
 
 #[cfg(test)]
@@ -120,19 +144,39 @@ mod tests {
         assert_eq!(report.notes[0].what, "footnote");
     }
 
+    /// An endnote leaves only a mark behind; its body is collected for the
+    /// document's end rather than inlined as a page-foot footnote.
     #[test]
-    fn endnote_lowers_to_a_footnote_and_records_the_approximation() {
+    fn endnote_leaves_a_mark_and_collects_its_body() {
         let mut endnotes = FxHashMap::default();
         endnotes.insert(1, text_body("end note text"));
         let package = WmlPackage { endnotes, ..Default::default() };
         let mut report = ImportReport::default();
         let options = ImportOptions::default();
         let mut ctx = LowerCtx::new(&package, &options, &mut report);
-        let inline =
-            lower_note_ref(true, 1, &mut ctx).expect("expected a resolved endnote");
-        assert!(matches!(inline, Inline::Footnote(_)));
+
+        let inline = lower_note_ref(true, 1, &mut ctx).expect("expected a resolved endnote");
+        assert!(matches!(&inline, Inline::Verbatim(v) if v == "#super[1]"), "{inline:?}");
+        assert_eq!(ctx.take_endnotes().len(), 1);
         assert_eq!(report.notes.len(), 1);
         assert_eq!(report.notes[0].what, "endnote");
+    }
+
+    /// Two references to the same endnote share one number and one collected
+    /// body — Word numbers the note, not the reference.
+    #[test]
+    fn a_repeated_endnote_reference_reuses_its_number() {
+        let mut endnotes = FxHashMap::default();
+        endnotes.insert(1, text_body("once"));
+        let package = WmlPackage { endnotes, ..Default::default() };
+        let mut report = ImportReport::default();
+        let options = ImportOptions::default();
+        let mut ctx = LowerCtx::new(&package, &options, &mut report);
+
+        let first = lower_note_ref(true, 1, &mut ctx).unwrap();
+        let second = lower_note_ref(true, 1, &mut ctx).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(ctx.take_endnotes().len(), 1);
     }
 
     /// A note that references itself must not recurse forever — the guard

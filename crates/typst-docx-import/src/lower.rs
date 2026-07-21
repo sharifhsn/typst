@@ -1,14 +1,20 @@
 //! Lower the Word IR ([`crate::wml`]) to the Typst IR ([`crate::tdoc`]).
 //! The mirror of the exporter's `convert.rs` + `mappers/`.
 
+use ecow::{eco_format, EcoString};
 use typst_ooxml_core::units::half_point_to_pt;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::mappers;
 use crate::mappers::para::{ParaKind, ParaResult};
 use crate::opts::ImportOptions;
 use crate::report::ImportReport;
-use crate::tdoc::{self, Block, List, ListItem, Stmt, TextStyle, TypstDoc};
-use crate::wml::model::{BodyItem, RunProps, SectionStart, WmlPackage};
+use crate::resolve::styles::{effective_para, heading_level};
+use crate::tdoc::{
+    self, Block, Date, DocumentInfo, Inline, List, ListItem, ParStyle, Stmt, TextStyle, TypstDoc,
+};
+use crate::wml::model::{BodyItem, DocumentMeta, Numbering, RunProps, SectionStart, WmlPackage};
 
 /// Everything the lowering phase threads through: the package being read, the
 /// options that govern how it's lowered, the loss report, and the guards
@@ -38,6 +44,19 @@ pub(crate) struct LowerCtx<'a> {
     /// (`#outline()` renders every heading, including the one that contains
     /// it — "maximum show rule depth exceeded").
     in_heading: bool,
+    /// Endnote bodies in first-reference order, emitted together at the
+    /// document's end — Word collects endnotes there, and Typst has no note
+    /// store to route them through. See `mappers::note`.
+    endnotes: Vec<Vec<Block>>,
+    /// `endnote id` → the number already assigned to it, so a second
+    /// reference to the same endnote reuses its number instead of collecting
+    /// the body twice.
+    endnote_numbers: FxHashMap<i64, usize>,
+    /// Labels already emitted. A Typst label must be unique in a document,
+    /// and real producers (LibreOffice in particular) do write the same
+    /// `w:bookmarkStart` name twice — emitting both makes every reference to
+    /// it ambiguous and fails the compile.
+    emitted_labels: FxHashSet<EcoString>,
 }
 
 /// How deep a chain of notes referencing other notes may nest before
@@ -61,7 +80,36 @@ impl<'a> LowerCtx<'a> {
             note_stack: Vec::new(),
             in_container: false,
             in_heading: false,
+            endnotes: Vec::new(),
+            endnote_numbers: FxHashMap::default(),
+            emitted_labels: FxHashSet::default(),
         }
+    }
+
+    /// Claim `label` for emission, or `false` if it has already been emitted
+    /// elsewhere in the document — see [`Self::emitted_labels`].
+    pub(crate) fn claim_label(&mut self, label: &EcoString) -> bool {
+        self.emitted_labels.insert(label.clone())
+    }
+
+    /// The number already assigned to endnote `id`, if it has been referenced
+    /// before. Checked *before* lowering so a repeat reference doesn't collect
+    /// a second copy of the same body.
+    pub(crate) fn endnote_number(&self, id: i64) -> Option<usize> {
+        self.endnote_numbers.get(&id).copied()
+    }
+
+    /// Collect `body` as the next endnote and return its number.
+    pub(crate) fn collect_endnote(&mut self, id: i64, body: Vec<Block>) -> usize {
+        self.endnotes.push(body);
+        let number = self.endnotes.len();
+        self.endnote_numbers.insert(id, number);
+        number
+    }
+
+    /// Take the collected endnotes, leaving the context empty.
+    pub(crate) fn take_endnotes(&mut self) -> Vec<Vec<Block>> {
+        std::mem::take(&mut self.endnotes)
     }
 
     /// Try to enter `(endnote, id)`'s body for lowering. Returns `false` —
@@ -137,6 +185,14 @@ impl<'a> LowerCtx<'a> {
 pub(crate) fn lower(ctx: &mut LowerCtx) -> TypstDoc {
     let mut doc = TypstDoc::default();
 
+    // Metadata leads the preamble: it identifies the document rather than
+    // styling it. A package with no core properties pushes nothing, so the
+    // preamble every existing fixture expects is unchanged.
+    let info = document_info(&ctx.package.meta, &mut *ctx.report);
+    if !info.is_empty() {
+        doc.preamble.push(Stmt::SetDocument(info));
+    }
+
     // The document's first section keeps the exact behaviour a single-section
     // document has always had: its page geometry (plus header/footer) goes to
     // the preamble as a `#set page(..)`, and its content is lowered flat into
@@ -155,6 +211,11 @@ pub(crate) fn lower(ctx: &mut LowerCtx) -> TypstDoc {
     // test and fixture already expects.
     if let Some(style) = default_text_style(&ctx.package.styles.default_run) {
         doc.preamble.push(Stmt::SetText(style));
+    }
+
+    if let Some(numbering) = heading_numbering(ctx.package) {
+        doc.preamble
+            .push(Stmt::Verbatim(eco_format!("#set heading(numbering: \"{numbering}\")")));
     }
 
     doc.body = lower_items(&first.items, ctx);
@@ -189,7 +250,32 @@ pub(crate) fn lower(ctx: &mut LowerCtx) -> TypstDoc {
         previous = setup;
     }
 
+    // Word renders endnotes together at the document's end, after a
+    // separator. Typst has no note store, so they are emitted here as
+    // ordinary content in first-reference order — the closest faithful
+    // equivalent, and much closer than scattering them across page feet.
+    let endnotes = ctx.take_endnotes();
+    if !endnotes.is_empty() {
+        doc.body.push(Block::Rule);
+        for (index, body) in endnotes.into_iter().enumerate() {
+            doc.body.extend(numbered_endnote(index + 1, body));
+        }
+    }
+
     doc
+}
+
+/// Prefix a collected endnote's body with its number so the entries at the
+/// document's end line up with the marks left in the text.
+fn numbered_endnote(number: usize, mut body: Vec<Block>) -> Vec<Block> {
+    let marker = Inline::Text(eco_format!("{number}. "));
+    match body.first_mut() {
+        // Fold the number into the note's own opening paragraph, so it reads
+        // as one block rather than a stray number on a line of its own.
+        Some(Block::Paragraph { body: inlines, .. }) => inlines.insert(0, marker),
+        _ => body.insert(0, Block::Paragraph { style: ParStyle::default(), body: vec![marker] }),
+    }
+    body
 }
 
 /// Lower a sequence of body items (the document body, or a table cell's
@@ -197,7 +283,7 @@ pub(crate) fn lower(ctx: &mut LowerCtx) -> TypstDoc {
 /// single [`Block::List`] rather than emitting one list per item.
 pub(crate) fn lower_items(items: &[BodyItem], ctx: &mut LowerCtx) -> Vec<Block> {
     let mut blocks = Vec::new();
-    let mut pending_list: Option<List> = None;
+    let mut pending_list: Option<PendingList> = None;
 
     for item in items {
         match item {
@@ -210,40 +296,114 @@ pub(crate) fn lower_items(items: &[BodyItem], ctx: &mut LowerCtx) -> Vec<Block> 
                 // list item ends the list and starts a new one after it —
                 // slightly worse than Word's layout, but it keeps the image.
                 if let Some(block) = anchored {
-                    if let Some(list) = pending_list.take() {
-                        blocks.push(Block::List(list));
+                    if let Some(pending) = pending_list.take() {
+                        blocks.push(pending.finish(&ctx.package.numbering));
                     }
                     blocks.push(block);
                 }
 
                 match kind {
-                    ParaKind::ListItem { ordered, level, body } => {
-                        let li = ListItem { ordered, level, body };
+                    ParaKind::ListItem { ordered, level, body, num_id } => {
+                        let item = ListItem { ordered, level, body };
                         match pending_list.as_mut() {
-                            Some(list) => list.items.push(li),
-                            None => pending_list = Some(List { items: vec![li] }),
+                            Some(pending) => pending.push(item),
+                            None => pending_list = Some(PendingList::new(item, num_id)),
                         }
                     }
                     other => {
-                        if let Some(list) = pending_list.take() {
-                            blocks.push(Block::List(list));
+                        if let Some(pending) = pending_list.take() {
+                            blocks.push(pending.finish(&ctx.package.numbering));
                         }
                         push_para_kind(&mut blocks, other);
                     }
                 }
             }
             BodyItem::Table(t) => {
-                if let Some(list) = pending_list.take() {
-                    blocks.push(Block::List(list));
+                if let Some(pending) = pending_list.take() {
+                    blocks.push(pending.finish(&ctx.package.numbering));
                 }
                 blocks.push(Block::Table(mappers::table::lower_table(t, ctx)));
             }
         }
     }
-    if let Some(list) = pending_list.take() {
-        blocks.push(Block::List(list));
+    if let Some(pending) = pending_list.take() {
+        blocks.push(pending.finish(&ctx.package.numbering));
     }
     blocks
+}
+
+/// A run of consecutive list-item paragraphs being accumulated into one
+/// [`Block::List`], together with the Word numbering reference needed to
+/// resolve the list's format and starting number once the run ends.
+///
+/// The `numId` can't be resolved item-by-item: Typst states an enum's
+/// numbering once for the whole list, with one counting symbol per nesting
+/// depth, so the pattern isn't knowable until every level the list actually
+/// uses has been seen.
+struct PendingList {
+    list: List,
+    num_id: Option<i64>,
+    deepest: u8,
+}
+
+impl PendingList {
+    fn new(item: ListItem, num_id: Option<i64>) -> Self {
+        let deepest = item.level;
+        PendingList { list: List { items: vec![item], numbering: None, start: None }, num_id, deepest }
+    }
+
+    fn push(&mut self, item: ListItem) {
+        self.deepest = self.deepest.max(item.level);
+        self.list.items.push(item);
+    }
+
+    fn finish(self, numbering: &Numbering) -> Block {
+        let mut list = self.list;
+        if let Some(num_id) = self.num_id
+            && list.items.iter().any(|item| item.ordered)
+        {
+            list.numbering = enum_numbering(numbering, num_id, self.deepest);
+            // Typst already counts from 1, so only a different start is worth
+            // stating.
+            list.start = numbering.start(num_id, 0).filter(|&start| start != 1);
+        }
+        Block::List(list)
+    }
+}
+
+/// Typst's counting symbol for one Word `w:numFmt`.
+///
+/// `None` for a format Typst has no counting symbol for (`ordinal`,
+/// `cardinalText`, the CJK and Hebrew sequences, …), which leaves the list on
+/// Typst's default numbering rather than inventing a different one.
+fn counting_symbol(num_fmt: &str) -> Option<&'static str> {
+    match num_fmt {
+        "decimal" | "decimalZero" => Some("1"),
+        "lowerLetter" => Some("a"),
+        "upperLetter" => Some("A"),
+        "lowerRoman" => Some("i"),
+        "upperRoman" => Some("I"),
+        _ => None,
+    }
+}
+
+/// Build the Typst `enum(numbering:)` pattern for a Word list.
+///
+/// Typst takes one counting symbol per nesting depth in a single pattern
+/// string (`"1.a.i."`) and shows the deepest applicable one; Word stores a
+/// format per level. Returns `None` when the list is plain decimal throughout
+/// — that is already Typst's default — or when any level uses a format with no
+/// Typst counterpart, since a partly-translated pattern would silently
+/// renumber the levels it couldn't express.
+fn enum_numbering(numbering: &Numbering, num_id: i64, deepest: u8) -> Option<EcoString> {
+    let mut symbols = Vec::with_capacity(usize::from(deepest) + 1);
+    for ilvl in 0..=i64::from(deepest) {
+        symbols.push(counting_symbol(&numbering.level(num_id, ilvl)?.num_fmt)?);
+    }
+    if symbols.iter().all(|symbol| *symbol == "1") {
+        return None;
+    }
+    Some(format!("{}.", symbols.join(".")).into())
 }
 
 fn push_para_kind(blocks: &mut Vec<Block>, kind: ParaKind) {
@@ -252,9 +412,86 @@ fn push_para_kind(blocks: &mut Vec<Block>, kind: ParaKind) {
         ParaKind::Rule => blocks.push(Block::Rule),
         ParaKind::Heading { level, body } => blocks.push(Block::Heading { level, body }),
         ParaKind::Paragraph { style, body } => blocks.push(Block::Paragraph { style, body }),
+        ParaKind::Equation { body } => blocks.push(Block::Equation { body }),
         ParaKind::Empty => {}
         ParaKind::ListItem { .. } => unreachable!("list items are handled by the caller"),
     }
+}
+
+/// Lower the package's core properties to a `#set document(..)`.
+///
+/// Word's single-string fields are split into the shapes Typst wants: authors
+/// on `;` (the separator `typst-docx` itself writes on export, so a
+/// round-tripped multi-author list comes back intact) and keywords on `,`
+/// (Word's own convention). `dc:description` has no `document` counterpart in
+/// Typst, so it's reported as a drop rather than vanishing quietly.
+fn document_info(meta: &DocumentMeta, report: &mut ImportReport) -> DocumentInfo {
+    if meta.description.is_some() {
+        report.drop("document description", "Typst's `document` has no description field");
+    }
+    DocumentInfo {
+        title: meta.title.clone(),
+        authors: split_metadata_list(meta.creator.as_deref(), ';'),
+        keywords: split_metadata_list(meta.keywords.as_deref(), ','),
+        date: meta.created.as_deref().and_then(parse_w3cdtf_date),
+    }
+}
+
+/// Split one of Word's delimited metadata strings into its parts, trimming
+/// whitespace and dropping empties.
+fn split_metadata_list(value: Option<&str>, separator: char) -> Vec<EcoString> {
+    value
+        .into_iter()
+        .flat_map(|value| value.split(separator))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part: &str| EcoString::from(part))
+        .collect()
+}
+
+/// Pull the calendar date out of a W3CDTF timestamp ("2026-03-14T09:00:00Z").
+/// Only the date survives — see [`Date`] for why the time of day doesn't.
+fn parse_w3cdtf_date(value: &str) -> Option<Date> {
+    let mut parts = value.split('T').next()?.split('-');
+    let year = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    // Typst's `datetime` rejects an out-of-range component outright, which
+    // would fail the whole compile over a cosmetic field.
+    ((1..=12).contains(&month) && (1..=31).contains(&day))
+        .then_some(Date { year, month, day })
+}
+
+/// The document's heading numbering, as a Typst `#set heading(numbering: ..)`
+/// pattern.
+///
+/// Word hangs heading numbering off the `HeadingN` paragraph *styles* via
+/// `w:numPr` rather than storing it as text, so without this a document whose
+/// headings Word auto-numbers imports with its numbers silently gone. That
+/// includes documents `typst-docx` itself produces, which now emit live
+/// `w:numPr` heading numbering — so this is what closes that round-trip.
+///
+/// Typst's heading numbering is full-context by default (`"1.1"` renders 1,
+/// 1.1, 1.1.1), which is the scheme Word's `%1.%2` `w:lvlText` states too.
+fn heading_numbering(package: &WmlPackage) -> Option<EcoString> {
+    let styles = &package.styles;
+    // The level-1 heading style carries the reference the whole scheme hangs
+    // off; the deeper levels share its `numId`.
+    let num = styles
+        .by_id
+        .values()
+        .filter(|style| heading_level(styles, Some(style.id.as_str())) == Some(1))
+        .find_map(|style| effective_para(styles, &style.para).num)?;
+
+    let mut symbols = Vec::new();
+    for ilvl in 0..9 {
+        let Some(level) = package.numbering.level(num.num_id, ilvl) else { break };
+        // A level Typst has no counting symbol for abandons the whole scheme,
+        // rather than renumbering the levels it couldn't express — the same
+        // rule `enum_numbering` follows.
+        symbols.push(counting_symbol(&level.num_fmt)?);
+    }
+    (!symbols.is_empty()).then(|| symbols.join(".").into())
 }
 
 /// A document-default `#set text(..)` from `styles.xml`'s docDefaults, so
@@ -272,6 +509,14 @@ fn default_text_style(run: &RunProps) -> Option<TextStyle> {
     }
     if let Some(color) = parse_hex_color(run.color.as_deref()) {
         style.color = Some(color);
+        any = true;
+    }
+    // Hoisted for the same reason as the font: Word stamps `w:lang` onto
+    // practically every run, so without a document-level default every single
+    // run would carry a redundant `lang:` argument (see
+    // `passes::collapse_style::reduce_style`, which clears the redundant ones).
+    if let Some(lang) = run.lang.as_deref().and_then(crate::mappers::run::lower_lang) {
+        style.lang = Some(lang);
         any = true;
     }
     any.then_some(style)
@@ -356,7 +601,7 @@ mod tests {
         let mut instances = FxHashMap::default();
         instances.insert(1, 100);
         let mut level_fmt = FxHashMap::default();
-        level_fmt.insert(0, LevelFormat { num_fmt: "bullet".into() });
+        level_fmt.insert(0, LevelFormat { num_fmt: "bullet".into(), start: None });
         let mut abstract_nums = FxHashMap::default();
         abstract_nums.insert(100, level_fmt);
 
@@ -369,7 +614,7 @@ mod tests {
 
         let package = WmlPackage {
             body: single_section(vec![para("Item 1"), para("Item 2")]),
-            numbering: Numbering { instances, abstract_nums },
+            numbering: Numbering { instances, abstract_nums, ..Default::default() },
             ..Default::default()
         };
 
@@ -602,5 +847,112 @@ mod tests {
             }
         }
         panic!("expected the depth cap to stop this chain");
+    }
+
+    /// Word joins multiple authors with `;` — the same separator `typst-docx`
+    /// writes — so a round-tripped author list must come back as a list.
+    #[test]
+    fn core_properties_lower_to_document_info() {
+        let mut report = ImportReport::default();
+        let info = document_info(
+            &DocumentMeta {
+                title: Some("Quarterly Report".into()),
+                creator: Some("Aoife Brennan; R. Okonkwo".into()),
+                keywords: Some("safety, quarterly".into()),
+                created: Some("2026-03-14T09:00:00Z".into()),
+                description: None,
+            },
+            &mut report,
+        );
+
+        assert_eq!(info.title.as_deref(), Some("Quarterly Report"));
+        assert_eq!(info.authors, ["Aoife Brennan", "R. Okonkwo"]);
+        assert_eq!(info.keywords, ["safety", "quarterly"]);
+        assert_eq!(info.date, Some(Date { year: 2026, month: 3, day: 14 }));
+        assert!(report.notes.is_empty());
+    }
+
+    /// Typst's `document` has no description, so the field is reported rather
+    /// than quietly discarded.
+    #[test]
+    fn a_description_is_reported_as_dropped() {
+        let mut report = ImportReport::default();
+        let info = document_info(
+            &DocumentMeta { description: Some("A test.".into()), ..Default::default() },
+            &mut report,
+        );
+
+        assert!(info.is_empty());
+        assert_eq!(report.notes.len(), 1);
+        assert_eq!(report.notes[0].what, "document description");
+    }
+
+    /// Build a one-instance `Numbering` whose levels use `formats` in order.
+    fn numbering_with(formats: &[&str]) -> Numbering {
+        let mut instances = FxHashMap::default();
+        instances.insert(1, 100);
+        let mut levels = FxHashMap::default();
+        for (ilvl, fmt) in formats.iter().enumerate() {
+            levels.insert(ilvl as i64, LevelFormat { num_fmt: (*fmt).into(), start: None });
+        }
+        let mut abstract_nums = FxHashMap::default();
+        abstract_nums.insert(100, levels);
+        Numbering { instances, abstract_nums, ..Default::default() }
+    }
+
+    #[test]
+    fn a_roman_list_gets_a_typst_numbering_pattern() {
+        let numbering = numbering_with(&["lowerRoman"]);
+        assert_eq!(enum_numbering(&numbering, 1, 0).as_deref(), Some("i."));
+    }
+
+    /// Typst already numbers `1.`, so a plain decimal list must not be wrapped
+    /// in a redundant `#set enum(numbering: "1.")`.
+    #[test]
+    fn a_plain_decimal_list_keeps_typsts_default() {
+        assert_eq!(enum_numbering(&numbering_with(&["decimal"]), 1, 0), None);
+    }
+
+    /// One pattern carries a counting symbol per nesting depth.
+    #[test]
+    fn nested_levels_join_into_one_pattern() {
+        let numbering = numbering_with(&["decimal", "lowerLetter", "lowerRoman"]);
+        assert_eq!(enum_numbering(&numbering, 1, 2).as_deref(), Some("1.a.i."));
+    }
+
+    /// A partly-translated pattern would silently renumber the levels it
+    /// couldn't express, so one untranslatable level abandons the whole thing.
+    #[test]
+    fn an_untranslatable_level_keeps_typsts_default() {
+        let numbering = numbering_with(&["decimal", "cardinalText"]);
+        assert_eq!(enum_numbering(&numbering, 1, 1), None);
+        // …but only when that level is actually reached.
+        assert_eq!(enum_numbering(&numbering, 1, 0), None);
+    }
+
+    /// A `w:startOverride` belongs to the instance, so two lists sharing an
+    /// `abstractNum` must not inherit each other's starting number.
+    #[test]
+    fn a_start_override_beats_the_shared_definition() {
+        let mut numbering = numbering_with(&["decimal"]);
+        numbering.abstract_nums.get_mut(&100).unwrap().get_mut(&0).unwrap().start = Some(1);
+        numbering.start_overrides.insert((1, 0), 7);
+        assert_eq!(numbering.start(1, 0), Some(7));
+        // An instance with no override still sees the shared start.
+        numbering.instances.insert(2, 100);
+        assert_eq!(numbering.start(2, 0), Some(1));
+    }
+
+    /// A malformed or out-of-range timestamp must not reach `datetime(..)`,
+    /// which would fail the whole compile over a cosmetic field.
+    #[test]
+    fn an_unusable_timestamp_yields_no_date() {
+        assert_eq!(parse_w3cdtf_date("not-a-date"), None);
+        assert_eq!(parse_w3cdtf_date("2026-13-01T00:00:00Z"), None);
+        assert_eq!(parse_w3cdtf_date("2026-00-10"), None);
+        assert_eq!(
+            parse_w3cdtf_date("2026-03-14"),
+            Some(Date { year: 2026, month: 3, day: 14 })
+        );
     }
 }
