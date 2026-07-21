@@ -16,7 +16,8 @@ use typst_ooxml_core::{ns, opc::Reader};
 use crate::ImportError;
 use crate::report::ImportReport;
 use crate::wml::model::{
-    BorderEdge, Body, BodyItem, BreakType, Cell, CellBorders, CellMargins, ChartData, ChartKind,
+    BorderEdge, Borders, Body, BodyItem, BreakType, Cell, CellMargins, ChartData,
+    ChartKind,
     ChartSeries, DmlDash, DmlFill, DmlGeometry, DmlGradient, DmlGradientKind, DmlSeg, DmlShape,
     DmlStroke, DocumentMeta, DrawingRef, Field,
     FurnitureKind, FurnitureRef, LegendPos, LevelFormat, NumRef, Numbering, ParaProps, Paragraph,
@@ -329,7 +330,7 @@ pub fn parse_package(
     // no document without `word/document.xml`, so it alone still propagates
     // a fatal `ImportError` (see `parse_document`).
     let mut rels = parse_rels(&mut reader, report);
-    let even_and_odd_headers = parse_even_and_odd_headers(&mut reader, report);
+    let settings = parse_settings(&mut reader, report);
 
     let mut media = FxHashMap::default();
     let media_names: Vec<EcoString> = reader
@@ -383,7 +384,8 @@ pub fn parse_package(
         rels,
         media,
         furniture,
-        even_and_odd_headers,
+        even_and_odd_headers: settings.even_and_odd_headers,
+        mirror_margins: settings.mirror_margins,
         footnotes,
         endnotes,
         charts,
@@ -1011,15 +1013,28 @@ fn parse_notes_part(
 
 // --- word/settings.xml ---------------------------------------------------------
 
-/// Whether `settings.xml` declares `<w:evenAndOddHeaders/>` — the switch that
-/// makes an `even`-typed header/footer reference active (see
-/// [`crate::mappers::section`]).
-fn parse_even_and_odd_headers(reader: &mut Reader, report: &mut ImportReport) -> bool {
+/// The two document-wide switches this importer reads out of `settings.xml`:
+/// `<w:evenAndOddHeaders/>`, which makes an `even`-typed header/footer
+/// reference active (see [`crate::mappers::section`]), and
+/// `<w:mirrorMargins/>`, which makes the left/right page margins swap on
+/// facing pages. Both are single flags on the settings root, so one read of
+/// the part answers both.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Settings {
+    pub even_and_odd_headers: bool,
+    pub mirror_margins: bool,
+}
+
+fn parse_settings(reader: &mut Reader, report: &mut ImportReport) -> Settings {
     let Some(xml) = read_optional_part(reader, "word/settings.xml", "settings.xml", report) else {
-        return false;
+        return Settings::default();
     };
-    parse_xml(&xml, "settings.xml", report, false, |document| {
-        document.root_element().children().any(|n| is_element(n, "evenAndOddHeaders"))
+    parse_xml(&xml, "settings.xml", report, Settings::default(), |document| {
+        let flag = |name| document.root_element().children().any(|n| is_element(n, name));
+        Settings {
+            even_and_odd_headers: flag("evenAndOddHeaders"),
+            mirror_margins: flag("mirrorMargins"),
+        }
     })
 }
 
@@ -2051,10 +2066,9 @@ fn parse_para_props(node: Node) -> ParaProps {
                 props.indent_hanging = attr(child, "hanging").and_then(parse_i64);
             }
             "shd" => props.shd_fill = attr(child, "fill").map(EcoString::from),
-            "pBdr" => {
-                props.bottom_border =
-                    child.children().any(|n| is_element(n, "bottom"));
-            }
+            "pBdr" => props.borders = parse_borders(child),
+            "keepLines" => props.keep_lines = toggle(Some(child)),
+            "keepNext" => props.keep_next = toggle(Some(child)),
             "rPr" => props.mark_props = parse_run_props(child),
             // Marks this paragraph as the *last* item of a section — see
             // `parse_document_body`, the one place that reads this field.
@@ -2147,13 +2161,22 @@ fn parse_table(node: Node, depth: usize, tb_depth: usize) -> Table {
 }
 
 /// The table-level properties this importer can express: how the table sits
-/// between the margins (`w:jc`) and how far it is pushed off the left one
-/// (`w:tblInd`). Everything else in `w:tblPr` — the table style, borders, and
-/// widths — is either resolved per cell already or out of scope.
+/// between the margins (`w:jc`), how far it is pushed off the left one
+/// (`w:tblInd`), and its blanket borders (`w:tblBorders`). The table style and
+/// the various width declarations stay out of scope — cell widths already come
+/// from `w:tblGrid`.
 fn parse_table_props(node: Node, table: &mut Table) {
     for prop in node.children().filter(|n| n.is_element()) {
         match prop.tag_name().name() {
             "jc" => table.jc = attr(prop, "val").map(EcoString::from),
+            "tblBorders" => {
+                table.borders.outer = parse_borders(prop);
+                let edge = |name| {
+                    prop.children().find(|n| is_element(*n, name)).map(parse_border_edge)
+                };
+                table.borders.inside_h = edge("insideH");
+                table.borders.inside_v = edge("insideV");
+            }
             // Only `dxa` (twips) is an absolute length. `pct` measures against
             // the text width and `auto`/`nil` against the table's own layout,
             // neither of which is resolvable here, so they are left unread
@@ -2171,8 +2194,15 @@ fn parse_row(node: Node, depth: usize, tb_depth: usize) -> Row {
     for child in unwrap_wrappers(node) {
         match child.tag_name().name() {
             "trPr" => {
-                row.is_header =
-                    child.children().any(|n| is_element(n, "tblHeader"));
+                row.is_header = child.children().any(|n| is_element(n, "tblHeader"));
+                row.cant_split = child.children().any(|n| is_element(n, "cantSplit"));
+                let height = child.children().find(|n| is_element(*n, "trHeight"));
+                if let Some(height) = height {
+                    row.height_twips = attr(height, "val").and_then(parse_i64);
+                    // Word's own default when `@w:hRule` is absent is
+                    // `atLeast` — a minimum, not a fixed height.
+                    row.height_exact = attr(height, "hRule") == Some("exact");
+                }
             }
             "tc" => row.cells.push(parse_cell(child, depth, tb_depth)),
             _ => {}
@@ -2213,7 +2243,7 @@ fn parse_cell_props(node: Node, cell: &mut Cell) {
             "shd" => {
                 cell.shd_fill = attr(prop, "fill").map(EcoString::from);
             }
-            "tcBorders" => cell.borders = parse_cell_borders(prop),
+            "tcBorders" => cell.borders = parse_borders(prop),
             "vAlign" => cell.v_align = attr(prop, "val").map(EcoString::from),
             "tcMar" => cell.margins = parse_cell_margins(prop),
             _ => {}
@@ -2221,17 +2251,16 @@ fn parse_cell_props(node: Node, cell: &mut Cell) {
     }
 }
 
-/// Parse `w:tcBorders`. Word names the horizontal sides `start`/`end` in its
+/// Parse the four sides of a `w:tcBorders`, a `w:pBdr`, or a `w:tblBorders`
+/// — OOXML states all three identically, so one parser reads all three (the
+/// table's two extra interior sides are picked up by its own caller, see
+/// `parse_table_props`). Word names the horizontal sides `start`/`end` in its
 /// newer, direction-neutral spelling as well as `left`/`right`; both are
 /// accepted, mirroring how `w:ind` is read (see `parse_para_props`).
-fn parse_cell_borders(node: Node) -> CellBorders {
-    let mut borders = CellBorders::default();
+fn parse_borders(node: Node) -> Borders {
+    let mut borders = Borders::default();
     for side in node.children().filter(|n| n.is_element()) {
-        let edge = BorderEdge {
-            val: attr(side, "val").unwrap_or("single").into(),
-            sz_eighth_pt: attr(side, "sz").and_then(parse_i64),
-            color: attr(side, "color").map(EcoString::from),
-        };
+        let edge = parse_border_edge(side);
         match side.tag_name().name() {
             "top" => borders.top = Some(edge),
             "bottom" => borders.bottom = Some(edge),
@@ -2241,6 +2270,15 @@ fn parse_cell_borders(node: Node) -> CellBorders {
         }
     }
     borders
+}
+
+fn parse_border_edge(side: Node) -> BorderEdge {
+    BorderEdge {
+        val: attr(side, "val").unwrap_or("single").into(),
+        sz_eighth_pt: attr(side, "sz").and_then(parse_i64),
+        color: attr(side, "color").map(EcoString::from),
+        space_pt: attr(side, "space").and_then(parse_i64),
+    }
 }
 
 /// Parse `w:tcMar`. Each side carries its measurement on `@w:w`, not `@w:val`.
@@ -2558,6 +2596,12 @@ fn parse_sectpr(node: Node) -> SectPr {
                 sect.margin_bottom = attr(child, "bottom").and_then(parse_i64);
                 sect.margin_left = attr(child, "left").and_then(parse_i64);
                 sect.margin_right = attr(child, "right").and_then(parse_i64);
+                sect.header_dist = attr(child, "header").and_then(parse_i64);
+                sect.footer_dist = attr(child, "footer").and_then(parse_i64);
+                // Word writes `w:gutter="0"` on essentially every document;
+                // only a real allowance is worth carrying.
+                sect.gutter =
+                    attr(child, "gutter").and_then(parse_i64).filter(|g| *g > 0);
             }
             "headerReference" => {
                 if let Some(r) = parse_furniture_ref(child) {
@@ -2975,7 +3019,7 @@ mod tests {
         assert_eq!(p.props.spacing_before, Some(240));
         assert_eq!(p.props.line, Some(360));
         assert_eq!(p.props.indent_left, Some(720));
-        assert!(p.props.bottom_border);
+        assert!(p.props.borders.is_bottom_only());
 
         assert_eq!(p.runs.len(), 6);
 

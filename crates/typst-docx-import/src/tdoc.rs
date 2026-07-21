@@ -323,6 +323,15 @@ pub struct ParStyle {
     pub hanging_indent_pt: Option<f64>,
     /// Paragraph background shading (`w:pPr/w:shd`).
     pub fill: Option<[u8; 3]>,
+    /// Paragraph borders (`w:pPr/w:pBdr`) → `#block(stroke:)`. A paragraph
+    /// whose *only* border is a bottom rule never gets here: it lowers to a
+    /// `#line` instead (see [`crate::mappers::para`]).
+    pub stroke: Option<BoxStroke>,
+    /// The gap Word keeps between those borders and the text (`w:pBdr`'s
+    /// per-side `@w:space`, in points) → the bordered block's `inset:`.
+    pub stroke_inset_pt: Option<f64>,
+    /// `w:keepLines` → `#block(breakable: false)`.
+    pub unbreakable: bool,
 }
 
 impl ParStyle {
@@ -377,6 +386,14 @@ pub struct Table {
     /// Only ever set for a table Word left at its default (left) alignment:
     /// Word itself ignores the indent on a centred or right-aligned table.
     pub indent_pt: Option<f64>,
+    /// The table's blanket stroke (`w:tblBorders`), which every cell that
+    /// states no border of its own inherits. `None` leaves Typst's default
+    /// (a 1pt grid); `Some(Border::None)` is a genuinely borderless table.
+    pub stroke: Option<Border>,
+    /// Per-row track sizes in points, positionally aligned with `rows`;
+    /// `None` sizes that row to its content. Only a `w:trHeight` Word marked
+    /// `hRule="exact"` reaches here — see [`crate::mappers::table`].
+    pub row_heights: Vec<Option<f64>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -391,7 +408,7 @@ pub struct TableCell {
     pub rowspan: usize,
     pub fill: Option<[u8; 3]>,
     /// Per-side borders (`w:tcBorders`).
-    pub stroke: CellStroke,
+    pub stroke: BoxStroke,
     /// Vertical alignment within the cell (`w:vAlign`). Horizontal alignment
     /// isn't here: it comes from the `w:jc` on the cell's own paragraphs,
     /// which lower through the ordinary paragraph path.
@@ -409,7 +426,7 @@ impl TableCell {
             colspan: 1,
             rowspan: 1,
             fill: None,
-            stroke: CellStroke::default(),
+            stroke: BoxStroke::default(),
             align: None,
             inset: None,
             body: Vec::new(),
@@ -417,20 +434,21 @@ impl TableCell {
     }
 }
 
-/// A cell's four border sides. A side left `None` says Word stated nothing and
-/// the table's own stroke should show through — which is *not* the same as
-/// [`Border::None`], Word explicitly drawing no line there.
+/// Four border sides — a table cell's, or a paragraph's. A side left `None`
+/// says Word stated nothing and whatever stroke is in effect should show
+/// through, which is *not* the same as [`Border::None`], Word explicitly
+/// drawing no line there.
 #[derive(Debug, Default, Clone, PartialEq)]
-pub struct CellStroke {
+pub struct BoxStroke {
     pub top: Option<Border>,
     pub bottom: Option<Border>,
     pub left: Option<Border>,
     pub right: Option<Border>,
 }
 
-impl CellStroke {
+impl BoxStroke {
     pub fn is_empty(&self) -> bool {
-        *self == CellStroke::default()
+        *self == BoxStroke::default()
     }
 }
 
@@ -585,6 +603,12 @@ pub struct PageSetup {
     /// `w:pgNumType/@w:start` — emits `#counter(page).update(n)` right after
     /// this section's `#set page(..)`. `None` means no restart here.
     pub page_num_start: Option<i64>,
+    /// `#set page(header-ascent:)` — the gap between the header and the body,
+    /// derived from Word's page-edge-relative `w:pgMar/@w:header` (see
+    /// [`crate::mappers::section`]). `None` keeps Typst's default.
+    pub header_ascent_pt: Option<f64>,
+    /// `#set page(footer-descent:)`, the footer's counterpart.
+    pub footer_descent_pt: Option<f64>,
 }
 
 impl PageSetup {
@@ -616,6 +640,8 @@ impl PageSetup {
             && self.page_num_start.is_none()
             && self.header == previous.header
             && self.footer == previous.footer
+            && self.header_ascent_pt == previous.header_ascent_pt
+            && self.footer_descent_pt == previous.footer_descent_pt
     }
 }
 
@@ -631,12 +657,17 @@ pub struct Furniture {
     pub even: Option<Vec<Block>>,
 }
 
+/// Page margins. When `mirrored` is set (Word's `w:mirrorMargins`), the
+/// horizontal pair names the *binding* sides rather than fixed ones: Typst
+/// spells that `margin: (inside: .., outside: ..)`, which swaps them on facing
+/// pages exactly as Word does. Word's `w:left` is the inside one.
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Margins {
     pub top_pt: f64,
     pub bottom_pt: f64,
     pub left_pt: f64,
     pub right_pt: f64,
+    pub mirrored: bool,
 }
 
 #[cfg(test)]

@@ -220,9 +220,18 @@ fn chart_table(data: &ChartData) -> Table {
         }
     }
 
-    // No placement of its own: a chart's data table is embedded in a
-    // `figure(..)`, which is what carries the chart's own positioning.
-    Table { columns, column_widths: Vec::new(), rows, align: None, indent_pt: None }
+    // No placement, stroke, or row sizing of its own: a chart's data table is
+    // built here rather than read off a `w:tbl`, so there is nothing authored
+    // to carry — it's embedded in a `figure(..)`, which is what positions it.
+    Table {
+        columns,
+        column_widths: Vec::new(),
+        rows,
+        align: None,
+        indent_pt: None,
+        stroke: None,
+        row_heights: Vec::new(),
+    }
 }
 
 fn text_cell(text: &str) -> TableCell {

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::opts::ImportOptions;
 use crate::tdoc::{
-    Align, Block, Border, BreakKind, CellStroke, Chart, ChartContent, DocumentInfo, Figure,
+    Align, Block, Border, BoxStroke, BreakKind, Chart, ChartContent, DocumentInfo, Figure,
     Furniture, Inline, Inlines, List, Sides, VAlign,
     LegendPos, Margins, PageSetup, ParStyle, Plot, PlotKind, PlotSeries, Script, Section,
     SectionStart, Stmt, Table, TableCell, TextStyle, TypstDoc, Underline,
@@ -164,6 +164,17 @@ impl Emitter<'_> {
     fn render_table(&mut self, table: &Table) -> String {
         let columns_arg = table_columns_arg(table);
         let mut lines = vec!["table(".to_string(), format!("  columns: {columns_arg},")];
+        if !table.row_heights.is_empty() {
+            let tracks: Vec<String> = table
+                .row_heights
+                .iter()
+                .map(|height| height.map(pt).unwrap_or_else(|| "auto".to_string()))
+                .collect();
+            lines.push(format!("  rows: ({}),", tracks.join(", ")));
+        }
+        if let Some(stroke) = table.stroke {
+            lines.push(format!("  stroke: {},", border_lit(&stroke)));
+        }
 
         // Every *leading* header row goes into one `table.header(..)`: Typst
         // takes a flat cell list there and re-flows it by column count, so a
@@ -277,6 +288,12 @@ impl Emitter<'_> {
         }
         if let Some(numbering) = page_numbering_arg(page.page_num_fmt.as_deref()) {
             simple_args.push(format!("numbering: {numbering}"));
+        }
+        if let Some(ascent) = page.header_ascent_pt {
+            simple_args.push(format!("header-ascent: {}", pt(ascent)));
+        }
+        if let Some(descent) = page.footer_descent_pt {
+            simple_args.push(format!("footer-descent: {}", pt(descent)));
         }
 
         // No furniture: keep the single-line form every other `#set page(..)`
@@ -402,6 +419,16 @@ impl Emitter<'_> {
             && let Some(numbering) = page_numbering_arg(Some(next_fmt))
         {
             simple_args.push(format!("numbering: {numbering}"));
+        }
+        if next.header_ascent_pt != previous.header_ascent_pt
+            && let Some(ascent) = next.header_ascent_pt
+        {
+            simple_args.push(format!("header-ascent: {}", pt(ascent)));
+        }
+        if next.footer_descent_pt != previous.footer_descent_pt
+            && let Some(descent) = next.footer_descent_pt
+        {
+            simple_args.push(format!("footer-descent: {}", pt(descent)));
         }
 
         let header_changed = next.header != previous.header;
@@ -817,8 +844,15 @@ fn page_numbering_arg(fmt: Option<&str>) -> Option<&'static str> {
 }
 
 fn render_margins(margin: &Margins) -> String {
+    // Mirrored margins name the binding sides rather than fixed ones, which is
+    // exactly what Typst's `inside`/`outside` pair means — it swaps them on
+    // facing pages, so no `binding:` argument is needed alongside (Typst
+    // derives the binding side from the text direction, matching Word's own
+    // left-inside default for a left-to-right document).
+    let (start, end) =
+        if margin.mirrored { ("inside", "outside") } else { ("left", "right") };
     format!(
-        "(top: {}, bottom: {}, left: {}, right: {})",
+        "(top: {}, bottom: {}, {start}: {}, {end}: {})",
         pt(margin.top_pt),
         pt(margin.bottom_pt),
         pt(margin.left_pt),
@@ -1111,6 +1145,19 @@ impl Emitter<'_> {
             // hugging the glyphs, so the block has to take the full width.
             block_args.push("width: 100%".to_string());
         }
+        if let Some(stroke) = &style.stroke {
+            block_args.push(format!("stroke: {}", stroke_dict(stroke)));
+            // A border, like shading, is drawn around the text *column*.
+            if style.fill.is_none() {
+                block_args.push("width: 100%".to_string());
+            }
+            if let Some(inset) = style.stroke_inset_pt {
+                block_args.push(format!("inset: {}", pt(inset)));
+            }
+        }
+        if style.unbreakable {
+            block_args.push("breakable: false".to_string());
+        }
         if let Some(above) = style.spacing_before_pt {
             block_args.push(format!("above: {}", pt(above)));
         }
@@ -1202,11 +1249,11 @@ impl Emitter<'_> {
     }
 }
 
-/// Render a [`CellStroke`] as Typst's `stroke:` dictionary. Only the sides
-/// Word actually stated appear, so the table's own stroke keeps showing
-/// through everywhere else — a side Word never mentioned must not be
+/// Render a [`BoxStroke`] as Typst's `stroke:` dictionary. Only the sides Word
+/// actually stated appear, so whatever stroke is already in effect keeps
+/// showing through everywhere else — a side Word never mentioned must not be
 /// silently switched off.
-fn stroke_dict(stroke: &CellStroke) -> String {
+fn stroke_dict(stroke: &BoxStroke) -> String {
     let parts: Vec<String> = [
         ("top", stroke.top),
         ("bottom", stroke.bottom),
@@ -1473,6 +1520,8 @@ mod tests {
         let table = Table {
             align: None,
             indent_pt: None,
+            stroke: None,
+            row_heights: Vec::new(),
             columns: 1,
             column_widths: vec![None],
             rows: vec![
@@ -1669,6 +1718,8 @@ mod tests {
         let table = Table {
             align: None,
             indent_pt: None,
+            stroke: None,
+            row_heights: Vec::new(),
             columns: 2,
             column_widths: vec![],
             rows: vec![
@@ -1801,6 +1852,7 @@ mod tests {
                         bottom_pt: 72.0,
                         left_pt: 72.0,
                         right_pt: 72.0,
+                        mirrored: false,
                     }),
                     flipped: false,
                     ..Default::default()
@@ -1911,6 +1963,8 @@ mod tests {
         let table = Table {
             align: None,
             indent_pt: None,
+            stroke: None,
+            row_heights: Vec::new(),
             columns: 1,
             column_widths: vec![],
             rows: vec![TableRow {
@@ -2077,7 +2131,15 @@ mod tests {
     #[test]
     fn no_lilaq_import_when_every_chart_is_a_table() {
         let table =
-            Table { columns: 1, column_widths: vec![], rows: vec![], align: None, indent_pt: None };
+            Table {
+                columns: 1,
+                column_widths: vec![],
+                rows: vec![],
+                align: None,
+                indent_pt: None,
+                stroke: None,
+                row_heights: Vec::new(),
+            };
         let d = doc(
             vec![],
             vec![Block::Chart(Chart { title: None, content: ChartContent::Table(table) })],

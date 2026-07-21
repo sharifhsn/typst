@@ -9,16 +9,24 @@ use crate::tdoc::{Block, Furniture, Margins, PageSetup};
 use crate::wml::model::{BodyItem, FurnitureKind, FurnitureRef, RunContent, RunItem, SectPr};
 
 pub(crate) fn lower_section(sect: &SectPr, ctx: &mut LowerCtx) -> PageSetup {
+    let mirrored = ctx.package.mirror_margins;
+    // Word states the binding allowance separately from the margins and adds
+    // it to whichever side the binding is on; Typst has no `gutter`, so it
+    // folds into that margin here. With mirrored margins the binding side is
+    // the inner one, which is `w:left` (see `Margins`).
+    let gutter_pt = sect.gutter.map(|g| twip_to_abs(g as f64).to_pt()).unwrap_or(0.0);
     let margin = if sect.margin_top.is_some()
         || sect.margin_bottom.is_some()
         || sect.margin_left.is_some()
         || sect.margin_right.is_some()
+        || gutter_pt > 0.0
     {
         Some(Margins {
             top_pt: twip(sect.margin_top),
             bottom_pt: twip(sect.margin_bottom),
-            left_pt: twip(sect.margin_left),
+            left_pt: twip(sect.margin_left) + gutter_pt,
             right_pt: twip(sect.margin_right),
+            mirrored,
         })
     } else {
         None
@@ -27,16 +35,18 @@ pub(crate) fn lower_section(sect: &SectPr, ctx: &mut LowerCtx) -> PageSetup {
     let header = lower_furniture(&sect.header_refs, sect.title_pg, ctx);
     let footer = lower_furniture(&sect.footer_refs, sect.title_pg, ctx);
 
-    // Structural to this feature, not specific to any one document, so it's
-    // recorded whenever furniture is emitted at all rather than gated on some
-    // more specific (and here, unavailable) signal — `ImportReport` dedupes,
-    // so this only ever costs one line.
-    if header.is_some() || footer.is_some() {
-        ctx.report.approximate(
-            "header/footer margins",
-            "w:pgMar's header/footer page-edge distance isn't mapped to Typst's page margins",
-        );
-    }
+    // A furniture distance only means something once there is furniture to
+    // place, so it's resolved against the margin that band sits in — and only
+    // when this section actually renders one.
+    let line_pt = default_line_height_pt(ctx);
+    let header_ascent_pt = header
+        .is_some()
+        .then(|| band_gap(sect.header_dist, sect.margin_top, line_pt))
+        .flatten();
+    let footer_descent_pt = footer
+        .is_some()
+        .then(|| band_gap(sect.footer_dist, sect.margin_bottom, line_pt))
+        .flatten();
 
     PageSetup {
         width_pt: sect.page_w.map(|w| twip_to_abs(w as f64).to_pt()),
@@ -49,7 +59,56 @@ pub(crate) fn lower_section(sect: &SectPr, ctx: &mut LowerCtx) -> PageSetup {
         footer,
         page_num_fmt: sect.page_num_fmt.clone(),
         page_num_start: sect.page_num_start,
+        header_ascent_pt,
+        footer_descent_pt,
     }
+}
+
+/// Convert one of Word's page-edge-relative furniture distances
+/// (`w:pgMar/@w:header` or `@w:footer`, in twips) into the Typst gap on the
+/// *body* side of the same band (`header-ascent`/`footer-descent`).
+///
+/// The two measure from opposite ends of the margin, so the conversion needs
+/// the furniture's own laid-out height — which isn't known here, and can't be:
+/// it depends on how Typst lays the content out. `typst-docx` faces the same
+/// problem going the other way and resolves it by assuming a single line
+/// (`document::adjust_furniture_band`), so this assumes one too, which makes
+/// the pair exact inverses for the overwhelmingly common single-line header.
+///
+/// `None` — leaving Typst's own default in place — when Word stated no
+/// distance, when there's no margin to resolve it against, or when the result
+/// lands within a point of what Typst would have chosen anyway. That last case
+/// is the common one: emitting a redundant `header-ascent` on every imported
+/// document would be noise, not fidelity.
+///
+/// A **negative** margin also yields `None`. Word allows one (the body then
+/// bleeds up into the header band, as `tdf119952_negativeMargins` in the wide
+/// corpus does), but it leaves no band to place furniture within, so there is
+/// no gap to state — and the clamp below would have no valid range.
+fn band_gap(dist: Option<i64>, margin: Option<i64>, line_pt: f64) -> Option<f64> {
+    let dist_pt = twip_to_abs(dist? as f64).to_pt();
+    let margin_pt = twip_to_abs(margin? as f64).to_pt();
+    if margin_pt <= 0.0 {
+        return None;
+    }
+    let gap = (margin_pt - dist_pt - line_pt).clamp(0.0, margin_pt);
+    // Typst's own default for both properties is 30% of the enclosing margin.
+    ((gap - margin_pt * 0.3).abs() > 1.0).then_some(gap)
+}
+
+/// The height of one line of body text, for [`band_gap`]'s single-line
+/// assumption. Word's `w:sz` is in half-points; 11pt is both Word's and
+/// Typst's default when the document states none, and 1.2 is the conventional
+/// single-spaced line height.
+fn default_line_height_pt(ctx: &LowerCtx) -> f64 {
+    let size_pt = ctx
+        .package
+        .styles
+        .default_run
+        .size_half_pt
+        .map(|half| half as f64 / 2.0)
+        .unwrap_or(11.0);
+    size_pt * 1.2
 }
 
 fn twip(v: Option<i64>) -> f64 {

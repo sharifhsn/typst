@@ -7,7 +7,7 @@ Comprehensive, source-grounded coverage of the two Word-interop crates:
 | **Export** — Typst → DOCX | `typst-docx` | `crates/typst-docx` |
 | **Import** — DOCX → Typst | `typst-docx-import` | `crates/typst-docx-import` |
 
-Every row below traces to actual code (not documentation or intent). Enumerated 2026-07-20 against branch `docx-import`, and **updated after the gap-closing work** described in the changelog at the end. A `typst-docx-roundtrip` crate exercises the composition of the two.
+Every row below traces to actual code (not documentation or intent). Enumerated 2026-07-20, and **updated after both gap-closing passes** described in the changelog at the end, against branch `codex/office-export` (which now carries all the Office work — export, import, and PowerPoint — on one branch). A `typst-docx-roundtrip` crate exercises the composition of the two.
 
 ## Legend
 
@@ -33,9 +33,9 @@ A cell may combine a symbol for the *mechanism* with a note for the *loss*. "Non
 |---|---|---|---|
 | Page size | ✅ | ✅ | Export derives from the converged paged geometry (`auto` axis → real section size, else A4); import `twip → abs`. |
 | Margins (4 body) | ✅ | ✅ | |
-| Header/footer edge margins | ✅ | ✗ | Import maps only the four body margins; header/footer distances not mapped (reported "header/footer margins"). |
+| Header/footer edge margins | ✅ | ✅ | Import converts `w:pgMar@header/@footer` (page-edge origin) to Typst's `header-ascent`/`footer-descent` (body-side origin) assuming a single line — the exact inverse of the exporter's own `adjust_furniture_band`. Skipped when the result lands within 1pt of Typst's 30% default. |
 | Orientation / landscape | ✅ | ✅ | Export derives from `PageElem::flipped` axis swap. |
-| Gutter / mirrored (book) margins | ◐ | ✗ | Export folds document-wide (OOXML has no per-section mirror); import does not parse `w:gutter`/`w:mirrorMargins`. |
+| Gutter / mirrored (book) margins | ◐ | ✅ | Export folds document-wide (OOXML has no per-section mirror). Import: `w:mirrorMargins` → `margin: (inside:, outside:)`, the spelling that swaps on facing pages; `w:gutter` folds into the binding-side margin, since Typst has no separate gutter. |
 | Text columns | ✅ | ✅ | Export emits `w:cols` num/space/equalWidth incl. mid-flow `#columns` wrapped in continuous sections; import maps **count only** (equal width assumed, per-column widths dropped). |
 | Column balancing | ✅ | — | Export sets `w:noColumnBalance`. |
 | Sections (multi-section) | ✅ | ✅ | Export derives boundaries from a change in size/orientation/margins/columns/gutter/numbering/line-numbers/header-band **or a content-hash diff**; import splits `w:body` at each `w:sectPr`. |
@@ -66,12 +66,12 @@ A cell may combine a symbol for the *mechanism* with a note for the *loss*. "Non
 | Indentation (left / right / first-line / hanging) | ✅ | ✅ | Import emits left/right via `#pad` and first-line/hanging via `#par`. |
 | Spacing before / after | ✅ | ✅ | Import parses both; the majority pair is hoisted into `#set par(spacing:)` and only deviating paragraphs carry a `#block(above:, below:)`. |
 | Line spacing / leading | ✅ | ◐ | Import ignores `w:lineRule` (auto/atLeast/exact), reads twips as absolute leading. |
-| keep-with-next / keep-lines | ✅ | ✗ | Import: not parsed. |
+| keep-with-next / keep-lines | ✅ | ◐ | Import: `w:keepLines` → `#block(breakable: false)`. `w:keepNext` has no Typst counterpart — nothing binds a block to its successor — so it is reported rather than dropped silently. |
 | page-break-before | ✅ | ✅ | Import via the break path. |
 | Contextual spacing | ✅ | — | |
 | Tab stops (+ leader) | ✅ | ◐ | Import → plain tab char. |
 | Paragraph shading / background | ✅ | ✅ | Import wraps the paragraph in `#block(fill:, width: 100%)`. |
-| Paragraph borders | ✅ (per-side) | ◐ | Export is the only construct that expresses non-uniform strokes. Import recognizes only a *bottom* border on an otherwise-empty paragraph → renders it as a `#line` rule; all other sides dropped. |
+| Paragraph borders | ✅ (per-side) | ✅ | Export is the only construct that expresses non-uniform strokes. Import reads all four `w:pBdr` sides into `#block(stroke:)`, with `@w:space` as the inset — except the lone-bottom-border-on-an-empty-paragraph idiom, which stays a `#line` rule because that is what it looks like. |
 
 ## 4. Run / character formatting
 
@@ -114,7 +114,7 @@ A cell may combine a symbol for the *mechanism* with a note for the *loss*. "Non
 | Outline level | ✅ | ✅ | Export `w:outlineLvl = level-1` (clamped 8). Import maps levels 1–6 to `=`…`======`, clamps 7–9 down, and treats `outlineLvl=9` as a body-text sentinel (never a heading). |
 | keepNext on headings | ✅ | — | |
 | Heading numbering | ✅/◐ | ✅ | Export emits live `w:numPr` on the `HeadingN` styles, but only after **replaying Word's numbering** over the real heading sequence and confirming every number matches Typst's; a moved counter, an unmappable numeral system, or a `STYLEREF` caption prefix makes it decline and keep frozen text. Import reads the style-linked `w:numPr` back into `#set heading(numbering:)`. |
-| Cross-ref anchor / bookmark | ✅ | ✗ | Export brackets headings in `w:bookmarkStart/End`; import does not track bookmarks. |
+| Cross-ref anchor / bookmark | ✅ | ✅ | Export brackets headings in `w:bookmarkStart/End`. Import lowers each `w:bookmarkStart` to a Typst label, hoisted to the end of its block (Typst labels attach backwards); a second bookmark on the same paragraph gets a `#metadata(none)` anchor of its own, since Typst allows one label per element. A label nothing ever emitted is downgraded by the `resolve_labels` pass rather than left dangling. |
 
 ## 7. Lists / numbering
 
@@ -137,8 +137,8 @@ A cell may combine a symbol for the *mechanism* with a note for the *loss*. "Non
 | colspan (`w:gridSpan`) | ✅ | ✅ | Import pads short rows to the widest row. |
 | **rowspan / vertical merge (`w:vMerge`)** | ✅ | ✅ | Import resolves merge runs into real rowspans via a grid-occupancy walk, dropping the covered cells and discounting the spanned columns when padding short rows. |
 | Per-side cell strokes | ✅ | ✅ | Import maps `w:tcBorders` per side; a side Word never stated is left unset so the table's own stroke shows through. |
-| Table-level borders | ◐ | ✗ | Export hardcodes a blanket `w:tblBorders` (real fidelity rides per-cell); import uses Typst default strokes. |
-| Stroke thickness / color / dash | ✅/◐ | ✗ | Export emits exact `a:custDash` run lengths, keeping `a:prstDash` only where a preset matches exactly. DrawingML has no dash offset, so a phase that isn't on an even run boundary is dropped (the pattern survives). |
+| Table-level borders | ◐ | ✅ | Export hardcodes a blanket `w:tblBorders` (real fidelity rides per-cell). Import maps it to `table(stroke:)` — which matters most for the `nil` case: a deliberately borderless Word table used to arrive wearing Typst's default 1pt grid. Word states six edges where Typst takes one stroke, so on disagreement the *interior* one wins (it decides how a table reads) and the reconciliation is reported. |
+| Stroke thickness / color / dash | ✅/◐ | ✅ | Export emits exact `a:custDash` run lengths, keeping `a:prstDash` only where a preset matches exactly. DrawingML has no dash offset, so a phase that isn't on an even run boundary is dropped (the pattern survives). Import reads `a:ln`'s width, colour and both dash spellings back, and distinguishes an absent `a:ln` from an explicit `a:noFill`. |
 | Cell fill / shading | ✅ | ✅ | Export: solid full, gradient → mean-of-stops, tiling dropped. Import: `w:shd@fill` → `table.cell(fill:)`. |
 | Horizontal cell alignment | ✅ | ✅ | Comes from the cell's own paragraphs' `w:jc`, through the ordinary paragraph path. |
 | Vertical cell alignment | ✅ | ✅ | Import: `w:vAlign` → `table.cell(align:)`. |
@@ -147,8 +147,8 @@ A cell may combine a symbol for the *mechanism* with a note for the *loss*. "Non
 | Footer rows (`table.footer`) | ⊘ | — | Export renders as ordinary rows (Word has no repeat-at-bottom); flagged approximate. |
 | Nested tables | ✅ | ✅ | Import cap depth 24 (DoS guard). |
 | Table layout | ◐ | — | Export always emits `w:tblLayout="fixed"`. |
-| Table alignment / indent | ✅ | ✗ | Export now sources `w:jc` from the style chain and emits `w:tblInd`. Import still parses neither. |
-| Row heights / cantSplit | ✅ | ✗ | Import does not parse row height. |
+| Table alignment / indent | ✅ | ✅ | Export sources `w:jc` from the style chain and emits `w:tblInd`. Import reads both, resolved against each other the way Word does: an indent is ignored once the table is centred or right-aligned, so only one is ever emitted. |
+| Row heights / cantSplit | ✅ | ◐ | Import maps `w:trHeight hRule="exact"` to a `rows:` track size. `atLeast` — Word's default — is a *minimum*, and a Typst track is exactly its stated size, so honoring it would clip any row whose content outgrew Word's floor; those stay content-sized and are reported. `w:cantSplit` has no per-row Typst counterpart and is likewise reported. |
 
 ## 9. Images
 
@@ -162,10 +162,10 @@ A cell may combine a symbol for the *mechanism* with a note for the *loss*. "Non
 | **EMF / WMF metafiles** | — | ⊘ | Neither direction supports metafiles. Import drops them per-image (no Rust GDI decoder; documented in README). In one 2,459-doc corpus these were **41% of all media parts**. |
 | Format sniffing (lying extensions) | — | ✅ | Import overrides the declared extension by magic bytes (SVG by text sniff). |
 | Sizing (EMU / DPI) | ✅ | ✅ | |
-| Inline positioning | ✅ | ✅ | |
+| Inline positioning | ✅ | ✅ | An image is inline content in Typst's model, Word's (`w:drawing` lives inside a `w:r`) and Pandoc's alike, so the DOCX/Pandoc targets now group it into its paragraph rather than letting it interrupt one. Before that, a lone image erased the boundary with whatever followed — realize discards the `ParbreakElem` between two blocks — and a run of figures collapsed into a single `w:p` holding every caption. |
 | Floating / anchored | ✅ | ◐ | Export → `wp:anchor` (align/offset/wrap). Import keeps the *named* placement (`#align`) but deliberately not the absolute offset or wrap: Word's offsets are page-relative and Typst's `#place` reserves no space, so emitting them would overlap body text. |
 | Alt text | ✅ | ✅ | |
-| Cropping / corner clip (`a:srcRect`) | ✅ | ✗ | Export emits native `roundRect` + `a:srcRect` (ported from the pptx sibling) instead of rasterizing. Import does not parse `srcRect`. |
+| Cropping / corner clip (`a:srcRect`) | ✅ | ✅ | Export emits native `roundRect` + `a:srcRect` (ported from the pptx sibling) instead of rasterizing. Import inverts both: the radius becomes a clipping `#box(radius:)`, and — since Typst's `image` has no crop parameter — the crop becomes geometry, oversizing the image to `W / (1 − l − r)` inside that box and `#place`-ing it by the hidden band so the box doesn't grow. |
 | Image inside hyperlink / field | ✅ | ⊘ | Import v1 simplification: skips drawings inside hyperlink/field runs. |
 
 ## 10. Math (OMML)
@@ -239,15 +239,15 @@ Export walks the resolved `MathItem` IR and emits `m:` OMML directly; a whole eq
 
 | Feature | Export T→D | Import D→T | Notes |
 |---|---|---|---|
-| rect / roundrect | ✅ native | ◐ | Export → `a:prstGeom`. Import → `#rect` from VML, **position dropped** (drawn inline), roundrect → rect (radius lost). |
-| circle / ellipse | ✅ native | ◐ | Import from VML `v:oval`, position dropped. |
-| polygon / path / `#curve` | ✅ native | ⊘ | Export → `a:custGeom` (moveTo/lnTo/cubicBezTo/close, 1:1). Import drops custom `v:path`/`v:formulas` geometry (needs a drawing package). |
+| rect / roundrect | ✅ native | ◐ | Export → `a:prstGeom`. Import reads both spellings: DrawingML `a:prstGeom` → `#rect` with the `roundRect` adjustment recovered as a real `radius:`, and legacy VML → `#rect` with the radius lost. **Position is dropped** either way (drawn inline). |
+| circle / ellipse | ✅ native | ◐ | Import from DrawingML `ellipse`/`circle` presets or VML `v:oval`; position dropped. |
+| polygon / path / `#curve` | ✅ native | ◐ | Export → `a:custGeom` (moveTo/lnTo/cubicBezTo/close, 1:1). Import inverts exactly that, command for command, into `#curve` — scaling the path's own `a:path@w/@h` coordinate space to the shape's extent. Legacy VML's `v:path`/`v:formulas` mini-language is still declined (it is a different, far messier grammar). |
 | line | ✅ native | ◐ | Import keeps length only, direction discarded. Export: horizontal rule → paragraph bottom border instead. |
 | Framed box / text box (box or rect with text body) | ✅ native | ◐ | Export → editable `wps:txbx` + legacy VML fallback via `mc:AlternateContent`; declined (→ raster) for footnote/no-frame/centered-figure bodies. Import inlines the content at the anchor, drops position/size + reports. |
 | WordArt (`v:textpath`) | — | ◐ | Import → plain text (curved/warped path styling dropped). |
 | Grouped shapes | ✅ (wpg group) | ◐ | Import recurses (cap 32), preserves multiple text boxes, drops group geometry. |
-| Preset / custom geometries (stars, callouts, connectors) | ✅ (many via custGeom) | ⊘ | Import drops them + reports (not reproduced). |
-| Shape stroke / fill | ✅ (solid + linear gradient) | ◐ | Import accepts `#rrggbb` only (named/system/theme colors ignored). |
+| Preset / custom geometries (stars, callouts, connectors) | ✅ (many via custGeom) | ◐ | Anything the exporter wrote as `a:custGeom` comes back as `#curve`. A *named* preset with no Typst counterpart (a star, a callout) still falls back to its bounding `#rect` and is reported — Word states those as a name plus adjustment guides, not as a path. |
+| Shape stroke / fill | ✅ (solid + linear gradient) | ◐ | Import reads `a:solidFill`/`a:gradFill` with `a:alpha` folded into the fourth channel, and `a:ln` with either dash spelling. Still `#rrggbb`-only: a theme colour lives in `theme1.xml`, which this importer does not resolve, and such a shape is reported rather than painted a guessed colour. |
 | OLE objects (`w:object`) | ✗ | ✗ | Neither direction. |
 | Drop shadow | ✗ | — | No shadow path in DOCX export (distinct box shadows fall to generic raster). |
 
@@ -284,8 +284,8 @@ Export walks the resolved `MathItem` IR and emits `m:` OMML directly; a whole eq
 |---|---|---|---|
 | RGB / CMYK / luma / oklab | ✅ | ✅ | Export composites everything to `[u8;3]` hex; import reads rgb hex. |
 | Alpha / opacity | ⊘ | — | Export composites translucent colors onto white (Word has no alpha primitive). |
-| Linear gradient (shapes) | ✅ native | ✗ | Export → `a:gradFill` (stops sampled). |
-| Radial gradient | ✅ | ✗ | Export emits `a:gradFill` with a reparameterised stop list. **Conic** still rasterizes — no OOXML path sweeps by angle. |
+| Linear gradient (shapes) | ✅ native | ✅ | Export → `a:gradFill` (stops sampled); import reads the stop list and `a:lin@ang` back into `gradient.linear`. |
+| Radial gradient | ✅ | ✅ | Export emits `a:gradFill` with a reparameterised stop list; import recovers it from `a:path`'s `a:fillToRect`. **Conic** still rasterizes in both directions — no OOXML path sweeps by angle. |
 | Gradient text / paragraph / cell fill | ◐ / ⊘ | ✗ | Export: block/highlight → first-stop shade; cells → mean-of-stops; **text gradient dropped**. |
 | Tiling / pattern fill | 🖼 / ⊘ | ✗ | Export: shapes → rasterized PNG tile; cells/text dropped. |
 | Solid stroke | ✅ | ◐ | Export → `a:ln` (dash → nearest preset); import: VML hex only. |
@@ -294,7 +294,7 @@ Export walks the resolved `MathItem` IR and emits `m:` OMML directly; a whole eq
 
 | Feature | Export T→D | Import D→T | Notes |
 |---|---|---|---|
-| `#block` (solid fill) | ✅ | ✗ | Export: fixed-height ≤60% page → one-cell table, else shaded/bordered paragraphs. Import parses no paragraph background. |
+| `#block` (solid fill) | ✅ | ✅ | Export: fixed-height ≤60% page → one-cell table, else shaded/bordered paragraphs. Import maps `w:shd@fill` to `#block(fill:, width: 100%)` — full width, because Word's shading spans the text column rather than hugging the glyphs. |
 | `#block` (closure / layouter body) | 🖼 | — | Rasterized with hidden searchable runs. |
 | `#box` (framed, with body) | ✅ | ◐ | See §15 text box. Import inlines the body. |
 | Radius (rounded corners) | ⊘ (text) / ✅ (bare shape) | — | Shaded-paragraph/textbox corner radius silently lost; a bare shape → `roundRect`. |
@@ -332,7 +332,7 @@ Import enforced by the shared OPC reader (`typst-ooxml-core::opc`), surfaced as 
 
 ### Import — `ImportReport` (`report.rs`)
 
-Two severities: **Approximate** ("mapped, detail lost") and **Drop** ("content dropped"), deduplicated by `(severity, what, detail)` so each construct reports once. Labels emitted: OMML equation, image, chart, footnote, endnote, text box, WordArt, VML shape, VML line, hyperlink, internal hyperlink, `field {TYPE}`, header/footer, header/footer tab stops, header/footer margins, continuous section, page/column break, plus part-name-keyed malformed-XML drops.
+Two severities: **Approximate** ("mapped, detail lost") and **Drop** ("content dropped"), deduplicated by `(severity, what, detail)` so each construct reports once. Labels emitted: OMML equation, image, chart, footnote, endnote, text box, WordArt, VML shape, VML line, hyperlink, internal hyperlink, `field {TYPE}`, header/footer, header/footer tab stops, keep with next, table borders, table row, table row height, table indent, continuous section, page/column break, plus part-name-keyed malformed-XML drops.
 
 ### Export — `FidelityReport` (`report.rs`)
 
@@ -375,9 +375,11 @@ The two directions are **not** inverses. Most of the gaps that used to matter
 have since been closed (see the changelog below); what remains:
 
 **Export-rich, import-blind** — export writes it, import cannot read it back:
-- Table-level borders, alignment/indent, row heights and `cantSplit`.
-- Linked styles (`w:link`), and the exporter's own bibliography (`b:Sources`)
-  — a round-tripped bibliography comes back as plain text.
+- The exporter's own bibliography (`b:Sources` + `CITATION` fields) — a
+  round-tripped bibliography comes back as plain text. The largest remaining
+  asymmetry by far.
+- Linked styles (`w:link`) — cosmetic: import resolves paragraph and character
+  styles independently, which loses the pairing but no formatting.
 
 **Import-capable, export-absent** — import reads it, export has no counterpart:
 - Word charts (`c:chart` / `cx:chart`) — import gives a table or an opt-in
@@ -385,13 +387,21 @@ have since been closed (see the changelog below); what remains:
 - Endnotes — import collects them at the document's end; export has no endnote
   source at all.
 
+**Approximate both ways** — mapped, but Typst has no property that means quite
+the same thing: `w:cantSplit`, an `atLeast` row height, per-column widths, and
+`w:keepNext`. Each is reported rather than silently dropped.
+
 **Symmetric** — round-trips in both directions: core prose and character
 formatting (including highlight, caps, tracking, language, underline pattern),
-paragraph indents/spacing/shading, sections, page geometry, columns,
-page-number restarts, lists (format and start), tables (grid, colspan,
-**rowspan**, per-side borders, alignment, inset, header rows), footnotes,
-hyperlinks (external **and** internal), bookmarks and cross-references, images
-(raster + SVG), document metadata, and the full OMML math structure set.
+paragraph indents/spacing/shading **and borders**, sections, page geometry
+(including **mirrored margins, the binding gutter, and header/footer band
+distances**), columns, page-number restarts, `w:keepLines`, lists (format,
+start, and authored bullet glyphs), tables (grid, colspan, **rowspan**,
+per-side and **table-level** borders, alignment and indent, inset, exact row
+heights, header rows), footnotes, hyperlinks (external **and** internal),
+bookmarks and cross-references, images (raster + SVG, with **corner clip and
+crop**), **DrawingML shapes** (preset and custom geometry, gradients, alpha,
+dashes), document metadata, and the full OMML math structure set.
 
 **Neither direction** — comments, OLE objects, EMF/WMF metafiles, and
 tracked changes as visible markup (see the changelog for why).
@@ -432,3 +442,55 @@ Three real defects were caught by the corpora during this work and fixed:
 non-ISO language tags failing the compile outright, a fully-merged table row
 emitting a bare `,`, and an inline `dir: rtl` override panicking Typst's
 shaper.
+
+### Second pass — the remaining round-trip asymmetries
+
+Everything the exporter already wrote but the importer could not read back.
+Each was a guaranteed round-trip loss, and each had its XML shape pinned down
+in advance by the code that emits it.
+
+Import gained: DrawingML shapes (`a:custGeom` → `#curve` command-for-command,
+presets → `#rect`/`#circle`/`#line`/`#polygon`, with `a:gradFill`, `a:alpha`
+and `a:custDash`), image crops (`a:srcRect`), table alignment and indent,
+authored bullet glyphs, **table-level borders**, **exact row heights**,
+**all four paragraph border sides**, **`w:keepLines`**, **header/footer band
+distances**, and **mirrored margins with the binding gutter**. A picture
+paragraph's own `w:jc` now places the figure, so a centred image no longer
+arrives flush left.
+
+Export gained one structural fix in the same pass: a bare `#image()` followed
+by its own caption paragraph used to emit a **single** `w:p` holding both, and
+a run of figures collapsed into one paragraph carrying every caption. The
+cause was upstream of `typst-docx` — `ImageElem` has no show rule outside the
+paged/HTML targets, so it reached paragraph grouping raw and *interrupted*
+rather than joining, which erased the only signal distinguishing "lone image,
+then a separate block" from "one paragraph split around an inline image".
+Treating an image as inline in the grouper (exactly as `LinkElem`/`RefElem`/
+`FootnoteElem` already are, and for the same stated reason) fixes both shapes
+at the root: three figures now emit six `w:p`, while `Text #image(..) more`
+still emits one. The golden-reference suite is untouched by this — paged and
+HTML both register their own `IMAGE_RULE`, so an image never reaches the
+grouper raw there.
+
+Two Word-verification defects were found by opening the round-tripped files in
+real Word — neither of which any automated gate caught, because both tests
+exercised the *function* rather than the document shape: a custom bullet
+marker read off the style chain instead of the element, and adjacent lists
+merged across a `w:numId` change, which silently renumbered roman lists to
+arabic.
+
+Still open, and deliberately so:
+
+- **Bibliography round-trip** — export writes real `b:Sources` and `CITATION`
+  fields; import parses neither back into `#cite`/`#bibliography`. This needs
+  an inverse of the hayagriva → Word-17-types mapping plus a sidecar `.yml`,
+  and the direction it would run in is the lossy one.
+- **OLE objects (`w:object`)** — neither direction. An embedded application
+  cannot be revived, but these almost always carry a `v:shape` preview image,
+  so importing *that* would beat today's silent nothing.
+- **`w:cantSplit`, `atLeast` row heights, per-column widths, `w:keepNext`** —
+  each reported rather than mapped, because Typst has no property that means
+  the same thing. See the rows above for the individual reasoning.
+- **Comments, conic gradients, gradient text fill** — genuinely blocked in at
+  least one direction; conic has no OOXML path that sweeps by angle, and Typst
+  has no comment construct for the exporter to find.

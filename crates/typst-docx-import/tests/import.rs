@@ -2450,3 +2450,271 @@ fn docx_with_body_and_numbering(doc_body: &str, numbering_xml: &str) -> Vec<u8> 
     package.add_relationships("word/document.xml", &Rels::new()).unwrap();
     package.finish(&Rels::new()).unwrap()
 }
+
+/// A document body plus a `word/settings.xml` — the document-wide switches
+/// (`w:mirrorMargins`, `w:evenAndOddHeaders`) live there, not in the body.
+fn docx_with_body_and_settings(doc_body: &str, settings_xml: &str) -> Vec<u8> {
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let document_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>{doc_body}</w:body>
+</w:document>"#
+    );
+    package.add_xml("word/document.xml", "application/xml", document_xml);
+    package.add_xml("word/settings.xml", "application/xml", settings_xml.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    package.finish(&Rels::new()).unwrap()
+}
+
+/// Word's default table has *no* visible borders; Typst's draws a 1pt grid.
+/// Leaving `w:tblBorders` unread therefore didn't lose a detail, it invented
+/// lines the document never had — so a table that states `nil` all round must
+/// come across as `stroke: none`.
+#[test]
+fn a_borderless_word_table_does_not_gain_typsts_default_grid() {
+    let body = r#"<w:tbl>
+        <w:tblPr><w:tblBorders>
+          <w:top w:val="nil"/><w:bottom w:val="nil"/>
+          <w:left w:val="nil"/><w:right w:val="nil"/>
+          <w:insideH w:val="nil"/><w:insideV w:val="nil"/>
+        </w:tblBorders></w:tblPr>
+        <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+        <w:tr><w:tc><w:p><w:r><w:t>plain</w:t></w:r></w:p></w:tc></w:tr>
+      </w:tbl>"#;
+    let src = import_docx(&docx_with_body(body)).expect("import should succeed").source;
+    assert!(src.contains("stroke: none"), "borderless table gained a grid:\n{src}");
+}
+
+/// A stated width comes across as that width, in Typst's own units: Word's
+/// `w:sz` is eighths of a point, so `sz="16"` is a 2pt rule.
+#[test]
+fn a_table_border_width_survives_in_points() {
+    let body = r#"<w:tbl>
+        <w:tblPr><w:tblBorders>
+          <w:top w:val="single" w:sz="16" w:color="FF0000"/>
+          <w:bottom w:val="single" w:sz="16" w:color="FF0000"/>
+          <w:left w:val="single" w:sz="16" w:color="FF0000"/>
+          <w:right w:val="single" w:sz="16" w:color="FF0000"/>
+          <w:insideH w:val="single" w:sz="16" w:color="FF0000"/>
+          <w:insideV w:val="single" w:sz="16" w:color="FF0000"/>
+        </w:tblBorders></w:tblPr>
+        <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+        <w:tr><w:tc><w:p><w:r><w:t>ruled</w:t></w:r></w:p></w:tc></w:tr>
+      </w:tbl>"#;
+    let src = import_docx(&docx_with_body(body)).expect("import should succeed").source;
+    assert!(src.contains("stroke: 2pt + rgb(\"FF0000\")"), "border lost:\n{src}");
+}
+
+/// Typst's fixed track "will be exactly of this size", so only Word's `exact`
+/// rule can become one. `atLeast` is a *minimum* the row grows past, which has
+/// no Typst track size at all — importing it as a fixed height would clip
+/// every row whose content outgrew Word's floor, so those stay content-sized
+/// and the loss is reported instead.
+#[test]
+fn only_an_exact_row_height_becomes_a_track_size() {
+    let body = r#"<w:tbl>
+        <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+        <w:tr><w:trPr><w:trHeight w:val="1440" w:hRule="exact"/></w:trPr>
+          <w:tc><w:p><w:r><w:t>fixed</w:t></w:r></w:p></w:tc></w:tr>
+        <w:tr><w:trPr><w:trHeight w:val="2880" w:hRule="atLeast"/></w:trPr>
+          <w:tc><w:p><w:r><w:t>floor</w:t></w:r></w:p></w:tc></w:tr>
+      </w:tbl>"#;
+    let result = import_docx(&docx_with_body(body)).expect("import should succeed");
+    let src = &result.source;
+    // 1440 twips = 72pt for the exact row; the `atLeast` row stays `auto`
+    // rather than becoming a 144pt track.
+    assert!(src.contains("rows: (72pt, auto)"), "row heights wrong:\n{src}");
+    assert!(!src.contains("144pt"), "an atLeast minimum became a fixed height:\n{src}");
+    assert!(
+        result.report.notes.iter().any(|n| n.what == "table row height"),
+        "the unrepresentable minimum went unreported"
+    );
+}
+
+/// A paragraph boxed on all four sides becomes a bordered block — while the
+/// lone-bottom-border idiom (Word's "section title underline") keeps lowering
+/// to a `#line`, which is what it actually looks like.
+#[test]
+fn a_boxed_paragraph_gets_a_stroke_but_a_lone_bottom_rule_stays_a_line() {
+    let body = r#"<w:p><w:pPr><w:pBdr>
+        <w:top w:val="single" w:sz="8" w:space="4"/>
+        <w:bottom w:val="single" w:sz="8" w:space="4"/>
+        <w:left w:val="single" w:sz="8" w:space="4"/>
+        <w:right w:val="single" w:sz="8" w:space="4"/>
+      </w:pBdr></w:pPr><w:r><w:t>boxed</w:t></w:r></w:p>
+      <w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="4"/></w:pBdr></w:pPr></w:p>"#;
+    let src = import_docx(&docx_with_body(body)).expect("import should succeed").source;
+    assert!(src.contains("stroke: (top: 1pt"), "paragraph box lost:\n{src}");
+    assert!(src.contains("inset: 4pt"), "border spacing lost:\n{src}");
+    assert!(src.contains("#line(length: 100%)"), "bottom rule idiom regressed:\n{src}");
+}
+
+/// `w:keepLines` has an exact Typst counterpart; `w:keepNext` does not, and
+/// says so rather than vanishing.
+#[test]
+fn keep_lines_becomes_an_unbreakable_block_and_keep_next_is_reported() {
+    let body = r#"<w:p><w:pPr><w:keepLines/><w:keepNext/></w:pPr>
+        <w:r><w:t>together</w:t></w:r></w:p>"#;
+    let result = import_docx(&docx_with_body(body)).expect("import should succeed");
+    assert!(
+        result.source.contains("breakable: false"),
+        "keepLines lost:\n{}",
+        result.source
+    );
+    assert!(
+        result.report.notes.iter().any(|n| n.what == "keep with next"),
+        "keepNext went unreported"
+    );
+}
+
+/// Mirrored margins are Typst's `inside`/`outside` pair — the one spelling
+/// that swaps on facing pages the way Word does — and Word's separate binding
+/// allowance folds into the inner one.
+#[test]
+fn mirrored_margins_become_inside_outside_and_absorb_the_gutter() {
+    let body = r#"<w:p><w:r><w:t>text</w:t></w:r></w:p>
+      <w:sectPr><w:pgSz w:w="12240" w:h="15840"/>
+        <w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440" w:gutter="720"/>
+      </w:sectPr>"#;
+    let settings = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:mirrorMargins/></w:settings>"#;
+    let src = import_docx(&docx_with_body_and_settings(body, settings))
+        .expect("import should succeed")
+        .source;
+    // 1440 twips = 72pt, plus a 720-twip (36pt) gutter on the binding side.
+    assert!(src.contains("inside: 108pt"), "gutter not folded in:\n{src}");
+    assert!(src.contains("outside: 72pt"), "outer margin wrong:\n{src}");
+    assert!(!src.contains("left: 108pt"), "still emitting fixed sides:\n{src}");
+}
+
+/// Word measures its header band from the page edge; Typst measures the gap on
+/// the *body* side of it. A header pushed unusually far down the page must
+/// therefore come across as a *narrower* ascent, not be silently defaulted.
+#[test]
+fn an_unusual_header_distance_reaches_the_page_setup() {
+    const HEADER_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p><w:r><w:t>Running head</w:t></w:r></w:p></w:hdr>"#;
+
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut doc_rels = Rels::new();
+    let header_rid = doc_rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
+        "header1.xml",
+        RelMode::Internal,
+    );
+    let document_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+  <w:p><w:r><w:t>Body.</w:t></w:r></w:p>
+  <w:sectPr>
+    <w:headerReference w:type="default" r:id="{header_rid}"/>
+    <w:pgSz w:w="12240" w:h="15840"/>
+    <w:pgMar w:top="2880" w:bottom="1440" w:left="1440" w:right="1440" w:header="2160"/>
+  </w:sectPr>
+</w:body></w:document>"#
+    );
+    package.add_xml("word/document.xml", "application/xml", document_xml);
+    package.add_xml("word/header1.xml", "application/xml", HEADER_XML.into());
+    package.add_relationships("word/document.xml", &doc_rels).unwrap();
+    package.add_relationships("word/header1.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+    // Top margin 144pt, header starting 108pt down, one 13.2pt line of text:
+    // 144 - 108 - 13.2 = 22.8pt, against the 43.2pt Typst would have defaulted.
+    assert!(src.contains("header-ascent: 22.8pt"), "header band not converted:\n{src}");
+}
+
+/// An *inline* picture is placed by the paragraph holding it, so a centred
+/// figure is a plain `w:jc` — reading only the float spelling
+/// (`wp:anchor/wp:positionH`) left every centred image flush left.
+#[test]
+fn a_centred_picture_paragraph_centres_the_figure() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+  <w:body>
+    <w:p>
+      <w:pPr><w:jc w:val="center"/></w:pPr>
+      <w:r><w:drawing><wp:inline>
+        <wp:extent cx="914400" cy="457200"/>
+        <wp:docPr id="1" name="Figure"/>
+        <a:graphic><a:graphicData>
+          <pic:pic><pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill></pic:pic>
+        </a:graphicData></a:graphic>
+      </wp:inline></w:drawing></w:r>
+    </w:p>
+  </w:body></w:document>"#;
+
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut doc_rels = Rels::new();
+    doc_rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        "media/image1.png",
+        RelMode::Internal,
+    );
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_media(
+        "word/media/image1.png",
+        "png",
+        "image/png",
+        vec![0x89, b'P', b'N', b'G'],
+    );
+    package.add_relationships("word/document.xml", &doc_rels).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+    assert!(src.contains("#image("), "the picture itself was lost:\n{src}");
+    assert!(src.contains("#align(center)["), "the paragraph's centring was lost:\n{src}");
+}
+
+/// Word permits a *negative* page margin — the body then bleeds up into the
+/// header band. `tdf119952_negativeMargins` in the wide corpus does exactly
+/// that, and it panicked the furniture-band conversion outright (a clamp whose
+/// range ran backwards) before this guard.
+#[test]
+fn a_negative_page_margin_does_not_panic_the_furniture_band() {
+    const HEADER_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p><w:r><w:t>Head</w:t></w:r></w:p></w:hdr>"#;
+
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut doc_rels = Rels::new();
+    let header_rid = doc_rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
+        "header1.xml",
+        RelMode::Internal,
+    );
+    let document_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+  <w:p><w:r><w:t>Body.</w:t></w:r></w:p>
+  <w:sectPr>
+    <w:headerReference w:type="default" r:id="{header_rid}"/>
+    <w:pgSz w:w="12240" w:h="15840"/>
+    <w:pgMar w:top="-1134" w:bottom="1440" w:left="1440" w:right="1440" w:header="720"/>
+  </w:sectPr>
+</w:body></w:document>"#
+    );
+    package.add_xml("word/document.xml", "application/xml", document_xml);
+    package.add_xml("word/header1.xml", "application/xml", HEADER_XML.into());
+    package.add_relationships("word/document.xml", &doc_rels).unwrap();
+    package.add_relationships("word/header1.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+    // No band to place furniture within, so no gap is stated at all.
+    assert!(!src.contains("header-ascent"), "invented a band gap:\n{src}");
+    assert!(src.contains("Body."), "content lost:\n{src}");
+}

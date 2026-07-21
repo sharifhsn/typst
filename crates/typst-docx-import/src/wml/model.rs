@@ -68,6 +68,10 @@ pub struct WmlPackage {
     pub furniture: FxHashMap<EcoString, Vec<BodyItem>>,
     /// `settings.xml` declares `w:evenAndOddHeaders`.
     pub even_and_odd_headers: bool,
+    /// `settings.xml` declares `w:mirrorMargins` — the left/right margins swap
+    /// on facing pages, which is Typst's `page(binding:)` model rather than a
+    /// per-section property (see [`SectPr::gutter`], its companion).
+    pub mirror_margins: bool,
     /// `word/footnotes.xml` bodies by `w:id`, boilerplate separators excluded.
     /// Flat, same reasoning as [`Self::furniture`].
     pub footnotes: FxHashMap<i64, Vec<BodyItem>>,
@@ -481,8 +485,18 @@ pub struct ParaProps {
     /// Run properties on the paragraph mark (`w:pPr/w:rPr`) — the default for
     /// bare runs and empty paragraphs.
     pub mark_props: RunProps,
-    /// Whether a `w:pBdr/w:bottom` (a rule-like bottom border) is present.
-    pub bottom_border: bool,
+    /// `w:pBdr` — the paragraph's own four border sides. Shares [`Borders`]
+    /// with a cell's `w:tcBorders`: OOXML states both the same way, and both
+    /// lower to the same Typst stroke.
+    pub borders: Borders,
+    /// `w:keepLines` — every line of the paragraph stays on one page.
+    pub keep_lines: Toggle,
+    /// `w:keepNext` — the paragraph stays on the page of the one *after* it.
+    /// Kept only so [`crate::mappers::para`] can report the loss: Typst has no
+    /// property that binds a block to its successor, and the heading idiom it
+    /// exists for ("don't strand a heading at the page foot") is something
+    /// Typst's layout already handles on its own.
+    pub keep_next: Toggle,
     /// `w:pPr/w:sectPr` — present only when this paragraph is the *last* item
     /// of a section (see [`Section`]); describes the section it closes. Direct,
     /// per-instance data: a style's own `pPr` is never a document section
@@ -567,12 +581,25 @@ pub struct Table {
     /// importer has no way to resolve, so they're left unread rather than
     /// misread as an absolute length.
     pub indent_twips: Option<i64>,
+    /// `w:tblPr/w:tblBorders` — the table's blanket borders, which a cell's
+    /// own `w:tcBorders` overrides where it states one. Reading this is what
+    /// lets a *borderless* Word table come across as borderless: Typst's table
+    /// draws a 1pt grid by default, so an unread `w:tblBorders` stating `nil`
+    /// silently added lines Word never drew.
+    pub borders: TableBorders,
 }
 
 #[derive(Debug, Default)]
 pub struct Row {
     pub is_header: bool,
     pub cells: Vec<Cell>,
+    /// `w:trPr/w:trHeight` — the row's authored height in twips, and whether
+    /// `@w:hRule` made it an exact height rather than a minimum. Only an
+    /// exact one reaches Typst; see [`crate::mappers::table`].
+    pub height_twips: Option<i64>,
+    pub height_exact: bool,
+    /// `w:trPr/w:cantSplit` — the row may not break across pages.
+    pub cant_split: bool,
 }
 
 #[derive(Debug, Default)]
@@ -584,7 +611,7 @@ pub struct Cell {
     /// `w:shd/@w:fill` hex.
     pub shd_fill: Option<EcoString>,
     /// `w:tcBorders` — the cell's own border overrides.
-    pub borders: CellBorders,
+    pub borders: Borders,
     /// `w:vAlign/@w:val` ("top"/"center"/"bottom").
     pub v_align: Option<EcoString>,
     /// `w:tcMar` — the cell's inner margins.
@@ -592,21 +619,55 @@ pub struct Cell {
     pub content: Vec<BodyItem>,
 }
 
-/// `w:tcBorders` — a cell's four border sides, kept raw (`w:sz` in eighths of
-/// a point, colors as hex strings) for [`crate::mappers::table`] to resolve,
-/// the same contract [`RunProps`] follows.
+/// Four border sides, kept raw (`w:sz` in eighths of a point, colors as hex
+/// strings) for the mappers to resolve, the same contract [`RunProps`] follows.
+///
+/// One type for both spellings OOXML gives this: a cell's `w:tcBorders` and a
+/// paragraph's `w:pBdr` are structurally identical and both lower to the same
+/// Typst stroke, so they share a parser ([`crate::wml::parse`]) and a resolver.
 ///
 /// A side left `None` means Word said nothing about it, which is *not* the
 /// same as Word explicitly switching it off — see [`BorderEdge::is_none`].
 #[derive(Debug, Default, Clone)]
-pub struct CellBorders {
+pub struct Borders {
     pub top: Option<BorderEdge>,
     pub bottom: Option<BorderEdge>,
     pub left: Option<BorderEdge>,
     pub right: Option<BorderEdge>,
 }
 
-/// One side of a [`CellBorders`].
+impl Borders {
+    pub fn is_empty(&self) -> bool {
+        self.top.is_none()
+            && self.bottom.is_none()
+            && self.left.is_none()
+            && self.right.is_none()
+    }
+
+    /// Whether the *only* side stated is a bottom rule — Word's "section-title
+    /// underline" idiom, which lowers to a `#line` rather than a bordered
+    /// block (see [`crate::mappers::para`]).
+    pub fn is_bottom_only(&self) -> bool {
+        self.bottom.is_some()
+            && self.top.is_none()
+            && self.left.is_none()
+            && self.right.is_none()
+    }
+}
+
+/// `w:tblPr/w:tblBorders` — a table's blanket borders. The four outer sides
+/// plus the two *interior* ones, which have no cell-level counterpart and no
+/// direct Typst equivalent either (Typst's `table(stroke:)` applies one stroke
+/// to every cell edge); [`crate::mappers::table`] is where that reconciliation
+/// happens.
+#[derive(Debug, Default, Clone)]
+pub struct TableBorders {
+    pub outer: Borders,
+    pub inside_h: Option<BorderEdge>,
+    pub inside_v: Option<BorderEdge>,
+}
+
+/// One side of a [`Borders`].
 #[derive(Debug, Clone)]
 pub struct BorderEdge {
     /// `@w:val` — "single", "double", …, or "nil"/"none" for no border at all.
@@ -615,6 +676,11 @@ pub struct BorderEdge {
     pub sz_eighth_pt: Option<i64>,
     /// `@w:color` — hex `RRGGBB` (or "auto").
     pub color: Option<EcoString>,
+    /// `@w:space` — the gap between the border and the text, in *points*
+    /// (not twips, and not eighths: this one attribute is whole points).
+    /// Only meaningful on a paragraph border, where it becomes the bordered
+    /// block's inset; a cell's padding is `w:tcMar` instead.
+    pub space_pt: Option<i64>,
 }
 
 impl BorderEdge {
@@ -731,6 +797,16 @@ pub struct SectPr {
     pub margin_bottom: Option<i64>,
     pub margin_left: Option<i64>,
     pub margin_right: Option<i64>,
+    /// `w:pgMar/@w:header` and `@w:footer` in twips — the distance from the
+    /// page edge to where the header/footer *starts*, which is a different
+    /// origin from Typst's `header-ascent`/`footer-descent` (the gap on the
+    /// body side of the same band). [`crate::mappers::section`] converts.
+    pub header_dist: Option<i64>,
+    pub footer_dist: Option<i64>,
+    /// `w:pgMar/@w:gutter` in twips — extra binding allowance added to the
+    /// inner margin. Typst has no `gutter` of its own; it folds into the
+    /// margin on the binding side.
+    pub gutter: Option<i64>,
     /// `w:headerReference` / `w:footerReference`, in document order.
     pub header_refs: Vec<FurnitureRef>,
     pub footer_refs: Vec<FurnitureRef>,

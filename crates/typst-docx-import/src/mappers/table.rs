@@ -3,8 +3,10 @@
 use typst_ooxml_core::units::twip_to_abs;
 
 use crate::lower::{lower_items, parse_hex_color, LowerCtx};
-use crate::tdoc::{self, Border, CellStroke, Sides, TableCell, TableRow, VAlign};
-use crate::wml::model::{BorderEdge, Cell, CellBorders, CellMargins, Row, Table as WmlTable};
+use crate::tdoc::{self, Border, BoxStroke, Sides, TableCell, TableRow, VAlign};
+use crate::wml::model::{
+    BorderEdge, Borders, Cell, CellMargins, Row, Table as WmlTable, TableBorders,
+};
 
 /// A source cell resolved against the table's vertical merges.
 #[derive(Debug, Clone, Copy)]
@@ -148,6 +150,8 @@ pub(crate) fn lower_table(table: &WmlTable, ctx: &mut LowerCtx) -> tdoc::Table {
         rows.push(TableRow { header: row.is_header, cells });
     }
 
+    let row_heights = lower_row_heights(&table.rows, ctx);
+
     // Word's `w:jc` on a *table* places the whole table between the margins;
     // `w:tblInd` pushes it off the left one. Word applies the indent only to a
     // table it is actually laying out from the left edge — a centred or
@@ -172,7 +176,81 @@ pub(crate) fn lower_table(table: &WmlTable, ctx: &mut LowerCtx) -> tdoc::Table {
         }
     };
 
-    tdoc::Table { columns, column_widths, rows, align, indent_pt }
+    let stroke = lower_table_stroke(&table.borders, ctx);
+
+    tdoc::Table { columns, column_widths, rows, align, indent_pt, stroke, row_heights }
+}
+
+/// Per-row track sizes, or an empty vector when no row states one Typst can
+/// honor.
+///
+/// Only `w:trHeight` with `@w:hRule="exact"` becomes a track size. Word's other
+/// (and default) rule, `atLeast`, is a *minimum* that the row grows past when
+/// its content needs more room — and Typst has no minimum: a fixed track "will
+/// be exactly of this size", so importing an `atLeast` height as one would clip
+/// or overflow every row whose content is taller than Word's floor. Sizing to
+/// content is the closer approximation, so that's what those rows keep.
+fn lower_row_heights(rows: &[Row], ctx: &mut LowerCtx) -> Vec<Option<f64>> {
+    let mut heights = Vec::with_capacity(rows.len());
+    let mut any_exact = false;
+    for row in rows {
+        if row.cant_split {
+            ctx.report.approximate(
+                "table row",
+                "w:cantSplit can't be expressed per row; Typst decides where the \
+                 table breaks",
+            );
+        }
+        let height = match row.height_twips.filter(|&h| h > 0) {
+            Some(h) if row.height_exact => {
+                any_exact = true;
+                Some(twip_to_abs(h as f64).to_pt())
+            }
+            Some(_) => {
+                ctx.report.approximate(
+                    "table row height",
+                    "w:trHeight hRule=\"atLeast\" is a minimum height, which Typst \
+                     track size for; the row sizes to its content instead",
+                );
+                None
+            }
+            None => None,
+        };
+        heights.push(height);
+    }
+    if any_exact { heights } else { Vec::new() }
+}
+
+/// `w:tblBorders` → the one stroke Typst's `table(stroke:)` applies to every
+/// cell edge.
+///
+/// Word states six sides here (four outer plus the two interior ones) where
+/// Typst takes a single stroke, so they have to be reconciled. When they
+/// disagree the *interior* stroke wins: in any table bigger than one cell most
+/// edges are interior, so it's the one that decides how the table reads.
+///
+/// `None` — leaving Typst's own 1pt grid — only when Word stated no border at
+/// all. That distinction is the point of reading this element: a table whose
+/// `w:tblBorders` says `nil` is deliberately borderless, and used to import
+/// with a full grid Word never drew.
+fn lower_table_stroke(borders: &TableBorders, ctx: &mut LowerCtx) -> Option<Border> {
+    let outer = &borders.outer;
+    let interior = [&borders.inside_h, &borders.inside_v];
+    let stated: Vec<Border> = interior
+        .into_iter()
+        .chain([&outer.top, &outer.bottom, &outer.left, &outer.right])
+        .filter_map(|edge| edge.as_ref().map(lower_border))
+        .collect();
+
+    let (first, rest) = stated.split_first()?;
+    if rest.iter().any(|border| border != first) {
+        ctx.report.approximate(
+            "table borders",
+            "w:tblBorders states the outer and interior edges separately; Typst's table \
+             takes one stroke for every edge, so the interior one is used throughout",
+        );
+    }
+    Some(*first)
 }
 
 /// `w:tblPr/w:jc` → the Typst alignment the table is wrapped in. `both`/
@@ -227,8 +305,8 @@ fn lower_border(edge: &BorderEdge) -> Border {
     }
 }
 
-fn lower_borders(borders: &CellBorders) -> CellStroke {
-    CellStroke {
+pub(crate) fn lower_borders(borders: &Borders) -> BoxStroke {
+    BoxStroke {
         top: borders.top.as_ref().map(lower_border),
         bottom: borders.bottom.as_ref().map(lower_border),
         left: borders.left.as_ref().map(lower_border),
@@ -265,8 +343,6 @@ mod tests {
     #[test]
     fn a_page_break_inside_a_table_cell_is_dropped_not_emitted() {
         let table = WmlTable {
-            jc: None,
-            indent_twips: None,
             grid: vec![1000],
             rows: vec![Row {
                 is_header: false,
@@ -281,7 +357,9 @@ mod tests {
                     })],
                     ..Default::default()
                 }],
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
@@ -325,23 +403,25 @@ mod tests {
     #[test]
     fn a_vertical_merge_becomes_a_rowspan_and_drops_its_continuations() {
         let table = WmlTable {
-            jc: None,
-            indent_twips: None,
             grid: vec![1000, 1000],
             rows: vec![
                 Row {
                     is_header: false,
                     cells: vec![merge_cell("spans", Some(true)), merge_cell("one", None)],
+                    ..Default::default()
                 },
                 Row {
                     is_header: false,
                     cells: vec![merge_cell("", Some(false)), merge_cell("two", None)],
+                    ..Default::default()
                 },
                 Row {
                     is_header: false,
                     cells: vec![merge_cell("", Some(false)), merge_cell("three", None)],
+                    ..Default::default()
                 },
             ],
+            ..Default::default()
         };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
@@ -364,13 +444,13 @@ mod tests {
     #[test]
     fn an_orphan_continuation_is_kept_as_an_ordinary_cell() {
         let table = WmlTable {
-            jc: None,
-            indent_twips: None,
             grid: vec![1000, 1000],
             rows: vec![Row {
                 is_header: false,
                 cells: vec![merge_cell("orphan", Some(false)), merge_cell("beside", None)],
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
@@ -393,13 +473,20 @@ mod tests {
         wide_continue.grid_span = 2;
 
         let table = WmlTable {
-            jc: None,
-            indent_twips: None,
             grid: vec![1000, 1000, 1000],
             rows: vec![
-                Row { is_header: false, cells: vec![wide, merge_cell("side", None)] },
-                Row { is_header: false, cells: vec![wide_continue, merge_cell("under", None)] },
+                Row {
+                    is_header: false,
+                    cells: vec![wide, merge_cell("side", None)],
+                    ..Default::default()
+                },
+                Row {
+                    is_header: false,
+                    cells: vec![wide_continue, merge_cell("under", None)],
+                    ..Default::default()
+                },
             ],
+            ..Default::default()
         };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();

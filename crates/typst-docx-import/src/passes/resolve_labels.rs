@@ -324,6 +324,8 @@ mod tests {
                 Block::Table(Table {
                     align: None,
                     indent_pt: None,
+                    stroke: None,
+                    row_heights: Vec::new(),
                     columns: 1,
                     column_widths: vec![None],
                     rows: vec![TableRow { header: false, cells: vec![cell] }],

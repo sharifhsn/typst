@@ -10,7 +10,7 @@ use typst_ooxml_core::units::twip_to_abs;
 
 use crate::lower::{parse_hex_color, LowerCtx};
 use crate::mappers::run::lower_paragraph_inlines;
-use crate::mappers::{chart, drawing, math};
+use crate::mappers::{chart, drawing, math, table};
 use crate::resolve::styles::{effective_para, heading_level};
 use crate::tdoc::{Align, Block, BreakKind, Inline, Inlines, ParStyle};
 use crate::wml::model::{BreakType, DrawingRef, ParaProps, Paragraph, RunContent, RunItem};
@@ -111,10 +111,28 @@ pub(crate) fn lower_paragraph(p: &Paragraph, ctx: &mut LowerCtx) -> ParaResult {
     // `ctx.options` to decide table-vs-plot, so it needs the whole context).
     let anchored = drawing_ref
         .and_then(|d| drawing::lower_drawing(d, package, &mut *ctx.report))
-        .map(Block::Figure)
+        .map(|mut figure| {
+            // A picture Word floated states its own placement
+            // (`wp:anchor/wp:positionH`), but an *inline* one is placed by the
+            // paragraph holding it — so a centred figure is a plain `w:jc` on
+            // that paragraph, and reading only the float spelling left every
+            // one of them flush left.
+            figure.align =
+                figure.align.or_else(|| eff_para.jc.as_deref().and_then(lower_jc));
+            Block::Figure(figure)
+        })
         .or_else(|| first_chart(p).and_then(|d| chart::lower_chart(d, ctx)).map(Block::Chart));
 
-    let kind = if eff_para.bottom_border && !has_text && drawing_ref.is_none() {
+    if eff_para.keep_next == Some(true) {
+        ctx.report.approximate(
+            "keep with next",
+            "w:keepNext binds a paragraph to the one after it; Typst has no such \
+             property (its layout already avoids stranding a heading at a page foot)",
+        );
+    }
+
+    let bottom_rule = eff_para.borders.is_bottom_only();
+    let kind = if bottom_rule && !has_text && drawing_ref.is_none() {
         ParaKind::Rule
     } else if let Some(level) = heading {
         ParaKind::Heading { level, body: inlines }
@@ -281,16 +299,35 @@ pub(crate) fn inlines_have_text(inlines: &Inlines) -> bool {
     })
 }
 
+/// `w:jc` → a Typst alignment. Shared by paragraphs (where `both` is a real
+/// justification) and by an inline figure, which takes the alignment of the
+/// paragraph it sits in.
+fn lower_jc(jc: &str) -> Option<Align> {
+    match jc {
+        "center" => Some(Align::Center),
+        "right" | "end" => Some(Align::Right),
+        "both" | "distribute" => Some(Align::Justify),
+        "left" | "start" => Some(Align::Left),
+        _ => None,
+    }
+}
+
 fn par_style(eff: &ParaProps) -> ParStyle {
-    let align = eff.jc.as_deref().map(|jc| match jc {
-        "center" => Align::Center,
-        "right" | "end" => Align::Right,
-        "both" | "distribute" => Align::Justify,
-        _ => Align::Left,
-    });
     let twips = |t: Option<i64>| t.map(|t| twip_to_abs(t as f64).to_pt());
+    // Word states the text/border gap per side; Typst's block takes one
+    // `inset:`, so the widest one is kept — it's the only choice that never
+    // pushes text *through* a border.
+    let sides =
+        [&eff.borders.top, &eff.borders.bottom, &eff.borders.left, &eff.borders.right];
+    let stroke_inset_pt = sides
+        .into_iter()
+        .flatten()
+        .filter_map(|edge| edge.space_pt)
+        .filter(|&space| space > 0)
+        .max()
+        .map(|space| space as f64);
     ParStyle {
-        align,
+        align: eff.jc.as_deref().and_then(lower_jc),
         leading_pt: twips(eff.line),
         spacing_before_pt: twips(eff.spacing_before),
         spacing_after_pt: twips(eff.spacing_after),
@@ -299,6 +336,9 @@ fn par_style(eff: &ParaProps) -> ParStyle {
         first_line_indent_pt: twips(eff.indent_first_line),
         hanging_indent_pt: twips(eff.indent_hanging),
         fill: parse_hex_color(eff.shd_fill.as_deref()),
+        stroke: (!eff.borders.is_empty()).then(|| table::lower_borders(&eff.borders)),
+        stroke_inset_pt,
+        unbreakable: eff.keep_lines == Some(true),
     }
 }
 

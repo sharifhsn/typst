@@ -1,7 +1,7 @@
 //! Resolve a run/paragraph's *effective* properties by walking `basedOn`
 //! chains + docDefaults + direct formatting.
 
-use crate::wml::model::{ParaProps, RunProps, Style, Styles};
+use crate::wml::model::{BorderEdge, Borders, ParaProps, RunProps, Style, Styles};
 
 /// Maximum `basedOn` hops to walk before giving up — guards against a cyclic
 /// style chain (which would otherwise loop forever).
@@ -52,10 +52,10 @@ fn merge_run(base: &RunProps, over: &RunProps) -> RunProps {
 }
 
 /// Layer `over`'s explicit fields on top of `base`, the [`ParaProps`]
-/// counterpart of [`merge_run`]. `bottom_border` has no "unset" state in the
-/// model (it's a plain `bool`, not a `Toggle`), so it's OR'd: a border
-/// inherited from a style isn't clearable by a paragraph that simply doesn't
-/// mention one. `sect_pr` is never meaningfully set on a *style's* `pPr` (a
+/// counterpart of [`merge_run`]. `borders` resolves per side, so a paragraph
+/// that adds a box around itself doesn't discard the rule its style already
+/// drew underneath — and one that mentions no border at all keeps the style's
+/// entirely. `sect_pr` is never meaningfully set on a *style's* `pPr` (a
 /// section boundary is document-instance data, not a formatting template), so
 /// it follows the same "direct wins" rule as every other field here purely
 /// for mechanical consistency — nothing actually reads it off the resolved,
@@ -75,8 +75,24 @@ fn merge_para(base: &ParaProps, over: &ParaProps) -> ParaProps {
         indent_hanging: over.indent_hanging.or(base.indent_hanging),
         shd_fill: over.shd_fill.clone().or_else(|| base.shd_fill.clone()),
         mark_props: merge_run(&base.mark_props, &over.mark_props),
-        bottom_border: base.bottom_border || over.bottom_border,
+        borders: merge_borders(&base.borders, &over.borders),
+        keep_lines: over.keep_lines.or(base.keep_lines),
+        keep_next: over.keep_next.or(base.keep_next),
         sect_pr: over.sect_pr.clone().or_else(|| base.sect_pr.clone()),
+    }
+}
+
+/// Resolve two `w:pBdr`s side by side: a side the paragraph states wins, a
+/// side it doesn't keeps whatever the style chain already had there.
+fn merge_borders(base: &Borders, over: &Borders) -> Borders {
+    let side = |over: &Option<BorderEdge>, base: &Option<BorderEdge>| {
+        over.clone().or(base.clone())
+    };
+    Borders {
+        top: side(&over.top, &base.top),
+        bottom: side(&over.bottom, &base.bottom),
+        left: side(&over.left, &base.left),
+        right: side(&over.right, &base.right),
     }
 }
 
