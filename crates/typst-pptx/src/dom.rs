@@ -6,6 +6,8 @@ pub use typst_ooxml_core::dml::{FillSpec, PathSegment, StrokeSpec};
 pub use typst_ooxml_core::media::MediaId;
 use typst_ooxml_core::media::MediaRegistry;
 
+use crate::report::FidelityReport;
+
 /// A slide-level intermediate representation.
 pub struct SlideIr {
     pub bg: Option<FillSpec>,
@@ -295,6 +297,12 @@ pub struct SlideCtx {
     pub physical_page_to_slide: Option<Vec<Option<usize>>>,
     /// License-permitted font programs used by editable presentation text.
     pub embedded_fonts: BTreeMap<(EcoString, EmbeddedFontStyle), EmbeddedFontProgram>,
+    /// Structured fidelity decisions accumulated while walking every slide.
+    pub(crate) fidelity_report: FidelityReport,
+    /// Zero-based index of the slide currently being walked, so free
+    /// functions that only receive `&mut SlideCtx` (fill/shape lowering) can
+    /// still record a fidelity decision against the right slide.
+    pub(crate) current_slide: usize,
 }
 
 impl Default for SlideCtx {
@@ -303,6 +311,8 @@ impl Default for SlideCtx {
             media: MediaRegistry::new("ppt/media"),
             physical_page_to_slide: None,
             embedded_fonts: BTreeMap::new(),
+            fidelity_report: FidelityReport::default(),
+            current_slide: 0,
         }
     }
 }
@@ -316,25 +326,12 @@ impl SlideCtx {
     /// Register one exact face for portable editable text when its OpenType
     /// license permits editing. PowerPoint font parts carry one standalone
     /// TrueType/OpenType program, so collections are deliberately skipped.
+    ///
+    /// Whether the face ended up embedded is recorded on the fidelity report
+    /// either way: a license-restricted, collection, or malformed face is a
+    /// real (if usually silent) representation decision — editable text using
+    /// it depends on whatever font the consumer substitutes.
     pub fn add_font(&mut self, font: &Font) {
-        let data = font.data().as_slice();
-        if data.len() < 32 || ttf_parser::fonts_in_collection(data).is_some() {
-            return;
-        }
-        let Ok(face) = ttf_parser::Face::parse(data, font.index()) else { return };
-        let Some(os2) = face.tables().os2 else { return };
-        if !os2.is_outline_embedding_allowed()
-            || !matches!(
-                os2.permissions(),
-                Some(
-                    ttf_parser::Permissions::Installable
-                        | ttf_parser::Permissions::Editable
-                )
-            )
-        {
-            return;
-        }
-
         let info = font.info();
         let bold = info.variant.weight.to_number() >= 600;
         let italic = !matches!(info.variant.style, FontStyle::Normal);
@@ -345,9 +342,41 @@ impl SlideCtx {
             (true, true) => EmbeddedFontStyle::BoldItalic,
         };
         let family = EcoString::from(info.family.as_str());
+
+        let embedded = self.try_embed_font(font, family.clone(), style);
+        self.fidelity_report.record_font(&family, style.name(), embedded);
+    }
+
+    /// Attempts to embed `font` as `family`/`style`, returning whether it was
+    /// (or already had been) embedded.
+    fn try_embed_font(
+        &mut self,
+        font: &Font,
+        family: EcoString,
+        style: EmbeddedFontStyle,
+    ) -> bool {
+        let data = font.data().as_slice();
+        if data.len() < 32 || ttf_parser::fonts_in_collection(data).is_some() {
+            return false;
+        }
+        let Ok(face) = ttf_parser::Face::parse(data, font.index()) else { return false };
+        let Some(os2) = face.tables().os2 else { return false };
+        if !os2.is_outline_embedding_allowed()
+            || !matches!(
+                os2.permissions(),
+                Some(
+                    ttf_parser::Permissions::Installable
+                        | ttf_parser::Permissions::Editable
+                )
+            )
+        {
+            return false;
+        }
+
         self.embedded_fonts.entry((family.clone(), style)).or_insert_with(|| {
             EmbeddedFontProgram { family, style, data: data.to_vec() }
         });
+        true
     }
 }
 

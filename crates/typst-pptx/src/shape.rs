@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::dom::{FillSpec, GeomKind, GeomShape, PathGeom, PicGeom, SlideCtx};
+use crate::report::{DecisionReason, LossSet, Representation};
 
 use typst_library::layout::{Size, Transform};
 use typst_library::visualize::{Color, Curve, Geometry, Paint, Shape, Tiling};
@@ -120,6 +121,13 @@ pub(crate) fn resolved_fill(
 fn tile_fill(ctx: &mut SlideCtx, tiling: &Tiling) -> Option<FillSpec> {
     let tile = dml::render_tiling_tile(tiling)?;
     let media = ctx.add_media(&tile.png, "png");
+    ctx.fidelity_report.record(
+        ctx.current_slide,
+        Representation::Approximate,
+        DecisionReason::TilingFillRasterizedApproximation,
+        LossSet::TILE_FILL,
+        0,
+    );
     Some(tile.fill(TileImage::Media(media)))
 }
 

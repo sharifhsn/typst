@@ -76,22 +76,41 @@ slide stays native and editable.
 
 ## Known limitations
 
+Every fidelity fallback this exporter takes now records itself in a
+`FidelityReport` — a `Representation`, a `LossSet`, and a `DecisionReason`
+naming the specific site. **That report, and the
+[support matrix](PPTX_SUPPORT_MATRIX.md) generated alongside it, are the
+source of truth**; this list is a prose summary of it and should be re-derived
+from `src/report.rs`'s `DecisionReason` variants rather than edited
+independently.
+
+Fallbacks the report names (see the matrix for what each loses):
+
+- **Raster fallbacks** — a group with a clip or skew, text under a
+  non-uniform transform, a shape whose geometry or fill DrawingML cannot
+  express (conic gradient, off-centre radial), a rotated or scaled picture,
+  and a transformed table.
+- **Approximations** — gradient/tiling *text* fill collapsed to one solid
+  colour (a DrawingML run carries only one), a tiling shape fill rendered to a
+  static tile image, and a page fill that is not solid-or-linear falling back
+  to plain **white**.
+- **Native-with-fallback** — equations, emitted as OMML behind an
+  `mc:AlternateContent` switch with a plain-text branch for consumers without
+  the extension.
+- **Drops** — an equation whose OMML source or geometry could not be
+  recovered.
+
+Two limitations are *not* fallback sites, so they are not in the report and
+belong here:
+
 - **Editable text layout still varies by consumer.** Standard EOT font parts
   preserve the source face in PowerPoint and current LibreOffice Impress, but
-  the applications can apply different text-box and line-breaking metrics. A
-  narrow editable text box can therefore wrap differently even when both use
-  the exact embedded font.
-- **Math compatibility varies by consumer.** PowerPoint can use the OMML choice;
-  older Office versions and LibreOffice may display the simpler DrawingML
-  fallback instead, which is not visually equivalent for complex equations.
-- **Native tables are conservative and incomplete.** Transformed or partially
-  captured tables can still require a whole-table picture fallback; cell-level
-  fills, strokes, gutters, math, and inset geometry need broader coverage.
-- **Mixed page sizes** cannot be represented directly because PowerPoint has one
-  global slide size. The CLI warns; off-size pages are uniformly scaled to fit
-  and centered on the first page's canvas, which can introduce letterboxing.
-- **Gradient/tiling *text* fills** are approximated with a representative solid
-  color (a run can carry only one color), so the text stays visible.
+  the applications apply different text-box and line-breaking metrics. A
+  narrow editable text box can wrap differently even with the same embedded
+  font.
+- **Mixed page sizes** cannot be represented: PowerPoint has one global slide
+  size. The CLI warns; off-size pages are uniformly scaled to fit and centred
+  on the first page's canvas, which can letterbox.
 
 ## Validation
 

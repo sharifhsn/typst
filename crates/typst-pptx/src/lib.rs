@@ -19,6 +19,7 @@ mod dom;
 mod encode;
 mod image;
 mod package;
+mod report;
 mod shape;
 mod slide;
 mod table;
@@ -33,6 +34,10 @@ use typst_library::introspection::Introspector;
 use typst_syntax::Span;
 
 use crate::dom::SlideCtx;
+pub use crate::report::{
+    DecisionReason, ExportDecision, ExportSource, FidelityReport, FontFact, LossSet,
+    Representation, RepresentationCounts,
+};
 
 /// Reserved options for PPTX export.
 #[derive(Default)]
@@ -55,7 +60,7 @@ pub struct SpeakerNote {
 
 /// Export a paged Typst document as a PowerPoint presentation.
 pub fn pptx(document: &PagedDocument, options: &PptxOptions) -> SourceResult<Vec<u8>> {
-    pptx_impl(document, options, None)
+    pptx_impl(document, options, None).map(PptxExport::into_bytes)
 }
 
 /// Export a filtered paged document while retaining its original physical-page
@@ -68,14 +73,75 @@ pub fn pptx_with_page_mapping(
     options: &PptxOptions,
     physical_page_to_slide: &[Option<usize>],
 ) -> SourceResult<Vec<u8>> {
+    pptx_impl(document, options, Some(physical_page_to_slide)).map(PptxExport::into_bytes)
+}
+
+/// Export a paged Typst document as a PowerPoint presentation, keeping the
+/// structured [`FidelityReport`] alongside the package bytes.
+///
+/// This is the reporting sibling of [`pptx`]: same bytes, same behavior, but
+/// the caller can additionally inspect every non-native representation
+/// decision the exporter made (rasterized shapes/groups/text/images,
+/// transformed-table fallback, tiling/gradient-text approximation, math's
+/// OMML/text-fallback pair, and page-background substitution).
+pub fn pptx_with_report(
+    document: &PagedDocument,
+    options: &PptxOptions,
+) -> SourceResult<PptxExport> {
+    pptx_impl(document, options, None)
+}
+
+/// [`pptx_with_page_mapping`], keeping the structured [`FidelityReport`]
+/// alongside the package bytes. See [`pptx_with_report`].
+pub fn pptx_with_page_mapping_and_report(
+    document: &PagedDocument,
+    options: &PptxOptions,
+    physical_page_to_slide: &[Option<usize>],
+) -> SourceResult<PptxExport> {
     pptx_impl(document, options, Some(physical_page_to_slide))
+}
+
+/// The result of a successful PPTX export: the finished OPC package bytes
+/// plus the [`FidelityReport`] describing every non-native representation
+/// decision made while producing them.
+///
+/// This is the PPTX analogue of how `typst-docx` exposes its report from
+/// `DocxDocument::fidelity_report()`. The two crates' pipelines differ (DOCX
+/// needs a typed `Document` stage to participate in Typst's generic compile
+/// pipeline; this exporter is a direct post-layout pass over a
+/// `PagedDocument`, more like `typst-pdf` or `typst-svg`), so rather than
+/// inventing an intermediate typed-document stage this crate doesn't
+/// otherwise need, the report simply travels with the bytes. [`pptx`] and
+/// [`pptx_with_page_mapping`] remain thin wrappers over this that discard the
+/// report for callers who don't need it.
+#[derive(Debug, Clone)]
+pub struct PptxExport {
+    bytes: Vec<u8>,
+    report: FidelityReport,
+}
+
+impl PptxExport {
+    /// The finished OPC package bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Consumes the export, keeping only the package bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    /// Structured fidelity decisions recorded while building this package.
+    pub fn fidelity_report(&self) -> &FidelityReport {
+        &self.report
+    }
 }
 
 fn pptx_impl(
     document: &PagedDocument,
     options: &PptxOptions,
     physical_page_to_slide: Option<&[Option<usize>]>,
-) -> SourceResult<Vec<u8>> {
+) -> SourceResult<PptxExport> {
     let mut ctx = SlideCtx {
         physical_page_to_slide: physical_page_to_slide.map(|mapping| mapping.to_vec()),
         ..SlideCtx::default()
@@ -90,7 +156,7 @@ fn pptx_impl(
         }
     };
     match package::write(document, &slides, &ctx, notes) {
-        Ok(bytes) => Ok(bytes),
+        Ok(bytes) => Ok(PptxExport { bytes, report: ctx.fidelity_report }),
         Err(err) => bail!(Span::detached(), "failed to finalize PPTX package: {err}"),
     }
 }

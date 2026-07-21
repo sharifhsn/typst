@@ -15,6 +15,7 @@ use crate::dom::{
     FillSpec, LinkOverlay, MathBox, PicGeom, RunLink, SlideCtx, SlideIr, SlideShape,
     TextBox, TextChild, TextColumns, TextPara, TextRun, TextWrap,
 };
+use crate::report::{DecisionReason, LossSet, Representation};
 use crate::table::{ActiveTable, ActiveTableCell, CapturedTableCell};
 use crate::text::{InlineMathSource, LinkTarget, TextSource};
 
@@ -40,6 +41,9 @@ fn slide(
     target_size: Size,
     ctx: &mut SlideCtx,
 ) -> SlideIr {
+    // Free helpers that only receive `&mut SlideCtx` (fill/shape lowering)
+    // read this back to record a fidelity decision against the right slide.
+    ctx.current_slide = slide_index;
     let mut walker = Walker::new(document, page, slide_index, target_size, ctx);
     walker.walk_frame(&page.frame, fit_page_transform(page.frame.size(), target_size));
     walker.emit_loose_tables();
@@ -59,7 +63,8 @@ fn slide(
 
     let mut shapes: Vec<_> = ordered.into_iter().map(|entry| entry.shape).collect();
     shapes.extend(walker.link_overlays.into_iter().map(SlideShape::LinkOverlay));
-    SlideIr { bg: background(page), shapes }
+    let ctx = walker.ctx;
+    SlideIr { bg: background(ctx, slide_index, page), shapes }
 }
 
 /// PowerPoint has one global slide size. Preserve every off-size Typst page by
@@ -255,6 +260,12 @@ impl<'a, 'b> Walker<'a, 'b> {
                             if group.clip.is_some() { "clip" } else { "transform" },
                             frame_text_chars(&group.frame),
                         );
+                        self.record_decision(
+                            Representation::Raster,
+                            DecisionReason::UnrepresentableGroupRasterFallback,
+                            LossSet::RASTER,
+                            frame_text_chars(&group.frame),
+                        );
                         // A clip or a non-similarity transform (skew,
                         // non-uniform scale) has no PPTX form: render the
                         // whole group through its own transform and place
@@ -272,6 +283,14 @@ impl<'a, 'b> Walker<'a, 'b> {
                 FrameItem::Text(text) => {
                     if let Some(similarity) = classify_similarity(item_transform) {
                         self.ctx.add_font(text.font.font());
+                        if !matches!(text.fill, Paint::Solid(_)) {
+                            self.record_decision(
+                                Representation::Approximate,
+                                DecisionReason::GradientOrTilingTextFillApproximation,
+                                LossSet::TEXT_FILL_COLOR,
+                                0,
+                            );
+                        }
                         let baseline = Point::zero().transform(item_transform);
                         let index = self.text.len();
                         self.text.push(TextSource {
@@ -286,6 +305,12 @@ impl<'a, 'b> Walker<'a, 'b> {
                         self.record_slide_number_text(index, text, item_transform);
                     } else {
                         debug_raster("text", "transform", text.text.chars().count());
+                        self.record_decision(
+                            Representation::Raster,
+                            DecisionReason::UnrepresentableTextTransformRasterFallback,
+                            LossSet::RASTER,
+                            text.text.chars().count(),
+                        );
                         self.raster_item(
                             order,
                             FrameItem::Text(text.clone()),
@@ -314,6 +339,12 @@ impl<'a, 'b> Walker<'a, 'b> {
                         }
                         None => {
                             debug_raster("shape", "unmappable", 0);
+                            self.record_decision(
+                                Representation::Raster,
+                                DecisionReason::UnmappableShapeRasterFallback,
+                                LossSet::RASTER,
+                                0,
+                            );
                             self.raster_item(
                                 order,
                                 FrameItem::Shape(shape.clone(), *span),
@@ -343,6 +374,25 @@ impl<'a, 'b> Walker<'a, 'b> {
         let order = self.next_order;
         self.next_order += 1;
         order
+    }
+
+    /// Records one fidelity decision against the slide currently being
+    /// walked.
+    pub(super) fn record_decision(
+        &mut self,
+        representation: Representation,
+        reason: DecisionReason,
+        losses: LossSet,
+        affected_text_chars: usize,
+    ) {
+        let slide_index = self.ctx.current_slide;
+        self.ctx.fidelity_report.record(
+            slide_index,
+            representation,
+            reason,
+            losses,
+            affected_text_chars,
+        );
     }
 
     fn handle_tag(&mut self, tag: &Tag, order: usize, item_transform: Transform) {
@@ -526,6 +576,14 @@ impl<'a, 'b> Walker<'a, 'b> {
                     return false;
                 };
                 self.ctx.add_font(text.font.font());
+                if !matches!(text.fill, Paint::Solid(_)) {
+                    self.record_decision(
+                        Representation::Approximate,
+                        DecisionReason::GradientOrTilingTextFillApproximation,
+                        LossSet::TEXT_FILL_COLOR,
+                        0,
+                    );
+                }
                 let baseline = Point::zero().transform(item_transform);
                 self.active_columns.last_mut().unwrap().text.push(TextSource {
                     order,
@@ -637,9 +695,21 @@ impl<'a, 'b> Walker<'a, 'b> {
 
     fn emit_math_box(&mut self, active: ActiveMath) {
         let Some(source) = self.equations.get(&active.loc) else {
+            self.record_decision(
+                Representation::Drop,
+                DecisionReason::MathSourceUnavailableDrop,
+                LossSet::DROP,
+                0,
+            );
             return;
         };
         let Some(bounds) = active.bounds else {
+            self.record_decision(
+                Representation::Drop,
+                DecisionReason::MathSourceUnavailableDrop,
+                LossSet::DROP,
+                0,
+            );
             return;
         };
         let block = source.block;
@@ -649,6 +719,12 @@ impl<'a, 'b> Walker<'a, 'b> {
         let size = bounds.size();
         let fallback =
             if source_fallback.is_empty() { active.fallback } else { source_fallback };
+        self.record_decision(
+            Representation::NativeWithFallback,
+            DecisionReason::MathOmmlWithTextFallback,
+            LossSet::MATH_NATIVE_WITH_FALLBACK,
+            0,
+        );
 
         if block && self.active_table_cells.is_empty() {
             self.shapes.push(OrderedShape {
@@ -717,6 +793,12 @@ impl<'a, 'b> Walker<'a, 'b> {
             return;
         }
         debug_raster("image", "transform-or-kind", 0);
+        self.record_decision(
+            Representation::Raster,
+            DecisionReason::RotatedOrScaledImageRasterFallback,
+            LossSet::RASTER,
+            0,
+        );
         self.raster_item(
             order,
             FrameItem::Image(image.clone(), size, span),
@@ -1427,7 +1509,7 @@ fn append_frame_text(frame: &Frame, out: &mut EcoString) {
     }
 }
 
-fn raster_fallback_text(item: &FrameItem) -> EcoString {
+pub(super) fn raster_fallback_text(item: &FrameItem) -> EcoString {
     fn append(item: &FrameItem, out: &mut EcoString) {
         match item {
             FrameItem::Text(text) => {
@@ -1497,13 +1579,151 @@ pub(super) fn frame_text_chars(frame: &Frame) -> usize {
     n
 }
 
-fn background(page: &Page) -> Option<FillSpec> {
+fn background(ctx: &mut SlideCtx, slide_index: usize, page: &Page) -> Option<FillSpec> {
     let fill = page.fill_or_white();
     fill.as_ref()?;
     // A solid or linear-gradient page fill maps to a native slide background;
     // a tiling or non-linear gradient we cannot represent falls back to white.
     match dml::resolved_fill(&fill, dml::AlphaMode::Preserve) {
         Some(spec) => spec,
-        None => Some(FillSpec::Solid([255, 255, 255, 255])),
+        None => {
+            ctx.fidelity_report.record(
+                slide_index,
+                Representation::Approximate,
+                DecisionReason::PageBackgroundWhiteFallback,
+                LossSet::BACKGROUND_COLOR,
+                0,
+            );
+            Some(FillSpec::Solid([255, 255, 255, 255]))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use typst_library::foundations::{Content, Smart};
+    use typst_library::layout::{Axes, Sides};
+    use typst_library::visualize::{
+        Color, ColorSpace, Gradient, ProcessColor, ProcessColorSpace, RadialGradient, Rgb,
+    };
+    use typst_layout::Page;
+
+    use super::*;
+
+    /// An off-center radial gradient: `dml::resolved_fill` cannot express it
+    /// (DrawingML's `a:fillToRect` outer path is always centered), so it is a
+    /// realistic stand-in for "any page fill the exporter can't map".
+    fn unrepresentable_fill() -> Paint {
+        Paint::Gradient(Gradient::Radial(Arc::new(RadialGradient {
+            stops: vec![
+                (
+                    Color::Process(ProcessColor::Rgb(Rgb::new(1.0, 0.0, 0.0, 1.0))),
+                    Ratio::zero(),
+                ),
+                (
+                    Color::Process(ProcessColor::Rgb(Rgb::new(0.0, 0.0, 1.0, 1.0))),
+                    Ratio::one(),
+                ),
+            ],
+            center: Axes::new(Ratio::new(0.4), Ratio::new(0.6)),
+            radius: Ratio::new(0.7),
+            focal_center: Axes::new(Ratio::new(0.3), Ratio::new(0.45)),
+            focal_radius: Ratio::new(0.1),
+            space: ColorSpace::Process(ProcessColorSpace::Srgb),
+            relative: Smart::Auto,
+            anti_alias: true,
+        })))
+    }
+
+    fn page_with_fill(fill: Option<Paint>) -> Page {
+        Page {
+            frame: Frame::soft(Size::new(Abs::pt(100.0), Abs::pt(100.0))),
+            bleed: Sides::splat(Abs::zero()),
+            fill: Smart::Custom(fill),
+            numbering: None,
+            supplement: Content::empty(),
+            number: 1,
+        }
+    }
+
+    #[test]
+    fn unrepresentable_page_fill_falls_back_to_white_and_is_recorded() {
+        let page = page_with_fill(Some(unrepresentable_fill()));
+        let mut ctx = SlideCtx::default();
+
+        let bg = background(&mut ctx, 3, &page);
+        assert!(matches!(bg, Some(FillSpec::Solid([255, 255, 255, 255]))));
+
+        let decisions = ctx.fidelity_report.decisions();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].source.slide_index, 3);
+        assert_eq!(decisions[0].representation, Representation::Approximate);
+        assert_eq!(
+            decisions[0].reason,
+            DecisionReason::PageBackgroundWhiteFallback
+        );
+        assert_eq!(decisions[0].occurrences, 1);
+    }
+
+    #[test]
+    fn solid_page_fill_maps_natively_with_no_decision() {
+        let page = page_with_fill(Some(Paint::Solid(Color::BLACK)));
+        let mut ctx = SlideCtx::default();
+
+        let bg = background(&mut ctx, 0, &page);
+        assert!(matches!(bg, Some(FillSpec::Solid(_))));
+        assert!(ctx.fidelity_report.decisions().is_empty());
+    }
+
+    /// End-to-end through the real `slides()` entry point: a skewed group (no
+    /// PPTX equivalent) rasterizes and the fidelity report records exactly
+    /// that, against the right slide.
+    #[test]
+    fn skewed_group_raster_fallback_is_recorded_on_the_right_slide() {
+        use ecow::eco_vec;
+        use typst_library::layout::GroupItem;
+        use typst_library::model::DocumentInfo;
+        use typst_library::visualize::Geometry;
+        use typst_syntax::Span;
+
+        let mut inner = Frame::soft(Size::new(Abs::pt(10.0), Abs::pt(10.0)));
+        inner.push(
+            Point::zero(),
+            FrameItem::Shape(
+                Geometry::Rect(Size::new(Abs::pt(10.0), Abs::pt(10.0)))
+                    .filled(Color::BLACK),
+                Span::detached(),
+            ),
+        );
+        let mut group = GroupItem::new(inner);
+        // A shear: no rotation/scale similarity, so this has no native
+        // DrawingML form and must rasterize.
+        group.transform = Transform { ky: Ratio::new(0.5), ..Transform::identity() };
+
+        let blank_frame = Frame::soft(Size::new(Abs::pt(50.0), Abs::pt(50.0)));
+        let mut skewed_frame = Frame::soft(Size::new(Abs::pt(50.0), Abs::pt(50.0)));
+        skewed_frame.push(Point::zero(), FrameItem::Group(group));
+
+        // The skew lands on the second (index 1) slide, to prove the decision
+        // is attributed to the right one rather than always slide 0.
+        let first = Page { frame: blank_frame, number: 1, ..page_with_fill(None) };
+        let second = Page { frame: skewed_frame, number: 2, ..page_with_fill(None) };
+
+        let document =
+            PagedDocument::new(eco_vec![first, second], DocumentInfo::default());
+        let mut ctx = SlideCtx::default();
+        let slides = slides(&document, &mut ctx);
+
+        assert_eq!(slides.len(), 2);
+        let decisions = ctx.fidelity_report.decisions();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].source.slide_index, 1);
+        assert_eq!(decisions[0].representation, Representation::Raster);
+        assert_eq!(
+            decisions[0].reason,
+            DecisionReason::UnrepresentableGroupRasterFallback
+        );
     }
 }

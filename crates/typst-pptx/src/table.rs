@@ -18,10 +18,11 @@ use crate::dom::{
     CellBorders, CellHAlign, CellInsets, CellVAlign, FillSpec, SlideShape, StrokeSpec,
     TableBox, TableCell, TableRow, TextPara,
 };
+use crate::report::{DecisionReason, LossSet, Representation};
 use crate::slide::{
     HighlightCandidate, LinkRect, OrderedShape, Rect, Walker, attach_highlights,
     classify_similarity, debug_raster, frame_text_chars, highlight_candidate,
-    text_link_overlays, transformed_rect,
+    raster_fallback_text, text_link_overlays, transformed_rect,
 };
 use crate::text::{InlineMathSource, TextSource};
 
@@ -123,6 +124,12 @@ impl<'a, 'b> Walker<'a, 'b> {
                 table.fallback = true;
                 table.cells.clear();
             }
+            self.record_decision(
+                Representation::Raster,
+                DecisionReason::TransformedTableRasterFallback,
+                LossSet::RASTER,
+                0,
+            );
             return true;
         };
         if similarity.rot_60k != 0 {
@@ -130,6 +137,12 @@ impl<'a, 'b> Walker<'a, 'b> {
                 table.fallback = true;
                 table.cells.clear();
             }
+            self.record_decision(
+                Representation::Raster,
+                DecisionReason::TransformedTableRasterFallback,
+                LossSet::RASTER,
+                0,
+            );
             return true;
         }
 
@@ -215,6 +228,18 @@ impl<'a, 'b> Walker<'a, 'b> {
                 // non-uniform scale) cannot be encoded by a DrawingML table.
                 // Preserve the complete cell content as positioned pictures
                 // rather than silently swallowing it in the table walker.
+                //
+                // This aggregates onto the same (slide, reason) row the
+                // initial transform detection already recorded in
+                // `start_table_cell`, so its occurrence count and swallowed
+                // text total reflect every item the whole-table fallback
+                // swept up, not just the trigger.
+                self.record_decision(
+                    Representation::Raster,
+                    DecisionReason::TransformedTableRasterFallback,
+                    LossSet::RASTER,
+                    raster_fallback_text(item).chars().count(),
+                );
                 self.raster_item(order, item.clone(), item_transform, None);
                 return true;
             }
@@ -246,6 +271,12 @@ impl<'a, 'b> Walker<'a, 'b> {
                         if group.clip.is_some() { "clip" } else { "transform" },
                         frame_text_chars(&group.frame),
                     );
+                    self.record_decision(
+                        Representation::Raster,
+                        DecisionReason::UnrepresentableGroupRasterFallback,
+                        LossSet::RASTER,
+                        frame_text_chars(&group.frame),
+                    );
                     self.raster_item(
                         order,
                         FrameItem::Group(group.clone()),
@@ -257,6 +288,14 @@ impl<'a, 'b> Walker<'a, 'b> {
             FrameItem::Text(text) => {
                 if let Some(similarity) = classify_similarity(item_transform) {
                     self.ctx.add_font(text.font.font());
+                    if !matches!(text.fill, Paint::Solid(_)) {
+                        self.record_decision(
+                            Representation::Approximate,
+                            DecisionReason::GradientOrTilingTextFillApproximation,
+                            LossSet::TEXT_FILL_COLOR,
+                            0,
+                        );
+                    }
                     let baseline = Point::zero().transform(item_transform);
                     self.active_table_cells.last_mut().unwrap().text.push(TextSource {
                         order,
@@ -271,6 +310,12 @@ impl<'a, 'b> Walker<'a, 'b> {
                     debug_raster(
                         "table-cell-text",
                         "transform",
+                        text.text.chars().count(),
+                    );
+                    self.record_decision(
+                        Representation::Raster,
+                        DecisionReason::UnrepresentableTextTransformRasterFallback,
+                        LossSet::RASTER,
                         text.text.chars().count(),
                     );
                     self.raster_item(
@@ -305,6 +350,12 @@ impl<'a, 'b> Walker<'a, 'b> {
                     }
                     None => {
                         debug_raster("table-cell-shape", "unmappable", 0);
+                        self.record_decision(
+                            Representation::Raster,
+                            DecisionReason::UnmappableShapeRasterFallback,
+                            LossSet::RASTER,
+                            0,
+                        );
                         self.raster_item(
                             order,
                             FrameItem::Shape(shape.clone(), *span),
