@@ -3,6 +3,7 @@
 use typst_ooxml_core::units::twip_to_abs;
 
 use crate::lower::{lower_items, parse_hex_color, LowerCtx};
+use crate::resolve::styles::effective_table;
 use crate::tdoc::{self, Border, BoxStroke, Sides, TableCell, TableRow, VAlign};
 use crate::wml::model::{
     BorderEdge, Borders, Cell, CellMargins, Row, Table as WmlTable, TableBorders,
@@ -102,6 +103,25 @@ pub(crate) fn lower_table(table: &WmlTable, ctx: &mut LowerCtx) -> tdoc::Table {
         .collect();
     column_widths.resize(columns, None);
 
+    // Resolved before any cell is lowered: Word's `TableGrid` — the most
+    // referenced table style by a wide margin — puts the table's entire
+    // appearance in the style and nothing on the table itself, so a table
+    // that names it used to arrive with no borders at all.
+    let resolved = effective_table(&ctx.package.styles, table);
+    if resolved.conditional {
+        ctx.report.approximate(
+            "table style",
+            "w:tblStylePr conditional formatting (banded rows, first row/column) is not \
+             applied; the style's base formatting is",
+        );
+    }
+    let stroke = lower_table_stroke(&resolved.borders, ctx);
+    let defaults = CellDefaults {
+        inset: lower_margins(&resolved.cell_margins),
+        fill: parse_hex_color(resolved.cell_shd_fill.as_deref()),
+        align: resolved.cell_v_align.as_deref().and_then(lower_v_align),
+    };
+
     let merged = resolve_vertical_merges(&table.rows);
 
     // Typst's `#table` auto-flows cells into a fixed-width grid with no notion
@@ -137,7 +157,7 @@ pub(crate) fn lower_table(table: &WmlTable, ctx: &mut LowerCtx) -> tdoc::Table {
                 let end = (merge.column + colspan).min(occupied.len());
                 occupied[start..end].fill(merge.rowspan - 1);
             }
-            cells.push(lower_cell(cell, merge.rowspan, ctx));
+            cells.push(lower_cell(cell, merge.rowspan, &defaults, ctx));
         }
 
         if columns > 0 {
@@ -176,7 +196,6 @@ pub(crate) fn lower_table(table: &WmlTable, ctx: &mut LowerCtx) -> tdoc::Table {
         }
     };
 
-    let stroke = lower_table_stroke(&table.borders, ctx);
 
     tdoc::Table { columns, column_widths, rows, align, indent_pt, stroke, row_heights }
 }
@@ -265,7 +284,20 @@ fn lower_table_jc(jc: &str) -> Option<tdoc::Align> {
     }
 }
 
-fn lower_cell(cell: &Cell, rowspan: usize, ctx: &mut LowerCtx) -> TableCell {
+/// What a table's style gives every cell that states nothing itself.
+#[derive(Debug, Default, Clone, Copy)]
+struct CellDefaults {
+    inset: Option<Sides>,
+    fill: Option<[u8; 3]>,
+    align: Option<VAlign>,
+}
+
+fn lower_cell(
+    cell: &Cell,
+    rowspan: usize,
+    defaults: &CellDefaults,
+    ctx: &mut LowerCtx,
+) -> TableCell {
     // A page/column break is meaningless inside a table cell (Typst rejects
     // it outright — "pagebreaks are not allowed inside of containers"), so
     // `lower_paragraph` needs to know it's lowering one; see
@@ -276,10 +308,11 @@ fn lower_cell(cell: &Cell, rowspan: usize, ctx: &mut LowerCtx) -> TableCell {
     TableCell {
         colspan: cell.grid_span.max(1),
         rowspan,
-        fill: parse_hex_color(cell.shd_fill.as_deref()),
+        // The cell's own properties win; the table style's fill in behind.
+        fill: parse_hex_color(cell.shd_fill.as_deref()).or(defaults.fill),
         stroke: lower_borders(&cell.borders),
-        align: cell.v_align.as_deref().and_then(lower_v_align),
-        inset: lower_margins(&cell.margins),
+        align: cell.v_align.as_deref().and_then(lower_v_align).or(defaults.align),
+        inset: lower_margins(&cell.margins).or(defaults.inset),
         body,
     }
 }

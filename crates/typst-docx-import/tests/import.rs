@@ -3161,3 +3161,108 @@ fn the_paragraph_half_of_a_linked_style_wins_over_the_character_half() {
     let italic = src.contains("style: \"italic\"");
     assert!(italic, "italic only in the linked half was lost:\n{src}");
 }
+
+/// Word's built-in `TableGrid` — "all borders", and by far the most
+/// referenced table style in real documents — carries a table's entire
+/// appearance in the *style*, with nothing on the table itself. Until the
+/// style was resolved, such a table arrived with no borders of its own and
+/// Typst's default grid instead of Word's.
+#[test]
+fn a_table_style_supplies_the_borders_and_padding_the_table_itself_omits() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:tbl>
+      <w:tblPr><w:tblStyle w:val="TableGrid"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+      <w:tr><w:tc><w:p><w:r><w:t>styled</w:t></w:r></w:p></w:tc></w:tr>
+    </w:tbl>
+  </w:body></w:document>"#;
+
+    const STYLES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="table" w:styleId="TableGrid">
+    <w:name w:val="Table Grid"/>
+    <w:tblPr>
+      <w:tblBorders>
+        <w:top w:val="single" w:sz="8"/><w:bottom w:val="single" w:sz="8"/>
+        <w:left w:val="single" w:sz="8"/><w:right w:val="single" w:sz="8"/>
+        <w:insideH w:val="single" w:sz="8"/><w:insideV w:val="single" w:sz="8"/>
+      </w:tblBorders>
+      <w:tblCellMar>
+        <w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/>
+        <w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/>
+      </w:tblCellMar>
+    </w:tblPr>
+    <w:tcPr><w:vAlign w:val="center"/></w:tcPr>
+  </w:style>
+</w:styles>"#;
+
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_xml("word/styles.xml", "application/xml", STYLES_XML.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+    // sz=8 eighths of a point = 1pt, from the style, not the table.
+    assert!(src.contains("stroke: 1pt"), "style borders not applied:\n{src}");
+    // 108 twips = 5.4pt of cell padding, likewise from the style.
+    assert!(src.contains("left: 5.4pt"), "style cell margins not applied:\n{src}");
+    // And the style's default cell alignment.
+    assert!(src.contains("align: horizon"), "style cell vAlign not applied:\n{src}");
+}
+
+/// A table's own `w:tblPr` is direct formatting and beats its style, while a
+/// cell's own `w:tcMar` beats the table-level default it sits under.
+#[test]
+fn direct_table_and_cell_properties_beat_the_style_defaults() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:tbl>
+      <w:tblPr>
+        <w:tblStyle w:val="Grid"/>
+        <w:tblCellMar><w:left w:w="288" w:type="dxa"/></w:tblCellMar>
+      </w:tblPr>
+      <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>inherits</w:t></w:r></w:p></w:tc>
+        <w:tc>
+          <w:tcPr><w:tcMar><w:left w:w="720" w:type="dxa"/></w:tcMar></w:tcPr>
+          <w:p><w:r><w:t>overrides</w:t></w:r></w:p>
+        </w:tc>
+      </w:tr>
+    </w:tbl>
+  </w:body></w:document>"#;
+
+    const STYLES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="table" w:styleId="Grid">
+    <w:name w:val="Grid"/>
+    <w:tblPr><w:tblCellMar><w:left w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr>
+    <w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr></w:tblStylePr>
+  </w:style>
+</w:styles>"#;
+
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_xml("word/styles.xml", "application/xml", STYLES_XML.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let result = import_docx(&bytes).expect("import should succeed");
+    let src = &result.source;
+    // The table's own 288 twips (14.4pt) beats the style's 108 (5.4pt)...
+    assert!(src.contains("left: 14.4pt"), "table's own margin should win:\n{src}");
+    assert!(!src.contains("left: 5.4pt"), "style margin leaked through:\n{src}");
+    // ...and the second cell's own 720 twips (36pt) beats the table's.
+    assert!(src.contains("left: 36pt"), "cell's own margin should win:\n{src}");
+    // Conditional formatting is out of scope, and says so.
+    assert!(
+        result.report.notes.iter().any(|n| n.what == "table style"),
+        "w:tblStylePr went unreported"
+    );
+}

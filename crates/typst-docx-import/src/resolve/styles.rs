@@ -2,7 +2,8 @@
 //! chains + docDefaults + direct formatting.
 
 use crate::wml::model::{
-    BorderEdge, Borders, ParaProps, RunProps, Style, StyleKind, Styles,
+    BorderEdge, Borders, CellMargins, ParaProps, RunProps, Style, StyleKind, Styles,
+    Table, TableBorders, TableStyleProps,
 };
 
 /// Maximum `basedOn` hops to walk before giving up — guards against a cyclic
@@ -140,6 +141,59 @@ fn linked_run(styles: &Styles, style: &Style) -> RunProps {
     match styles.by_id.get(link) {
         Some(linked) if linked.kind == StyleKind::Character => linked.run.clone(),
         _ => RunProps::default(),
+    }
+}
+
+/// Effective table properties: the table's own `w:tblPr` over its named
+/// `w:tblStyle` (with `basedOn`).
+///
+/// Word's built-in `TableGrid` — "all borders", and by far the most-referenced
+/// table style in real documents — carries the table's entire appearance here
+/// and nothing at all on the table itself, so a table that names it used to
+/// arrive with no borders and Typst's own default grid instead.
+///
+/// Returns the resolved borders and cell padding plus the style's cell
+/// defaults, which a cell's own `w:tcPr` still overrides.
+pub fn effective_table(styles: &Styles, table: &Table) -> TableStyleProps {
+    let mut acc = TableStyleProps::default();
+
+    if let Some(sid) = table.style_id.as_deref() {
+        for style in style_chain(styles, sid) {
+            acc = merge_table(&acc, &style.table);
+        }
+    }
+
+    // The table's own properties are direct formatting and win outright.
+    merge_table(
+        &acc,
+        &TableStyleProps {
+            borders: table.borders.clone(),
+            cell_margins: table.cell_margins,
+            ..TableStyleProps::default()
+        },
+    )
+}
+
+fn merge_table(base: &TableStyleProps, over: &TableStyleProps) -> TableStyleProps {
+    let side = |over: &Option<BorderEdge>, base: &Option<BorderEdge>| {
+        over.clone().or(base.clone())
+    };
+    let margin = |over: Option<i64>, base: Option<i64>| over.or(base);
+    TableStyleProps {
+        borders: TableBorders {
+            outer: merge_borders(&base.borders.outer, &over.borders.outer),
+            inside_h: side(&over.borders.inside_h, &base.borders.inside_h),
+            inside_v: side(&over.borders.inside_v, &base.borders.inside_v),
+        },
+        cell_margins: CellMargins {
+            top: margin(over.cell_margins.top, base.cell_margins.top),
+            bottom: margin(over.cell_margins.bottom, base.cell_margins.bottom),
+            left: margin(over.cell_margins.left, base.cell_margins.left),
+            right: margin(over.cell_margins.right, base.cell_margins.right),
+        },
+        cell_shd_fill: over.cell_shd_fill.clone().or_else(|| base.cell_shd_fill.clone()),
+        cell_v_align: over.cell_v_align.clone().or_else(|| base.cell_v_align.clone()),
+        conditional: base.conditional || over.conditional,
     }
 }
 

@@ -698,6 +698,14 @@ pub struct Table {
     /// importer has no way to resolve, so they're left unread rather than
     /// misread as an absolute length.
     pub indent_twips: Option<i64>,
+    /// `w:tblPr/w:tblStyle` — the named table style this table uses. Word's
+    /// built-in `TableGrid` (all borders) dominates real documents: 5273 of
+    /// the wide corpus's 5400-odd table-style references. Resolving it is
+    /// what makes a styled table look like one.
+    pub style_id: Option<EcoString>,
+    /// `w:tblPr/w:tblCellMar` — the table's default cell padding, which a
+    /// cell's own `w:tcMar` overrides.
+    pub cell_margins: CellMargins,
     /// `w:tblPr/w:tblBorders` — the table's blanket borders, which a cell's
     /// own `w:tcBorders` overrides where it states one. Reading this is what
     /// lets a *borderless* Word table come across as borderless: Typst's table
@@ -1007,6 +1015,30 @@ pub struct Style {
     pub outline_level: Option<u8>,
     pub run: RunProps,
     pub para: ParaProps,
+    /// A `w:type="table"` style's own table-shaped properties. Empty for
+    /// every other style kind.
+    pub table: TableStyleProps,
+}
+
+/// The parts of a table style this importer resolves: the table's own
+/// properties (`w:tblPr`) and the defaults it gives every cell (`w:tcPr`).
+///
+/// Word also allows *conditional* formatting per region — `w:tblStylePr` for
+/// the first row, banded rows, the first column and so on. That is a
+/// materially bigger feature (Typst expresses banding through a `fill`
+/// function rather than stored properties) and much rarer: 58 of the 305
+/// corpus documents that reference a table style use it at all. It is
+/// reported rather than mapped — see [`Self::conditional`].
+#[derive(Debug, Default, Clone)]
+pub struct TableStyleProps {
+    pub borders: TableBorders,
+    pub cell_margins: CellMargins,
+    /// `w:tcPr/w:shd@fill` — the default fill for every cell.
+    pub cell_shd_fill: Option<EcoString>,
+    /// `w:tcPr/w:vAlign` — the default vertical alignment for every cell.
+    pub cell_v_align: Option<EcoString>,
+    /// Whether the style carries any `w:tblStylePr` conditional formatting.
+    pub conditional: bool,
 }
 
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]

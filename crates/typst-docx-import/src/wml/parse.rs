@@ -17,7 +17,7 @@ use crate::ImportError;
 use crate::report::ImportReport;
 use crate::wml::model::{
     BorderEdge, Borders, Body, BodyItem, BreakType, Cell, CellMargins, ChartData,
-    ChartKind, Comment, RevisionInfo, WordSource,
+    ChartKind, Comment, RevisionInfo, TableBorders, TableStyleProps, WordSource,
     ChartSeries, DmlDash, DmlFill, DmlGeometry, DmlGradient, DmlGradientKind, DmlSeg, DmlShape,
     DmlStroke, DocumentMeta, DrawingRef, Field,
     FurnitureKind, FurnitureRef, LegendPos, LevelFormat, NumRef, Numbering, ParaProps, Paragraph,
@@ -2508,6 +2508,20 @@ fn parse_table(node: Node, depth: usize, tb_depth: usize) -> Table {
     table
 }
 
+/// A table *style*'s `w:tblPr`: the blanket borders and the default cell
+/// padding it gives every table that names it. The same two properties a
+/// table can state directly (see [`parse_table_props`]), which is why they
+/// resolve against each other in `resolve::styles::effective_table`.
+fn parse_table_style_pr(node: Node, out: &mut TableStyleProps) {
+    for prop in node.children().filter(|n| n.is_element()) {
+        match prop.tag_name().name() {
+            "tblBorders" => out.borders = parse_table_borders(prop),
+            "tblCellMar" => out.cell_margins = parse_cell_margins(prop),
+            _ => {}
+        }
+    }
+}
+
 /// The table-level properties this importer can express: how the table sits
 /// between the margins (`w:jc`), how far it is pushed off the left one
 /// (`w:tblInd`), and its blanket borders (`w:tblBorders`). The table style and
@@ -2517,14 +2531,9 @@ fn parse_table_props(node: Node, table: &mut Table) {
     for prop in node.children().filter(|n| n.is_element()) {
         match prop.tag_name().name() {
             "jc" => table.jc = attr(prop, "val").map(EcoString::from),
-            "tblBorders" => {
-                table.borders.outer = parse_borders(prop);
-                let edge = |name| {
-                    prop.children().find(|n| is_element(*n, name)).map(parse_border_edge)
-                };
-                table.borders.inside_h = edge("insideH");
-                table.borders.inside_v = edge("insideV");
-            }
+            "tblBorders" => table.borders = parse_table_borders(prop),
+            "tblCellMar" => table.cell_margins = parse_cell_margins(prop),
+            "tblStyle" => table.style_id = attr(prop, "val").map(EcoString::from),
             // Only `dxa` (twips) is an absolute length. `pct` measures against
             // the text width and `auto`/`nil` against the table's own layout,
             // neither of which is resolvable here, so they are left unread
@@ -2534,6 +2543,18 @@ fn parse_table_props(node: Node, table: &mut Table) {
             }
             _ => {}
         }
+    }
+}
+
+/// A `w:tblBorders`: the four outer sides plus the two interior ones. Shared
+/// by a table's own `w:tblPr` and by a table style's.
+fn parse_table_borders(node: Node) -> TableBorders {
+    let edge =
+        |name| node.children().find(|n| is_element(*n, name)).map(parse_border_edge);
+    TableBorders {
+        outer: parse_borders(node),
+        inside_h: edge("insideH"),
+        inside_v: edge("insideV"),
     }
 }
 
@@ -3060,6 +3081,24 @@ fn parse_style(node: Node) -> Style {
             "basedOn" => style.based_on = attr(child, "val").map(EcoString::from),
             "link" => style.link = attr(child, "val").map(EcoString::from),
             "rPr" => style.run = parse_run_props(child),
+            // A table style's `w:tblPr`/`w:tcPr` are the table and cell
+            // defaults it hands every table that names it; `w:tblStylePr` is
+            // its per-region conditional formatting, recorded only so the
+            // mapper can report it (see `TableStyleProps`).
+            "tblPr" if style.kind == StyleKind::Table => {
+                parse_table_style_pr(child, &mut style.table);
+            }
+            "tcPr" if style.kind == StyleKind::Table => {
+                for prop in child.children().filter(|n| n.is_element()) {
+                    let val = |name| attr(prop, name).map(EcoString::from);
+                    match prop.tag_name().name() {
+                        "shd" => style.table.cell_shd_fill = val("fill"),
+                        "vAlign" => style.table.cell_v_align = val("val"),
+                        _ => {}
+                    }
+                }
+            }
+            "tblStylePr" => style.table.conditional = true,
             "pPr" => {
                 // `w:outlineLvl` numbers heading levels 1..=9 as 0..=8; **9 is
                 // the sentinel for "body text"**, not a tenth heading level.
