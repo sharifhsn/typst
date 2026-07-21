@@ -1232,14 +1232,24 @@ fn handle_block_inner(
         let right = crate::props::abs_to_twip(elem.right.get(styles).abs.resolve(styles));
         let mut blocks = ctx.blocks(&elem.body, styles)?;
         for b in &mut blocks {
-            if let Block::Para(para) = b {
-                let ind = para.props.ind.get_or_insert_with(Default::default);
-                if left != 0 {
-                    ind.left = Some(ind.left.unwrap_or(0) + left);
+            match b {
+                Block::Para(para) => {
+                    let ind = para.props.ind.get_or_insert_with(Default::default);
+                    if left != 0 {
+                        ind.left = Some(ind.left.unwrap_or(0) + left);
+                    }
+                    if right != 0 {
+                        ind.right = Some(ind.right.unwrap_or(0) + right);
+                    }
                 }
-                if right != 0 {
-                    ind.right = Some(ind.right.unwrap_or(0) + right);
+                // A table is offset from the text margin by `w:tblInd`, not by
+                // the `w:ind` that indents a paragraph; the narrowed width is
+                // already baked into the measured column widths.
+                Block::Table(table) if left != 0 => {
+                    let ind = table.props.ind_dxa.get_or_insert(0);
+                    *ind += left;
                 }
+                _ => {}
             }
         }
         out.extend(blocks);
@@ -1332,6 +1342,17 @@ fn handle_block_inner(
             LossSet::VISUAL_ONLY,
             0,
         );
+    } else if container_clips(child, styles)
+        && let Some(run) = mappers::image::clipped_image(child, styles, ctx)?
+    {
+        // A block-level clipping container whose whole content is one image —
+        // the rounded figure image / card cover idiom. Word frames pictures
+        // natively, so this keeps the original image bytes editable instead of
+        // rasterizing the clipped region.
+        out.push(Block::Para(Para {
+            props: ParaProps::default(),
+            content: vec![ParaChild::Run(run)],
+        }));
     } else if let Some(elem) = child.to_packed::<typst_library::layout::BlockElem>() {
         handle_block_box(ctx, elem, styles, out)?;
     } else if is_framed_container(child) && handle_block_framed(ctx, child, styles, out)?
@@ -1603,7 +1624,7 @@ fn handle_block_box(
         let width_dxa = crate::props::abs_to_twip(width).max(1);
         let height_dxa = crate::props::abs_to_twip(height).max(1);
         out.push(Block::Table(Tbl {
-            props: TblProps { width_dxa: Some(width_dxa), style: None, jc: None },
+            props: TblProps { width_dxa: Some(width_dxa), ..Default::default() },
             grid: vec![width_dxa],
             rows: vec![Row {
                 header: false,
@@ -1874,6 +1895,15 @@ fn stamp_box_decorations(
         }
         seen_para += 1;
     }
+}
+
+/// Whether a container clips its own content (`#box(clip: true)` /
+/// `#block(clip: true)`) — the precondition for
+/// [`mappers::image::clipped_image`]'s native picture-frame recovery.
+pub(crate) fn container_clips(child: &Content, styles: StyleChain) -> bool {
+    use typst_library::layout::{BlockElem, BoxElem};
+    child.to_packed::<BoxElem>().is_some_and(|elem| elem.clip.get(styles))
+        || child.to_packed::<BlockElem>().is_some_and(|elem| elem.clip.get(styles))
 }
 
 /// Whether a native element is a framed container (`#box`/`#rect`/`#square`) that

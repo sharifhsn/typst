@@ -35,7 +35,7 @@ use typst_syntax::{FileId, Span};
 
 use crate::dom::{
     Block, BookmarkTable, BreakKind, Field, FieldCacheStatus, FieldDisplay, FieldMode,
-    Footnote, HeadingStyleSample, Jc, ListSpec, NumberingTable, ParaProps,
+    Footnote, HeadingStyleSample, Jc, ListLevel, ListSpec, NumberingTable, ParaProps,
     ReviewCandidateKind, ReviewJoinId, ReviewOrigin, Run, RunProps, TocFigure,
     TocHeading, Underline, VertAlign,
 };
@@ -101,6 +101,12 @@ pub struct DocxCtx<'a, 'e> {
     /// Monotonic `relativeHeight` z-order for floating drawings (`<wp:anchor>`).
     next_z: u32,
     pub(crate) max_heading_level: u8,
+    /// The Word multilevel shape every numbered heading's `numbering:` pattern
+    /// maps onto. `None` until the first numbered heading; `Some(None)` once a
+    /// pattern has no `w:lvlText` equivalent or two headings disagree — one
+    /// `w:abstractNum` cannot then describe the document, so it keeps Typst's
+    /// frozen numbers. See [`crate::heading_numbering`].
+    pub(crate) heading_num_levels: Option<Option<Vec<ListLevel>>>,
     pub(crate) uses_math: bool,
     /// Structured representation choices and suppressed diagnostics.
     pub(crate) fidelity_report: FidelityReport,
@@ -263,6 +269,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             next_hdrftr_id: 1,
             next_z: 1,
             max_heading_level: 0,
+            heading_num_levels: None,
             uses_math: false,
             fidelity_report: FidelityReport::default(),
             paged_geometry: Arc::new(typst_export_common::paged::PagedGeometry::default()),
@@ -1019,6 +1026,17 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             .push(HeadingStyleSample { level, rpr: style_owned_heading_props(props) });
     }
 
+    /// Folds one numbered heading's Word numbering shape into the document's.
+    /// Live numbering needs a single shape for the whole document, so any
+    /// disagreement — or a heading Word cannot state at all — collapses it.
+    pub(crate) fn note_heading_numbering(&mut self, levels: Option<Vec<ListLevel>>) {
+        match &self.heading_num_levels {
+            None => self.heading_num_levels = Some(levels),
+            Some(agreed) if *agreed == levels => {}
+            Some(_) => self.heading_num_levels = Some(None),
+        }
+    }
+
     // -- Property resolvers -------------------------------------------------
 
     /// Resolves a `TextElem`'s effective run properties.
@@ -1437,13 +1455,23 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
     }
 
     pub(crate) fn resolve_par_jc(&self, styles: StyleChain) -> Option<Jc> {
-        use typst_library::layout::{AlignElem, FixedAlignment};
         use typst_library::model::ParElem;
-        use typst_library::text::TextElem;
 
         if styles.get(ParElem::justify) {
             return Some(Jc::Both);
         }
+
+        self.resolve_align_jc(styles)
+    }
+
+    /// The chain's horizontal alignment as a Word justification, shared by
+    /// every construct Word aligns with a `w:jc` (paragraphs via
+    /// [`Self::resolve_par_jc`], whole tables via `w:tblPr/w:jc`). `Start`
+    /// yields `None`: it is Word's default, so emitting it would only add
+    /// noise.
+    pub(crate) fn resolve_align_jc(&self, styles: StyleChain) -> Option<Jc> {
+        use typst_library::layout::{AlignElem, FixedAlignment};
+        use typst_library::text::TextElem;
 
         let rtl = !styles.resolve(TextElem::dir).is_positive();
         match styles.resolve(AlignElem::alignment).x {
@@ -2160,6 +2188,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 );
             }
             out.extend(self.inline_runs(body, styles, props.clone())?);
+        } else if crate::convert::container_clips(child, styles)
+            && let Some(run) = mappers::image::clipped_image(child, styles, self)?
+        {
+            // A clipping box whose whole content is one image is a picture
+            // frame, and Word frames pictures natively: the rounded outline and
+            // the crop both live on the `pic:pic` itself. Recovering it keeps
+            // the original, replaceable image bytes, where the paths below would
+            // either discard the clip (the icon-sizing branch) or flatten the
+            // whole box into a raster.
+            out.push(run);
         } else if let Some(elem) = child.to_packed::<typst_library::layout::BoxElem>() {
             // A non-text-box `#box` (no visible frame, or a body that must
             // rasterize): keep the existing rasterize/extract handling.

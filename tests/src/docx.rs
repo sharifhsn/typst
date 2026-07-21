@@ -648,6 +648,50 @@ fn table_preflight_reports_native_and_approximate_geometry() {
 }
 
 #[test]
+fn table_horizontal_alignment_maps_to_tbl_pr_jc() {
+    let table = "#table(columns: (40pt, 40pt), [a], [b])";
+    let tbl_pr = |src: &str| {
+        let p = parts(src);
+        element_fragments(&p["word/document.xml"], "tblPr")
+            .first()
+            .expect("a table has table properties")
+            .to_string()
+    };
+
+    assert!(
+        !tbl_pr(table).contains("<w:jc "),
+        "a start-aligned table matches Word's default and needs no w:jc"
+    );
+    assert!(
+        tbl_pr(&format!("#align(center)[{table}]")).contains("<w:jc w:val=\"center\"/>"),
+        "a centered table must be centered in Word, not left-aligned"
+    );
+    assert!(
+        tbl_pr(&format!("#align(right)[{table}]")).contains("<w:jc w:val=\"end\"/>"),
+        "a right-aligned table must be right-aligned in Word"
+    );
+    assert!(
+        tbl_pr(&format!("#set text(dir: rtl)\n#align(right)[{table}]"))
+            .contains("<w:jc w:val=\"start\"/>"),
+        "Typst's physical alignment translates to Word's logical one under RTL"
+    );
+}
+
+#[test]
+fn padded_table_is_offset_with_tbl_ind() {
+    let p = parts("#pad(left: 2cm)[#table(columns: (40pt, 40pt), [a], [b])]");
+    let tbl_pr = element_fragments(&p["word/document.xml"], "tblPr")
+        .first()
+        .expect("a table has table properties")
+        .to_string();
+    assert!(
+        tbl_pr.contains("<w:tblInd w:w=\"1134\" w:type=\"dxa\"/>"),
+        "horizontal padding offsets a table with w:tblInd, not the paragraph w:ind: \
+         {tbl_pr}"
+    );
+}
+
+#[test]
 fn flexible_table_uses_converged_paged_cell_geometry() {
     let src = "#set page(width: 140mm, height: 90mm, margin: 10mm)\n#table(columns: (1fr, 2fr), [One], [Two])";
     let compiled = compile_docx(src, &[]);
@@ -1591,16 +1635,55 @@ fn linear_gradient_fill_maps_to_native_gradfill() {
         "90deg maps to ang=5400000"
     );
 
-    // A radial gradient has no representable OOXML shape-relative form here and
-    // still rasterizes, same as before. (An empirical LibreOffice check found
-    // the emitted a:path/a:fillToRect renders visibly more circular than
-    // Typst's own box-relative elliptical stretch on a non-square shape — the
-    // exact mismatch this comment originally warned about — so it stays
-    // scoped out rather than ship a subtly-wrong native mapping.)
-    let r = parts("#rect(width: 100pt, height: 50pt, fill: gradient.radial(red, blue))");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn radial_gradient_fill_maps_to_a_native_circle_path() {
+    // Both models normalize the gradient to the painted box, so a radial fill
+    // is a native `a:gradFill` with a circle path rather than a raster.
+    let p = parts("#rect(width: 100pt, height: 50pt, fill: gradient.radial(red, blue))");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<a:path path=\"circle\">"), "radial maps to a circle path");
     assert!(
-        !r["word/document.xml"].contains("<a:gradFill"),
-        "radial gradients are not (yet) natively mapped"
+        doc.contains("<a:fillToRect l=\"50000\" t=\"50000\" r=\"50000\" b=\"50000\"/>"),
+        "the default zero-radius focal circle collapses to the box centre: {doc}"
+    );
+    assert!(!doc.contains("<a:blip"), "not rasterized");
+
+    // A radius smaller than the default holds its final colour out to the box
+    // edge, since DrawingML has no shorter outer circle to stop at.
+    let tight = parts(
+        "#rect(width: 60pt, height: 60pt, fill: gradient.radial(red, blue, radius: 25%))",
+    );
+    let tight_doc = &tight["word/document.xml"];
+    let start = tight_doc.find("<a:gradFill").expect("a radial fill emits a gradFill");
+    let end = tight_doc[start..].find("</a:gradFill>").expect("gradFill closes");
+    let gradient = &tight_doc[start..start + end];
+    assert!(
+        gradient.matches("<a:gs pos=\"100000\">").count() == 1
+            && gradient.contains("<a:gs pos=\"50000\">"),
+        "a 25% radius reaches its last stop halfway to the edge, then holds: \
+         {gradient}"
+    );
+
+    // An off-centre outer circle has no DrawingML expression (its outer path is
+    // always the shape's own rectangle), so it keeps the raster fallback.
+    let offset = parts(
+        "#rect(width: 60pt, height: 60pt, \
+           fill: gradient.radial(red, blue, center: (20%, 80%)))",
+    );
+    assert!(
+        !offset["word/document.xml"].contains("<a:gradFill"),
+        "an off-centre radial gradient is not claimed as native"
+    );
+
+    // A conic gradient has no `a:gradFill` path that sweeps by angle at all.
+    let conic =
+        parts("#rect(width: 60pt, height: 60pt, fill: gradient.conic(red, blue))");
+    assert!(
+        !conic["word/document.xml"].contains("<a:gradFill"),
+        "conic gradients still rasterize"
     );
     assert_all_wellformed(&p);
 }
@@ -1608,8 +1691,9 @@ fn linear_gradient_fill_maps_to_native_gradfill() {
 #[test]
 fn shape_stroke_dash_and_cap_are_carried_natively() {
     // A shape's stroke dash pattern and line cap must reach the native
-    // `a:ln`'s `cap` attribute and `a:prstDash` child, not silently flatten to
-    // a plain solid line.
+    // `a:ln`'s `cap` attribute and dash child, not silently flatten to a plain
+    // solid line. `dashed` is an equal 3pt on/off pair, which at a 3pt width is
+    // one line width of each — stated exactly rather than snapped to a preset.
     let p = parts(
         "#rect(width: 100pt, height: 40pt, \
            stroke: (paint: red, thickness: 3pt, dash: \"dashed\", cap: \"round\"))",
@@ -1617,24 +1701,97 @@ fn shape_stroke_dash_and_cap_are_carried_natively() {
     let doc = &p["word/document.xml"];
     assert!(doc.contains("cap=\"rnd\""), "round cap maps to rnd");
     assert!(
-        doc.contains("<a:prstDash val=\"sysDash\"/>"),
-        "equal dashed segments map to a system dash rather than dots"
+        doc.contains("<a:custDash><a:ds d=\"100000\" sp=\"100000\"/></a:custDash>"),
+        "equal dashed segments keep their authored lengths"
     );
 
     // Non-horizontal, so it maps to a native shape (a horizontal line keeps
     // its existing paragraph-border mapping, which has no `cap` concept).
+    // `dotted` is a one-line-width dot with a 2pt gap.
     let dotted = parts(
         "#line(length: 100pt, angle: 20deg, stroke: (paint: blue, thickness: 1pt, dash: \"dotted\", cap: \"square\"))",
     );
     let doc2 = &dotted["word/document.xml"];
     assert!(doc2.contains("cap=\"sq\""), "square cap maps to sq");
-    assert!(doc2.contains("<a:prstDash val=\"sysDot\"/>"), "dotted maps to a dot preset");
+    assert!(
+        doc2.contains("<a:custDash><a:ds d=\"100000\" sp=\"200000\"/></a:custDash>"),
+        "a dotted line keeps its exact gap rather than the nearest dot preset"
+    );
 
-    // A plain solid stroke still carries an explicit cap but no prstDash.
+    // An authored pattern that *is* a DrawingML preset stays a preset, so a
+    // consumer's line UI shows a named pattern instead of a custom one. `dash`
+    // is four line widths on, three off.
+    let preset = parts(
+        "#line(length: 100pt, angle: 20deg, \
+           stroke: (paint: blue, thickness: 2pt, dash: (8pt, 6pt)))",
+    );
+    assert!(
+        preset["word/document.xml"].contains("<a:prstDash val=\"dash\"/>"),
+        "an exact preset pattern stays a preset"
+    );
+
+    // A plain solid stroke still carries an explicit cap but no dash element.
     let solid = parts("#rect(width: 100pt, height: 40pt, stroke: black)");
     assert!(
-        !solid["word/document.xml"].contains("<a:prstDash"),
+        !solid["word/document.xml"].contains("<a:prstDash")
+            && !solid["word/document.xml"].contains("<a:custDash"),
         "solid line has no dash element"
+    );
+    assert_all_wellformed(&p);
+    assert_all_wellformed(&dotted);
+    assert_all_wellformed(&preset);
+}
+
+#[test]
+fn shape_opacity_survives_as_drawingml_alpha() {
+    // A DrawingML fill has its own alpha channel, so a translucent shape must
+    // stay translucent instead of being flattened onto the white page.
+    let p = parts(
+        "#rect(width: 100pt, height: 40pt, fill: rgb(\"#ff000080\"), \
+           stroke: (paint: rgb(\"#0000ff40\"), thickness: 2pt))",
+    );
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("<a:srgbClr val=\"FF0000\"><a:alpha val=\"50196\"/></a:srgbClr>"),
+        "a half-transparent fill keeps its own colour and alpha: {doc}"
+    );
+    assert!(
+        doc.contains("<a:srgbClr val=\"0000FF\"><a:alpha val=\"25098\"/></a:srgbClr>"),
+        "a translucent stroke keeps its alpha too"
+    );
+    assert!(
+        !doc.contains("val=\"FF8080\""),
+        "the fill must not arrive pre-composited onto white"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn rounded_shape_carries_its_authored_corner_radius() {
+    // `roundRect` without an adjustment takes Word's stock 16.667% corner. The
+    // authored radius must ride along instead.
+    let p = parts("#rect(width: 100pt, height: 40pt, radius: 4pt, fill: red)");
+    let doc = &p["word/document.xml"];
+    assert!(doc.contains("<a:prstGeom prst=\"roundRect\">"), "a radius rounds the shape");
+    // 4pt of a 40pt shorter side = 10%.
+    assert!(
+        doc.contains("<a:gd name=\"adj\" fmla=\"val 10000\"/>"),
+        "the authored radius becomes the roundRect adjustment: {doc}"
+    );
+
+    // Typst caps a corner radius at half the shorter side; so does the emitted
+    // adjustment, whose maximum is Word's 50%.
+    let capped = parts("#rect(width: 100pt, height: 40pt, radius: 100pt, fill: red)");
+    assert!(
+        capped["word/document.xml"].contains("<a:gd name=\"adj\" fmla=\"val 50000\"/>"),
+        "an oversized radius clamps to a fully-rounded end, as Typst clamps it"
+    );
+
+    // A square shape emits no adjustment at all.
+    let square = parts("#rect(width: 100pt, height: 40pt, fill: red)");
+    assert!(
+        !square["word/document.xml"].contains("prst=\"roundRect\""),
+        "an unrounded rectangle stays a plain rect"
     );
     assert_all_wellformed(&p);
 }
@@ -1815,6 +1972,121 @@ fn intrinsic_raster_image_size_is_bounded_by_the_page_region() {
     assert!(
         document.contains("<wp:extent cx=\"635000\" cy=\"2540000\"/>"),
         "the intrinsic image is contained to the 200pt page region"
+    );
+}
+
+/// A 100x400 red PNG, used by the clipped-picture tests below.
+fn tall_png() -> Vec<u8> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAGQAAAGQAQMAAABiWFesAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURf8AAP///0EdNBEAAAABYktHRAH/Ai3eAAAAB3RJTUUH6gcNBh0zf3DnMQAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyNi0wNy0xM1QwNjoyOTo1MSswMDowMHA2gI4AAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjYtMDctMTNUMDY6Mjk6NTErMDA6MDABazgyAAAAKHRFWHRkYXRlOnRpbWVzdGFtcAAyMDI2LTA3LTEzVDA2OjI5OjUxKzAwOjAwVn4Z7QAAABxJREFUWMPtwQENAAAAwqD3T20ON6AAAAAAAHg0FeAAAWZQEs0AAAAASUVORK5CYII=",
+    ).unwrap()
+}
+
+#[test]
+fn rounded_clipped_image_stays_a_native_word_picture() {
+    let png = tall_png();
+    let src = r#"#set page(width: 200pt, height: 200pt, margin: 10pt)
+#box(radius: 6pt, clip: true, width: 60pt, height: 40pt)[#image("photo.png", width: 100%)]"#;
+    let raw = package_bytes_with_files(src, &[("photo.png", &png)]);
+    let document = String::from_utf8(raw["word/document.xml"].clone()).unwrap();
+
+    assert!(
+        document.contains("<a:prstGeom prst=\"roundRect\">"),
+        "the clip becomes the picture's own outline: {document}"
+    );
+    // 6pt of a 40pt shorter side = 15% of it, in 1/1000 of a percent.
+    assert!(
+        document.contains("<a:gd name=\"adj\" fmla=\"val 15000\"/>"),
+        "the corner radius rides along as the roundRect adjustment"
+    );
+    // The 60x240pt cover image shows only its middle 40pt: 100/240 off each
+    // vertical edge, nothing horizontally.
+    assert!(
+        document.contains("<a:srcRect l=\"0\" t=\"41667\" r=\"0\" b=\"41667\"/>"),
+        "the cover overflow becomes the picture's source rectangle"
+    );
+    assert!(
+        document.contains("<wp:extent cx=\"762000\" cy=\"508000\"/>"),
+        "the picture takes the clip's extent, not the image's"
+    );
+    assert!(
+        raw.keys().any(|name| name == "word/media/image1.png"),
+        "the original PNG bytes are embedded verbatim"
+    );
+
+    let compiled = compile_docx(src, &[("photo.png", &png)]);
+    let decision = compiled
+        .fidelity_report()
+        .decisions()
+        .iter()
+        .find(|decision| decision.reason == DecisionReason::NativeClippedPicture)
+        .expect("a natively framed picture is reported");
+    assert_eq!(decision.representation, Representation::Native);
+    assert!(!decision.losses.visual_fidelity && !decision.losses.editability);
+}
+
+#[test]
+fn fully_rounded_clipped_image_becomes_a_circular_picture() {
+    let png = tall_png();
+    let raw = package_bytes_with_files(
+        r#"#set page(width: 200pt, height: 200pt, margin: 10pt)
+#box(radius: 50%, clip: true, width: 40pt, height: 40pt)[#image("photo.png", width: 100%)]"#,
+        &[("photo.png", &png)],
+    );
+    let document = String::from_utf8(raw["word/document.xml"].clone()).unwrap();
+    assert!(
+        document.contains("<a:gd name=\"adj\" fmla=\"val 50000\"/>"),
+        "a fully-rounded square crop is a roundRect at Word's maximum adjustment, \
+         which renders as a circle: {document}"
+    );
+}
+
+#[test]
+fn rounded_figure_image_is_framed_natively_too() {
+    // A clipping container reached through block dispatch (a figure body)
+    // takes the same native picture frame as the inline form.
+    let png = tall_png();
+    let raw = package_bytes_with_files(
+        r#"#set page(width: 200pt, height: 200pt, margin: 10pt)
+#figure(
+  box(radius: 6pt, clip: true, width: 60pt, height: 40pt)[#image("photo.png", width: 100%)],
+  caption: [Rounded],
+)"#,
+        &[("photo.png", &png)],
+    );
+    let document = String::from_utf8(raw["word/document.xml"].clone()).unwrap();
+    assert!(
+        document.contains("<a:prstGeom prst=\"roundRect\">"),
+        "a figure's rounded image stays a real picture: {document}"
+    );
+    assert!(
+        document.contains("Rounded"),
+        "the caption still accompanies the natively framed picture"
+    );
+}
+
+#[test]
+fn clip_that_the_picture_frame_cannot_express_still_rasterizes() {
+    let png = tall_png();
+    // The image is CONTAINed, not covering: the clip window shows background
+    // above and below it, which a picture frame has no way to paint.
+    let src = r#"#set page(width: 200pt, height: 200pt, margin: 10pt)
+#box(radius: 6pt, clip: true, width: 60pt, height: 120pt)[#image("photo.png", width: 20pt)]"#;
+    let raw = package_bytes_with_files(src, &[("photo.png", &png)]);
+    let document = String::from_utf8(raw["word/document.xml"].clone()).unwrap();
+    assert!(
+        !document.contains("prst=\"roundRect\""),
+        "a non-covering clip keeps the exact raster fallback"
+    );
+    let compiled = compile_docx(src, &[("photo.png", &png)]);
+    assert!(
+        !compiled
+            .fidelity_report()
+            .decisions()
+            .iter()
+            .any(|decision| decision.reason == DecisionReason::NativeClippedPicture),
+        "the native picture frame must not claim a clip it cannot express"
     );
 }
 
@@ -2983,6 +3255,103 @@ fn nested_bullets_indent_by_level() {
         );
     }
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn custom_bullet_markers_reach_the_numbering_level_text() {
+    let single = parts("#set list(marker: [--])\n- a\n- b");
+    assert!(
+        single["word/numbering.xml"].contains("<w:lvlText w:val=\"\u{2013}\"/>"),
+        "a custom marker replaces the conventional bullet at every level"
+    );
+    assert!(
+        !single["word/numbering.xml"].contains("<w:lvlText w:val=\"\u{2022}\"/>"),
+        "the default bullet must not survive a custom marker"
+    );
+
+    // A marker array cycles by nesting depth, exactly as `w:lvl` does.
+    let cycled = parts(
+        "#set list(marker: ([\u{25cf}], [\u{25cb}], [\u{25a0}]))\n- a\n  - b\n    - c",
+    );
+    let numbering = &cycled["word/numbering.xml"];
+    for (ilvl, glyph) in
+        [(0, "\u{25cf}"), (1, "\u{25cb}"), (2, "\u{25a0}"), (3, "\u{25cf}")]
+    {
+        let level = numbering
+            .split("<w:lvl ")
+            .find(|level| level.starts_with(&format!("w:ilvl=\"{ilvl}\"")))
+            .unwrap_or_else(|| panic!("numbering has level {ilvl}"));
+        assert!(
+            level.contains(&format!("<w:lvlText w:val=\"{glyph}\"/>")),
+            "level {ilvl} shows the cycled marker {glyph}"
+        );
+    }
+    assert_all_wellformed(&cycled);
+}
+
+#[test]
+fn inexpressible_bullet_markers_fall_back_and_are_reported() {
+    // A function marker is never evaluated for the numbering shape, and a
+    // marker that draws cannot be a level string: both keep the conventional
+    // glyph and must be reported rather than silently substituted.
+    for src in [
+        "#set list(marker: n => [#(n + 1).])\n- a\n- b",
+        "#set list(marker: box(width: 4pt, height: 4pt, fill: red))\n- a\n- b",
+    ] {
+        let doc = compile_docx(src, &[]);
+        assert!(
+            doc.fidelity_report().decisions().iter().any(|decision| {
+                decision.reason == DecisionReason::ListMarkerTextApproximation
+                    && decision.representation == Representation::Approximate
+                    && decision.losses.visual_fidelity
+            }),
+            "an inexpressible marker is recorded as a visual approximation: {src}"
+        );
+    }
+
+    // A coloured marker keeps its glyph — a level string just has nowhere to
+    // put the colour, which is a reportable approximation rather than a
+    // substitution.
+    let styled_src = "#set list(marker: text(fill: red)[\u{2713}])\n- a";
+    assert!(
+        parts(styled_src)["word/numbering.xml"]
+            .contains("<w:lvlText w:val=\"\u{2713}\"/>"),
+        "a formatted marker still contributes its characters"
+    );
+    assert!(
+        compile_docx(styled_src, &[])
+            .fidelity_report()
+            .decisions()
+            .iter()
+            .any(|decision| {
+                decision.reason == DecisionReason::ListMarkerTextApproximation
+            }),
+        "marker run formatting that w:lvlText cannot carry is reported"
+    );
+
+    // A plain marker needs no report at all.
+    let plain = compile_docx("#set list(marker: [--])\n- a", &[]);
+    assert!(
+        !plain.fidelity_report().decisions().iter().any(|decision| {
+            decision.reason == DecisionReason::ListMarkerTextApproximation
+        }),
+        "a marker Word can hold verbatim is not a loss"
+    );
+}
+
+#[test]
+fn percent_in_a_level_string_is_escaped() {
+    let p = parts("#set list(marker: [50%])\n- a");
+    assert!(
+        p["word/numbering.xml"].contains("<w:lvlText w:val=\"50%%\"/>"),
+        "a literal percent must not read as a w:lvlText counter reference"
+    );
+
+    let enumerated = parts("#set enum(numbering: \"1%\")\n+ a");
+    assert!(
+        enumerated["word/numbering.xml"].contains("<w:lvlText w:val=\"%1%%\"/>"),
+        "an enum pattern's literal percent is escaped while its placeholder is not"
+    );
 }
 
 #[test]
@@ -7496,3 +7865,145 @@ fn negative_v_cancels_a_following_paragraph_s_natural_boundary_gap() {
     );
     assert_all_wellformed(&p);
 }
+
+
+#[test]
+fn heading_numbers_become_live_word_numbering() {
+    // Typst hands the exporter a finished `1.2`, but baking it in as text means
+    // it never renumbers in Word. Map it onto Word's own idiom instead: one
+    // multilevel list whose levels are bound to the `HeadingN` styles.
+    let src = "#set heading(numbering: \"1.1\")\n\
+               = Intro <intro>\n\
+               == Sub\n\
+               = Methods\n\n\
+               As in @intro.";
+    let p = parts(src);
+    let numbering = &p["word/numbering.xml"];
+    assert!(
+        numbering.contains(
+            "<w:numFmt w:val=\"decimal\"/><w:pStyle w:val=\"Heading2\"/>\
+             <w:lvlText w:val=\"%1.%2\"/>"
+        ),
+        "each level is bound to its heading style and shows its full ancestry: {numbering}"
+    );
+
+    // The `HeadingN` styles join that list, so a heading the reader adds in Word
+    // is numbered too.
+    let styles = &p["word/styles.xml"];
+    let heading1 = styles
+        .split("<w:style ")
+        .find(|style| style.contains("w:styleId=\"Heading1\""))
+        .expect("Heading1 style");
+    assert!(
+        heading1.contains("<w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr>"),
+        "Heading1 carries the numbering: {heading1}"
+    );
+
+    // …and the frozen text is gone, so the number is not shown twice.
+    let doc = &p["word/document.xml"];
+    assert!(
+        !doc.contains("TypstHeadingNumber"),
+        "no baked number run survives: {doc}"
+    );
+    assert!(visible_text(doc).starts_with("Intro"), "the heading is just its title");
+
+    // A `@ref` to a heading keeps working: its bookmark stays (now empty) and
+    // the field asks for the paragraph's number instead of the bookmark's text.
+    let anchor = doc
+        .split(" REF ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("a REF field");
+    assert!(anchor.ends_with("Number"), "the ref still targets the number bookmark");
+    assert!(doc.contains(&format!("w:name=\"{anchor}\"")), "which still exists");
+    assert!(
+        doc.contains(&format!(" REF {anchor} \\w \\h ")),
+        "and asks Word for the paragraph number in full context: {doc}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn unnumbered_headings_opt_out_of_the_style_numbering() {
+    // Numbering hangs off the `HeadingN` style, so a heading Typst deliberately
+    // left unnumbered has to cancel it explicitly or Word would number it.
+    let p = parts(
+        "#set heading(numbering: \"1.\")\n\
+         #heading(numbering: none)[Abstract]\n\
+         = Intro\n\
+         = Methods",
+    );
+    let doc = &p["word/document.xml"];
+    let abstract_para = doc
+        .split("<w:p ")
+        .find(|para| para.contains("Abstract"))
+        .expect("the abstract heading");
+    assert!(
+        abstract_para.contains("<w:numId w:val=\"0\"/>"),
+        "the unnumbered heading cancels the style's numbering: {abstract_para}"
+    );
+    assert!(
+        !doc.contains("TypstHeadingNumber"),
+        "the numbered headings still went live: {doc}"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn heading_numbers_word_cannot_reproduce_stay_frozen() {
+    // A closure has no `w:lvlText` equivalent. Rather than coerce it into one
+    // Word would renumber differently, keep Typst's own text and say so.
+    let src = "#set heading(numbering: (..n) => [X])\n= Intro\n= Methods";
+    let p = parts(src);
+    let doc = &p["word/document.xml"];
+    assert!(
+        doc.contains("TypstHeadingNumber1"),
+        "the computed number survives as text: {doc}"
+    );
+    assert!(
+        !p["word/styles.xml"].contains("<w:numPr>"),
+        "and no heading style claims live numbering"
+    );
+
+    let compiled = compile_docx(src, &[]);
+    assert!(
+        compiled.fidelity_report().decisions().iter().any(|decision| {
+            decision.reason == DecisionReason::TypstOwnedHeadingNumber
+                && decision.representation == Representation::Approximate
+        }),
+        "the lost dynamic behaviour is reported"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn a_moved_heading_counter_keeps_typst_numbers() {
+    // Word increments one counter per level; a Typst document that moves the
+    // heading counter itself would renumber differently, so the mapping must
+    // decline rather than silently produce different numbers.
+    let src = "#set heading(numbering: \"1.\")\n\
+               = Intro\n\
+               #counter(heading).update(7)\n\
+               = Methods";
+    let p = parts(src);
+    assert!(
+        p["word/document.xml"].contains("TypstHeadingNumber1"),
+        "the second heading is still Typst's 8., not Word's 2."
+    );
+    let compiled = compile_docx(src, &[]);
+    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::TypstOwnedHeadingNumber
+    }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn documents_without_heading_numbers_report_no_loss() {
+    // Nothing to make live and nothing lost: an unnumbered document must not be
+    // charged an approximation.
+    let compiled = compile_docx("= Intro\n= Methods", &[]);
+    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
+        decision.reason == DecisionReason::TypstOwnedHeadingNumber
+    }));
+}
+

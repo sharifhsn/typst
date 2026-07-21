@@ -21,7 +21,7 @@ use crate::dom::{
     Block, BookmarkTable, DocxDocument, EmbeddedFontProgram, EmbeddedFontStyle, Field,
     FieldCacheStatus as DomFieldCacheStatus, FieldDisplay, FieldMode, Footnote,
     HdrFtrPart, HdrFtrRef, HeadingStyle, HeadingStyleSample, LineNumbering, MediaPart,
-    NumberingTable, Para, ParaChild, ParaProps, PgNumType, ReviewCandidate,
+    NumberingTable, Para, ParaChild, ParaProps, PgNumType, PicClip, ReviewCandidate,
     ReviewCandidateKind, ReviewOrigin, Run, RunProps, SectPr, SectType, Spacing,
     TextDefaults, TocFigure, TocHeading, VAlign,
 };
@@ -52,6 +52,7 @@ struct LoweredDocx {
     bookmarks: BookmarkTable,
     max_heading_level: u8,
     heading_style_samples: Vec<HeadingStyleSample>,
+    heading_num_levels: Option<Option<Vec<crate::dom::ListLevel>>>,
     uses_math: bool,
     deferred_tags: Vec<Tag>,
     real_alias_locations: rustc_hash::FxHashSet<Location>,
@@ -240,13 +241,14 @@ fn docx_document_impl(
         mut header_parts,
         mut footer_parts,
         mut footnotes,
-        numbering,
+        mut numbering,
         media,
         doc_rels,
         footnote_rels,
         bookmarks,
         max_heading_level,
         heading_style_samples,
+        heading_num_levels,
         uses_math,
         deferred_tags,
         real_alias_locations,
@@ -416,6 +418,7 @@ fn docx_document_impl(
                 bookmarks: std::mem::take(&mut ctx.bookmarks),
                 max_heading_level: ctx.max_heading_level,
                 heading_style_samples: std::mem::take(&mut ctx.heading_style_samples),
+                heading_num_levels: ctx.heading_num_levels.take(),
                 uses_math: ctx.uses_math,
                 deferred_tags: std::mem::take(&mut ctx.deferred_tags),
                 real_alias_locations: std::mem::take(&mut ctx.real_alias_locations),
@@ -547,6 +550,23 @@ fn docx_document_impl(
         derive_heading_styles(max_heading_level, &heading_style_samples, &body);
     demote_unrepresentable_heading_booleans(&mut heading_styles, &mut body);
     apply_style_inheritance(&text_defaults, &heading_styles, &mut body);
+
+    // Promote the baked heading numbers to Word auto-numbering. This needs the
+    // finished heading styles (it hangs a `w:numPr` off them) and the finished
+    // body (it replays Word's counters over the real heading sequence), so it
+    // runs here rather than during lowering.
+    crate::heading_numbering::apply(
+        &mut crate::heading_numbering::Parts {
+            body: &mut body,
+            footnotes: &mut footnotes,
+            headers: &mut header_parts,
+            footers: &mut footer_parts,
+        },
+        heading_num_levels.as_ref().and_then(|levels| levels.as_ref()),
+        &mut numbering,
+        &mut heading_styles,
+        &mut fidelity_report,
+    );
 
     let mut introspector = DocxIntrospector::new(
         &tags,
@@ -1287,6 +1307,7 @@ fn derive_heading_styles(
             level,
             rpr,
             spacing: uniform_heading_spacing(level, body),
+            num_id: None,
         });
     }
     styles
@@ -3330,7 +3351,9 @@ fn stroke_signature(stroke: Option<&crate::dom::ShapeStroke>) -> String {
 fn shape_geom_name(geom: &crate::dom::ShapeGeom) -> String {
     match geom {
         crate::dom::ShapeGeom::Rect => "rect".into(),
-        crate::dom::ShapeGeom::RoundRect => "roundrect".into(),
+        crate::dom::ShapeGeom::RoundRect { adj_100k } => {
+            format!("roundrect:{adj_100k}")
+        }
         crate::dom::ShapeGeom::Ellipse => "ellipse".into(),
         crate::dom::ShapeGeom::Path(segments) => {
             let mut out = String::from("path:");
@@ -3458,6 +3481,7 @@ fn dense_visual_page_block(
         }),
         shape: None,
         group: None,
+        pic_clip: PicClip::default(),
     };
     Some(Block::Para(Para {
         props: crate::dom::ParaProps::default(),
@@ -3531,6 +3555,7 @@ fn page_overlay_block(
         }),
         shape: None,
         group: None,
+        pic_clip: PicClip::default(),
     };
     Ok(Some(Block::Para(Para {
         props: crate::dom::ParaProps::default(),
@@ -3580,6 +3605,7 @@ fn solid_page_fill_block(
             txbx: None,
         }),
         group: None,
+        pic_clip: PicClip::default(),
     };
     Block::Para(Para {
         props: crate::dom::ParaProps::default(),

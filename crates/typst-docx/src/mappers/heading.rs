@@ -84,6 +84,19 @@ pub fn heading(
         && !numbers.is_empty()
     {
         ctx.note_heading_number(level, numbers.clone());
+
+        // Record the Word numbering shape this heading's pattern maps onto.
+        // The number below stays baked in either way; `heading_numbering` later
+        // replaces it with live `w:numPr` numbering across the whole document,
+        // but only once every heading agrees on one shape that reproduces the
+        // numbers Typst computed here.
+        let derived = elem
+            .numbering
+            .get_ref(styles)
+            .as_ref()
+            .and_then(crate::heading_numbering::derive_levels);
+        ctx.note_heading_numbering(derived);
+
         let number_bookmark =
             elem.location().and_then(|loc| ctx.number_bookmark_for_emission(loc));
         if let Some((id, name)) = &number_bookmark {

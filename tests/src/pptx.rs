@@ -453,10 +453,26 @@ fn table_border_dash_and_cap_are_preserved() {
     let slide = &p["ppt/slides/slide1.xml"];
     assert!(slide.contains("cap=\"rnd\""), "round table border caps");
     assert!(
-        slide.contains("<a:prstDash val=\"sysDash\"/>"),
-        "table borders should preserve the authored dash preset"
+        slide.contains("<a:custDash><a:ds d=\"100000\" sp=\"100000\"/></a:custDash>"),
+        "table borders should preserve the authored dash lengths exactly"
+    );
+
+    // A pattern that *is* a DrawingML preset stays one, so PowerPoint's border
+    // UI shows a named dash rather than a custom pattern.
+    let preset = parts(
+        r#"#set page(width: 360pt, height: 200pt)
+#table(
+  columns: 2,
+  stroke: (paint: red, thickness: 2pt, dash: (8pt, 6pt)),
+  [left], [right],
+)"#,
+    );
+    assert!(
+        preset["ppt/slides/slide1.xml"].contains("<a:prstDash val=\"dash\"/>"),
+        "an exact preset pattern stays a preset"
     );
     assert_all_wellformed(&p);
+    assert_all_wellformed(&preset);
 }
 
 #[test]
@@ -810,18 +826,33 @@ Gradient"##,
 }
 
 #[test]
-fn radial_gradient_shape_does_not_native_map() {
-    // A radial gradient has no verified-correct OOXML shape-relative form
-    // here (an empirical LibreOffice check found the a:path/a:fillToRect
-    // model renders visibly more circular than Typst's own box-relative
-    // elliptical stretch on a non-square shape), so it stays on the raster
-    // fallback rather than ship a subtly-wrong native mapping.
+fn radial_gradient_shape_maps_to_a_native_circle_path() {
+    // Both models normalize the gradient to the painted box, so the elliptical
+    // stretch of a radial fill in a non-square shape carries over natively.
     let p = parts(
         r#"#set page(width: 160pt, height: 100pt, margin: 0pt)
 #rect(width: 100pt, height: 60pt, fill: gradient.radial(red, blue))"#,
     );
     let slide = &p["ppt/slides/slide1.xml"];
-    assert!(!slide.contains("<a:gradFill"), "radial gradients are not natively mapped");
+    assert!(slide.contains("<a:path path=\"circle\">"), "radial maps to a circle path");
+    assert!(!slide.contains("<a:blip"), "not rasterized");
+
+    // A conic gradient has no `a:gradFill` path that sweeps by angle, and an
+    // off-centre outer circle cannot be expressed at all (DrawingML's outer
+    // path is always the shape's own rectangle): both keep the raster fallback.
+    for fill in [
+        "gradient.conic(red, blue)",
+        "gradient.radial(red, blue, center: (20%, 80%))",
+    ] {
+        let raster = parts(&format!(
+            "#set page(width: 160pt, height: 100pt, margin: 0pt)\n\
+             #rect(width: 100pt, height: 60pt, fill: {fill})"
+        ));
+        assert!(
+            !raster["ppt/slides/slide1.xml"].contains("<a:gradFill"),
+            "{fill} is not claimed as a native gradient"
+        );
+    }
     assert_all_wellformed(&p);
 }
 
@@ -857,16 +888,17 @@ fn tiling_shape_fill_emits_native_blip_tile() {
 }
 
 #[test]
-fn radial_gradient_page_background_does_not_native_map() {
+fn radial_gradient_page_background_maps_natively() {
     let p = parts(
         r#"#set page(width: 160pt, height: 100pt, margin: 0pt, fill: gradient.radial(red, blue))
 Background"#,
     );
     let slide = &p["ppt/slides/slide1.xml"];
     assert!(
-        !slide.contains("<p:bg><p:bgPr><a:gradFill"),
-        "radial page backgrounds are not natively mapped"
+        slide.contains("<p:bg><p:bgPr><a:gradFill"),
+        "a radial page background is a native slide background: {slide}"
     );
+    assert!(slide.contains("<a:path path=\"circle\">"), "with a circle path");
     assert_all_wellformed(&p);
 }
 
@@ -1164,15 +1196,17 @@ fn straight_line_exports_as_loose_connector() {
         .expect("connector should have stroke");
     assert_eq!(stroke.attribute("w"), Some("38100"));
     assert_eq!(stroke.attribute("cap"), Some("rnd"));
+    let ds = stroke
+        .descendants()
+        .find(|node| node.tag_name().name() == "ds")
+        .expect("connector should carry an exact dash pattern");
+    // `dashed` is an equal 3pt on/off pair, which at a 3pt width is one line
+    // width of each — not any preset's proportions.
+    assert_eq!(ds.attribute("d"), Some("100000"));
+    assert_eq!(ds.attribute("sp"), Some("100000"));
     assert!(
-        stroke.descendants().any(|node| node.tag_name().name() == "prstDash"
-            && node.attribute("val") == Some("sysDash")),
-        "connector should preserve dash preset"
-    );
-    assert!(
-        !stroke.descendants().any(|node| node.tag_name().name() == "prstDash"
-            && node.attribute("val") == Some("sysDot")),
-        "equal dashed segments must not degrade to round dots"
+        !stroke.descendants().any(|node| node.tag_name().name() == "prstDash"),
+        "an exactly stated pattern must not also emit a preset"
     );
     assert_all_wellformed(&p);
 }

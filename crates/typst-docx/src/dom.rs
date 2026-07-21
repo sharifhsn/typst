@@ -415,6 +415,10 @@ pub struct HeadingStyle {
     pub rpr: RunProps,
     /// Paragraph spacing owned by the style when all headings at this level agree.
     pub spacing: Option<Spacing>,
+    /// The `w:numPr` numbering instance this style joins, when the document's
+    /// heading numbers are live (see `crate::heading_numbering`). The level's
+    /// `w:ilvl` is `level - 1`.
+    pub num_id: Option<u32>,
 }
 
 /// One resolved heading style sample recorded while lowering a heading.
@@ -723,6 +727,34 @@ pub struct Drawing {
     /// one coordinate space), taking priority over `shape`/`rel`. `None` for
     /// every other drawing.
     pub group: Option<GroupSpec>,
+    /// How the raster picture is framed. Default = the whole image in a plain
+    /// rectangle, which is every picture that is not natively clipped.
+    pub pic_clip: PicClip,
+}
+
+/// The DrawingML framing of a raster picture: the preset outline it is cut to,
+/// and which part of the source image shows through it. Together these express
+/// a Typst `#box(radius: .., clip: true)[image]` natively — the outline rounds
+/// the corners and the source rectangle takes the cover overflow — instead of
+/// flattening the clip into a rasterized region.
+#[derive(Default, Clone, Copy)]
+pub struct PicClip {
+    pub geom: PicGeom,
+    /// `<a:srcRect>` `[left, top, right, bottom]` insets in 1/1000 of a
+    /// percent of the source image, or `None` for the whole image.
+    pub src_rect: Option<[i32; 4]>,
+}
+
+/// A raster picture's preset outline (`pic:spPr/a:prstGeom`).
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum PicGeom {
+    /// `prst="rect"` — an ordinary, unclipped picture.
+    #[default]
+    Rect,
+    /// `prst="roundRect"`, with the corner radius as an `adj` guide in 1/1000
+    /// of a percent of the shorter side. A full `adj` of 50000 is Word's
+    /// circle/stadium, which is what a `radius: 50%` clip means.
+    RoundRect { adj_100k: i32 },
 }
 
 impl Drawing {
@@ -790,7 +822,9 @@ pub enum TextBoxWrap {
 /// shape's bounding box.
 pub enum ShapeGeom {
     Rect,
-    RoundRect,
+    /// A rounded rectangle, with the corner radius as an `adj` guide in 1/1000
+    /// of a percent of the shorter side.
+    RoundRect { adj_100k: i32 },
     Ellipse,
     /// An arbitrary vector path — straight and cubic-Bézier segments, mapping
     /// 1:1 to `#curve`'s Move/Line/Cubic/Close (a `#polygon`, or a diagonal
@@ -851,6 +885,10 @@ pub struct TblProps {
     pub width_dxa: Option<i32>,
     pub style: Option<EcoString>,
     pub jc: Option<Jc>,
+    /// `<w:tblInd>` — the table's left offset from the text margin (twips).
+    /// Word indents a table with this rather than with the `w:ind` that
+    /// indents a paragraph. Default none.
+    pub ind_dxa: Option<i32>,
 }
 
 pub struct Row {
@@ -1080,6 +1118,11 @@ pub struct ListLevel {
     pub ind_left: i32,
     pub ind_hanging: i32,
     pub bullet_font: Option<EcoString>,
+    /// `w:pStyle` — the paragraph style whose paragraphs this level numbers.
+    /// A list joins its numbering per paragraph (`w:numPr` on each `w:p`);
+    /// heading numbering instead binds the level to the `HeadingN` style, so
+    /// every heading Word later creates in that style is numbered too.
+    pub pstyle: Option<EcoString>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]

@@ -69,6 +69,10 @@ pub enum DecisionReason {
     /// A figure number keeps Typst's computed value because its numbering
     /// pattern or function has no equivalent Word `SEQ` format.
     TypstOwnedFigureNumber,
+    /// Heading numbers stayed frozen text instead of becoming live `w:numPr`
+    /// numbering, because Word's one-counter-per-level model could not
+    /// reproduce the numbers Typst computed (see `crate::heading_numbering`).
+    TypstOwnedHeadingNumber,
     /// Typst could not compute a trustworthy cached field result, so the
     /// consumer must provide a best-effort value from the native field code.
     FieldCacheUnavailable,
@@ -138,6 +142,15 @@ pub enum DecisionReason {
     /// Word keeps one exact image while older/alternate consumers receive two
     /// cropped bands to avoid a pathological full-container image layout.
     LibreOfficeImageLayoutFallback,
+    /// A bullet list stayed a native Word list, but a numbering level holds a
+    /// literal string only: a custom `list.marker`'s run formatting — or, for
+    /// a marker that is not text at all, the marker itself — has no `w:lvlText`
+    /// equivalent and the conventional glyph for that depth stands in.
+    ListMarkerTextApproximation,
+    /// A clipped image kept its original bytes inside a native picture frame:
+    /// the clip became the picture's preset outline and the crop its source
+    /// rectangle, instead of the whole region being flattened to a raster.
+    NativeClippedPicture,
 }
 
 /// Independent dimensions in which a representation can lose information.

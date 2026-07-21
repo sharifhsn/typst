@@ -98,6 +98,15 @@ pub fn build(
         w.open("w:link").attr(xml::W_VAL, &char_id).empty();
         w.open(xml::W_PPR).start_children();
         w.leaf("w:keepNext");
+        // Binding the numbering here (rather than on each `w:p`) is what makes
+        // heading numbers live: a heading the reader adds later joins the same
+        // multilevel list simply by carrying this style.
+        if let Some(num_id) = style.and_then(|style| style.num_id) {
+            w.open("w:numPr").start_children();
+            w.open("w:ilvl").attr(xml::W_VAL, &(level - 1).to_string()).empty();
+            w.open("w:numId").attr(xml::W_VAL, &num_id.to_string()).empty();
+            w.close();
+        }
         w.open("w:outlineLvl")
             .attr(xml::W_VAL, &(level - 1).to_string())
             .empty();

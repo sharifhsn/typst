@@ -27,8 +27,8 @@ use typst_library::diag::SourceResult;
 use typst_library::foundations::{Content, Context, Depth, Packed, Resolve, StyleChain};
 use typst_library::layout::Abs;
 use typst_library::model::{
-    EnumElem, EnumItem, ListElem, NamedNumeralSystem, Numbering, NumberingPattern,
-    TermsElem,
+    EnumElem, EnumItem, ListElem, ListMarker, NamedNumeralSystem, Numbering,
+    NumberingPattern, TermsElem,
 };
 
 use crate::ctx::DocxCtx;
@@ -36,6 +36,7 @@ use crate::dom::{
     Block, Indent, ListLevel, ListSpec, MultiLevelType, NumFmt, Para, ParaChild,
     ParaProps, ReviewCandidateKind, Run, RunProps,
 };
+use crate::report::{DecisionReason, LossSet, Representation};
 
 /// The `w:pStyle` applied to every list/enum item paragraph.
 const LIST_PARAGRAPH: &str = "ListParagraph";
@@ -43,7 +44,9 @@ const LIST_PARAGRAPH: &str = "ListParagraph";
 /// The conventional bullet glyph for each nesting level (cycled past level 2),
 /// mirroring Typst's default `•`/`‣`/`–` marker cycle. Plain Unicode glyphs in a
 /// normal font are accepted by Word (`numbering_lists.md` §3.3); we avoid the
-/// Symbol-font PUA route so no font metadata is required.
+/// Symbol-font PUA route so no font metadata is required. Used verbatim when
+/// `list.marker` is the Typst default, and as the per-level substitute for a
+/// marker Word's `w:lvlText` cannot hold.
 const BULLET_GLYPHS: [&str; 3] = ["\u{2022}", "\u{2023}", "\u{2013}"];
 
 /// Twips per nesting level for the text-start indent (Word's stock 0.5"/level).
@@ -67,7 +70,19 @@ pub fn list(
     let ilvl = depth.min(8) as u8;
     let paragraph_spacing = ctx.word_paragraph_boundary_spacing(styles);
 
-    let num_id = ctx.register_list(bullet_spec());
+    let markers = resolve_bullet_glyphs(styles.get_ref(ListElem::marker));
+    if markers.approximated {
+        // The glyph a level shows is generated, not authored text, so no source
+        // character is at risk — only the marker's appearance.
+        ctx.record_content_decision(
+            &elem.clone().pack(),
+            Representation::Approximate,
+            DecisionReason::ListMarkerTextApproximation,
+            LossSet::VISUAL_ONLY,
+            0,
+        );
+    }
+    let num_id = ctx.register_list(bullet_spec(&markers.glyphs));
 
     let mut out = Vec::new();
     for item in &elem.children {
@@ -79,17 +94,20 @@ pub fn list(
     Ok(out)
 }
 
-/// Builds the 9-level bullet shape (one `abstractNum`, `hybridMultilevel`).
-fn bullet_spec() -> ListSpec {
-    let levels = (0..9u8)
+/// Builds the 9-level bullet shape (one `abstractNum`, `hybridMultilevel`)
+/// from one already-resolved glyph per level.
+fn bullet_spec(glyphs: &[EcoString; BULLET_LEVELS]) -> ListSpec {
+    let levels = (0..BULLET_LEVELS)
         .map(|i| ListLevel {
             num_fmt: NumFmt::Bullet,
             // For `numFmt="bullet"` the level text is taken literally.
-            lvl_text: BULLET_GLYPHS[(i as usize) % BULLET_GLYPHS.len()].into(),
+            lvl_text: glyphs[i].clone(),
             start: 1,
             ind_left: LEVEL_INDENT_TWIPS * (i as i32 + 1),
             ind_hanging: HANGING_TWIPS,
             bullet_font: None,
+            // A list joins its numbering per paragraph, not by style.
+            pstyle: None,
         })
         .collect();
     ListSpec {
@@ -97,6 +115,108 @@ fn bullet_spec() -> ListSpec {
         multilevel: MultiLevelType::HybridMultilevel,
         restart_at_1: false,
     }
+}
+
+/// The number of nesting levels an `w:abstractNum` describes.
+const BULLET_LEVELS: usize = 9;
+
+/// The per-level bullet glyphs of one list, plus whether Word's `w:lvlText`
+/// had to approximate the authored marker.
+struct BulletGlyphs {
+    glyphs: [EcoString; BULLET_LEVELS],
+    approximated: bool,
+}
+
+/// Resolves `list.marker` into one literal `w:lvlText` per nesting level.
+///
+/// Word stores a bullet as a literal string on the numbering *level*, so a
+/// marker survives natively exactly when it reduces to characters. Typst's
+/// content markers cycle by depth ([`ListMarker::resolve`]), which lines up
+/// one-to-one with the `w:lvl` list — level `i` shows the marker for depth
+/// `i`. A marker level that is not plain text (an image, a box, a whole
+/// block) keeps the conventional glyph for its depth, as does every level of
+/// a `marker: depth => ..` function: evaluating a user function nine times
+/// here, for levels the document may never reach, would run arbitrary code
+/// outside any item's context without a `w:lvlText` to show for it.
+fn resolve_bullet_glyphs(marker: &ListMarker) -> BulletGlyphs {
+    let mut approximated = false;
+    let glyphs = std::array::from_fn(|level| {
+        let authored = match marker {
+            ListMarker::Content(list) if !list.is_empty() => {
+                marker_lvl_text(&list[level % list.len()])
+            }
+            // An empty content list is unreachable (the cast rejects it); a
+            // function marker is deliberately not evaluated.
+            ListMarker::Content(_) | ListMarker::Func(_) => None,
+        };
+        match authored {
+            Some(marker) => {
+                approximated |= marker.formatted;
+                marker.text
+            }
+            None => {
+                approximated = true;
+                BULLET_GLYPHS[level % BULLET_GLYPHS.len()].into()
+            }
+        }
+    });
+    BulletGlyphs { glyphs, approximated }
+}
+
+/// One marker reduced to what a numbering level can hold.
+struct MarkerText {
+    /// The literal `w:lvlText`.
+    text: EcoString,
+    /// The marker carried run formatting (`text(fill: ..)`, another font, a
+    /// different size) that a level string has nowhere to put.
+    formatted: bool,
+}
+
+/// One marker's literal `w:lvlText`, or `None` when the marker carries
+/// something a level string cannot hold at all: a level is characters only, so
+/// any element that draws or lays out on its own disqualifies the whole marker
+/// rather than being silently dropped from the middle of it.
+fn marker_lvl_text(marker: &Content) -> Option<MarkerText> {
+    use std::ops::ControlFlow;
+    use typst_library::foundations::{SequenceElem, StyledElem, SymbolElem};
+    use typst_library::introspection::TagElem;
+    use typst_library::text::{SmartQuoteElem, SpaceElem, TextElem};
+
+    let mut formatted = false;
+    let expressible = marker
+        .traverse(&mut |element: Content| {
+            if element.is::<StyledElem>() {
+                formatted = true;
+                return ControlFlow::Continue(());
+            }
+            let inert = element.is::<SequenceElem>() || element.is::<TagElem>();
+            let textual = element.is::<TextElem>()
+                || element.is::<SymbolElem>()
+                || element.is::<SpaceElem>()
+                || element.is::<SmartQuoteElem>();
+            if inert || textual {
+                ControlFlow::Continue(())
+            } else {
+                ControlFlow::Break(())
+            }
+        })
+        .is_continue();
+
+    let text = expressible.then(|| escape_lvl_text(&marker.plain_text()))?;
+    (!text.is_empty()).then_some(MarkerText { text, formatted })
+}
+
+/// Escapes a literal for `w:lvlText`, where `%` introduces a reference to a
+/// level's counter (`%1`, `%2`, …) and a literal percent sign is written `%%`.
+fn escape_lvl_text(literal: &str) -> EcoString {
+    let mut escaped = EcoString::with_capacity(literal.len());
+    for c in literal.chars() {
+        if c == '%' {
+            escaped.push('%');
+        }
+        escaped.push(c);
+    }
+    escaped
 }
 
 // ===========================================================================
@@ -202,12 +322,15 @@ fn native_enum_levels(numbering: &Numbering, full: bool) -> Option<Vec<ListLevel
             ind_left: LEVEL_INDENT_TWIPS * (i as i32 + 1),
             ind_hanging: HANGING_TWIPS,
             bullet_font: None,
+            pstyle: None,
         });
     }
     Some(levels)
 }
 
-fn native_num_fmt(system: NamedNumeralSystem) -> Option<NumFmt> {
+/// The `w:numFmt` for a Typst numeral system, or `None` for one Word does not
+/// share. Also used by heading numbering.
+pub(crate) fn native_num_fmt(system: NamedNumeralSystem) -> Option<NumFmt> {
     let one = system.system().represent(1).ok()?.to_string();
     let four = system.system().represent(4).ok()?.to_string();
     Some(match (one.as_str(), four.as_str()) {
@@ -220,14 +343,17 @@ fn native_num_fmt(system: NamedNumeralSystem) -> Option<NumFmt> {
     })
 }
 
-fn full_level_text(pattern: &NumberingPattern, level: usize) -> EcoString {
+/// The `w:lvlText` showing a level's full ancestry (`%1.%2.…`) under a Typst
+/// numbering pattern. Also used by heading numbering, whose numbers are always
+/// full.
+pub(crate) fn full_level_text(pattern: &NumberingPattern, level: usize) -> EcoString {
     let mut text = EcoString::new();
     for i in 0..=level {
-        text.push_str(full_level_prefix(pattern, i));
+        text.push_str(&escape_lvl_text(full_level_prefix(pattern, i)));
         text.push('%');
         text.push_str(&(i + 1).to_string());
     }
-    text.push_str(&pattern.suffix);
+    text.push_str(&escape_lvl_text(&pattern.suffix));
     text
 }
 
@@ -244,11 +370,11 @@ fn full_level_prefix(pattern: &NumberingPattern, level: usize) -> &str {
 fn single_level_text(pattern: &NumberingPattern, level: usize) -> EcoString {
     let mut text = EcoString::new();
     if let Some((prefix, _)) = pattern.pieces.first() {
-        text.push_str(prefix);
+        text.push_str(&escape_lvl_text(prefix));
     }
     text.push('%');
     text.push_str(&(level + 1).to_string());
-    text.push_str(&pattern.suffix);
+    text.push_str(&escape_lvl_text(&pattern.suffix));
     text
 }
 

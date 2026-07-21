@@ -409,9 +409,7 @@ fn write_cell_border(w: &mut XmlWriter, name: &'static str, stroke: Option<&Stro
                 .attr("cap", stroke.cap)
                 .start_children();
             dml::write_solid_fill(w, stroke.color);
-            if let Some(dash) = stroke.dash {
-                w.open("a:prstDash").attr("val", dash).empty();
-            }
+            dml::write_dash(w, stroke.dash.as_ref());
             w.close();
         }
         None => {

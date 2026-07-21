@@ -19,7 +19,14 @@ pub fn srgb_rgb(color: &Color) -> [u8; 3] {
 /// no alpha channel. Dropping alpha makes translucent colors unexpectedly dark
 /// and saturated, so callers targeting those properties must composite first.
 pub fn composite_rgb(color: &Color, backdrop: [u8; 3]) -> [u8; 3] {
-    let [r, g, b, a] = srgb_rgba(color);
+    composite_rgba(srgb_rgba(color), backdrop)
+}
+
+/// Flatten straight sRGB + alpha onto an opaque sRGB backdrop. Used where a
+/// color has already been lowered for DrawingML (which keeps its alpha) but is
+/// being reused by an alpha-less WordprocessingML or VML property.
+pub fn composite_rgba(rgba: [u8; 4], backdrop: [u8; 3]) -> [u8; 3] {
+    let [r, g, b, a] = rgba;
     let composite = |foreground: u8, background: u8| {
         let value = foreground as u32 * a as u32 + background as u32 * (255 - a as u32);
         ((value + 127) / 255) as u8
@@ -30,6 +37,12 @@ pub fn composite_rgb(color: &Color, backdrop: [u8; 3]) -> [u8; 3] {
 /// Flatten a color onto Word's default white page/cell background.
 pub fn composite_rgb_on_white(color: &Color) -> [u8; 3] {
     composite_rgb(color, [255; 3])
+}
+
+/// Flatten straight sRGB + alpha onto Word's default white page/cell
+/// background.
+pub fn composite_rgba_on_white(rgba: [u8; 4]) -> [u8; 3] {
+    composite_rgba(rgba, [255; 3])
 }
 
 pub fn hex_rgb(rgb: [u8; 3]) -> String {

@@ -36,16 +36,19 @@
 use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Content, Packed, Resolve, Smart, StyleChain};
-use typst_library::layout::{Abs, OuterVAlignment, Sizing, VAlignment};
+use typst_library::layout::{
+    Abs, Frame, FrameItem, OuterVAlignment, Point, Size, Sizing, VAlignment,
+};
 use typst_library::model::{FigureElem, FigureKind, Numbering};
 use typst_library::text::TextElem;
-use typst_library::visualize::{Image, ImageElem, ImageKind, SvgImage};
-use typst_ooxml_core::media;
+use typst_library::visualize::{Curve, Image, ImageElem, ImageKind, SvgImage};
+use typst_ooxml_core::{dml, media};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, BreakKind, Drawing, Field, FieldCacheStatus,
-    FieldDisplay, FieldMode, Jc, Para, ParaChild, ParaProps, Run, RunProps, TextBoxWrap,
+    FieldDisplay, FieldMode, Jc, Para, ParaChild, ParaProps, PicClip, PicGeom, Run,
+    RunProps, TextBoxWrap,
 };
 use crate::report::{DecisionReason, LossSet, Representation};
 
@@ -115,6 +118,7 @@ pub fn image(
                 anchor: None,
                 shape: None,
                 group: None,
+                pic_clip: PicClip::default(),
             }));
         }
         ctx.warn_ignored("SVG image could not be rasterized for DOCX fallback", span);
@@ -188,6 +192,7 @@ pub fn image(
         anchor: None,
         shape: None,
         group: None,
+        pic_clip: PicClip::default(),
     }))
 }
 
@@ -1577,6 +1582,7 @@ fn fallback_runs(
         anchor: None,
         shape: None,
         group: None,
+        pic_clip: PicClip::default(),
     }));
     hidden_text_runs(text, &mut runs);
     runs
@@ -1613,6 +1619,7 @@ fn fallback_runs_tiled(
             anchor: None,
             shape: None,
             group: None,
+            pic_clip: PicClip::default(),
         }));
     }
     hidden_text_runs(text, &mut runs);
@@ -1636,6 +1643,219 @@ fn hidden_text_runs(text: &str, out: &mut Vec<Run>) {
         props: hidden,
         text: format!(" {flattened} ").into(),
     });
+}
+
+// ---------------------------------------------------------------------------
+// Natively clipped pictures.
+// ---------------------------------------------------------------------------
+
+/// Recovers a clipped image container — `#box(radius: .., clip: true)[image]`,
+/// the rounded avatar/card idiom — as a real Word picture instead of baking the
+/// clip into a raster.
+///
+/// DrawingML expresses exactly this shape: the picture's `a:prstGeom` is its
+/// outline (a `roundRect` whose `adj` guide carries the corner radius — at its
+/// maximum, a circular crop), and `a:blipFill/a:srcRect` says which part of the
+/// source image shows through it. The image therefore stays the
+/// original, full-resolution, replaceable bytes — croppable and re-roundable in
+/// Word — rather than a flattened bitmap of the clipped result.
+///
+/// `None` means "not this shape, rasterize as before". The classification is
+/// deliberately narrow: the clip must be a preset outline, the container's
+/// entire visible content must be one image, and that image must *cover* the
+/// clip (a gap would expose a background a picture frame cannot paint).
+pub fn clipped_image(
+    child: &Content,
+    styles: StyleChain,
+    ctx: &mut DocxCtx,
+) -> SourceResult<Option<Run>> {
+    let (frame, _) =
+        ctx.layout_export_frame(child, styles, child.span(), ctx.raster_height)?;
+    let Some(frame) = frame else { return Ok(None) };
+    let Some(picture) = clipped_picture(&frame) else { return Ok(None) };
+    let Some(src_rect) = cover_src_rect(picture.pos, picture.size, picture.frame) else {
+        return Ok(None);
+    };
+    // Only formats Word embeds verbatim can keep their own coordinate system
+    // under `a:srcRect`; a re-rendered fallback would be cropped to its own ink
+    // and make the source rectangle meaningless.
+    let Some((bytes, ext)) = embeddable_bytes(picture.image) else {
+        return Ok(None);
+    };
+
+    let w_emu = crate::props::abs_to_emu(picture.frame.x);
+    let h_emu = crate::props::abs_to_emu(picture.frame.y);
+    if w_emu <= 0 || h_emu <= 0 {
+        return Ok(None);
+    }
+
+    ctx.record_content_decision(
+        child,
+        Representation::Native,
+        DecisionReason::NativeClippedPicture,
+        LossSet::default(),
+        0,
+    );
+    ctx.defer_frame_tags(&frame);
+
+    let rel = ctx.add_image(&bytes, &ext);
+    let docpr_id = ctx.next_drawing_id();
+    let name: EcoString = ecow::eco_format!("Picture {docpr_id}");
+    Ok(Some(Run::Drawing(Drawing {
+        rel,
+        svg_rel: None,
+        compatibility_split_ids: None,
+        w_emu,
+        h_emu,
+        source_offset_emu: [0, 0],
+        alt: picture.image.alt().map(Into::into),
+        decorative: false,
+        docpr_id,
+        name,
+        anchor: None,
+        shape: None,
+        group: None,
+        pic_clip: PicClip {
+            geom: picture.geom,
+            src_rect: (src_rect != [0; 4]).then_some(src_rect),
+        },
+    })))
+}
+
+/// One image seen through a preset clip outline.
+struct ClippedPicture<'a> {
+    geom: PicGeom,
+    /// The clip's extent, which is also the emitted picture's extent.
+    frame: Size,
+    image: &'a Image,
+    /// The image's placement within the clip, in the clip's own coordinates.
+    pos: Point,
+    size: Size,
+}
+
+/// Finds the sole clipped picture in `frame`, descending through the
+/// pass-through groups Typst nests around a box's content.
+///
+/// A `#box(clip: true)` lays out as a group carrying the clip curve; anything
+/// else visible beside it (a fill, a border, a second image, text) means the
+/// container is not just a framed picture and must keep the raster path.
+fn clipped_picture(frame: &Frame) -> Option<ClippedPicture<'_>> {
+    let mut found: Option<ClippedPicture<'_>> = None;
+    for (_, item) in frame.items() {
+        match item {
+            FrameItem::Group(group) if found.is_none() => {
+                let size = group.frame.size();
+                if !is_translation(&group.transform) {
+                    return None;
+                }
+                found = Some(match group.clip.as_ref().map(|c| clip_to_pic_geom(c, size))
+                {
+                    // A real clip outline: the image inside it is the payload.
+                    Some(Some(geom @ PicGeom::RoundRect { .. })) => {
+                        let (pos, image, size_of_image) =
+                            single_frame_image(&group.frame)?;
+                        ClippedPicture {
+                            geom,
+                            frame: size,
+                            image,
+                            pos,
+                            size: size_of_image,
+                        }
+                    }
+                    // A pass-through wrapper: no clip at all, or the plain
+                    // bounding rectangle Typst puts around a box's content,
+                    // neither of which removes anything. The real outline, if
+                    // there is one, is further in.
+                    None | Some(Some(PicGeom::Rect)) => clipped_picture(&group.frame)?,
+                    // A clip that is not a preset outline.
+                    Some(None) => return None,
+                });
+            }
+            FrameItem::Tag(_) | FrameItem::Link(..) => {}
+            _ => return None,
+        }
+    }
+    found
+}
+
+/// Whether a group's clip (if any) is just its own bounding rectangle, which
+/// removes nothing and so may be walked through.
+fn clip_is_bounding_rect(group: &typst_library::layout::GroupItem) -> bool {
+    group.clip.as_ref().is_none_or(|clip| *clip == Curve::rect(group.frame.size()))
+}
+
+/// Classifies a clip curve as a DrawingML preset picture outline.
+fn clip_to_pic_geom(clip: &Curve, size: Size) -> Option<PicGeom> {
+    if !size.x.to_pt().is_finite()
+        || !size.y.to_pt().is_finite()
+        || size.x.to_pt() <= 0.0
+        || size.y.to_pt() <= 0.0
+    {
+        return None;
+    }
+    if *clip == Curve::rect(size) {
+        return Some(PicGeom::Rect);
+    }
+    let radius = dml::rounded_rect_radius(clip, size)?;
+    Some(PicGeom::RoundRect { adj_100k: dml::round_rect_adj(radius, size) })
+}
+
+/// The sole image in a frame, in that frame's coordinates. Pass-through groups
+/// that only translate are walked into; anything that draws beside the image
+/// (text, a second picture, an inked shape) disqualifies the frame.
+fn single_frame_image(frame: &Frame) -> Option<(Point, &Image, Size)> {
+    let mut found: Option<(Point, &Image, Size)> = None;
+    for (pos, item) in frame.items() {
+        match item {
+            FrameItem::Image(image, size, _) if found.is_none() => {
+                found = Some((*pos, image, *size));
+            }
+            FrameItem::Group(group) if found.is_none() => {
+                if !is_translation(&group.transform) || !clip_is_bounding_rect(group) {
+                    return None;
+                }
+                let (inner, image, size) = single_frame_image(&group.frame)?;
+                let inner = inner.transform(group.transform);
+                found = Some((Point::new(pos.x + inner.x, pos.y + inner.y), image, size));
+            }
+            FrameItem::Tag(_) | FrameItem::Link(..) => {}
+            _ => return None,
+        }
+    }
+    found
+}
+
+/// Whether a group transform is a pure translation, the only placement an
+/// axis-aligned `pic:pic` can reproduce.
+fn is_translation(transform: &typst_library::layout::Transform) -> bool {
+    transform.sx.get() == 1.0
+        && transform.sy.get() == 1.0
+        && transform.kx.get() == 0.0
+        && transform.ky.get() == 0.0
+}
+
+/// The `a:srcRect` insets `[left, top, right, bottom]` (1/1000 of a percent)
+/// that reveal a `frame`-sized window of an image placed at `pos` with `size`.
+///
+/// `None` when the image does not fully cover the window: the picture frame has
+/// no way to paint the exposed background, so those cases keep the raster path.
+fn cover_src_rect(pos: Point, size: Size, frame: Size) -> Option<[i32; 4]> {
+    let (ix, iy) = (pos.x.to_pt(), pos.y.to_pt());
+    let (iw, ih) = (size.x.to_pt(), size.y.to_pt());
+    let (fw, fh) = (frame.x.to_pt(), frame.y.to_pt());
+    // A tenth of a point of slack absorbs the rounding that layout leaves on an
+    // exactly-fitting image without admitting a visible gap.
+    const EPS: f64 = 0.05;
+    if iw <= EPS || ih <= EPS {
+        return None;
+    }
+    if ix > EPS || iy > EPS || ix + iw < fw - EPS || iy + ih < fh - EPS {
+        return None;
+    }
+    let frac = |amount: f64, span: f64| {
+        ((amount.max(0.0) / span) * 100_000.0).round().clamp(0.0, 99_000.0) as i32
+    };
+    Some([frac(-ix, iw), frac(-iy, ih), frac(ix + iw - fw, iw), frac(iy + ih - fh, ih)])
 }
 
 // ---------------------------------------------------------------------------

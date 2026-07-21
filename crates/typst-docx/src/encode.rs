@@ -12,8 +12,8 @@ use typst_syntax::Span;
 use crate::dom::{
     Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, DocxDocument,
     Drawing, Field, FieldDisplay, FieldMode, Footnote, GroupSpec, HdrFtrPart, Jc, Para,
-    ParaChild, ParaProps, ReviewJoinId, Row, Run, SectPr, SectType, ShapeFill, ShapeGeom,
-    ShapeSpec, Spacing, Tbl, Toc, VAlign, VMerge,
+    ParaChild, ParaProps, PicGeom, ReviewJoinId, Row, Run, SectPr, SectType, ShapeFill,
+    ShapeGeom, ShapeSpec, Spacing, Tbl, Toc, VAlign, VMerge,
 };
 use crate::package::{DOCX_PACKAGE_OPTIONS, Package, RelMode, Rels};
 use crate::styles_part;
@@ -621,6 +621,12 @@ fn write_table(
         };
         w.open("w:jc").attr("w:val", value).empty();
     }
+    if let Some(ind) = tbl.props.ind_dxa {
+        w.open("w:tblInd")
+            .attr("w:w", &ind.to_string())
+            .attr("w:type", "dxa")
+            .empty();
+    }
     // A visible single-line border on all edges + insides, so the table is not
     // borderless by default (Word's no-style default is invisible).
     w.open("w:tblBorders").start_children();
@@ -1006,7 +1012,11 @@ fn write_vml_textbox(
     tb: &crate::dom::TextBox,
 ) {
     let pt = |emu: i64| format!("{:.2}", emu as f64 / 12700.0);
-    let hex = |c: [u8; 4]| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
+    // VML colours carry no alpha, so a translucent shape colour is composited
+    // onto the page rather than arriving fully saturated.
+    let hex = |c: [u8; 4]| {
+        format!("#{}", crate::props::hex(crate::props::shape_color_on_white(c)))
+    };
 
     w.open("w:pict").start_children();
     w.open("v:rect")
@@ -1213,6 +1223,14 @@ fn write_pic_payload(w: &mut XmlWriter, d: &Drawing) {
     // pic:blipFill
     w.open("pic:blipFill").start_children();
     dml::write_blip(w, &d.rel, d.svg_rel.as_deref());
+    if let Some([l, t, r, b]) = d.pic_clip.src_rect {
+        w.open("a:srcRect")
+            .attr("l", &l.to_string())
+            .attr("t", &t.to_string())
+            .attr("r", &r.to_string())
+            .attr("b", &b.to_string())
+            .empty();
+    }
     w.open("a:stretch").start_children();
     w.open("a:fillRect").empty();
     w.close(); // a:stretch
@@ -1226,9 +1244,12 @@ fn write_pic_payload(w: &mut XmlWriter, d: &Drawing) {
         .attr("cy", &d.h_emu.to_string())
         .empty();
     w.close(); // a:xfrm
-    w.open("a:prstGeom").attr("prst", "rect").start_children();
-    w.open("a:avLst").empty();
-    w.close(); // a:prstGeom
+    match d.pic_clip.geom {
+        PicGeom::Rect => dml::write_prst_geom(w, "rect"),
+        PicGeom::RoundRect { adj_100k } => {
+            dml::write_prst_geom_with_adj(w, "roundRect", adj_100k)
+        }
+    }
     w.close(); // pic:spPr
     w.close(); // pic:pic
     w.close(); // a:graphicData
@@ -1316,13 +1337,10 @@ fn write_wsp(
     w.close(); // a:xfrm
 
     match &shape.geom {
-        ShapeGeom::Rect | ShapeGeom::RoundRect | ShapeGeom::Ellipse => {
-            let prst = match shape.geom {
-                ShapeGeom::RoundRect => "roundRect",
-                ShapeGeom::Ellipse => "ellipse",
-                _ => "rect",
-            };
-            dml::write_prst_geom(w, prst);
+        ShapeGeom::Rect => dml::write_prst_geom(w, "rect"),
+        ShapeGeom::Ellipse => dml::write_prst_geom(w, "ellipse"),
+        &ShapeGeom::RoundRect { adj_100k } => {
+            dml::write_prst_geom_with_adj(w, "roundRect", adj_100k)
         }
         ShapeGeom::Path(segments) => {
             dml::write_custom_geom(w, segments, w_emu, h_emu);
@@ -1948,6 +1966,9 @@ fn build_numbering(document: &DocxDocument, pretty: bool) -> String {
             w.open("w:lvl").attr("w:ilvl", &i.to_string()).start_children();
             w.open("w:start").attr(xml::W_VAL, &level.start.to_string()).empty();
             w.open("w:numFmt").attr(xml::W_VAL, level.num_fmt.as_str()).empty();
+            if let Some(pstyle) = &level.pstyle {
+                w.open("w:pStyle").attr(xml::W_VAL, pstyle).empty();
+            }
             w.open("w:lvlText").attr(xml::W_VAL, &level.lvl_text).empty();
             w.open("w:lvlJc").attr(xml::W_VAL, "left").empty();
             w.open(xml::W_PPR).start_children();

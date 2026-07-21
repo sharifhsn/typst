@@ -62,6 +62,13 @@ pub fn color_to_hex(color: &Color) -> [u8; 3] {
     ooxml_color::composite_rgb_on_white(color)
 }
 
+/// An already-lowered DrawingML colour (straight sRGB + alpha) → opaque
+/// `RRGGBB`, for the WordprocessingML and VML properties that reuse a shape's
+/// colour but have no alpha channel of their own (`w:bdr`, VML `fillcolor`).
+pub fn shape_color_on_white(rgba: [u8; 4]) -> [u8; 3] {
+    ooxml_color::composite_rgba_on_white(rgba)
+}
+
 /// A gradient approximated by a single solid colour — its first stop — for a
 /// flat `w:shd` shade (see `handle_block_box` / `inline_frame`). A gradient's
 /// stops are stored in its own interpolation space (Oklab by default);

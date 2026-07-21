@@ -18,19 +18,11 @@ use typst_ooxml_core::dml::{self, TileImage};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, Drawing, GroupChild, GroupSpec, Para, ParaChild, ParaProps, Run, RunProps,
-    ShapeFill, ShapeGeom, ShapeSpec, ShapeStroke, TextBox, TextBoxWrap,
+    Block, Drawing, GroupChild, GroupSpec, Para, ParaChild, ParaProps, PicClip, Run,
+    RunProps, ShapeFill, ShapeGeom, ShapeSpec, ShapeStroke, TextBox, TextBoxWrap,
 };
 use crate::props::{abs_to_emu, color_to_hex};
 use crate::report::{DecisionReason, LossSet, Representation};
-
-fn opaque(rgb: [u8; 3]) -> [u8; 4] {
-    [rgb[0], rgb[1], rgb[2], 255]
-}
-
-fn rgb(rgba: [u8; 4]) -> [u8; 3] {
-    [rgba[0], rgba[1], rgba[2]]
-}
 
 /// Maps a shape element to a vector DrawingML shape run, or `None` to rasterize.
 pub fn shape(
@@ -63,6 +55,7 @@ pub fn shape(
         anchor: None,
         shape: Some(spec),
         group: None,
+        pic_clip: PicClip::default(),
     })))
 }
 
@@ -101,7 +94,7 @@ pub fn text_box(
         body,
         fill_paint,
         stroke,
-        rounded,
+        radius,
         inset,
         nonuniform_stroke: _,
     } = framed;
@@ -154,7 +147,7 @@ pub fn text_box(
     crate::mappers::table::collapse_par_spacing(&mut blocks);
     crate::document::collect_tags(&blocks, &mut ctx.deferred_tags);
 
-    let geom = if rounded { ShapeGeom::RoundRect } else { ShapeGeom::Rect };
+    let geom = rounded_geom(radius, styles, size);
     let ins = resolve_insets(&inset, styles, size);
 
     let docpr_id = ctx.next_drawing_id();
@@ -183,6 +176,7 @@ pub fn text_box(
             }),
         }),
         group: None,
+        pic_clip: PicClip::default(),
     })))
 }
 
@@ -253,6 +247,7 @@ pub fn unframed_text_box(
             txbx: Some(TextBox { ins: [0; 4], blocks, wrap, autofit: true }),
         }),
         group: None,
+        pic_clip: PicClip::default(),
     })))
 }
 
@@ -295,7 +290,7 @@ pub fn inline_frame(
             // `w:bdr/@w:sz` is in eighths of a point; keep a visible minimum.
             sz: ((pt * 8.0).round() as u32).max(2),
             space: 0,
-            color: rgb(s.color),
+            color: crate::props::shape_color_on_white(s.color),
         }
     });
     Some((framed.body, fill, bdr))
@@ -311,7 +306,8 @@ struct Framed {
     /// [`ShapeStroke`]) had some sides set and others not — see
     /// [`inline_frame`]'s use of this.
     nonuniform_stroke: bool,
-    rounded: bool,
+    /// The authored corner radius, or `None` for a square frame.
+    radius: Option<Rel<Length>>,
     inset: Sides<Option<Rel<Length>>>,
 }
 
@@ -328,7 +324,7 @@ fn framed_container(child: &Content, styles: StyleChain) -> Option<Framed> {
             fill_paint: e.fill.get_cloned(styles),
             stroke,
             nonuniform_stroke: crate::convert::stroke_sides_nonuniform(&raw_stroke),
-            rounded: any_radius(&e.radius.get_cloned(styles)),
+            radius: corner_radius(&e.radius.get_cloned(styles)),
             inset: e.inset.get_cloned(styles),
         })
     } else if let Some(e) = child.to_packed::<RectElem>() {
@@ -341,7 +337,7 @@ fn framed_container(child: &Content, styles: StyleChain) -> Option<Framed> {
             fill_paint: fill,
             nonuniform_stroke: matches!(&raw_stroke, Smart::Custom(sides)
                 if crate::convert::stroke_sides_nonuniform(sides)),
-            rounded: any_radius(&e.radius.get_cloned(styles)),
+            radius: corner_radius(&e.radius.get_cloned(styles)),
             inset: e.inset.get_cloned(styles),
         })
     } else if let Some(e) = child.to_packed::<SquareElem>() {
@@ -354,7 +350,7 @@ fn framed_container(child: &Content, styles: StyleChain) -> Option<Framed> {
             fill_paint: fill,
             nonuniform_stroke: matches!(&raw_stroke, Smart::Custom(sides)
                 if crate::convert::stroke_sides_nonuniform(sides)),
-            rounded: any_radius(&e.radius.get_cloned(styles)),
+            radius: corner_radius(&e.radius.get_cloned(styles)),
             inset: e.inset.get_cloned(styles),
         })
     } else {
@@ -390,11 +386,34 @@ fn sides_stroke_first(
     None
 }
 
-/// Whether any corner has a nonzero radius (→ a `roundRect` frame).
-fn any_radius(radius: &typst_library::layout::Corners<Option<Rel<Length>>>) -> bool {
+/// The corner radius a container rounds with, or `None` when it is square.
+/// Word's `roundRect` preset has a single adjustment, so per-corner radii
+/// collapse to the first corner that actually rounds.
+fn corner_radius(
+    radius: &typst_library::layout::Corners<Option<Rel<Length>>>,
+) -> Option<Rel<Length>> {
     [radius.top_left, radius.top_right, radius.bottom_left, radius.bottom_right]
         .into_iter()
-        .any(|c| c.is_some_and(|r| !r.is_zero()))
+        .flatten()
+        .find(|r| !r.is_zero())
+}
+
+/// A container's geometry at its final size: a `roundRect` carrying the
+/// authored corner radius as its adjustment, or a plain rectangle.
+///
+/// The radius resolves the way Typst's own `clip_rect` resolves it — relative
+/// to the shorter side and capped at half of it — so the emitted shape and the
+/// Typst rendering round by the same amount. Without an explicit adjustment
+/// Word would fall back to its own stock 16.667% corner.
+fn rounded_geom(
+    radius: Option<Rel<Length>>,
+    styles: StyleChain,
+    size: typst_library::layout::Size,
+) -> ShapeGeom {
+    let Some(radius) = radius else { return ShapeGeom::Rect };
+    let shorter = size.x.min(size.y);
+    let resolved = radius.resolve(styles).relative_to(shorter).min(shorter / 2.0);
+    ShapeGeom::RoundRect { adj_100k: dml::round_rect_adj(resolved, size) }
 }
 
 /// Resolves a container's inset to text-frame insets `[left, top, right, bottom]`
@@ -450,11 +469,11 @@ fn build(
         )?;
         let fill = fill_color(ctx, &fill_paint)?;
         let stroke = sides_stroke_first(&raw_stroke, styles);
-        let geom = if any_radius(&e.radius.get_cloned(styles)) {
-            ShapeGeom::RoundRect
-        } else {
-            ShapeGeom::Rect
-        };
+        let geom = rounded_geom(
+            corner_radius(&e.radius.get_cloned(styles)),
+            styles,
+            typst_library::layout::Size::new(w, h),
+        );
         Some((w, h, ShapeSpec { geom, fill, stroke, txbx: None }))
     } else if let Some(e) = child.to_packed::<RectElem>() {
         if e.body.get_ref(styles).is_some() {
@@ -470,7 +489,12 @@ fn build(
         let fill = fill_color(ctx, e.fill.get_ref(styles))?;
         let stroke =
             sides_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
-        Some((w, h, ShapeSpec { geom: ShapeGeom::Rect, fill, stroke, txbx: None }))
+        let geom = rounded_geom(
+            corner_radius(&e.radius.get_cloned(styles)),
+            styles,
+            typst_library::layout::Size::new(w, h),
+        );
+        Some((w, h, ShapeSpec { geom, fill, stroke, txbx: None }))
     } else if let Some(e) = child.to_packed::<SquareElem>() {
         if e.body.get_ref(styles).is_some() {
             return None;
@@ -485,7 +509,12 @@ fn build(
         let fill = fill_color(ctx, e.fill.get_ref(styles))?;
         let stroke =
             sides_stroke(e.stroke.get_cloned(styles), e.fill.get_ref(styles), styles)?;
-        Some((w, h, ShapeSpec { geom: ShapeGeom::Rect, fill, stroke, txbx: None }))
+        let geom = rounded_geom(
+            corner_radius(&e.radius.get_cloned(styles)),
+            styles,
+            typst_library::layout::Size::new(w, h),
+        );
+        Some((w, h, ShapeSpec { geom, fill, stroke, txbx: None }))
     } else if let Some(e) = child.to_packed::<EllipseElem>() {
         if e.body.get_ref(styles).is_some() {
             return None;
@@ -626,19 +655,18 @@ fn explicit_box_size(
 }
 
 /// `None` outer = unrepresentable fill → rasterize; inner `None` = no fill.
+///
+/// A DrawingML fill carries its own `a:alpha`, so a translucent shape stays
+/// translucent over whatever is behind it instead of being flattened onto the
+/// white page. (The alpha-less WordprocessingML properties — `w:shd`, `w:bdr`,
+/// `w:color` — still composite; see [`crate::props::color_to_hex`].)
 fn fill_color(ctx: &mut DocxCtx, paint: &Option<Paint>) -> Option<Option<ShapeFill>> {
     match paint {
-        None => Some(None),
-        Some(Paint::Solid(c)) => Some(Some(ShapeFill::Solid(opaque(color_to_hex(c))))),
-        Some(Paint::Gradient(g)) => gradient_fill(g).map(Some),
+        // A tiling has no DrawingML paint of its own; it is rendered into a
+        // tiled `a:blipFill` instead.
         Some(Paint::Tiling(tiling)) => tile_fill(ctx, tiling).map(Some),
+        _ => dml::resolved_fill(paint, dml::AlphaMode::Preserve),
     }
-}
-
-/// Maps a Typst [`Gradient`] to a native DrawingML gradient fill, or `None`
-/// (bail to rasterize) for conic gradients.
-fn gradient_fill(gradient: &typst_library::visualize::Gradient) -> Option<ShapeFill> {
-    dml::gradient_fill(gradient, dml::AlphaMode::Opaque)
 }
 
 fn tile_fill(ctx: &mut DocxCtx, tiling: &Tiling) -> Option<ShapeFill> {
@@ -691,16 +719,8 @@ fn default_stroke(fill: &Option<Paint>) -> Option<ShapeStroke> {
 }
 
 fn resolve_stroke(stroke: Stroke, styles: StyleChain) -> Option<ShapeStroke> {
-    let fx = stroke.resolve(styles).unwrap_or_default();
-    match &fx.paint {
-        Paint::Solid(c) => Some(ShapeStroke {
-            color: opaque(color_to_hex(c)),
-            w_emu: abs_to_emu(fx.thickness),
-            cap: dml::line_cap_to_ooxml(fx.cap),
-            dash: fx.dash.as_ref().map(|d| dml::prst_dash(&d.array, fx.thickness)),
-        }),
-        _ => None,
-    }
+    let fixed = stroke.resolve(styles).unwrap_or_default();
+    resolved_stroke(&Some(fixed), 1.0).flatten()
 }
 
 // ---------------------------------------------------------------------------
@@ -1242,6 +1262,7 @@ pub fn mixed_canvas(
         anchor: None,
         shape: None,
         group: Some(GroupSpec { children }),
+        pic_clip: PicClip::default(),
     })))
 }
 
@@ -1517,6 +1538,7 @@ fn build_shapes_drawing(
                 txbx: None,
             }),
             group: None,
+            pic_clip: PicClip::default(),
         })));
     }
 
@@ -1615,6 +1637,7 @@ fn build_shapes_drawing(
         anchor: None,
         shape: None,
         group: Some(GroupSpec { children }),
+        pic_clip: PicClip::default(),
     })))
 }
 
@@ -1636,21 +1659,7 @@ fn resolved_stroke(
     stroke: &Option<typst_library::visualize::FixedStroke>,
     scale: f64,
 ) -> Option<Option<ShapeStroke>> {
-    match stroke {
-        None => Some(None),
-        Some(fx) => match &fx.paint {
-            Paint::Solid(c) => {
-                let thickness = fx.thickness * scale;
-                Some(Some(ShapeStroke {
-                    color: opaque(color_to_hex(c)),
-                    w_emu: abs_to_emu(thickness),
-                    cap: dml::line_cap_to_ooxml(fx.cap),
-                    dash: fx.dash.as_ref().map(|d| dml::prst_dash(&d.array, thickness)),
-                }))
-            }
-            _ => None,
-        },
-    }
+    dml::resolved_stroke(stroke, scale, dml::AlphaMode::Preserve)
 }
 
 #[cfg(test)]

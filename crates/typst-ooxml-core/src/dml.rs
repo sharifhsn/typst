@@ -10,7 +10,7 @@ use crate::xml::XmlWriter;
 use typst_export_common::raster;
 use typst_library::layout::{Abs, Frame, Point, Ratio, Size, Transform};
 use typst_library::visualize::{
-    Color, Curve, CurveItem, FixedStroke, Geometry, Gradient,
+    Color, Curve, CurveItem, DashPattern, FixedStroke, Geometry, Gradient,
     GradientStop as TypstGradientStop, LineCap, Paint, Tiling,
 };
 
@@ -88,19 +88,37 @@ impl RenderedTile {
 }
 
 /// A gradient stop.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct GradientStop {
     pub pos_100k: i32,
     pub color: [u8; 4],
 }
 
 /// A stroke specification.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StrokeSpec {
     pub color: [u8; 4],
     pub w_emu: i64,
     pub cap: &'static str,
-    pub dash: Option<&'static str>,
+    pub dash: Option<DashSpec>,
+}
+
+/// A stroke's dash pattern, in the two shapes DrawingML offers for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DashSpec {
+    /// An `a:prstDash` preset. A named pattern is what a consumer's own UI
+    /// round-trips, so it is preferred wherever it is exact.
+    Preset(&'static str),
+    /// An `a:custDash` pattern spelling out the authored run lengths.
+    Custom(Vec<DashStop>),
+}
+
+/// One `a:ds` entry: a dash and the space that follows it, each measured in
+/// 1000ths of a percent of the line width (so `100_000` is one line width).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DashStop {
+    pub d: i32,
+    pub sp: i32,
 }
 
 /// Whether lowering should preserve source alpha or force opaque colors.
@@ -130,17 +148,21 @@ pub fn resolved_fill(fill: &Option<Paint>, alpha: AlphaMode) -> Option<Option<Fi
 
 /// Lowers a Typst gradient to a DrawingML fill.
 ///
-/// Radial gradients are intentionally NOT mapped to `FillSpec::RadialGradient`
-/// here: an empirical LibreOffice round-trip (Typst PDF ground truth vs. a
-/// DOCX/PPTX shape carrying a non-square bounding box) showed the emitted
-/// `a:path path="circle"`/`a:fillToRect` renders visibly more circular than
-/// Typst's own box-relative elliptical stretch — the exact coordinate-space
-/// mismatch a prior round's DOCX author flagged as a reason to scope radial
-/// out of shape fills. `FillSpec::RadialGradient` and its `write_fill` support
-/// are kept (and exercised directly by tests) as verified-correct-XML
-/// infrastructure for a future attempt that solves the aspect-ratio mapping,
-/// but no caller should reach it via `gradient_fill`/`resolved_fill` until
-/// that's fixed and re-verified visually.
+/// Both models normalize to the painted box, so the elliptical stretch a
+/// radial gradient takes in a non-square shape carries over for free. What does
+/// *not* carry over is the extent: Typst parameterizes a radial gradient
+/// between a focal circle and an outer circle of its own `radius`, while
+/// DrawingML always runs from `a:fillToRect` to the shape's bounding box. The
+/// focal circle is exactly what `a:fillToRect` expresses; the outer radius is
+/// absorbed by rescaling the stop offsets into bounding-box space (see
+/// [`stops_relative_to_bounding_box`]).
+///
+/// `None` (rasterize) for the two cases that have no faithful mapping:
+/// * an outer circle that is not centered — DrawingML's outer path is always
+///   the shape's own rectangle, so an off-center one cannot be expressed; and
+/// * a conic gradient, which has no DrawingML analogue at all (`a:gradFill`
+///   offers linear, rectangular, circular and shape paths — none sweeps by
+///   angle).
 pub fn gradient_fill(gradient: &Gradient, alpha: AlphaMode) -> Option<FillSpec> {
     match gradient {
         Gradient::Linear(linear) => {
@@ -151,8 +173,110 @@ pub fn gradient_fill(gradient: &Gradient, alpha: AlphaMode) -> Option<FillSpec> 
                 stops: gradient_stops(gradient, &linear.stops, alpha),
             })
         }
-        Gradient::Radial(_) | Gradient::Conic(_) => None,
+        Gradient::Radial(radial) => {
+            let center = [ratio_100k(radial.center.x), ratio_100k(radial.center.y)];
+            if center != [50_000, 50_000] {
+                return None;
+            }
+            let radius_100k = ratio_100k(radial.radius);
+            let focal_radius_100k = ratio_100k(radial.focal_radius);
+            let stops = stops_relative_to_bounding_box(
+                gradient_stops(gradient, &radial.stops, alpha),
+                radius_100k,
+                focal_radius_100k,
+            )?;
+            Some(FillSpec::RadialGradient {
+                stops,
+                center_100k: center,
+                radius_100k,
+                focal_center_100k: [
+                    ratio_100k(radial.focal_center.x),
+                    ratio_100k(radial.focal_center.y),
+                ],
+                focal_radius_100k,
+            })
+        }
+        Gradient::Conic(_) => None,
     }
+}
+
+/// Reparameterizes radial stops from Typst's outer circle onto DrawingML's
+/// bounding box.
+///
+/// Both models start their gradient at the focal circle — which is exactly what
+/// `a:fillToRect` encodes — but they end it in different places. Typst reaches
+/// its last stop at `radius` from the (centered) origin, in coordinates
+/// normalized to the box, and holds the final color beyond that; DrawingML
+/// reaches its last stop at the box edge, half a normalized unit out. A stop at
+/// `p` therefore belongs at `p × (radius − focal_radius) / (0.5 − focal_radius)`:
+///
+/// * a small `radius` compresses every stop inward, and the color Typst holds
+///   past it becomes an explicit terminal stop at the box edge;
+/// * a large `radius` pushes the tail outside the shape, so the gradient is cut
+///   at the edge with an interpolated stop — that tail is not visible in Typst
+///   either.
+///
+/// `None` for a gradient there is nothing to draw: no stops, no extent, or a
+/// focal circle that already reaches the box edge.
+fn stops_relative_to_bounding_box(
+    stops: Vec<GradientStop>,
+    radius_100k: i32,
+    focal_radius_100k: i32,
+) -> Option<Vec<GradientStop>> {
+    if stops.is_empty() || radius_100k <= focal_radius_100k || focal_radius_100k >= 50_000
+    {
+        return None;
+    }
+    let scale = f64::from(radius_100k - focal_radius_100k)
+        / f64::from(50_000 - focal_radius_100k);
+
+    let mut out: Vec<GradientStop> = Vec::with_capacity(stops.len() + 1);
+    for stop in &stops {
+        let pos = (f64::from(stop.pos_100k) * scale).round() as i32;
+        if pos <= 100_000 {
+            out.push(GradientStop { pos_100k: pos, color: stop.color });
+            continue;
+        }
+        // The first stop past the box edge: land exactly on the edge, taking
+        // the color the gradient has there. Everything after it is outside the
+        // shape.
+        let previous = out.last().copied();
+        out.push(GradientStop {
+            pos_100k: 100_000,
+            color: match previous {
+                Some(before) if pos > before.pos_100k => mix_rgba(
+                    before.color,
+                    stop.color,
+                    f64::from(100_000 - before.pos_100k)
+                        / f64::from(pos - before.pos_100k),
+                ),
+                _ => stop.color,
+            },
+        });
+        break;
+    }
+
+    // A gradient that ends before the box edge holds its final color out to it,
+    // matching Typst's clamp beyond `radius`.
+    if out.last().is_some_and(|last| last.pos_100k < 100_000) {
+        let color = out[out.len() - 1].color;
+        out.push(GradientStop { pos_100k: 100_000, color });
+    }
+    Some(out)
+}
+
+/// Straight-alpha linear blend of two sRGB colors, `t` running from `a` to `b`.
+fn mix_rgba(a: [u8; 4], b: [u8; 4], t: f64) -> [u8; 4] {
+    let t = t.clamp(0.0, 1.0);
+    let channel = |a: u8, b: u8| {
+        (f64::from(a) + (f64::from(b) - f64::from(a)) * t).round().clamp(0.0, 255.0) as u8
+    };
+    [
+        channel(a[0], b[0]),
+        channel(a[1], b[1]),
+        channel(a[2], b[2]),
+        channel(a[3], b[3]),
+    ]
 }
 
 /// Lowers a Typst linear gradient to a DrawingML fill.
@@ -247,10 +371,7 @@ pub fn resolved_stroke(
                     color: srgb_rgba(color, alpha),
                     w_emu: units::abs_to_emu(thickness),
                     cap: line_cap_to_ooxml(fixed.cap),
-                    dash: fixed
-                        .dash
-                        .as_ref()
-                        .map(|dash| prst_dash(&dash.array, thickness)),
+                    dash: fixed.dash.as_ref().map(|dash| dash_spec(dash, thickness)),
                 }))
             }
             Paint::Gradient(_) | Paint::Tiling(_) => None,
@@ -264,6 +385,126 @@ pub fn line_cap_to_ooxml(cap: LineCap) -> &'static str {
         LineCap::Butt => "flat",
         LineCap::Round => "rnd",
         LineCap::Square => "sq",
+    }
+}
+
+/// Lowers a resolved Typst dash pattern to DrawingML.
+///
+/// DrawingML can state a dash pattern exactly — `a:custDash` lists the run
+/// lengths as percentages of the line width — so the authored pattern is
+/// preserved rather than snapped to whichever preset happens to be nearest.
+/// A preset still wins when the pattern *is* that preset, because a named
+/// pattern is what a consumer's line UI shows and round-trips; the nearest-fit
+/// [`prst_dash`] heuristic remains only for the patterns `a:custDash` cannot
+/// state at all (see [`custom_dash`]).
+pub fn dash_spec(dash: &DashPattern<Abs, Abs>, thickness: Abs) -> DashSpec {
+    if dash.array.is_empty() {
+        return DashSpec::Preset("solid");
+    }
+
+    // An odd-length array alternates its on/off roles on every repeat, which
+    // every renderer resolves by repeating the array once; `a:ds` pairs each
+    // dash with its following space, so it needs that same even array.
+    let mut array = dash.array.clone();
+    if array.len() % 2 == 1 {
+        array.extend_from_within(..);
+    }
+    rotate_to_phase(&mut array, dash.phase);
+
+    if let Some(preset) = exact_preset(&array, thickness) {
+        return DashSpec::Preset(preset);
+    }
+
+    match custom_dash(&array, thickness) {
+        Some(stops) => DashSpec::Custom(stops),
+        // Fall back on the original (un-doubled) array so the heuristic keeps
+        // reading the pattern the author actually wrote.
+        None => DashSpec::Preset(prst_dash(&dash.array, thickness)),
+    }
+}
+
+/// The `a:prstDash` presets ECMA-376 fixes as a width-relative run-length
+/// sequence, and their sequences.
+///
+/// The `sys*` family is deliberately absent: those are *system* dashes whose
+/// run lengths the consumer chooses, so matching a pattern onto one would hand
+/// the geometry back to the renderer instead of preserving it.
+const PRESET_RATIOS: &[(&str, &[f64])] = &[
+    ("dot", &[1.0, 3.0]),
+    ("dash", &[4.0, 3.0]),
+    ("lgDash", &[8.0, 3.0]),
+    ("dashDot", &[4.0, 3.0, 1.0, 3.0]),
+    ("lgDashDot", &[8.0, 3.0, 1.0, 3.0]),
+    ("lgDashDotDot", &[8.0, 3.0, 1.0, 3.0, 1.0, 3.0]),
+];
+
+/// The preset that renders exactly this pattern, if any.
+fn exact_preset(array: &[Abs], thickness: Abs) -> Option<&'static str> {
+    if thickness <= Abs::zero() {
+        return None;
+    }
+    let ratios: Vec<f64> = array.iter().map(|length| *length / thickness).collect();
+    PRESET_RATIOS
+        .iter()
+        .find(|(_, preset)| {
+            preset.len() == ratios.len()
+                && preset
+                    .iter()
+                    .zip(&ratios)
+                    .all(|(preset, ratio)| (preset - ratio).abs() <= 1e-3)
+        })
+        .map(|(name, _)| *name)
+}
+
+/// Lowers an even-length dash array to `a:ds` entries.
+///
+/// `None` for the patterns DrawingML cannot state: run lengths are relative to
+/// the line width, so a zero-width stroke has no scale to express them in, and
+/// a run that rounds to zero (or overflows the 32-bit percentage) would collapse
+/// the pattern rather than approximate it.
+fn custom_dash(array: &[Abs], thickness: Abs) -> Option<Vec<DashStop>> {
+    if thickness <= Abs::zero() {
+        return None;
+    }
+    array
+        .chunks_exact(2)
+        .map(|pair| {
+            Some(DashStop {
+                d: line_width_percent(pair[0], thickness)?,
+                sp: line_width_percent(pair[1], thickness)?,
+            })
+        })
+        .collect()
+}
+
+/// A run length as a fraction of the line width, in `a:ds`'s unit of 1000ths
+/// of a percent.
+fn line_width_percent(length: Abs, thickness: Abs) -> Option<i32> {
+    let percent = (length / thickness * 100_000.0).round();
+    (1.0..=f64::from(i32::MAX)).contains(&percent).then_some(percent as i32)
+}
+
+/// Rotates a dash array so that it starts where a non-zero phase does.
+///
+/// `a:custDash` always begins at the head of its pattern, so a phase survives
+/// only when it lands exactly on a run boundary — and only an even one, since
+/// `a:ds` pairs each dash with the space after it. Any other phase is dropped;
+/// the pattern itself still survives, which is strictly more than the nearest
+/// preset would have kept.
+fn rotate_to_phase(array: &mut [Abs], phase: Abs) {
+    let period: f64 = array.iter().map(|length| length.to_pt()).sum();
+    if period <= 0.0 {
+        return;
+    }
+    let offset = phase.to_pt().rem_euclid(period);
+    let tolerance = period * 1e-6;
+    let mut boundary = 0.0;
+    for index in (0..array.len()).step_by(2) {
+        if (boundary - offset).abs() <= tolerance {
+            array.rotate_left(index);
+            return;
+        }
+        boundary += array[index].to_pt() + array[index + 1].to_pt();
     }
 }
 
@@ -725,9 +966,7 @@ pub fn write_stroke(w: &mut XmlWriter, stroke: Option<&StrokeSpec>, clamp_width:
                 .attr("cap", stroke.cap)
                 .start_children();
             write_solid_fill(w, stroke.color);
-            if let Some(dash) = stroke.dash {
-                w.open("a:prstDash").attr("val", dash).empty();
-            }
+            write_dash(w, stroke.dash.as_ref());
             w.close();
         }
         None => {
@@ -735,6 +974,27 @@ pub fn write_stroke(w: &mut XmlWriter, stroke: Option<&StrokeSpec>, clamp_width:
             w.leaf("a:noFill");
             w.close();
         }
+    }
+}
+
+/// Emits an `a:ln`'s dash child. Both elements are optional, and their absence
+/// means a solid line, so a `None` pattern writes nothing.
+pub fn write_dash(w: &mut XmlWriter, dash: Option<&DashSpec>) {
+    match dash {
+        Some(DashSpec::Preset(preset)) => {
+            w.open("a:prstDash").attr("val", preset).empty();
+        }
+        Some(DashSpec::Custom(stops)) => {
+            w.open("a:custDash").start_children();
+            for stop in stops {
+                w.open("a:ds")
+                    .attr("d", &stop.d.to_string())
+                    .attr("sp", &stop.sp.to_string())
+                    .empty();
+            }
+            w.close();
+        }
+        None => {}
     }
 }
 
@@ -779,10 +1039,158 @@ mod tests {
         assert_eq!(prst_dash(&[Abs::pt(6.0), Abs::pt(3.0)], Abs::pt(3.0)), "dash");
     }
 
-    // `gradient_fill` never produces `FillSpec::RadialGradient` (see its doc
-    // comment — the mapping is visually wrong on non-square shapes), but the
-    // XML-writer path stays covered directly so it doesn't silently bitrot
-    // ahead of a future fix.
+    fn pattern(array: &[f64], phase: f64) -> DashPattern<Abs, Abs> {
+        DashPattern {
+            array: array.iter().copied().map(Abs::pt).collect(),
+            phase: Abs::pt(phase),
+        }
+    }
+
+    fn dash_stops(pairs: &[(i32, i32)]) -> DashSpec {
+        DashSpec::Custom(pairs.iter().map(|&(d, sp)| DashStop { d, sp }).collect())
+    }
+
+    #[test]
+    fn custom_dash_states_the_authored_run_lengths() {
+        // 3pt on / 1.5pt off at a 3pt width: one line width of dash, half of gap.
+        assert_eq!(
+            dash_spec(&pattern(&[3.0, 1.5], 0.0), Abs::pt(3.0)),
+            dash_stops(&[(100_000, 50_000)])
+        );
+        // A four-entry dash-dot pattern keeps all four runs rather than
+        // collapsing onto the `dashDot` preset's own proportions.
+        assert_eq!(
+            dash_spec(&pattern(&[3.0, 2.0, 1.0, 2.0], 0.0), Abs::pt(1.0)),
+            dash_stops(&[(300_000, 200_000), (100_000, 200_000)])
+        );
+    }
+
+    #[test]
+    fn odd_dash_arrays_repeat_into_dash_space_pairs() {
+        // `(4pt, 2pt, 1pt)` alternates roles on each repeat, so the resolved
+        // pattern is the array twice over: 4 on, 2 off, 1 on, 4 off, 2 on, 1 off.
+        assert_eq!(
+            dash_spec(&pattern(&[4.0, 2.0, 1.0], 0.0), Abs::pt(1.0)),
+            dash_stops(&[(400_000, 200_000), (100_000, 400_000), (200_000, 100_000)])
+        );
+    }
+
+    #[test]
+    fn exact_presets_win_over_a_custom_pattern() {
+        // `dash` is 4 line widths on, 3 off.
+        assert_eq!(
+            dash_spec(&pattern(&[8.0, 6.0], 0.0), Abs::pt(2.0)),
+            DashSpec::Preset("dash")
+        );
+        // A system preset is never matched onto — its run lengths belong to the
+        // consumer — so an equal on/off pair stays exact.
+        assert_eq!(
+            dash_spec(&pattern(&[3.0, 3.0], 0.0), Abs::pt(3.0)),
+            dash_stops(&[(100_000, 100_000)])
+        );
+    }
+
+    #[test]
+    fn a_phase_on_an_even_boundary_rotates_the_pattern() {
+        // Starting 6pt into `(4pt, 2pt, 1pt, 2pt)` is the same as starting at
+        // the third run.
+        assert_eq!(
+            dash_spec(&pattern(&[4.0, 2.0, 1.0, 2.0], 6.0), Abs::pt(1.0)),
+            dash_stops(&[(100_000, 200_000), (400_000, 200_000)])
+        );
+        // A phase inside a run has no `a:custDash` equivalent; the pattern is
+        // still stated exactly, only its offset is lost.
+        assert_eq!(
+            dash_spec(&pattern(&[4.0, 2.0, 1.0, 2.0], 1.0), Abs::pt(1.0)),
+            dash_stops(&[(400_000, 200_000), (100_000, 200_000)])
+        );
+    }
+
+    #[test]
+    fn patterns_custom_dash_cannot_state_fall_back_to_a_preset() {
+        // Percentages are relative to the line width, so a zero-width stroke
+        // has no scale to express them in.
+        assert_eq!(
+            dash_spec(&pattern(&[3.0, 3.0], 0.0), Abs::zero()),
+            DashSpec::Preset("sysDash")
+        );
+        // A run that rounds away would collapse the pattern instead of
+        // approximating it.
+        assert_eq!(
+            dash_spec(&pattern(&[6.0, 0.0], 0.0), Abs::pt(3.0)),
+            DashSpec::Preset("dash")
+        );
+        // An empty array is Typst's `solid`.
+        assert_eq!(dash_spec(&pattern(&[], 0.0), Abs::pt(1.0)), DashSpec::Preset("solid"));
+    }
+
+    fn stops(pairs: &[(i32, u8)]) -> Vec<GradientStop> {
+        pairs
+            .iter()
+            .map(|&(pos_100k, gray)| GradientStop {
+                pos_100k,
+                color: [gray, gray, gray, 255],
+            })
+            .collect()
+    }
+
+    fn positions(stops: &[GradientStop]) -> Vec<i32> {
+        stops.iter().map(|stop| stop.pos_100k).collect()
+    }
+
+    #[test]
+    fn default_radial_extent_needs_no_reparameterization() {
+        let mapped =
+            stops_relative_to_bounding_box(stops(&[(0, 0), (100_000, 255)]), 50_000, 0)
+                .expect("the default radial gradient maps natively");
+        assert_eq!(positions(&mapped), [0, 100_000]);
+    }
+
+    #[test]
+    fn small_radial_extent_compresses_stops_and_holds_the_final_color() {
+        let mapped =
+            stops_relative_to_bounding_box(stops(&[(0, 0), (100_000, 255)]), 25_000, 0)
+                .expect("a small radius maps natively");
+        // Typst reaches its last stop a quarter of the way across the box, then
+        // holds that color out to the edge.
+        assert_eq!(positions(&mapped), [0, 50_000, 100_000]);
+        assert_eq!(mapped[1].color, mapped[2].color);
+    }
+
+    #[test]
+    fn large_radial_extent_is_cut_at_the_box_edge() {
+        let mapped =
+            stops_relative_to_bounding_box(stops(&[(0, 0), (100_000, 100)]), 100_000, 0)
+                .expect("a large radius maps natively");
+        // The box edge is halfway along the gradient, so the emitted terminal
+        // stop carries the color the gradient has there, not its final one.
+        assert_eq!(positions(&mapped), [0, 100_000]);
+        assert_eq!(mapped[1].color, [50, 50, 50, 255]);
+    }
+
+    #[test]
+    fn a_focal_circle_shifts_the_start_of_the_reparameterization() {
+        // With the focal circle at 25% and the outer one at 50%, the visible
+        // span is half of what DrawingML's own 0..50% span covers.
+        let mapped = stops_relative_to_bounding_box(
+            stops(&[(0, 0), (100_000, 255)]),
+            50_000,
+            25_000,
+        )
+        .expect("a focal circle maps natively");
+        assert_eq!(positions(&mapped), [0, 100_000]);
+    }
+
+    #[test]
+    fn degenerate_radial_extents_are_rejected() {
+        assert!(stops_relative_to_bounding_box(stops(&[(0, 0)]), 0, 0).is_none());
+        assert!(stops_relative_to_bounding_box(Vec::new(), 50_000, 0).is_none());
+        assert!(
+            stops_relative_to_bounding_box(stops(&[(0, 0)]), 60_000, 50_000).is_none(),
+            "a focal circle reaching the box edge leaves no gradient to draw"
+        );
+    }
+
     #[test]
     fn write_fill_radial_gradient_emits_path_circle() {
         let fill = FillSpec::RadialGradient {

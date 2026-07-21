@@ -760,7 +760,10 @@ impl State {
     }
 
     fn visit_para(&mut self, para: &Para) -> Result<(), DocumentInvariantError> {
+        // `w:numId="0"` is the reserved "no numbering" override, not a `w:num`
+        // instance, so it is legitimately absent from `numbering.xml`.
         if let Some((num_id, _)) = para.props.num
+            && num_id != crate::heading_numbering::NO_NUMBERING_ID
             && !self.numbering_ids.contains(&num_id)
         {
             return Err(DocumentInvariantError::MissingNumberingId(num_id));
@@ -999,7 +1002,7 @@ mod dangling_field_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dom::{Drawing, Field};
+    use crate::dom::{Drawing, Field, PicClip};
 
     #[test]
     fn duplicate_drawing_ids_are_rejected() {
@@ -1038,6 +1041,7 @@ mod tests {
             anchor: None,
             shape: None,
             group: None,
+            pic_clip: PicClip::default(),
         });
         assert_eq!(
             state.visit_run(&run),

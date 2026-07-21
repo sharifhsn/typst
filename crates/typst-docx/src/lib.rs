@@ -12,6 +12,7 @@ mod document;
 mod dom;
 mod encode;
 mod fallback;
+mod heading_numbering;
 mod introspect;
 mod invariants;
 mod manifest;

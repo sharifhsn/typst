@@ -463,8 +463,18 @@ fn cellgrid(
         }
     }
 
+    // A `w:tbl` sits flush against the left text margin unless `w:tblPr/w:jc`
+    // says otherwise, so an `#align(center)`/`#align(right)` wrapper around a
+    // table narrower than the text column was silently lost. The cells' own
+    // paragraphs read the same chain, matching Typst, where a table's `align`
+    // defaults to `auto` and therefore inherits the outer alignment too.
     let tbl = Tbl {
-        props: TblProps { width_dxa: Some(width_dxa), style: None, jc: None },
+        props: TblProps {
+            width_dxa: Some(width_dxa),
+            style: None,
+            jc: ctx.resolve_align_jc(styles),
+            ind_dxa: None,
+        },
         grid: col_dxa,
         rows,
     };
