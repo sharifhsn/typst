@@ -57,22 +57,35 @@ pub enum DecisionReason {
     /// its source text kept alongside as invisible, searchable fallback
     /// text).
     UnrepresentableTextTransformRasterFallback,
-    /// A shape's geometry or fill has no native form — a skewed or
-    /// non-uniformly scaled local transform, a degenerate path, or a paint
-    /// that DrawingML cannot express (an off-center radial gradient, a conic
-    /// gradient) — so the shape was rendered to a picture instead of a native
-    /// `custGeom`/`prstGeom`.
+    /// A shape's local transform is not a similarity — a skew, a non-uniform
+    /// scale, or a reflection — so its path could not be placed as a native
+    /// `custGeom`/`prstGeom` and the shape was rendered to a picture.
     ///
-    /// `shape_to_geom` collapses these distinct causes into one `None`
-    /// return, so this reason currently cannot distinguish "unmappable
-    /// geometry" from "unmappable fill" without restructuring that
-    /// function's return type into a typed error.
-    UnmappableShapeRasterFallback,
-    /// A picture's placement is not a pure translation (any rotation, scale,
-    /// or skew). PowerPoint's `p:pic`/`a:xfrm` does support a native `rot`
-    /// attribute, but this exporter's picture emission never sets one today,
-    /// so any non-identity placement re-renders the image at its final
-    /// on-slide transform instead of keeping it a native, editable picture.
+    /// Measured, not assumed: no frame walk reaches this today. A
+    /// non-similarity always arrives on a *group*, which rasterizes as
+    /// [`Self::UnrepresentableGroupRasterFallback`] before the walk descends
+    /// to the shape, and composing similarities only ever yields another
+    /// similarity. The guard stays because `shape_to_geom` is also callable
+    /// on its own, but a deck reporting this reason means the group walk
+    /// changed.
+    UnmappableShapeTransformRasterFallback,
+    /// A shape's path is empty, degenerate (zero width *and* height), or has
+    /// non-finite bounds, so there was no `custGeom` to write.
+    UnmappableShapeGeometryRasterFallback,
+    /// A shape's fill paint has no DrawingML equivalent — an off-center
+    /// radial gradient, a conic gradient, or a tiling whose tile could not be
+    /// rendered — so the shape was rendered to a picture rather than shipped
+    /// with a visibly wrong fill.
+    UnmappableShapeFillRasterFallback,
+    /// A shape's stroke is painted with a gradient or a tiling, and `a:ln`
+    /// carries a solid color only.
+    UnmappableShapeStrokeRasterFallback,
+    /// A picture's placement is neither a translation nor a rotation with
+    /// uniform scale — a skew, a non-uniform scale, or a reflection — so it
+    /// cannot be expressed as an `a:xfrm` box plus `rot` and was rendered at
+    /// its final on-slide transform instead. Rotated and uniformly scaled
+    /// pictures are native (see `Walker::try_emit_rotated_image`); this also
+    /// covers an image whose bytes could not be embedded or rendered at all.
     RotatedOrScaledImageRasterFallback,
     /// A table cell region's transform was not an axis-aligned similarity
     /// (rotation, skew, or non-uniform scale), so the whole table — including
@@ -330,14 +343,14 @@ mod tests {
         report.record(
             0,
             Representation::Raster,
-            DecisionReason::UnmappableShapeRasterFallback,
+            DecisionReason::UnmappableShapeGeometryRasterFallback,
             LossSet::RASTER,
             4,
         );
         report.record(
             0,
             Representation::Raster,
-            DecisionReason::UnmappableShapeRasterFallback,
+            DecisionReason::UnmappableShapeGeometryRasterFallback,
             LossSet::RASTER,
             7,
         );
@@ -354,14 +367,14 @@ mod tests {
         report.record(
             0,
             Representation::Raster,
-            DecisionReason::UnmappableShapeRasterFallback,
+            DecisionReason::UnmappableShapeGeometryRasterFallback,
             LossSet::RASTER,
             0,
         );
         report.record(
             1,
             Representation::Raster,
-            DecisionReason::UnmappableShapeRasterFallback,
+            DecisionReason::UnmappableShapeGeometryRasterFallback,
             LossSet::RASTER,
             0,
         );
@@ -376,7 +389,7 @@ mod tests {
         report.record(
             0,
             Representation::Raster,
-            DecisionReason::UnmappableShapeRasterFallback,
+            DecisionReason::UnmappableShapeGeometryRasterFallback,
             LossSet::RASTER,
             0,
         );

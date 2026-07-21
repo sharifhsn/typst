@@ -34,7 +34,7 @@ Measured across 531 presentations that have at least one slide:
 | animation (`p:timing`) | 23.2% | no Typst equivalent |
 | picture (`p:pic`) | 21.1% | |
 | SmartArt (`dgm`) | 14.1% | a whole diagram language |
-| speaker notes | 13.9% | |
+| speaker notes | 13.9% | export already writes these; see stage 5 |
 | transition (`p:transition`) | 13.6% | no Typst equivalent |
 | table (`a:tbl`) | 10.0% | |
 | shape effects (`a:effectLst`) | 8.7% | shadows, glow, reflection |
@@ -151,9 +151,15 @@ already does the DrawingML half — it should be *shared*, not rewritten.
 → the same data-table-or-plot treatment the DOCX importer gives them. Both
 mappers largely transfer.
 
-**Stage 5 — the periphery.** Speaker notes → a `#metadata` block (the same
-device comments use, so they render nothing), hyperlinks, and the report
-entries for everything in the "cannot" table above.
+**Stage 5 — the periphery.** Speaker notes, hyperlinks, and the report entries
+for everything in the "cannot" table above.
+
+Notes have a shape already waiting for them: the exporter *writes*
+`notesSlide` parts, and it gets the text from the `<pdfpc-file>` metadata
+Touying and the pdfpc integration emit. An importer that emits that same
+`#metadata(..) <pdfpc-file>` payload round-trips notes for free and stays
+compatible with the presentation packages people already use — inventing a
+second convention would break both directions at once.
 
 ## Effort, honestly
 

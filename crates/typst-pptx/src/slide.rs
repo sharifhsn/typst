@@ -16,6 +16,7 @@ use crate::dom::{
     TextBox, TextChild, TextColumns, TextPara, TextRun, TextWrap,
 };
 use crate::report::{DecisionReason, LossSet, Representation};
+use crate::shape::ShapeFallback;
 use crate::table::{ActiveTable, ActiveTableCell, CapturedTableCell};
 use crate::text::{InlineMathSource, LinkTarget, TextSource};
 
@@ -324,7 +325,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                         highlight_candidate(shape, *span, item_transform, order);
                     match crate::shape::shape_to_geom(self.ctx, shape, item_transform, 0)
                     {
-                        Some(geom) => {
+                        Ok(geom) => {
                             self.shapes.push(OrderedShape {
                                 order,
                                 shape: SlideShape::Geom(geom),
@@ -337,11 +338,15 @@ impl<'a, 'b> Walker<'a, 'b> {
                                 }
                             }
                         }
-                        None => {
-                            debug_raster("shape", "unmappable", 0);
+                        // Nothing was going to be drawn, so nothing was lost.
+                        Err(cause) if fallback_draws_nothing(shape, cause) => {
+                            debug_skip("shape", cause.tag());
+                        }
+                        Err(cause) => {
+                            debug_raster("shape", cause.tag(), 0);
                             self.record_decision(
                                 Representation::Raster,
-                                DecisionReason::UnmappableShapeRasterFallback,
+                                cause.reason(),
                                 LossSet::RASTER,
                                 0,
                             );
@@ -775,8 +780,10 @@ impl<'a, 'b> Walker<'a, 'b> {
         item_transform: Transform,
     ) {
         // A translation-only placement embeds the original bytes verbatim (or
-        // a natural-size render for SVG/PDF kinds); anything rotated, scaled,
-        // or skewed goes through the transform-carrying render fallback.
+        // a natural-size render for SVG/PDF kinds) and needs no `a:xfrm`
+        // rotation at all. Kept as its own branch rather than folded into the
+        // rotated case below so the overwhelmingly common placement stays
+        // arithmetically untouched.
         if let Some(sim) = classify_similarity(item_transform)
             && sim.rot_60k == 0
             && (sim.scale - 1.0).abs() < 1e-6
@@ -792,6 +799,9 @@ impl<'a, 'b> Walker<'a, 'b> {
             );
             return;
         }
+        if self.try_emit_rotated_image(order, image, size, item_transform) {
+            return;
+        }
         debug_raster("image", "transform-or-kind", 0);
         self.record_decision(
             Representation::Raster,
@@ -805,6 +815,50 @@ impl<'a, 'b> Walker<'a, 'b> {
             item_transform,
             image.alt().map(Into::into),
         );
+    }
+
+    /// Places a rotated and/or uniformly scaled image as a *native* picture
+    /// instead of rendering it.
+    ///
+    /// DrawingML states this directly: `a:xfrm` positions an axis-aligned box
+    /// and then spins it about its own center by `rot`. Typst instead rotates
+    /// about the item's local origin, so the two models agree on exactly one
+    /// point — the box center — which is what the geometry below is derived
+    /// from. Reflections never arrive here: `classify_similarity` rejects a
+    /// negative determinant, so no `flipH`/`flipV` is needed.
+    ///
+    /// The image is embedded at its *final* on-slide size, so a scaled-up SVG
+    /// or PDF is rendered at the resolution it will be displayed at rather
+    /// than the one it was laid out at.
+    fn try_emit_rotated_image(
+        &mut self,
+        order: usize,
+        image: &typst_library::visualize::Image,
+        size: Size,
+        item_transform: Transform,
+    ) -> bool {
+        let Some(sim) = classify_similarity(item_transform) else {
+            return false;
+        };
+        if !sim.scale.is_finite() || sim.scale <= 0.0 {
+            return false;
+        }
+        let scaled = Size::new(size.x * sim.scale, size.y * sim.scale);
+        let Some(embedded) = crate::image::embed_image(self.ctx, image, scaled) else {
+            return false;
+        };
+        let pos =
+            rotated_pic_origin(embedded.offset, embedded.size, sim.scale, item_transform);
+        self.push_pic_with_geom(
+            order,
+            (embedded.media, embedded.svg_media),
+            pos,
+            embedded.size,
+            image.alt().map(Into::into),
+            (PicGeom::Rect, None),
+            sim.rot_60k,
+        );
+        true
     }
 
     /// Renders one frame item through its full accumulated transform and
@@ -888,37 +942,47 @@ impl<'a, 'b> Walker<'a, 'b> {
         let Some((pos, image, size)) = single_frame_image(frame) else {
             return false;
         };
-        // Only translation is representable as a `p:pic` placement.
+        // A rotation or uniform scale is carried by the `a:xfrm` itself (the
+        // same box-center identity `try_emit_rotated_image` relies on); a
+        // skew or non-uniform scale is not representable at all.
         let Some(sim) = classify_similarity(group_transform) else {
             return false;
         };
-        if sim.rot_60k != 0 || (sim.scale - 1.0).abs() > 1e-6 {
+        if !sim.scale.is_finite() || sim.scale <= 0.0 {
             return false;
         }
         // The image must COVER the whole frame; the visible frame is the crop
         // the clip reveals. A gap (image smaller than the frame on any side)
         // would expose background we can't represent, so fall back to raster.
+        // Both are local, pre-transform measurements, so the crop ratios are
+        // unaffected by any rotation or scale applied on top.
         let Some(src_rect) = cover_src_rect(pos, size, frame.size()) else {
             return false;
         };
         // Embed the original bytes and place the picture at the frame's bounds
         // (in outer coordinates); the geom rounds it and the srcRect crops the
-        // cover overflow.
-        let Some(embedded) = crate::image::embed_original_image(self.ctx, image, size)
+        // cover overflow. An SVG is rendered at its final on-slide size so a
+        // scaled-up card does not ship a soft fallback.
+        let scaled_source = Size::new(size.x * sim.scale, size.y * sim.scale);
+        let Some(embedded) =
+            crate::image::embed_original_image(self.ctx, image, scaled_source)
         else {
             return false;
         };
         if !point_is_zero(embedded.offset) {
             return false;
         }
-        let pic_pos = Point::zero().transform(group_transform);
+        let pic_size = Size::new(frame.size().x * sim.scale, frame.size().y * sim.scale);
+        let pic_pos =
+            rotated_pic_origin(Point::zero(), pic_size, sim.scale, group_transform);
         self.push_pic_with_geom(
             order,
             (embedded.media, embedded.svg_media),
             pic_pos,
-            frame.size(),
+            pic_size,
             image.alt().map(Into::into),
             (geom, (src_rect != [0; 4]).then_some(src_rect)),
+            sim.rot_60k,
         );
         true
     }
@@ -931,10 +995,12 @@ impl<'a, 'b> Walker<'a, 'b> {
         size: Size,
         alt: Option<EcoString>,
     ) {
-        self.push_pic_with_geom(order, media, pos, size, alt, (PicGeom::Rect, None));
+        self.push_pic_with_geom(order, media, pos, size, alt, (PicGeom::Rect, None), 0);
     }
 
     /// `shape` is the preset geometry paired with an optional `a:srcRect` crop.
+    /// `rot_60k` spins the placed box about its own center, DrawingML-style.
+    #[allow(clippy::too_many_arguments)]
     fn push_pic_with_geom(
         &mut self,
         order: usize,
@@ -943,6 +1009,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         size: Size,
         alt: Option<EcoString>,
         shape: (PicGeom, Option<[i32; 4]>),
+        rot_60k: i32,
     ) {
         let (media, svg_media) = media;
         let (geom, src_rect) = shape;
@@ -953,7 +1020,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                 y_emu: crate::text::emu(pos.y),
                 w_emu: crate::text::extent_emu(size.x),
                 h_emu: crate::text::extent_emu(size.y),
-                rot_60k: 0,
+                rot_60k,
                 media,
                 svg_media,
                 alt,
@@ -1268,6 +1335,23 @@ fn cover_src_rect(pos: Point, size: Size, frame: Size) -> Option<[i32; 4]> {
     Some([frac(-ix, iw), frac(-iy, ih), frac(ix + iw - fw, iw), frac(iy + ih - fh, ih)])
 }
 
+/// Whether a shape the exporter could not lower would have put no ink on the
+/// slide anyway.
+///
+/// The raster fallback silently emits nothing for an inkless frame, so
+/// recording a `Raster` decision for one claims a picture that does not exist:
+/// a zero-size filled rectangle and a fully transparent one each used to add a
+/// raster to the report while adding no media part to the package.
+///
+/// Only the cases that *provably* draw nothing are skipped — a degenerate path
+/// still draws a dot if it carries a stroke, and a fallback that emitted
+/// nothing because the render itself failed must stay in the report rather
+/// than vanish from it.
+pub(super) fn fallback_draws_nothing(shape: &Shape, cause: ShapeFallback) -> bool {
+    shape_draws_no_ink(shape)
+        || (cause == ShapeFallback::Geometry && shape.stroke.is_none())
+}
+
 fn shape_draws_no_ink(shape: &Shape) -> bool {
     let fill_draws = shape.fill.as_ref().is_some_and(paint_draws_ink);
     let stroke_draws = shape.stroke.as_ref().is_some_and(|stroke| {
@@ -1459,6 +1543,27 @@ pub(super) fn classify_similarity(transform: Transform) -> Option<Similarity> {
     })
 }
 
+/// The top-left corner of the *unrotated* `a:xfrm` box for a picture that
+/// `transform` rotates and uniformly scales.
+///
+/// `offset` and `size` describe the embedded image inside the scaled-but-
+/// unrotated local frame (an SVG render is cropped to its ink, so the offset
+/// is not always zero). Dividing the scale back out turns the box center into
+/// a point `transform` can map directly, and DrawingML then spins the box
+/// about that same center — so placing the box centered there reproduces
+/// Typst's placement exactly, whatever the rotation.
+fn rotated_pic_origin(
+    offset: Point,
+    size: Size,
+    scale: f64,
+    transform: Transform,
+) -> Point {
+    let center_local =
+        Point::new((offset.x + size.x / 2.0) / scale, (offset.y + size.y / 2.0) / scale);
+    let center = center_local.transform(transform);
+    Point::new(center.x - size.x / 2.0, center.y - size.y / 2.0)
+}
+
 fn text_rect(text: &typst_library::text::TextItem, baseline: Point, scale: f64) -> Rect {
     let size = text.size * scale.abs();
     let descent = (-text.font.metrics().descender).at(size);
@@ -1566,6 +1671,16 @@ pub(super) fn debug_raster(kind: &str, reason: &str, text_chars: usize) {
     }
 }
 
+/// Traces a fallback that was *declined* because the content drew nothing.
+///
+/// Separate from [`debug_raster`] on purpose: these lines must not read as
+/// rasterizations in an audit that counts them.
+pub(super) fn debug_skip(kind: &str, reason: &str) {
+    if std::env::var_os("PPTX_DEBUG_RASTER").is_some() {
+        eprintln!("SKIPPED kind={kind} reason={reason} (draws nothing)");
+    }
+}
+
 /// Total text characters in a frame tree (for the raster audit).
 pub(super) fn frame_text_chars(frame: &Frame) -> usize {
     let mut n = 0;
@@ -1604,7 +1719,7 @@ mod tests {
     use std::sync::Arc;
 
     use typst_library::foundations::{Content, Smart};
-    use typst_library::layout::{Axes, Sides};
+    use typst_library::layout::{Angle, Axes, Sides};
     use typst_library::visualize::{
         Color, ColorSpace, Gradient, ProcessColor, ProcessColorSpace, RadialGradient, Rgb,
     };
@@ -1725,5 +1840,72 @@ mod tests {
             decisions[0].reason,
             DecisionReason::UnrepresentableGroupRasterFallback
         );
+    }
+
+    /// A shape that draws nothing must not be reported as a rasterized one:
+    /// the raster fallback emits no picture for it, so the row would claim
+    /// media the package does not contain.
+    #[test]
+    fn an_inkless_unmappable_shape_is_not_reported_as_a_raster() {
+        use ecow::eco_vec;
+        use typst_library::model::DocumentInfo;
+        use typst_library::visualize::Geometry;
+        use typst_syntax::Span;
+
+        let mut frame = Frame::soft(Size::new(Abs::pt(50.0), Abs::pt(50.0)));
+        // Degenerate: no width and no height, so there is no `custGeom` to
+        // write — and with no stroke, nothing to draw either.
+        frame.push(
+            Point::zero(),
+            FrameItem::Shape(
+                Geometry::Rect(Size::zero()).filled(Color::BLACK),
+                Span::detached(),
+            ),
+        );
+
+        let page = Page { frame, ..page_with_fill(None) };
+        let document = PagedDocument::new(eco_vec![page], DocumentInfo::default());
+        let mut ctx = SlideCtx::default();
+        slides(&document, &mut ctx);
+
+        assert!(ctx.fidelity_report.decisions().is_empty());
+        assert!(ctx.media.parts().is_empty());
+    }
+
+    /// A quarter turn about the box center — Typst's own `#rotate` default —
+    /// must leave the `a:xfrm` box exactly where the unrotated picture sat,
+    /// because DrawingML rotates about that same center.
+    #[test]
+    fn rotation_about_the_center_leaves_the_box_in_place() {
+        let size = Size::new(Abs::pt(120.0), Abs::pt(60.0));
+        let center = Point::new(size.x / 2.0, size.y / 2.0);
+        // What `#rotate(90deg)` produces: translate to center, turn, translate
+        // back.
+        let transform = Transform::translate(center.x, center.y)
+            .pre_concat(Transform::rotate(Angle::deg(90.0)))
+            .pre_concat(Transform::translate(-center.x, -center.y));
+
+        let origin = rotated_pic_origin(Point::zero(), size, 1.0, transform);
+
+        assert!(origin.x.to_pt().abs() < 1e-9, "{origin:?}");
+        assert!(origin.y.to_pt().abs() < 1e-9, "{origin:?}");
+    }
+
+    /// The scale is applied to the embedded image before it reaches
+    /// `rotated_pic_origin`, so the function has to divide it back out to
+    /// recover a point the layout transform can map.
+    #[test]
+    fn a_scaled_placement_keeps_its_center() {
+        let size = Size::new(Abs::pt(100.0), Abs::pt(40.0));
+        let scaled = Size::new(size.x * 2.0, size.y * 2.0);
+        let transform = Transform::translate(Abs::pt(30.0), Abs::pt(10.0))
+            .pre_concat(Transform::scale(Ratio::new(2.0), Ratio::new(2.0)));
+
+        let origin = rotated_pic_origin(Point::zero(), scaled, 2.0, transform);
+
+        // Local center (50, 20) maps to (30 + 100, 10 + 40); the doubled box
+        // is 200x80, so its corner sits half of that up and to the left.
+        assert!((origin.x.to_pt() - 30.0).abs() < 1e-9, "{origin:?}");
+        assert!((origin.y.to_pt() - 10.0).abs() < 1e-9, "{origin:?}");
     }
 }

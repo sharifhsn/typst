@@ -8,30 +8,76 @@ use typst_library::visualize::{Color, Curve, Geometry, Paint, Shape, Tiling};
 use typst_ooxml_core::dml::{self, AlphaMode, TileImage};
 use typst_ooxml_core::{color as ooxml_color, units};
 
+/// Which part of a shape had no DrawingML form.
+///
+/// Kept separate from the `None` these lowering helpers return individually,
+/// because "the exporter rasterized a shape" is not actionable on its own —
+/// a skewed rectangle, a degenerate path, and a conic-gradient fill are three
+/// different problems with three different answers, and the fidelity report
+/// can only say which one it was if the failure is typed on the way out.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) enum ShapeFallback {
+    /// The frame-walk transform is not a similarity: a skew, a non-uniform
+    /// scale, or a reflection.
+    Transform,
+    /// The path is empty, degenerate (zero width *and* height), or has
+    /// non-finite bounds.
+    Geometry,
+    /// The fill paint has no DrawingML equivalent: an off-center radial
+    /// gradient, a conic gradient, or a tiling whose tile failed to render.
+    Fill,
+    /// The stroke is painted with a gradient or a tiling; `a:ln` carries a
+    /// solid color only.
+    Stroke,
+}
+
+impl ShapeFallback {
+    pub(crate) fn reason(self) -> DecisionReason {
+        match self {
+            Self::Transform => DecisionReason::UnmappableShapeTransformRasterFallback,
+            Self::Geometry => DecisionReason::UnmappableShapeGeometryRasterFallback,
+            Self::Fill => DecisionReason::UnmappableShapeFillRasterFallback,
+            Self::Stroke => DecisionReason::UnmappableShapeStrokeRasterFallback,
+        }
+    }
+
+    /// Short tag for the `PPTX_DEBUG_RASTER` trace.
+    pub(crate) fn tag(self) -> &'static str {
+        match self {
+            Self::Transform => "transform",
+            Self::Geometry => "geometry",
+            Self::Fill => "fill",
+            Self::Stroke => "stroke",
+        }
+    }
+}
+
 /// Lower one laid-out Typst shape to the PPTX slide IR.
 ///
 /// The transform is expected to be the frame-walk transform for this item. It
 /// may translate, rotate, reflect, or uniformly scale the geometry; skew and
-/// non-uniform scale return `None` so the caller can rasterize instead.
+/// non-uniform scale return [`ShapeFallback::Transform`] so the caller can
+/// rasterize instead.
 pub(crate) fn shape_to_geom(
     ctx: &mut SlideCtx,
     shape: &Shape,
     transform: Transform,
     rot_60k: i32,
-) -> Option<GeomShape> {
-    let scale = dml::similarity_scale(&transform)?;
-    let stroke = dml::resolved_stroke(&shape.stroke, scale, AlphaMode::Preserve)?;
+) -> Result<GeomShape, ShapeFallback> {
+    let scale = dml::similarity_scale(&transform).ok_or(ShapeFallback::Transform)?;
+    let stroke = dml::resolved_stroke(&shape.stroke, scale, AlphaMode::Preserve)
+        .ok_or(ShapeFallback::Stroke)?;
 
     if let Some(connector) = line_to_connector(shape, transform, rot_60k, stroke.clone())
     {
-        return Some(connector);
+        return Ok(connector);
     }
 
     let raw = dml::geometry_to_raw(&shape.geometry, transform);
-    let normalized = dml::normalize_segments(raw)?;
-    let fill = resolved_fill(ctx, &shape.fill)?;
+    let normalized = dml::normalize_segments(raw).ok_or(ShapeFallback::Geometry)?;
+    let fill = resolved_fill(ctx, &shape.fill).ok_or(ShapeFallback::Fill)?;
 
-    Some(GeomShape {
+    Ok(GeomShape {
         x_emu: units::abs_to_emu(normalized.min_x),
         y_emu: units::abs_to_emu(normalized.min_y),
         w_emu: units::abs_to_emu(normalized.w).max(1),
@@ -143,8 +189,8 @@ mod tests {
     use typst_library::foundations::Smart;
     use typst_library::layout::{Abs, Angle, Point, Ratio, Size, Transform};
     use typst_library::visualize::{
-        ColorSpace, FillRule, LinearGradient, Oklab, ProcessColor, ProcessColorSpace,
-        RadialGradient, Rgb,
+        ColorSpace, FillRule, FixedStroke, LinearGradient, Oklab, ProcessColor,
+        ProcessColorSpace, RadialGradient, Rgb,
     };
     use typst_library::visualize::{Geometry, Gradient};
 
@@ -279,6 +325,80 @@ mod tests {
         assert_ne!(stops[0].color, raw);
         assert_eq!(stops[0].color, srgb_bytes(&oklab));
         assert!(stops.len() > 2, "Oklab interpolation needs sampled sRGB stops");
+    }
+
+    fn unmappable_gradient() -> Gradient {
+        Gradient::Radial(Arc::new(RadialGradient {
+            stops: vec![
+                (
+                    Color::Process(ProcessColor::Rgb(Rgb::new(1.0, 0.0, 0.0, 1.0))),
+                    Ratio::zero(),
+                ),
+                (
+                    Color::Process(ProcessColor::Rgb(Rgb::new(0.0, 0.0, 1.0, 1.0))),
+                    Ratio::one(),
+                ),
+            ],
+            center: typst_library::layout::Axes::new(Ratio::new(0.4), Ratio::new(0.6)),
+            radius: Ratio::new(0.7),
+            focal_center: typst_library::layout::Axes::new(
+                Ratio::new(0.3),
+                Ratio::new(0.45),
+            ),
+            focal_radius: Ratio::new(0.1),
+            space: ColorSpace::Process(ProcessColorSpace::Srgb),
+            relative: Smart::Auto,
+            anti_alias: true,
+        }))
+    }
+
+    /// The whole point of the typed error: four different problems that all
+    /// end in a picture must not arrive at the report as one indistinguishable
+    /// "unmappable shape".
+    #[test]
+    fn each_unmappable_part_names_itself() {
+        let mut ctx = SlideCtx::default();
+        let square = Size::new(Abs::pt(10.0), Abs::pt(20.0));
+
+        let cause = |ctx: &mut SlideCtx, shape: &Shape, transform| {
+            shape_to_geom(ctx, shape, transform, 0).err()
+        };
+
+        // A shear is not a similarity, so the path cannot be placed.
+        let skew = Transform { ky: Ratio::new(0.5), ..Transform::identity() };
+        let rect = bare_shape(Geometry::Rect(square));
+        assert_eq!(cause(&mut ctx, &rect, skew), Some(ShapeFallback::Transform));
+
+        // A rectangle with no extent in either axis has no `custGeom`.
+        let degenerate = bare_shape(Geometry::Rect(Size::zero()));
+        assert_eq!(
+            cause(&mut ctx, &degenerate, Transform::identity()),
+            Some(ShapeFallback::Geometry)
+        );
+
+        // An off-center radial gradient has no `a:gradFill` equivalent.
+        let filled = Shape {
+            fill: Some(Paint::Gradient(unmappable_gradient())),
+            ..bare_shape(Geometry::Rect(square))
+        };
+        assert_eq!(
+            cause(&mut ctx, &filled, Transform::identity()),
+            Some(ShapeFallback::Fill)
+        );
+
+        // `a:ln` carries a solid color only, whatever the gradient is.
+        let stroked = Shape {
+            stroke: Some(FixedStroke {
+                paint: Paint::Gradient(unmappable_gradient()),
+                thickness: Abs::pt(1.0),
+                ..FixedStroke::default()
+            }),
+            ..bare_shape(Geometry::Rect(square))
+        };
+        assert_eq!(
+            cause(&mut ctx, &stroked, Transform::identity()),
+            Some(ShapeFallback::Stroke)
+        );
     }
 
     #[test]

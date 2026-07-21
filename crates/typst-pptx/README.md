@@ -87,9 +87,12 @@ independently.
 Fallbacks the report names (see the matrix for what each loses):
 
 - **Raster fallbacks** — a group with a clip or skew, text under a
-  non-uniform transform, a shape whose geometry or fill DrawingML cannot
-  express (conic gradient, off-centre radial), a rotated or scaled picture,
-  and a transformed table.
+  non-uniform transform, a shape whose geometry, fill or stroke DrawingML
+  cannot express (each named separately: a degenerate path, a conic or
+  off-centre radial gradient, a gradient stroke), a picture placed under a
+  skew or non-uniform scale, and a transformed table. Rotated and uniformly
+  scaled pictures are *not* in this list: they are native `a:xfrm` boxes with
+  a `rot`.
 - **Approximations** — gradient/tiling *text* fill collapsed to one solid
   colour (a DrawingML run carries only one), a tiling shape fill rendered to a
   static tile image, and a page fill that is not solid-or-linear falling back

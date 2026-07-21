@@ -21,8 +21,9 @@ use crate::dom::{
 use crate::report::{DecisionReason, LossSet, Representation};
 use crate::slide::{
     HighlightCandidate, LinkRect, OrderedShape, Rect, Walker, attach_highlights,
-    classify_similarity, debug_raster, frame_text_chars, highlight_candidate,
-    raster_fallback_text, text_link_overlays, transformed_rect,
+    classify_similarity, debug_raster, debug_skip, fallback_draws_nothing,
+    frame_text_chars, highlight_candidate, raster_fallback_text, text_link_overlays,
+    transformed_rect,
 };
 use crate::text::{InlineMathSource, TextSource};
 
@@ -337,7 +338,7 @@ impl<'a, 'b> Walker<'a, 'b> {
             FrameItem::Shape(shape, span) => {
                 let highlight = highlight_candidate(shape, *span, item_transform, order);
                 match crate::shape::shape_to_geom(self.ctx, shape, item_transform, 0) {
-                    Some(geom) => {
+                    Ok(geom) => {
                         self.shapes
                             .push(OrderedShape { order, shape: SlideShape::Geom(geom) });
                         if let Some(highlight) = highlight {
@@ -348,11 +349,15 @@ impl<'a, 'b> Walker<'a, 'b> {
                                 .push(highlight);
                         }
                     }
-                    None => {
-                        debug_raster("table-cell-shape", "unmappable", 0);
+                    // Nothing was going to be drawn, so nothing was lost.
+                    Err(cause) if fallback_draws_nothing(shape, cause) => {
+                        debug_skip("table-cell-shape", cause.tag());
+                    }
+                    Err(cause) => {
+                        debug_raster("table-cell-shape", cause.tag(), 0);
                         self.record_decision(
                             Representation::Raster,
-                            DecisionReason::UnmappableShapeRasterFallback,
+                            cause.reason(),
                             LossSet::RASTER,
                             0,
                         );
