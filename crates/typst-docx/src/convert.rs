@@ -52,6 +52,23 @@ pub fn convert_children(
     // content). Used to tell two adjacent paragraphs apart from one paragraph
     // that Typst split into `[par, inline-equation, par]`.
     let mut last_was_par = false;
+    // Whether the *current* `pending` buffer was seeded by real paragraph
+    // text (a `ParElem`) rather than starting cold with a solo inline-ish
+    // element (a bare top-level image, or a box/equation/raw reached via the
+    // same paths) that has nothing buffered before it. Realize erases the
+    // `ParbreakElem` that would otherwise mark a blank line between two
+    // independent top-level blocks (see `visit_filter_rules` in
+    // `typst-realize`), so by the time a lone image and a wholly separate
+    // following paragraph reach here, they look identical — on the wire —
+    // to a genuine `[par, image, par]` split of ONE authored paragraph
+    // around an inline image. Only in the latter case (`from_paragraph`
+    // true) does the *trailing* `ParElem` continue the same paragraph; a
+    // solo image with nothing preceding it in `pending` is never a split of
+    // existing paragraph content, so the following `ParElem` must start a
+    // new one instead of being glued onto the image's `<w:p>`. Kept in sync
+    // with `have_pending`: reset to `false` by every `flush`, and set `true`
+    // only when a `ParElem`'s content is folded into `pending` below.
+    let mut pending_from_paragraph = false;
     // Whether `pending` currently holds nothing but a lone orphaned
     // `SpaceElem` — the single space realize leaves behind when a paragraph
     // is split around a promoted-to-block child (e.g. an inline equation
@@ -85,7 +102,14 @@ pub fn convert_children(
         }
         if child.is::<ParbreakElem>() {
             let from = blocks.len();
-            flush(&mut pending, &mut pending_props, &mut have_pending, &mut pending_orphaned_whitespace, &mut blocks);
+            flush(
+                &mut pending,
+                &mut pending_props,
+                &mut have_pending,
+                &mut pending_orphaned_whitespace,
+                &mut pending_from_paragraph,
+                &mut blocks,
+            );
             pending_v = apply_pending_v(&mut blocks, from, pending_v);
             last_was_par = false;
             continue;
@@ -106,7 +130,14 @@ pub fn convert_children(
                 && let Some(sole) = paragraph_sole_block_container(&par.body, *styles)
             {
                 let from = blocks.len();
-                flush(&mut pending, &mut pending_props, &mut have_pending, &mut pending_orphaned_whitespace, &mut blocks);
+                flush(
+                    &mut pending,
+                    &mut pending_props,
+                    &mut have_pending,
+                    &mut pending_orphaned_whitespace,
+                    &mut pending_from_paragraph,
+                    &mut blocks,
+                );
                 pending_v = apply_pending_v(&mut blocks, from, pending_v);
                 handle_block(ctx, sole, *styles, &mut blocks)?;
                 last_was_par = false;
@@ -119,11 +150,22 @@ pub fn convert_children(
             // that contains an inline equation into `[par, equation, par]`; that
             // trailing `par` must *continue* the equation's paragraph, not start
             // a new one. It continues when the previous content was inline (not
-            // another `par`) and there is buffered content to join.
-            let continues = !last_was_par && have_pending;
+            // another `par`), there is buffered content to join, AND that buffered
+            // content actually originated from paragraph text (`pending_from_paragraph`)
+            // — otherwise a solo top-level image/box/equation with nothing before it
+            // would wrongly absorb the next, wholly unrelated paragraph (see
+            // `pending_from_paragraph`'s doc comment).
+            let continues = !last_was_par && have_pending && pending_from_paragraph;
             if !continues {
                 let from = blocks.len();
-                flush(&mut pending, &mut pending_props, &mut have_pending, &mut pending_orphaned_whitespace, &mut blocks);
+                flush(
+                    &mut pending,
+                    &mut pending_props,
+                    &mut have_pending,
+                    &mut pending_orphaned_whitespace,
+                    &mut pending_from_paragraph,
+                    &mut blocks,
+                );
                 pending_v = apply_pending_v(&mut blocks, from, pending_v);
                 // Typst's default `first-line-indent` (`all: false`) indents a
                 // paragraph only when it directly follows another; Word's
@@ -162,6 +204,7 @@ pub fn convert_children(
             pending_orphaned_whitespace = false;
             have_pending = true;
             last_was_par = true;
+            pending_from_paragraph = true;
         } else if let Some(elem) = child.to_packed::<TagElem>() {
             // Introspection tag: record as a block-level tag (kept for the
             // introspector). Transparent — does not change paragraph structure.
@@ -199,7 +242,14 @@ pub fn convert_children(
             // (mappers/table.rs) adds on top of this value afterward. See
             // `apply_pending_v`'s doc comment for the full chain.
             let from = blocks.len();
-            flush(&mut pending, &mut pending_props, &mut have_pending, &mut pending_orphaned_whitespace, &mut blocks);
+            flush(
+                &mut pending,
+                &mut pending_props,
+                &mut have_pending,
+                &mut pending_orphaned_whitespace,
+                &mut pending_from_paragraph,
+                &mut blocks,
+            );
             pending_v = apply_pending_v(&mut blocks, from, pending_v);
             if let typst_library::layout::Spacing::Rel(rel) = elem.amount {
                 let twips = crate::props::abs_to_twip(rel.abs.resolve(*styles));
@@ -281,14 +331,28 @@ pub fn convert_children(
             last_was_par = false;
         } else {
             let from = blocks.len();
-            flush(&mut pending, &mut pending_props, &mut have_pending, &mut pending_orphaned_whitespace, &mut blocks);
+            flush(
+                &mut pending,
+                &mut pending_props,
+                &mut have_pending,
+                &mut pending_orphaned_whitespace,
+                &mut pending_from_paragraph,
+                &mut blocks,
+            );
             handle_block(ctx, child, *styles, &mut blocks)?;
             pending_v = apply_pending_v(&mut blocks, from, pending_v);
             last_was_par = false;
         }
     }
     let from = blocks.len();
-    flush(&mut pending, &mut pending_props, &mut have_pending, &mut pending_orphaned_whitespace, &mut blocks);
+    flush(
+        &mut pending,
+        &mut pending_props,
+        &mut have_pending,
+        &mut pending_orphaned_whitespace,
+        &mut pending_from_paragraph,
+        &mut blocks,
+    );
     apply_pending_v(&mut blocks, from, pending_v);
 
     // Drop a *trailing* pagebreak-only paragraph: a document closing a `set page`
@@ -556,8 +620,12 @@ fn flush(
     props: &mut Option<ParaProps>,
     have_pending: &mut bool,
     orphaned_whitespace: &mut bool,
+    from_paragraph: &mut bool,
     blocks: &mut Vec<Block>,
 ) {
+    // Whatever `pending` held (or didn't), it's gone now — the next buffer
+    // starts with a clean slate, so it hasn't yet been seeded by a `ParElem`.
+    *from_paragraph = false;
     if !*have_pending && pending.is_empty() {
         *props = None;
         return;

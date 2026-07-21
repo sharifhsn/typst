@@ -28,6 +28,7 @@ use typst_library::layout::{
     AlignElem, BoxElem, HElem, InlineElem, PageElem, PagebreakElem, VElem,
 };
 use typst_library::math::{EquationElem, Mathy};
+use typst_library::visualize::ImageElem;
 use typst_library::model::{
     CiteElem, CiteGroup, DocumentElem, EnumElem, FootnoteElem, LinkElem, ListElem,
     ListItemLike, ListLike, ParElem, ParbreakElem, RefElem, TermsElem,
@@ -1062,6 +1063,17 @@ static PAR: GroupingRule = GroupingRule {
             || elem == LinkElem::ELEM
             || elem == RefElem::ELEM
             || elem == FootnoteElem::ELEM
+            // An image is inline content in Typst's own model — that is what
+            // the paged and HTML `IMAGE_RULE`s make it — and in Word's and
+            // Pandoc's too (`w:drawing` lives inside a `w:r`; Pandoc's `Image`
+            // is an `Inline`). Left interrupting, it also erased the boundary
+            // between a lone image and whatever followed: realize drops the
+            // `ParbreakElem` separating two blocks (see `visit_filter_rules`),
+            // so `[image, par]` from an image plus a *separate* caption became
+            // indistinguishable from the `[par, image, par]` that one authored
+            // paragraph split around an inline image — and a run of figures
+            // collapsed into a single `w:p` holding every caption.
+            || elem == ImageElem::ELEM
             // An *inline* equation kept native (the DOCX target) must stay in its
             // paragraph so the spaces around it survive (`a $x$ b`); a block
             // equation is display-level and still interrupts. Paged/HTML turn
