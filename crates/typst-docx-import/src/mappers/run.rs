@@ -8,7 +8,7 @@
 use typst_ooxml_core::units::{half_point_to_pt, twip_to_abs};
 
 use crate::lower::{lower_items, parse_hex_color, LowerCtx};
-use crate::mappers::{comment, dml_shape, field, math, note, shape};
+use crate::mappers::{comment, dml_shape, field, math, note, revision, shape};
 use crate::report::ImportReport;
 use crate::resolve::styles::effective_run;
 use crate::tdoc::{Inline, Inlines, Lang, Script, TextStyle, Underline};
@@ -84,6 +84,17 @@ pub(crate) fn lower_run_items(
                 {
                     out.push(Inline::Label(label));
                 }
+            }
+            // An insertion's own content follows and flows through normally;
+            // only the record rides beside it.
+            RunItem::RevisionStart(info) => {
+                out.extend(revision::lower_insertion_start(info, ctx));
+            }
+            RunItem::RevisionEnd => out.extend(revision::lower_insertion_end(ctx)),
+            // A deletion's runs never join the paragraph — they are lowered
+            // into the anchor's own value instead.
+            RunItem::Deletion { info, runs } => {
+                out.extend(revision::lower_deletion(info, runs, ctx));
             }
             RunItem::Field(f) => out.extend(field::lower_field(f, ctx)),
         }

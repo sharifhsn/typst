@@ -11,10 +11,9 @@ use std::path::PathBuf;
 use crate::opts::ImportOptions;
 use crate::tdoc::{
     Align, Block, Border, BoxStroke, BreakKind, Chart, ChartContent, CommentAnchor,
-    DocumentInfo, Figure,
-    Furniture, Inline, Inlines, List, Sides, VAlign,
-    LegendPos, Margins, PageSetup, ParStyle, Plot, PlotKind, PlotSeries, Script, Section,
-    SectionStart, Stmt, Table, TableCell, TextStyle, TypstDoc, Underline,
+    DocumentInfo, Figure, Furniture, Inline, Inlines, LegendPos, List, Margins, PageSetup,
+    ParStyle, Plot, PlotKind, PlotSeries, RevisionAnchor, Script, Section, SectionStart,
+    Sides, Stmt, Table, TableCell, TextStyle, TypstDoc, Underline, VAlign,
 };
 use crate::wml::model::WmlPackage;
 
@@ -1068,10 +1067,40 @@ impl Emitter<'_> {
         format!("#metadata(({})) <{}>", fields.join(", "), anchor.label)
     }
 
+    /// Render one tracked-change record as a labelled `#metadata(..)`, the
+    /// same invisible-but-queryable device [`Self::render_comment`] uses.
+    ///
+    /// An insertion's inserted text is *not* in here — it is live content
+    /// between this anchor and its `-end` twin. A deletion's removed text is,
+    /// because there is nowhere else for it to be.
+    fn render_revision(&mut self, anchor: &RevisionAnchor) -> String {
+        let Some(info) = &anchor.info else {
+            return format!("#metadata(none) <{}>", anchor.label);
+        };
+
+        let mut fields = vec![format!("kind: {}", string_literal(info.kind))];
+        for (name, value) in [("author", &info.author), ("date", &info.date)] {
+            if let Some(value) = value {
+                fields.push(format!("{name}: {}", string_literal(value)));
+            }
+        }
+        // Only a move carries this, and it is the sole link between the half
+        // the text left and the half it arrived at.
+        if let Some(name) = &info.move_name {
+            fields.push(format!("moved: {}", string_literal(name)));
+        }
+        if !info.body.is_empty() {
+            let body = self.render_cell_body(&info.body);
+            fields.push(format!("body: [{body}]"));
+        }
+        format!("#metadata(({})) <{}>", fields.join(", "), anchor.label)
+    }
+
     fn render_inline(&mut self, inline: &Inline) -> String {
         match inline {
             Inline::Text(s) => escape_markup(s),
             Inline::Comment(anchor) => self.render_comment(anchor),
+            Inline::Revision(anchor) => self.render_revision(anchor),
             Inline::Space => " ".to_string(),
             Inline::Linebreak => " \\\n".to_string(),
             Inline::Strong(body) => format!("*{}*", self.render_inlines(body)),

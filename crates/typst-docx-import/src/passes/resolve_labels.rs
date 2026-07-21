@@ -102,6 +102,9 @@ fn collect_inlines(inlines: &Inlines, out: &mut Labels) {
             Inline::Comment(anchor) => {
                 out.insert(anchor.label.clone());
             }
+            Inline::Revision(anchor) => {
+                out.insert(anchor.label.clone());
+            }
             Inline::Strong(body)
             | Inline::Emph(body)
             | Inline::Link { body, .. }

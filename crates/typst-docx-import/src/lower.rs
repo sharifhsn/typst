@@ -44,6 +44,14 @@ pub(crate) struct LowerCtx<'a> {
     /// (`#outline()` renders every heading, including the one that contains
     /// it — "maximum show rule depth exceeded").
     in_heading: bool,
+    /// How many revision anchors have been emitted, so each gets a unique
+    /// label. Word's own `w:id`s are per-revision and not reliably unique
+    /// across a document's parts, so they aren't reused.
+    pub(crate) revision_counter: usize,
+    /// Labels of insertions whose closing anchor hasn't been emitted yet — a
+    /// stack, because Word nests revisions (content inserted and then deleted
+    /// again writes a `w:del` inside a `w:ins`).
+    pub(crate) open_revisions: Vec<EcoString>,
     /// Endnote bodies in first-reference order, emitted together at the
     /// document's end — Word collects endnotes there, and Typst has no note
     /// store to route them through. See `mappers::note`.
@@ -78,6 +86,8 @@ impl<'a> LowerCtx<'a> {
             options,
             report,
             note_stack: Vec::new(),
+            revision_counter: 0,
+            open_revisions: Vec::new(),
             in_container: false,
             in_heading: false,
             endnotes: Vec::new(),
@@ -288,13 +298,26 @@ pub(crate) fn lower_items(items: &[BodyItem], ctx: &mut LowerCtx) -> Vec<Block> 
     for item in items {
         match item {
             BodyItem::Paragraph(p) => {
-                let ParaResult { anchored, kind } = mappers::para::lower_paragraph(p, ctx);
+                let ParaResult { anchored, leading, kind } =
+                    mappers::para::lower_paragraph(p, ctx);
 
                 // An anchored figure/chart is a block in its own right and
                 // leads the paragraph it hangs off. Typst can't place a block
                 // between two items of one list, so an anchored block inside a
                 // list item ends the list and starts a new one after it —
                 // slightly worse than Word's layout, but it keeps the image.
+                // Anchors hoisted out of a heading go in front of it, still
+                // in document order and still rendering nothing.
+                if !leading.is_empty() {
+                    if let Some(pending) = pending_list.take() {
+                        blocks.push(
+                            pending.finish(&ctx.package.numbering, &mut *ctx.report),
+                        );
+                    }
+                    let style = ParStyle::default();
+                    blocks.push(Block::Paragraph { style, body: leading });
+                }
+
                 if let Some(block) = anchored {
                     if let Some(pending) = pending_list.take() {
                         blocks.push(pending.finish(&ctx.package.numbering, &mut *ctx.report));

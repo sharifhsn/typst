@@ -248,7 +248,13 @@ fn run_item_has_tab(item: &RunItem) -> bool {
         RunItem::Run(r) => r.content.iter().any(|c| matches!(c, RunContent::Tab)),
         RunItem::Hyperlink { runs, .. } => runs.iter().any(run_item_has_tab),
         RunItem::Field(f) => f.result.iter().any(run_item_has_tab),
-        RunItem::Bookmark(_) | RunItem::CommentRange { .. } => false,
+        RunItem::Bookmark(_)
+        | RunItem::CommentRange { .. }
+        | RunItem::RevisionStart(_)
+        | RunItem::RevisionEnd => false,
+        // A deletion's runs are out of the flow, but a tab inside one still
+        // says this furniture used tab stops.
+        RunItem::Deletion { runs, .. } => runs.iter().any(run_item_has_tab),
     }
 }
 

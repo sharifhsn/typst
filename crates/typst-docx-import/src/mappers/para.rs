@@ -10,7 +10,7 @@ use typst_ooxml_core::units::twip_to_abs;
 
 use crate::lower::{parse_hex_color, LowerCtx};
 use crate::mappers::run::lower_paragraph_inlines;
-use crate::mappers::{chart, drawing, math, table};
+use crate::mappers::{chart, drawing, math, revision, table};
 use crate::resolve::styles::{effective_para, heading_level};
 use crate::tdoc::{Align, Block, BreakKind, Inline, Inlines, ParStyle};
 use crate::wml::model::{BreakType, DrawingRef, ParaProps, Paragraph, RunContent, RunItem};
@@ -25,6 +25,18 @@ use crate::wml::model::{BreakType, DrawingRef, ParaProps, Paragraph, RunContent,
 /// and classifying it as "a list item" used to discard the image entirely.
 pub struct ParaResult {
     pub anchored: Option<Block>,
+    /// Comment/revision anchors lifted **out** of a heading, to be emitted as
+    /// their own block just before it.
+    ///
+    /// A label binds to the element it follows — except at the end of a
+    /// heading, where it binds to the *heading* instead of to the `#metadata`
+    /// it was written after, leaving the record unreachable by `#query`.
+    /// (Verified: inside a list item, an ordinary paragraph or a table cell
+    /// the label binds correctly, so only headings need this.) Hoisting the
+    /// anchors to a sibling block costs the exact word they pointed at —
+    /// headings are short — and keeps the record queryable, which is the
+    /// whole point of emitting it.
+    pub leading: Vec<Inline>,
     pub kind: ParaKind,
 }
 
@@ -48,7 +60,7 @@ pub enum ParaKind {
 
 impl ParaResult {
     fn bare(kind: ParaKind) -> Self {
-        ParaResult { anchored: None, kind }
+        ParaResult { anchored: None, leading: Vec::new(), kind }
     }
 }
 
@@ -123,6 +135,13 @@ pub(crate) fn lower_paragraph(p: &Paragraph, ctx: &mut LowerCtx) -> ParaResult {
         })
         .or_else(|| first_chart(p).and_then(|d| chart::lower_chart(d, ctx)).map(Block::Chart));
 
+    if p.props.format_revision {
+        revision::report_unmapped(
+            "a tracked formatting change (w:rPrChange/w:pPrChange)",
+            ctx,
+        );
+    }
+
     if eff_para.keep_next == Some(true) {
         ctx.report.approximate(
             "keep with next",
@@ -131,8 +150,17 @@ pub(crate) fn lower_paragraph(p: &Paragraph, ctx: &mut LowerCtx) -> ParaResult {
         );
     }
 
+    // Lifted before classification so the heading's own body no longer holds
+    // them (see `ParaResult::leading`).
+    let leading = if heading.is_some() { take_anchors(&mut inlines) } else { Vec::new() };
+    let anchors = has_anchors(&inlines);
     let bottom_rule = eff_para.borders.is_bottom_only();
-    let kind = if bottom_rule && !has_text && drawing_ref.is_none() {
+    // A paragraph carrying a comment or revision record is never reduced to a
+    // decorative rule, even when its style draws one and its text is gone:
+    // `ParaKind::Rule` carries no inlines, so taking that branch would discard
+    // the record. A wholly-deleted paragraph is a deleted paragraph, not a
+    // horizontal line.
+    let kind = if bottom_rule && !has_text && !anchors && drawing_ref.is_none() {
         ParaKind::Rule
     } else if let Some(level) = heading {
         ParaKind::Heading { level, body: inlines }
@@ -140,13 +168,31 @@ pub(crate) fn lower_paragraph(p: &Paragraph, ctx: &mut LowerCtx) -> ParaResult {
         let ordered = package.numbering.is_ordered(num.num_id, num.ilvl);
         let level = num.ilvl.clamp(0, i64::from(u8::MAX)) as u8;
         ParaKind::ListItem { ordered, level, body: inlines, num_id: Some(num.num_id) }
-    } else if has_text {
+    } else if has_text || anchors {
+        // `has_anchors` keeps a paragraph whose only content is a comment or
+        // revision record — a wholly-deleted paragraph is exactly that, and
+        // dropping it as "empty" would throw the record away. It costs
+        // nothing visually: a paragraph holding only `#metadata` renders
+        // pixel-identically to no paragraph at all.
         ParaKind::Paragraph { style: par_style(&eff_para), body: inlines }
     } else {
         ParaKind::Empty
     };
 
-    ParaResult { anchored, kind }
+    ParaResult { anchored, leading, kind }
+}
+
+/// Remove every comment/revision anchor from `inlines` and return them in
+/// document order.
+fn take_anchors(inlines: &mut Inlines) -> Vec<Inline> {
+    if !has_anchors(inlines) {
+        return Vec::new();
+    }
+    let (anchors, rest): (Vec<_>, Vec<_>) = std::mem::take(inlines)
+        .into_iter()
+        .partition(|inline| matches!(inline, Inline::Comment(_) | Inline::Revision(_)));
+    *inlines = rest;
+    anchors
 }
 
 /// Move every [`Inline::Label`] to the end of `inlines`.
@@ -244,7 +290,10 @@ fn first_drawing(p: &Paragraph) -> Option<&DrawingRef> {
         RunItem::Hyperlink { .. }
         | RunItem::Field(_)
         | RunItem::Bookmark(_)
-        | RunItem::CommentRange { .. } => None,
+        | RunItem::CommentRange { .. }
+        | RunItem::RevisionStart(_)
+        | RunItem::RevisionEnd
+        | RunItem::Deletion { .. } => None,
     })
 }
 
@@ -259,7 +308,10 @@ fn first_chart(p: &Paragraph) -> Option<&DrawingRef> {
         RunItem::Hyperlink { .. }
         | RunItem::Field(_)
         | RunItem::Bookmark(_)
-        | RunItem::CommentRange { .. } => None,
+        | RunItem::CommentRange { .. }
+        | RunItem::RevisionStart(_)
+        | RunItem::RevisionEnd
+        | RunItem::Deletion { .. } => None,
     })
 }
 
@@ -281,7 +333,9 @@ pub(crate) fn inlines_have_text(inlines: &Inlines) -> bool {
         // Nor does a comment anchor: `#metadata` is invisible by design, and
         // treating one as visible would resurrect an empty paragraph Word
         // only kept in order to hang the anchor on.
-        Inline::Comment(_) => false,
+        // Nor does a revision record: an insertion's text is separate live
+        // content, and a deletion's is deliberately not in the document.
+        Inline::Comment(_) | Inline::Revision(_) => false,
         // A page reference renders a number, so it is visible content.
         Inline::PageRef(_) => true,
         Inline::Styled { body, .. } => inlines_have_text(body),
@@ -320,6 +374,15 @@ fn lower_jc(jc: &str) -> Option<Align> {
         "left" | "start" => Some(Align::Left),
         _ => None,
     }
+}
+
+/// Whether these inlines carry a comment or revision record. Such an anchor
+/// is invisible, so it never counts as *text* (see [`inlines_have_text`]) —
+/// but it is still information, which is a different question.
+fn has_anchors(inlines: &Inlines) -> bool {
+    inlines
+        .iter()
+        .any(|inline| matches!(inline, Inline::Comment(_) | Inline::Revision(_)))
 }
 
 fn par_style(eff: &ParaProps) -> ParStyle {

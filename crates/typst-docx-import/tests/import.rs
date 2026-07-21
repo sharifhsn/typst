@@ -4,7 +4,9 @@
 //! emitted Typst source is idiomatic — headings as `=`, emphasis as
 //! `*`/`_`, and lists as `-`/`+`.
 
-use typst_docx_import::{import_docx, import_docx_with, ChartStyle, ImportOptions, Tier};
+use typst_docx_import::{
+    import_docx, import_docx_with, ChartStyle, ImportOptions, Tier, TrackedChanges,
+};
 use typst_ooxml_core::opc::{Package, PackageOptions, RelMode, Rels};
 
 const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -1545,12 +1547,15 @@ fn smart_tags_and_bidi_overrides_are_transparent() {
     assert!(src.contains("Overridden"), "w:bdo lost its text:\n{src}");
 }
 
-/// Tracked changes are accepted: `w:ins` wraps runs that *are* part of the
-/// final text, so the wrapper must be transparent, while `w:del` holds text
-/// the author removed and must not come back. `delins.docx` in the POI corpus
-/// has 43 insertions that were being dropped wholesale.
+/// Tracked changes render as "all changes accepted" in **both** modes: an
+/// insertion's text is live content, a deletion's is not. `delins.docx` in the
+/// POI corpus has 43 insertions that were once being dropped wholesale.
+///
+/// Under the default `Preserve` they also keep their record, as invisible
+/// metadata — so the deleted words are readable through `#query` without ever
+/// reaching the page.
 #[test]
-fn tracked_insertions_are_kept_and_deletions_dropped() {
+fn tracked_changes_render_accepted_and_keep_their_record() {
     let doc = r#"<?xml version="1.0"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
   <w:p>
@@ -1570,10 +1575,28 @@ fn tracked_insertions_are_kept_and_deletions_dropped() {
 
     let src = import_docx(&bytes).expect("import should succeed").source;
     assert!(src.contains("Kept"), "plain run lost:\n{src}");
+    // Insertions are live text, bracketed by a record.
     assert!(src.contains("InsertedText"), "w:ins content was dropped:\n{src}");
     assert!(src.contains("MovedIn"), "w:moveTo content was dropped:\n{src}");
-    assert!(!src.contains("DeletedText"), "w:del content leaked back in:\n{src}");
-    assert!(!src.contains("MovedOut"), "w:moveFrom content leaked back in:\n{src}");
+    assert!(src.contains("kind: \"insertion\""), "no insertion record:\n{src}");
+    assert!(src.contains("<ins-1>"), "insertion not opened:\n{src}");
+    assert!(src.contains("<ins-1-end>"), "insertion not closed:\n{src}");
+    // A deletion's text is inside the metadata *value* — never loose in the
+    // markup, so it cannot render.
+    assert!(
+        src.contains("kind: \"deletion\", author: \"a\", body: [DeletedText"),
+        "deleted text not carried in the record:\n{src}"
+    );
+    let loose = src.replace("body: [DeletedText ]", "").replace("body: [MovedOut]", "");
+    assert!(!loose.contains("DeletedText"), "w:del content leaked into the text:\n{src}");
+    assert!(!loose.contains("MovedOut"), "w:moveFrom leaked into the text:\n{src}");
+
+    // `Accept` throws the record away and leaves the same visible text.
+    let opts = ImportOptions { tracked: TrackedChanges::Accept, ..Default::default() };
+    let accepted = import_docx_with(&bytes, &opts).expect("import should succeed").source;
+    assert!(accepted.contains("Kept") && accepted.contains("InsertedText"));
+    assert!(!accepted.contains("DeletedText"), "accept kept a deletion:\n{accepted}");
+    assert!(!accepted.contains("metadata"), "accept mode emitted a record:\n{accepted}");
 }
 
 /// A plotted chart must use Word's own extent and legend placement. Rendering
@@ -2917,4 +2940,56 @@ fn a_dangling_comment_anchor_is_reported_and_emits_nothing() {
     assert!(result.source.contains("Orphaned."), "text lost with the anchor:\n{}", result.source);
     assert!(!result.source.contains("comment-9"), "emitted a label with nothing behind it");
     assert!(result.report.notes.iter().any(|n| n.what == "comment"), "went unreported");
+}
+
+/// A label binds to the element it follows — *except* at the end of a heading,
+/// where it binds to the heading instead of to the `#metadata` it was written
+/// after, which left the record unreachable by `#query`. Anchors on a heading
+/// are therefore hoisted to their own block just before it. (Lists, ordinary
+/// paragraphs and table cells all bind correctly and keep their anchors in
+/// place, where they mark the exact words.)
+#[test]
+fn an_anchor_on_a_heading_is_hoisted_so_its_label_still_binds_to_the_record() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
+      <w:commentRangeStart w:id="4"/>
+      <w:r><w:t>Chapter One</w:t></w:r>
+      <w:commentRangeEnd w:id="4"/>
+    </w:p>
+  </w:body></w:document>"#;
+
+    const STYLES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/>
+    <w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>
+</w:styles>"#;
+
+    const COMMENTS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:comment w:id="4" w:author="Reviewer">
+    <w:p><w:r><w:t>Retitle this.</w:t></w:r></w:p></w:comment>
+</w:comments>"#;
+
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_xml("word/styles.xml", "application/xml", STYLES_XML.into());
+    package.add_xml("word/comments.xml", "application/xml", COMMENTS_XML.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+    let heading = src.find("= Chapter One").expect("heading lost");
+    let anchor = src.find("<comment-4>").expect("comment lost");
+    // Before the heading, on its own line — not trailing inside it, where the
+    // label would silently bind to the heading element instead.
+    assert!(anchor < heading, "anchor not hoisted ahead of the heading:\n{src}");
+    assert!(
+        !src[heading..].starts_with("= Chapter One #metadata"),
+        "anchor left inside the heading:\n{src}"
+    );
+    assert!(src.contains("author: \"Reviewer\""), "payload lost:\n{src}");
 }

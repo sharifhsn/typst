@@ -172,12 +172,40 @@ pub enum RunItem {
     /// genuinely only needs its start, both ends matter here — they are what
     /// says *which words* the comment is about.
     CommentRange { id: i64, end: bool },
+    /// The start of an **insertion** (`w:ins`, or `w:moveTo` for text moved
+    /// in): the runs that follow, up to the matching [`Self::RevisionEnd`],
+    /// are content somebody added. They are ordinary live content — an
+    /// accepted insertion is just text — so this is a marker beside them
+    /// rather than a wrapper around them, which is also what lets Typst
+    /// express it: a label attaches to one element, so a range is two points.
+    RevisionStart(RevisionInfo),
+    /// Closes the nearest open [`Self::RevisionStart`].
+    RevisionEnd,
+    /// A **deletion** (`w:del`, or `w:moveFrom` for text moved away). Unlike
+    /// an insertion this has no live content to bracket — the whole point is
+    /// that it is *not* in the document any more — so the removed runs are
+    /// carried inside the item itself, to be lowered into the metadata value
+    /// where they render nothing but stay readable.
+    Deletion { info: RevisionInfo, runs: Vec<RunItem> },
     /// A Word field. Both OOXML spellings — the `w:fldSimple` element and the
     /// flattened `w:fldChar` begin/separate/end run sequence — are folded
     /// back into this one logical item at parse time, so lowering sees a
     /// field as a field rather than as loose punctuation runs. See
     /// [`crate::mappers::field`] for how `instr` is interpreted.
     Field(Field),
+}
+
+/// Who made a tracked change, and when. `move_name` is the `@w:name` Word
+/// puts on both halves of a move, which is the only thing tying a
+/// `w:moveFrom` to its `w:moveTo`.
+#[derive(Debug, Default, Clone)]
+pub struct RevisionInfo {
+    pub author: Option<EcoString>,
+    /// `@w:date`, a W3CDTF timestamp, kept verbatim.
+    pub date: Option<EcoString>,
+    pub move_name: Option<EcoString>,
+    /// Whether this is half of a *move* rather than a plain edit.
+    pub moved: bool,
 }
 
 /// A Word field: `w:fldSimple`, or the flattened `w:fldChar`
@@ -535,6 +563,12 @@ pub struct ParaProps {
     pub borders: Borders,
     /// `w:keepLines` — every line of the paragraph stays on one page.
     pub keep_lines: Toggle,
+    /// Whether this paragraph carries a tracked **formatting** change
+    /// (`w:pPrChange`, or a `w:rPrChange` on any of its runs) — a record of
+    /// what the formatting *used to be*. Kept as one flag rather than the old
+    /// properties themselves: nothing in Typst could consume them, so all the
+    /// mapper does is say so.
+    pub format_revision: bool,
     /// `w:keepNext` — the paragraph stays on the page of the one *after* it.
     /// Kept only so [`crate::mappers::para`] can report the loss: Typst has no
     /// property that binds a block to its successor, and the heading idiom it

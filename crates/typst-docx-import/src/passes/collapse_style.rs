@@ -122,6 +122,16 @@ fn collapse_inline(inline: Inline, default: &TextStyle, in_heading: bool, out: &
         // treatment as a footnote's — an annotation should read as idiomatic
         // Typst too, not stay at tier-1 literal formatting just because it
         // happens to live inside a metadata value.
+        // A deletion's body is ordinary content, so it gets the same tier-2
+        // treatment as a comment's or a footnote's.
+        Inline::Revision(mut anchor) => {
+            if let Some(info) = anchor.info.as_mut() {
+                for block in &mut info.body {
+                    walk_block(block, default);
+                }
+            }
+            out.push(Inline::Revision(anchor));
+        }
         Inline::Comment(mut anchor) => {
             if let Some(info) = anchor.info.as_mut() {
                 for block in &mut info.body {

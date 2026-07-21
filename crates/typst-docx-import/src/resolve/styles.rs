@@ -76,6 +76,7 @@ fn merge_para(base: &ParaProps, over: &ParaProps) -> ParaProps {
         shd_fill: over.shd_fill.clone().or_else(|| base.shd_fill.clone()),
         mark_props: merge_run(&base.mark_props, &over.mark_props),
         borders: merge_borders(&base.borders, &over.borders),
+        format_revision: base.format_revision || over.format_revision,
         keep_lines: over.keep_lines.or(base.keep_lines),
         keep_next: over.keep_next.or(base.keep_next),
         sect_pr: over.sect_pr.clone().or_else(|| base.sect_pr.clone()),

@@ -9,6 +9,7 @@ pub mod field;
 pub mod math;
 pub mod note;
 pub mod para;
+pub mod revision;
 pub mod run;
 pub mod section;
 pub mod shape;

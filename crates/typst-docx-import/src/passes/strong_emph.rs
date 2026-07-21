@@ -99,6 +99,14 @@ fn promote_inline(inline: Inline, out: &mut Inlines) {
     match inline {
         // See the matching arm in `collapse_style`: a comment's body is
         // walked as its own block sequence, exactly like a footnote's.
+        Inline::Revision(mut anchor) => {
+            if let Some(info) = anchor.info.as_mut() {
+                for block in &mut info.body {
+                    walk_block(block);
+                }
+            }
+            out.push(Inline::Revision(anchor));
+        }
         Inline::Comment(mut anchor) => {
             if let Some(info) = anchor.info.as_mut() {
                 for block in &mut info.body {

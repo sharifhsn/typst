@@ -205,6 +205,8 @@ pub enum Inline {
     PageRef(EcoString),
     /// One end of a Word comment's anchor — see [`CommentAnchor`].
     Comment(CommentAnchor),
+    /// A tracked change's record — see [`RevisionAnchor`].
+    Revision(RevisionAnchor),
     /// `<name>` — a Typst label, lowered from a `w:bookmarkStart`. A label
     /// attaches to whatever *precedes* it, so `mappers::para` hoists these to
     /// the end of their block: Word writes a bookmark at the start of the
@@ -267,6 +269,40 @@ pub struct CommentInfo {
     pub author: Option<EcoString>,
     pub initials: Option<EcoString>,
     pub date: Option<EcoString>,
+    pub body: Vec<Block>,
+}
+
+/// A tracked change's record, emitted as a labelled `#metadata` exactly like
+/// [`CommentAnchor`] and for the same reason: it must not reach the page.
+///
+/// Both halves of the revision model fall out of one observation — a *range
+/// is two points*:
+///
+/// - An **insertion** brackets live content, so it is two anchors with the
+///   inserted text between them, rendering normally (an accepted insertion is
+///   just text).
+/// - A **deletion** has no live content to bracket, so it is a single anchor
+///   whose [`RevisionInfo::body`] carries the removed text. It renders
+///   nothing and occupies no space, but the words are still there to read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RevisionAnchor {
+    pub label: EcoString,
+    /// `None` closes an insertion opened earlier.
+    pub info: Option<RevisionInfo>,
+}
+
+/// Who changed what, and when.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RevisionInfo {
+    /// `"insertion"` or `"deletion"` — what the metadata's `kind` field says.
+    pub kind: &'static str,
+    pub author: Option<EcoString>,
+    pub date: Option<EcoString>,
+    /// Word's `@w:name`, which is the only thing tying the two halves of a
+    /// *move* together. Present only for a move.
+    pub move_name: Option<EcoString>,
+    /// A deletion's removed content. Empty for an insertion, whose content is
+    /// live in the document between its two anchors.
     pub body: Vec<Block>,
 }
 

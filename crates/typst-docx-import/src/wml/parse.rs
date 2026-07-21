@@ -17,7 +17,7 @@ use crate::ImportError;
 use crate::report::ImportReport;
 use crate::wml::model::{
     BorderEdge, Borders, Body, BodyItem, BreakType, Cell, CellMargins, ChartData,
-    ChartKind, Comment,
+    ChartKind, Comment, RevisionInfo,
     ChartSeries, DmlDash, DmlFill, DmlGeometry, DmlGradient, DmlGradientKind, DmlSeg, DmlShape,
     DmlStroke, DocumentMeta, DrawingRef, Field,
     FurnitureKind, FurnitureRef, LegendPos, LevelFormat, NumRef, Numbering, ParaProps, Paragraph,
@@ -450,7 +450,14 @@ fn collect_bookmarks_in_run_item(item: &RunItem, labels: &mut Labels, used: &mut
         RunItem::Bookmark(name) => register_bookmark(name, labels, used),
         // Comment anchors get their labels at lower time, from the comment's
         // own id, so there is no name to reserve here.
-        RunItem::CommentRange { .. } => {}
+        RunItem::CommentRange { .. }
+        | RunItem::RevisionStart(_)
+        | RunItem::RevisionEnd => {}
+        RunItem::Deletion { runs, .. } => {
+            for run_item in runs {
+                collect_bookmarks_in_run_item(run_item, labels, used);
+            }
+        }
         RunItem::Hyperlink { runs, .. } => {
             for run_item in runs {
                 collect_bookmarks_in_run_item(run_item, labels, used);
@@ -635,14 +642,93 @@ fn unwrap_wrappers<'a>(node: Node<'a, 'a>) -> Vec<Node<'a, 'a>> {
     out
 }
 
-/// Splice an iterator of already-selected children (the caller may have
-/// filtered some out, as the paragraph walk does for `w:pPr`). Generic, but
-/// *not* recursive — the recursion lives in the two concrete functions below,
-/// because a generic function that recurses on a freshly-filtered iterator
+/// One item of a paragraph's flattened inline content, as
+/// [`flatten_revisions`] produces it.
+///
+/// A revision wrapper cannot simply be spliced away like the other transparent
+/// wrappers when its record is being kept: `w:ins` *brackets* content, and the
+/// bracket is the information. Since the flattened list is otherwise made of
+/// XML nodes, and a marker is not a node, the list becomes this small enum
+/// instead — which is also what lets a deletion carry nodes that never enter
+/// the run sequence at all.
+enum Flat<'a> {
+    Node(Node<'a, 'a>),
+    /// Opens an insertion (`w:ins`, or `w:moveTo`).
+    RevisionStart(RevisionInfo),
+    RevisionEnd,
+    /// A deletion (`w:del`/`w:moveFrom`) and the nodes it removed. They are
+    /// held aside rather than spliced into the run sequence: an accepted
+    /// deletion is *not* part of the text, so its content must not flow into
+    /// the paragraph — only into the revision record.
+    Deleted { info: RevisionInfo, nodes: Vec<Node<'a, 'a>> },
+}
+
+/// `w:author`/`w:date` off a revision wrapper, plus the `w:name` that ties the
+/// two halves of a move together.
+fn revision_info(node: Node, moved: bool) -> RevisionInfo {
+    RevisionInfo {
+        author: attr(node, "author").map(EcoString::from),
+        date: attr(node, "date").map(EcoString::from),
+        move_name: attr(node, "name").map(EcoString::from),
+        moved,
+    }
+}
+
+/// Flatten a paragraph's inline children, turning revision wrappers into
+/// [`Flat`] markers rather than splicing them away.
+///
+/// Always records them: the Word IR's job is to say what the document
+/// contains, and whether a revision reaches the *output* is a lowering
+/// decision (see [`crate::opts::TrackedChanges`] and `mappers::revision`).
+///
+/// Generic, but *not* recursive — same constraint as [`splice_children`] and
+/// for the same reason: recursing generically on a freshly-filtered iterator
 /// instantiates a new closure type per level and never stops monomorphizing.
-fn splice_wrappers<'a>(children: impl Iterator<Item = Node<'a, 'a>>, out: &mut Vec<Node<'a, 'a>>) {
+/// The recursion lives in the two concrete functions below.
+fn flatten_revisions<'a>(
+    children: impl Iterator<Item = Node<'a, 'a>>,
+    out: &mut Vec<Flat<'a>>,
+) {
     for child in children {
-        splice_node(child, 0, out);
+        flatten_revision_node(child, 0, out);
+    }
+}
+
+fn flatten_revision_children<'a>(
+    parent: Node<'a, 'a>,
+    depth: usize,
+    out: &mut Vec<Flat<'a>>,
+) {
+    for child in parent.children().filter(|n| n.is_element()) {
+        flatten_revision_node(child, depth, out);
+    }
+}
+
+fn flatten_revision_node<'a>(child: Node<'a, 'a>, depth: usize, out: &mut Vec<Flat<'a>>) {
+    let name = child.tag_name().name();
+    let moved = name == "moveTo" || name == "moveFrom";
+    match name {
+        "ins" | "moveTo" if depth < MAX_WRAPPER_DEPTH => {
+            out.push(Flat::RevisionStart(revision_info(child, moved)));
+            // Recursed rather than spliced, so a revision nested inside
+            // another (content inserted and then deleted again — Word writes
+            // exactly that) keeps both records.
+            flatten_revision_children(child, depth + 1, out);
+            out.push(Flat::RevisionEnd);
+        }
+        "del" | "moveFrom" if depth < MAX_WRAPPER_DEPTH => {
+            let mut nodes = Vec::new();
+            splice_children(child, depth + 1, &mut nodes);
+            out.push(Flat::Deleted { info: revision_info(child, moved), nodes });
+        }
+        // Everything else — including a revision wrapper past the depth cap —
+        // falls through to the ordinary wrapper splicing, which is exactly
+        // the accept-the-change behaviour that predates this.
+        _ => {
+            let mut spliced = Vec::new();
+            splice_node(child, 0, &mut spliced);
+            out.extend(spliced.into_iter().map(Flat::Node));
+        }
     }
 }
 
@@ -919,7 +1005,11 @@ fn namespace_run_items(items: &mut [RunItem], part: &str) {
             // A bookmark name is document-global, not a per-part relationship
             // id, so it needs no namespacing. Nor is a comment id, which
             // keys `word/comments.xml` for the whole package.
-            RunItem::Bookmark(_) | RunItem::CommentRange { .. } => {}
+            RunItem::Bookmark(_)
+            | RunItem::CommentRange { .. }
+            | RunItem::RevisionStart(_)
+            | RunItem::RevisionEnd => {}
+            RunItem::Deletion { runs, .. } => namespace_run_items(runs, part),
             RunItem::Run(r) => {
                 for c in &mut r.content {
                     match c {
@@ -1089,11 +1179,18 @@ fn parse_settings(reader: &mut Reader, report: &mut ImportReport) -> Settings {
 }
 
 fn parse_paragraph(node: Node, tb_depth: usize) -> Paragraph {
-    let props = node
+    let mut props = node
         .children()
         .find(|n| is_element(*n, "pPr"))
         .map(parse_para_props)
         .unwrap_or_default();
+    // A run's own `w:rPrChange` sits several levels down, so it is found by
+    // one descendant scan rather than threaded up through run parsing — the
+    // mapper only needs to know *that* the paragraph has one, since there is
+    // nothing in Typst to map it onto.
+    props.format_revision |= node
+        .descendants()
+        .any(|n| n.is_element() && n.tag_name().name() == "rPrChange");
     let runs = fold_field_children(
         node.children().filter(|n| n.is_element() && n.tag_name().name() != "pPr"),
         tb_depth,
@@ -1206,9 +1303,33 @@ fn fold_field_children<'a>(
     // machine below sees a flat run sequence, exactly as if Word had never
     // wrapped it.
     let mut flat = Vec::new();
-    splice_wrappers(children, &mut flat);
+    flatten_revisions(children, &mut flat);
 
-    for child in flat {
+    for item in flat {
+        let child = match item {
+            Flat::Node(node) => node,
+            // An insertion's own runs follow this marker and are ordinary
+            // content; only the record rides beside them.
+            Flat::RevisionStart(info) => {
+                push_item(&mut stack, &mut top, RunItem::RevisionStart(info));
+                continue;
+            }
+            Flat::RevisionEnd => {
+                push_item(&mut stack, &mut top, RunItem::RevisionEnd);
+                continue;
+            }
+            // A deletion's runs are parsed but kept *out* of the paragraph's
+            // own sequence — they are not part of the text any more.
+            Flat::Deleted { info, nodes } => {
+                let runs = nodes
+                    .into_iter()
+                    .filter(|n| is_element(*n, "r"))
+                    .map(|n| RunItem::Run(parse_run(n, tb_depth)))
+                    .collect();
+                push_item(&mut stack, &mut top, RunItem::Deletion { info, runs });
+                continue;
+            }
+        };
         match child.tag_name().name() {
             "r" => match classify_run(child, tb_depth) {
                 RunKind::FieldBegin => {
@@ -1452,6 +1573,15 @@ fn parse_run(node: Node, tb_depth: usize) -> Run {
             // Typst renumbers footnotes itself, so this must never surface as
             // stray text in the imported note.
             "footnoteRef" | "endnoteRef" => {}
+            // A deletion's text. Word writes removed text as `w:delText`
+            // rather than `w:t` precisely so a naive reader won't show it —
+            // it reaches this parser only from inside a `w:del` whose record
+            // is being kept, never from the document's live text.
+            "delText" => {
+                if let Some(t) = child.text() {
+                    run.content.push(RunContent::Text(t.into()));
+                }
+            }
             // The comment mark at an anchor.
             "commentReference" => {
                 if let Some(id) = attr(child, "id").and_then(parse_i64) {
@@ -2176,6 +2306,7 @@ fn parse_para_props(node: Node) -> ParaProps {
             }
             "shd" => props.shd_fill = attr(child, "fill").map(EcoString::from),
             "pBdr" => props.borders = parse_borders(child),
+            "pPrChange" => props.format_revision = true,
             "keepLines" => props.keep_lines = toggle(Some(child)),
             "keepNext" => props.keep_next = toggle(Some(child)),
             "rPr" => props.mark_props = parse_run_props(child),

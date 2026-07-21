@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use ecow::EcoString;
 
-pub use opts::{ChartStyle, ImportOptions, Tier};
+pub use opts::{ChartStyle, ImportOptions, Tier, TrackedChanges};
 pub use report::ImportReport;
 pub use tdoc::TypstDoc;
 
