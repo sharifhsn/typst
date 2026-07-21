@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 use crate::opts::ImportOptions;
 use crate::tdoc::{
-    Align, Block, Border, BoxStroke, BreakKind, Chart, ChartContent, DocumentInfo, Figure,
+    Align, Block, Border, BoxStroke, BreakKind, Chart, ChartContent, CommentAnchor,
+    DocumentInfo, Figure,
     Furniture, Inline, Inlines, List, Sides, VAlign,
     LegendPos, Margins, PageSetup, ParStyle, Plot, PlotKind, PlotSeries, Script, Section,
     SectionStart, Stmt, Table, TableCell, TextStyle, TypstDoc, Underline,
@@ -1029,9 +1030,48 @@ fn shorthand_is_safe(prev: Option<char>, next: Option<char>, body: &str) -> bool
 }
 
 impl Emitter<'_> {
+    /// Render one comment anchor as a labelled `#metadata(..)`.
+    ///
+    /// `#metadata` renders nothing, so an imported document looks exactly as
+    /// it would with the comments stripped — which is the whole point: a
+    /// comment is an annotation, not content, and must not reach the page.
+    /// The value is still reachable with `#query(<comment-1>)` (or
+    /// `#query(selector(metadata))` for all of them), so a `#show` rule can
+    /// opt into displaying them.
+    ///
+    /// The label rides on the metadata element itself rather than being
+    /// hoisted the way a bookmark's is (see `mappers::para::hoist_labels`):
+    /// hoisting would move the anchor away from the words it marks, and for a
+    /// comment that position *is* the information.
+    fn render_comment(&mut self, anchor: &CommentAnchor) -> String {
+        let Some(info) = &anchor.info else {
+            // The closing end of a span: a bare labelled anchor, since the
+            // payload already rode in on the opening one.
+            return format!("#metadata(none) <{}>", anchor.label);
+        };
+
+        let mut fields = vec!["kind: \"comment\"".to_string()];
+        for (name, value) in [
+            ("author", &info.author),
+            ("initials", &info.initials),
+            ("date", &info.date),
+        ] {
+            if let Some(value) = value {
+                fields.push(format!("{name}: {}", string_literal(value)));
+            }
+        }
+        // The body stays *content* rather than a flattened string, so a
+        // comment's own emphasis, lists and links survive into the value and
+        // a show rule can render them as authored.
+        let body = self.render_cell_body(&info.body);
+        fields.push(format!("body: [{body}]"));
+        format!("#metadata(({})) <{}>", fields.join(", "), anchor.label)
+    }
+
     fn render_inline(&mut self, inline: &Inline) -> String {
         match inline {
             Inline::Text(s) => escape_markup(s),
+            Inline::Comment(anchor) => self.render_comment(anchor),
             Inline::Space => " ".to_string(),
             Inline::Linebreak => " \\\n".to_string(),
             Inline::Strong(body) => format!("*{}*", self.render_inlines(body)),

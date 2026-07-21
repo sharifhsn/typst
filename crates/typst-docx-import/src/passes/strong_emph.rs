@@ -97,6 +97,16 @@ fn promote_inlines(inlines: Inlines) -> Inlines {
 
 fn promote_inline(inline: Inline, out: &mut Inlines) {
     match inline {
+        // See the matching arm in `collapse_style`: a comment's body is
+        // walked as its own block sequence, exactly like a footnote's.
+        Inline::Comment(mut anchor) => {
+            if let Some(info) = anchor.info.as_mut() {
+                for block in &mut info.body {
+                    walk_block(block);
+                }
+            }
+            out.push(Inline::Comment(anchor));
+        }
         Inline::Strong(body) => out.push(Inline::Strong(promote_inlines(body))),
         Inline::Emph(body) => out.push(Inline::Emph(promote_inlines(body))),
         Inline::Link { dest, body } => {

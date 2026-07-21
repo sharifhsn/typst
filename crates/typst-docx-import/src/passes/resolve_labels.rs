@@ -97,6 +97,11 @@ fn collect_inlines(inlines: &Inlines, out: &mut Labels) {
             Inline::Label(name) => {
                 out.insert(name.clone());
             }
+            // A comment anchor emits its label on a `#metadata` element of
+            // its own, so the name is just as much "defined" as a bookmark's.
+            Inline::Comment(anchor) => {
+                out.insert(anchor.label.clone());
+            }
             Inline::Strong(body)
             | Inline::Emph(body)
             | Inline::Link { body, .. }

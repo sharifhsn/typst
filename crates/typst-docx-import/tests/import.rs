@@ -2797,3 +2797,124 @@ fn an_ole_object_keeps_its_preview_picture_and_reports_what_was_embedded() {
         "double-reported one embedded object"
     );
 }
+
+/// A Word comment is an *annotation*, not content: it must not reach the page.
+/// It lowers to a labelled `#metadata`, which renders nothing but is reachable
+/// through `#query`, so the information survives without the import deciding
+/// to print it. A commented *span* becomes two anchors, because a Typst label
+/// attaches to a single element.
+#[test]
+fn comments_become_invisible_queryable_metadata_delimiting_the_commented_span() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:r><w:t xml:space="preserve">Keep </w:t></w:r>
+      <w:commentRangeStart w:id="7"/>
+      <w:r><w:t>this bit</w:t></w:r>
+      <w:commentRangeEnd w:id="7"/>
+      <w:r><w:commentReference w:id="7"/></w:r>
+      <w:r><w:t xml:space="preserve"> intact.</w:t></w:r>
+    </w:p>
+  </w:body></w:document>"#;
+
+    const COMMENTS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:comment w:id="7" w:author="Ada Lovelace" w:initials="AL" w:date="2026-07-21T09:00:00Z">
+    <w:p>
+      <w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r>
+      <w:r><w:t xml:space="preserve">Please </w:t></w:r>
+      <w:r><w:rPr><w:b/></w:rPr><w:t>double-check</w:t></w:r>
+      <w:r><w:t xml:space="preserve"> this.</w:t></w:r>
+    </w:p>
+  </w:comment>
+</w:comments>"#;
+
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_xml("word/comments.xml", "application/xml", COMMENTS_XML.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+
+    // The annotated text is untouched, and the anchors bracket exactly it.
+    assert!(src.contains("Keep "), "body text lost:\n{src}");
+    assert!(src.contains("intact."), "body text lost:\n{src}");
+    let open = src.find("<comment-7>").expect("no opening anchor");
+    let close = src.find("<comment-7-end>").expect("no closing anchor");
+    let bit = src.find("this bit").expect("commented text lost");
+    assert!(open < bit && bit < close, "anchors don't bracket the commented span:\n{src}");
+
+    // The payload rides on the opening anchor, as an invisible `#metadata`.
+    assert!(src.contains("kind: \"comment\""), "no comment payload:\n{src}");
+    assert!(src.contains("author: \"Ada Lovelace\""), "author lost:\n{src}");
+    assert!(src.contains("initials: \"AL\""), "initials lost:\n{src}");
+    assert!(src.contains("date: \"2026-07-21T09:00:00Z\""), "date lost:\n{src}");
+    // The body stays content, so its own formatting survives into the value.
+    assert!(src.contains("*double-check*"), "comment body formatting lost:\n{src}");
+    // `w:annotationRef` is the mark placeholder Word substitutes; left alone
+    // it would surface as stray text inside the comment body.
+    assert!(!src.contains("annotationRef"), "annotation ref leaked:\n{src}");
+    // The closing anchor carries no payload — one comment, stated once.
+    assert!(src.contains("#metadata(none) <comment-7-end>"), "bad closing anchor:\n{src}");
+}
+
+/// A comment Word anchored to a *point* writes no range pair at all — only
+/// the reference mark. The payload has to ride on that instead, or a
+/// point-anchored comment would import as nothing.
+#[test]
+fn a_point_anchored_comment_carries_its_payload_on_the_reference_mark() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:r><w:t>Some text.</w:t></w:r>
+      <w:r><w:commentReference w:id="3"/></w:r>
+    </w:p>
+  </w:body></w:document>"#;
+
+    const COMMENTS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:comment w:id="3" w:author="Grace Hopper">
+    <w:p><w:r><w:t>A point remark.</w:t></w:r></w:p>
+  </w:comment>
+</w:comments>"#;
+
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_xml("word/comments.xml", "application/xml", COMMENTS_XML.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let src = import_docx(&bytes).expect("import should succeed").source;
+    assert!(src.contains("author: \"Grace Hopper\""), "point comment lost:\n{src}");
+    assert!(src.contains("<comment-3>"), "no anchor:\n{src}");
+    assert!(!src.contains("comment-3-end"), "invented a range that Word never wrote:\n{src}");
+}
+
+/// An anchor whose comment is missing from `word/comments.xml` is dangling.
+/// Word never writes that, but a hand-edited document can — it must be
+/// reported rather than emitting a label with nothing behind it.
+#[test]
+fn a_dangling_comment_anchor_is_reported_and_emits_nothing() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:commentRangeStart w:id="9"/>
+      <w:r><w:t>Orphaned.</w:t></w:r>
+      <w:commentRangeEnd w:id="9"/>
+    </w:p>
+  </w:body></w:document>"#;
+
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let result = import_docx(&bytes).expect("import should succeed");
+    assert!(result.source.contains("Orphaned."), "text lost with the anchor:\n{}", result.source);
+    assert!(!result.source.contains("comment-9"), "emitted a label with nothing behind it");
+    assert!(result.report.notes.iter().any(|n| n.what == "comment"), "went unreported");
+}

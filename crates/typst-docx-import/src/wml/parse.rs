@@ -17,7 +17,7 @@ use crate::ImportError;
 use crate::report::ImportReport;
 use crate::wml::model::{
     BorderEdge, Borders, Body, BodyItem, BreakType, Cell, CellMargins, ChartData,
-    ChartKind,
+    ChartKind, Comment,
     ChartSeries, DmlDash, DmlFill, DmlGeometry, DmlGradient, DmlGradientKind, DmlSeg, DmlShape,
     DmlStroke, DocumentMeta, DrawingRef, Field,
     FurnitureKind, FurnitureRef, LegendPos, LevelFormat, NumRef, Numbering, ParaProps, Paragraph,
@@ -371,6 +371,7 @@ pub fn parse_package(
     let footnotes =
         parse_notes_part(&mut reader, &mut rels, "word/footnotes.xml", "footnote", report);
     let endnotes = parse_notes_part(&mut reader, &mut rels, "word/endnotes.xml", "endnote", report);
+    let comments = parse_comments_part(&mut reader, &mut rels, report);
     let charts = parse_chart_parts(&mut reader, report);
 
     let bookmarks = collect_bookmarks(&body);
@@ -388,6 +389,7 @@ pub fn parse_package(
         mirror_margins: settings.mirror_margins,
         footnotes,
         endnotes,
+        comments,
         charts,
     })
 }
@@ -446,6 +448,9 @@ fn collect_bookmarks_in_items(items: &[BodyItem], labels: &mut Labels, used: &mu
 fn collect_bookmarks_in_run_item(item: &RunItem, labels: &mut Labels, used: &mut UsedLabels) {
     match item {
         RunItem::Bookmark(name) => register_bookmark(name, labels, used),
+        // Comment anchors get their labels at lower time, from the comment's
+        // own id, so there is no name to reserve here.
+        RunItem::CommentRange { .. } => {}
         RunItem::Hyperlink { runs, .. } => {
             for run_item in runs {
                 collect_bookmarks_in_run_item(run_item, labels, used);
@@ -912,8 +917,9 @@ fn namespace_run_items(items: &mut [RunItem], part: &str) {
     for item in items {
         match item {
             // A bookmark name is document-global, not a per-part relationship
-            // id, so it needs no namespacing.
-            RunItem::Bookmark(_) => {}
+            // id, so it needs no namespacing. Nor is a comment id, which
+            // keys `word/comments.xml` for the whole package.
+            RunItem::Bookmark(_) | RunItem::CommentRange { .. } => {}
             RunItem::Run(r) => {
                 for c in &mut r.content {
                     match c {
@@ -948,6 +954,50 @@ fn namespace_run_items(items: &mut [RunItem], part: &str) {
 }
 
 // --- word/footnotes.xml, word/endnotes.xml ------------------------------------
+
+/// Parse `word/comments.xml` into a map of `w:id` → [`Comment`].
+///
+/// Structurally the same job as [`parse_notes_part`] — a companion part of
+/// id-keyed body content, whose own relationships are merged under the shared
+/// `"{part}!{rid}"` namespace so a comment can carry images and hyperlinks
+/// like anything else — with one difference: a comment also carries *who*
+/// wrote it, so its attributes are read alongside the body.
+fn parse_comments_part(
+    reader: &mut Reader,
+    rels: &mut FxHashMap<EcoString, Relationship>,
+    report: &mut ImportReport,
+) -> FxHashMap<i64, Comment> {
+    const PART: &str = "word/comments.xml";
+    let Some(xml) = read_optional_part(reader, PART, PART, report) else {
+        return FxHashMap::default();
+    };
+    let comments = parse_xml(&xml, PART, report, FxHashMap::default(), |document| {
+        let mut comments = FxHashMap::default();
+        let root = document.root_element();
+        for child in root.children().filter(|n| is_element(*n, "comment")) {
+            // An id-less comment can never be matched to its anchors.
+            let Some(id) = attr(child, "id").and_then(parse_i64) else { continue };
+            let mut body = parse_body_content(child, 0);
+            namespace_rel_ids(&mut body, PART);
+            comments.insert(
+                id,
+                Comment {
+                    author: attr(child, "author").map(EcoString::from),
+                    initials: attr(child, "initials").map(EcoString::from),
+                    date: attr(child, "date").map(EcoString::from),
+                    body,
+                },
+            );
+        }
+        comments
+    });
+
+    for (rid, rel) in parse_rels_for(reader, PART, report) {
+        rels.insert(eco_format!("{PART}!{rid}"), rel);
+    }
+
+    comments
+}
 
 /// `w:type` values that mark Word's own rule-line boilerplate — the
 /// separator, continuation-separator, and continuation-notice notes every
@@ -1210,6 +1260,16 @@ fn fold_field_children<'a>(
                     push_item(&mut stack, &mut top, RunItem::Bookmark(name.into()));
                 }
             }
+            // The two ends of a commented span. Kept in place (unlike a
+            // bookmark, which the paragraph mapper hoists) because *where*
+            // they sit is the whole point — they say which words the comment
+            // is about.
+            "commentRangeStart" | "commentRangeEnd" => {
+                if let Some(id) = attr(child, "id").and_then(parse_i64) {
+                    let end = child.tag_name().name() == "commentRangeEnd";
+                    push_item(&mut stack, &mut top, RunItem::CommentRange { id, end });
+                }
+            }
             "oMath" => push_item(&mut stack, &mut top, RunItem::Run(math_run(child, false))),
             // An `m:oMathPara` is Word's *block* equation wrapper. Flattening
             // it to its `m:oMath` children keeps one fragment per equation,
@@ -1392,6 +1452,17 @@ fn parse_run(node: Node, tb_depth: usize) -> Run {
             // Typst renumbers footnotes itself, so this must never surface as
             // stray text in the imported note.
             "footnoteRef" | "endnoteRef" => {}
+            // The comment mark at an anchor.
+            "commentReference" => {
+                if let Some(id) = attr(child, "id").and_then(parse_i64) {
+                    run.content.push(RunContent::CommentRef(id));
+                }
+            }
+            // The number placeholder inside a *comment's own* body — the
+            // comment-mark twin of `w:footnoteRef` above, and suppressed for
+            // the same reason: Word substitutes it with the rendered mark, so
+            // left alone it would surface as stray text inside the comment.
+            "annotationRef" => {}
             _ => {}
         }
     }

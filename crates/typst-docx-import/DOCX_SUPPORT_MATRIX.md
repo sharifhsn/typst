@@ -276,7 +276,7 @@ Export walks the resolved `MathItem` IR and emits `m:` OMML directly; a whole eq
 |---|---|---|---|
 | Insertions (`w:ins` / `w:moveTo`) | — | ⊘ (accepted) | Import always accepts (splices in, keeps runs) — no option, documented. Export's "review tags" (`w:sdt` regions) are a different, opt-in concept. |
 | Deletions (`w:del` / `w:moveFrom`) | — | ⊘ (discarded) | Import removes the deleted text (`w:delText` never read). |
-| Comments (`w:comment` + ranges) | ✗ | ✗ | Neither direction handles comments. |
+| Comments (`w:comment` + ranges) | ✗ | ✅ | Export has no Typst source construct to find. Import lowers each comment to a labelled **`#metadata`** — the one Typst element that is invisible, carries an arbitrary value, and stays reachable via `#query`. So a comment reaches neither the page nor the bin: rendered output is identical to the comment-free import (verified: the comment text appears 0 times in the rendered PDF), while `#query(<comment-N>)` returns author / initials / date / body, the body kept as **content** so its own formatting survives. A commented *span* becomes two anchors (`<comment-N>` … `<comment-N-end>`) because a Typst label attaches to one element; a point-anchored comment — Word omits the range pair — carries its payload on the `w:commentReference` mark instead. `w:annotationRef` is suppressed like `w:footnoteRef`. A dangling anchor is reported. |
 
 ## 19. Colors, fills, gradients, strokes
 
@@ -332,7 +332,7 @@ Import enforced by the shared OPC reader (`typst-ooxml-core::opc`), surfaced as 
 
 ### Import — `ImportReport` (`report.rs`)
 
-Two severities: **Approximate** ("mapped, detail lost") and **Drop** ("content dropped"), deduplicated by `(severity, what, detail)` so each construct reports once. Labels emitted: OMML equation, image, chart, footnote, endnote, text box, WordArt, VML shape, VML line, hyperlink, internal hyperlink, `field {TYPE}`, header/footer, header/footer tab stops, keep with next, embedded object, table borders, table row, table row height, table indent, continuous section, page/column break, plus part-name-keyed malformed-XML drops.
+Two severities: **Approximate** ("mapped, detail lost") and **Drop** ("content dropped"), deduplicated by `(severity, what, detail)` so each construct reports once. Labels emitted: OMML equation, image, chart, footnote, endnote, text box, WordArt, VML shape, VML line, hyperlink, internal hyperlink, `field {TYPE}`, header/footer, header/footer tab stops, keep with next, embedded object, comment, table borders, table row, table row height, table indent, continuous section, page/column break, plus part-name-keyed malformed-XML drops.
 
 ### Export — `FidelityReport` (`report.rs`)
 
@@ -403,9 +403,10 @@ bookmarks and cross-references, images (raster + SVG, with **corner clip and
 crop**), **DrawingML shapes** (preset and custom geometry, gradients, alpha,
 dashes), document metadata, and the full OMML math structure set.
 
-**Neither direction** — comments, EMF/WMF metafiles, and tracked changes as
-visible markup (see the changelog for why). An OLE object's *preview* now
-imports, but its payload cannot round-trip in either direction.
+**Neither direction** — EMF/WMF metafiles, and tracked changes as visible
+markup (see the changelog for why). An OLE object's *preview* now imports, but
+its payload cannot round-trip in either direction. **Comments** import (as
+invisible metadata) but have no export counterpart yet.
 
 ---
 

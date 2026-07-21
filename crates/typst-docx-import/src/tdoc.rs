@@ -203,6 +203,8 @@ pub enum Inline {
     /// `Verbatim` so `passes::resolve_labels` can find and downgrade it when
     /// the label turns out never to have been emitted.
     PageRef(EcoString),
+    /// One end of a Word comment's anchor — see [`CommentAnchor`].
+    Comment(CommentAnchor),
     /// `<name>` — a Typst label, lowered from a `w:bookmarkStart`. A label
     /// attaches to whatever *precedes* it, so `mappers::para` hoists these to
     /// the end of their block: Word writes a bookmark at the start of the
@@ -232,6 +234,40 @@ pub enum Inline {
     Shape { call: EcoString, body: Vec<Block> },
     /// Raw Typst source, emitted verbatim (escape hatch).
     Verbatim(EcoString),
+}
+
+/// One end of a Word comment's anchor, emitted as a labelled `#metadata(..)`.
+///
+/// Typst has no comment construct, and the tempting alternatives are all
+/// wrong: rendering a comment as a footnote turns an *annotation* into printed
+/// content (changing pagination and appearing in the PDF), while dropping it
+/// loses real authored information. `#metadata` is the one Typst element that
+/// is invisible, carries an arbitrary value, and is still reachable — via
+/// `#query` — so a comment survives with **no effect on the rendered output**
+/// and a `#show` rule can opt into displaying it.
+///
+/// A comment annotates a *span*, and Typst attaches a label to one element, so
+/// a span becomes two anchors: the opening one carries [`Self::info`], the
+/// closing one carries nothing but its own label. A comment Word anchored to a
+/// point rather than a range (it omits the `w:commentRangeStart`/`End` pair
+/// then) simply has no closing anchor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommentAnchor {
+    /// The Typst label this anchor emits, already made unique.
+    pub label: EcoString,
+    /// `None` closes a span whose opening anchor carried the payload.
+    pub info: Option<CommentInfo>,
+}
+
+/// A comment's authorship and content — the value side of a [`CommentAnchor`].
+/// `body` stays as blocks rather than being flattened to a string so a
+/// comment's own formatting, lists and links survive into the metadata value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommentInfo {
+    pub author: Option<EcoString>,
+    pub initials: Option<EcoString>,
+    pub date: Option<EcoString>,
+    pub body: Vec<Block>,
 }
 
 /// Direct character-level formatting. Used both inline ([`Inline::Styled`]) and

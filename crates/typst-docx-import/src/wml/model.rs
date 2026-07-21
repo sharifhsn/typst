@@ -77,12 +77,27 @@ pub struct WmlPackage {
     pub footnotes: FxHashMap<i64, Vec<BodyItem>>,
     /// `word/endnotes.xml`, likewise.
     pub endnotes: FxHashMap<i64, Vec<BodyItem>>,
+    /// `word/comments.xml` by `w:id`. Unlike a note, a comment carries its own
+    /// authorship, so this is a struct rather than a bare item list.
+    pub comments: FxHashMap<i64, Comment>,
     /// Parsed chart parts by zip name (`word/charts/chart1.xml` → data). A
     /// chart's `r:id` reference (see [`RunContent::Chart`]) resolves through
     /// [`Self::rels`] to a target *name*; this map is keyed by the full zip
     /// name that target resolves to, the same convention [`Self::media`]
     /// uses for images.
     pub charts: FxHashMap<EcoString, ChartData>,
+}
+
+/// One `w:comment` from `word/comments.xml`: who wrote it, when, and what
+/// they wrote. The body is ordinary body content — a comment can hold several
+/// paragraphs, formatting, even a table.
+#[derive(Debug, Default)]
+pub struct Comment {
+    pub author: Option<EcoString>,
+    pub initials: Option<EcoString>,
+    /// `@w:date`, a W3CDTF timestamp, kept verbatim.
+    pub date: Option<EcoString>,
+    pub body: Vec<BodyItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +161,17 @@ pub enum RunItem {
     /// only the start is modelled: it is the position a `REF`/`PAGEREF` field
     /// or an internal hyperlink jumps to, which is all a jump target needs.
     Bookmark(EcoString),
+    /// `w:commentRangeStart` / `w:commentRangeEnd` — the two ends of the span
+    /// a comment annotates. Word writes these as siblings of the runs they
+    /// bracket (the `w:commentReference` mark that goes *with* them lives
+    /// inside a run instead — see [`RunContent::CommentRef`]).
+    ///
+    /// Modelled as two independent points rather than a range because that is
+    /// what Typst can express: a label attaches to one element, so a span
+    /// becomes an opening anchor and a closing one. Unlike a bookmark, which
+    /// genuinely only needs its start, both ends matter here — they are what
+    /// says *which words* the comment is about.
+    CommentRange { id: i64, end: bool },
     /// A Word field. Both OOXML spellings — the `w:fldSimple` element and the
     /// flattened `w:fldChar` begin/separate/end run sequence — are folded
     /// back into this one logical item at parse time, so lowering sees a
@@ -193,6 +219,12 @@ pub enum RunContent {
     /// *inside* a `w:r`, which is why it is run content rather than a
     /// [`RunItem`] beside one.
     Ruby { base: Vec<RunItem>, gloss: Vec<RunItem> },
+    /// `w:commentReference` — the mark Word draws at a comment's anchor,
+    /// inside a run of its own. A comment always has one; the surrounding
+    /// [`RunItem::CommentRange`] pair is what Word omits for a point comment,
+    /// which is why the payload is attached to whichever anchor comes first
+    /// (see [`crate::mappers::comment`]).
+    CommentRef(i64),
     /// A `w:footnoteReference`/`w:endnoteReference` — the marker in the body
     /// text. The note's content lives in a separate part, keyed by this id.
     NoteRef { endnote: bool, id: i64 },

@@ -8,7 +8,7 @@
 use typst_ooxml_core::units::{half_point_to_pt, twip_to_abs};
 
 use crate::lower::{lower_items, parse_hex_color, LowerCtx};
-use crate::mappers::{dml_shape, field, math, note, shape};
+use crate::mappers::{comment, dml_shape, field, math, note, shape};
 use crate::report::ImportReport;
 use crate::resolve::styles::effective_run;
 use crate::tdoc::{Inline, Inlines, Lang, Script, TextStyle, Underline};
@@ -35,6 +35,11 @@ pub(crate) fn lower_run_items(
     for run_item in items {
         match run_item {
             RunItem::Run(r) => out.extend(lower_run(r, para_style_id, ctx)),
+            // Kept exactly where it was found: an anchor's position is what
+            // says which words the comment is about.
+            RunItem::CommentRange { id, end } => {
+                out.extend(comment::lower_comment_anchor(*id, *end, ctx));
+            }
             RunItem::Hyperlink { rel_id, anchor, runs } => {
                 let inner = lower_run_items(runs, para_style_id, ctx);
                 match rel_id {
@@ -99,6 +104,12 @@ fn lower_run(r: &Run, para_style_id: Option<&str>, ctx: &mut LowerCtx) -> Inline
     for c in &r.content {
         match c {
             RunContent::Text(s) => content.push(Inline::Text(s.clone())),
+            // The comment mark itself. It carries the payload only when it is
+            // the *first* anchor for its id — i.e. for a comment Word anchored
+            // to a point rather than a span, where no range pair exists.
+            RunContent::CommentRef(id) => {
+                content.extend(comment::lower_comment_anchor(*id, false, ctx));
+            }
             RunContent::Tab => content.push(Inline::Text("\t".into())),
             RunContent::Break(BreakType::Line) => content.push(Inline::Linebreak),
             // Page/column breaks are handled at the paragraph level.

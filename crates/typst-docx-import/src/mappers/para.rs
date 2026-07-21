@@ -241,7 +241,10 @@ fn first_drawing(p: &Paragraph) -> Option<&DrawingRef> {
         // A drawing nested inside a hyperlink or a field's cached result
         // isn't discovered as the paragraph's figure — same simplification
         // as the pre-existing hyperlink exclusion; out of scope for v1.
-        RunItem::Hyperlink { .. } | RunItem::Field(_) | RunItem::Bookmark(_) => None,
+        RunItem::Hyperlink { .. }
+        | RunItem::Field(_)
+        | RunItem::Bookmark(_)
+        | RunItem::CommentRange { .. } => None,
     })
 }
 
@@ -253,7 +256,10 @@ fn first_chart(p: &Paragraph) -> Option<&DrawingRef> {
             RunContent::Chart(d) => Some(d),
             _ => None,
         }),
-        RunItem::Hyperlink { .. } | RunItem::Field(_) | RunItem::Bookmark(_) => None,
+        RunItem::Hyperlink { .. }
+        | RunItem::Field(_)
+        | RunItem::Bookmark(_)
+        | RunItem::CommentRange { .. } => None,
     })
 }
 
@@ -272,6 +278,10 @@ pub(crate) fn inlines_have_text(inlines: &Inlines) -> bool {
         // A label renders nothing of its own — it only names the block it
         // rides on, so it can't make an otherwise-empty paragraph visible.
         Inline::Label(_) => false,
+        // Nor does a comment anchor: `#metadata` is invisible by design, and
+        // treating one as visible would resurrect an empty paragraph Word
+        // only kept in order to hang the anchor on.
+        Inline::Comment(_) => false,
         // A page reference renders a number, so it is visible content.
         Inline::PageRef(_) => true,
         Inline::Styled { body, .. } => inlines_have_text(body),

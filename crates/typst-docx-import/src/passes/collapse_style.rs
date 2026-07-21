@@ -118,6 +118,18 @@ fn collapse_inlines(inlines: Inlines, default: &TextStyle, in_heading: bool) -> 
 
 fn collapse_inline(inline: Inline, default: &TextStyle, in_heading: bool, out: &mut Inlines) {
     match inline {
+        // A comment's body is ordinary body content, so it gets the same
+        // treatment as a footnote's — an annotation should read as idiomatic
+        // Typst too, not stay at tier-1 literal formatting just because it
+        // happens to live inside a metadata value.
+        Inline::Comment(mut anchor) => {
+            if let Some(info) = anchor.info.as_mut() {
+                for block in &mut info.body {
+                    walk_block(block, default);
+                }
+            }
+            out.push(Inline::Comment(anchor));
+        }
         Inline::Strong(body) => {
             out.push(Inline::Strong(collapse_inlines(body, default, in_heading)))
         }
