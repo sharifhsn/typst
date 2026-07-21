@@ -248,7 +248,7 @@ Export walks the resolved `MathItem` IR and emits `m:` OMML directly; a whole eq
 | Grouped shapes | ✅ (wpg group) | ◐ | Import recurses (cap 32), preserves multiple text boxes, drops group geometry. |
 | Preset / custom geometries (stars, callouts, connectors) | ✅ (many via custGeom) | ◐ | Anything the exporter wrote as `a:custGeom` comes back as `#curve`. A *named* preset with no Typst counterpart (a star, a callout) still falls back to its bounding `#rect` and is reported — Word states those as a name plus adjustment guides, not as a path. |
 | Shape stroke / fill | ✅ (solid + linear gradient) | ◐ | Import reads `a:solidFill`/`a:gradFill` with `a:alpha` folded into the fourth channel, and `a:ln` with either dash spelling. Still `#rrggbb`-only: a theme colour lives in `theme1.xml`, which this importer does not resolve, and such a shape is reported rather than painted a guessed colour. |
-| OLE objects (`w:object`) | ✗ | ✗ | Neither direction. |
+| OLE objects (`w:object`) | ✗ | ◐ | Export has no source construct. Import cannot revive an embedded application, but Word renders a **preview picture** beside every embedding, so that is kept (the whole element used to fall through the run parser, taking the preview with it) and the payload is reported *by name* from `o:OLEObject/@ProgID` — "an embedded Excel.Sheet.12 object…". Measured on the wide corpus: 61 documents, 121 embeddings, top producers Equation.3 / Package / Excel.Sheet.12. **95.9% of those previews are EMF/WMF**, which Typst cannot decode, so today the picture itself only lands for the PNG minority; the naming is what carries the other 95.9%. |
 | Drop shadow | ✗ | — | No shadow path in DOCX export (distinct box shadows fall to generic raster). |
 
 ## 16. Charts & plots
@@ -332,7 +332,7 @@ Import enforced by the shared OPC reader (`typst-ooxml-core::opc`), surfaced as 
 
 ### Import — `ImportReport` (`report.rs`)
 
-Two severities: **Approximate** ("mapped, detail lost") and **Drop** ("content dropped"), deduplicated by `(severity, what, detail)` so each construct reports once. Labels emitted: OMML equation, image, chart, footnote, endnote, text box, WordArt, VML shape, VML line, hyperlink, internal hyperlink, `field {TYPE}`, header/footer, header/footer tab stops, keep with next, table borders, table row, table row height, table indent, continuous section, page/column break, plus part-name-keyed malformed-XML drops.
+Two severities: **Approximate** ("mapped, detail lost") and **Drop** ("content dropped"), deduplicated by `(severity, what, detail)` so each construct reports once. Labels emitted: OMML equation, image, chart, footnote, endnote, text box, WordArt, VML shape, VML line, hyperlink, internal hyperlink, `field {TYPE}`, header/footer, header/footer tab stops, keep with next, embedded object, table borders, table row, table row height, table indent, continuous section, page/column break, plus part-name-keyed malformed-XML drops.
 
 ### Export — `FidelityReport` (`report.rs`)
 
@@ -403,8 +403,9 @@ bookmarks and cross-references, images (raster + SVG, with **corner clip and
 crop**), **DrawingML shapes** (preset and custom geometry, gradients, alpha,
 dashes), document metadata, and the full OMML math structure set.
 
-**Neither direction** — comments, OLE objects, EMF/WMF metafiles, and
-tracked changes as visible markup (see the changelog for why).
+**Neither direction** — comments, EMF/WMF metafiles, and tracked changes as
+visible markup (see the changelog for why). An OLE object's *preview* now
+imports, but its payload cannot round-trip in either direction.
 
 ---
 

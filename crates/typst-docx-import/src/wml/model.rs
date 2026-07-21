@@ -236,6 +236,18 @@ pub enum RunContent {
     /// ever reached through the `v:path` mini-language this importer declines
     /// to interpret. See [`DmlShape`] and `mappers::dml_shape`.
     DmlShape(DmlShape),
+    /// A `w:object` — an OLE embedding (an Excel sheet, a Visio drawing, an
+    /// equation from a pre-2007 editor, an ActiveX control). The payload is a
+    /// whole foreign application's document, which nothing here can revive, so
+    /// only the loss is modelled: `prog_id` is `o:OLEObject/@ProgID`
+    /// ("Excel.Sheet.12"), which is what makes the report say *what* was lost
+    /// rather than just "an object".
+    ///
+    /// Word writes a rendered **preview picture** next to it (a `v:shape` with
+    /// `v:imagedata`), and that is parsed by the ordinary VML path into a
+    /// sibling [`Self::Drawing`] — so the object still *shows* what it looked
+    /// like, it just isn't live any more.
+    EmbeddedObject { prog_id: Option<EcoString> },
     /// A `wps:wsp` with geometry but nothing this importer can paint it with:
     /// no `a:srgbClr` fill or line colour (a theme-coloured shape, whose
     /// palette lives in `theme1.xml`), and no text box to fall back on. The

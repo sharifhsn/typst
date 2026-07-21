@@ -2718,3 +2718,82 @@ fn a_negative_page_margin_does_not_panic_the_furniture_band() {
     assert!(!src.contains("header-ascent"), "invented a band gap:\n{src}");
     assert!(src.contains("Body."), "content lost:\n{src}");
 }
+
+/// An OLE embedding (`w:object`) is a whole foreign application's document —
+/// an Excel sheet, a MathType equation — that nothing here can revive. But
+/// Word renders a **preview picture** beside it, and the entire element used
+/// to fall through the run parser, so that preview went with it. Now the
+/// picture is kept and the payload is reported by name.
+#[test]
+fn an_ole_object_keeps_its_preview_picture_and_reports_what_was_embedded() {
+    const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:v="urn:schemas-microsoft-com:vml"
+            xmlns:o="urn:schemas-microsoft-com:office:office">
+  <w:body>
+    <w:p><w:r>
+      <w:object w:dxaOrig="7247" w:dyaOrig="2920">
+        <v:shape id="_x0000_i1025" style="width:120pt;height:60pt" o:ole="">
+          <v:imagedata r:id="rId1" o:title=""/>
+        </v:shape>
+        <o:OLEObject Type="Embed" ProgID="Excel.Sheet.12" ShapeID="_x0000_i1025"
+                     DrawAspect="Content" ObjectID="_1452851351" r:id="rId2"/>
+      </w:object>
+    </w:r></w:p>
+  </w:body></w:document>"#;
+
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut doc_rels = Rels::new();
+    doc_rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        "media/image1.png",
+        RelMode::Internal,
+    );
+    // The payload itself — a real package declares it, and the importer never
+    // follows it. Present so the fixture is a well-formed OLE embedding.
+    doc_rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject",
+        "embeddings/oleObject1.bin",
+        RelMode::Internal,
+    );
+    package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
+    package.add_media(
+        "word/media/image1.png",
+        "png",
+        "image/png",
+        vec![0x89, b'P', b'N', b'G'],
+    );
+    package.add_media(
+        "word/embeddings/oleObject1.bin",
+        "bin",
+        "application/vnd.openxmlformats-officedocument.oleObject",
+        vec![0xD0, 0xCF, 0x11, 0xE0],
+    );
+    package.add_relationships("word/document.xml", &doc_rels).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let result = import_docx(&bytes).expect("import should succeed");
+    let src = &result.source;
+    // The preview survives, at the size the shape's own `style` declared.
+    assert!(src.contains("#image("), "the preview picture was lost:\n{src}");
+    assert!(src.contains("width: 120pt"), "the preview's size was lost:\n{src}");
+    // And the payload is named, not merely counted.
+    let note = result
+        .report
+        .notes
+        .iter()
+        .find(|n| n.what == "embedded object")
+        .expect("the embedded object went unreported");
+    assert!(
+        note.detail.contains("Excel.Sheet.12"),
+        "the report should name the producer, got: {}",
+        note.detail
+    );
+    // Exactly one note for one loss: the object's own placeholder shape must
+    // not also raise a vague "unsupported VML geometry" drop beside it.
+    assert!(
+        !result.report.notes.iter().any(|n| n.what == "VML shape"),
+        "double-reported one embedded object"
+    );
+}

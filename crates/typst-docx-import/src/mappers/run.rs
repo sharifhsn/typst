@@ -196,6 +196,24 @@ fn lower_run(r: &Run, para_style_id: Option<&str>, ctx: &mut LowerCtx) -> Inline
             RunContent::DmlUnsupported => {
                 dml_shape::report_unsupported(&mut *ctx.report)
             }
+            // An OLE embedding: a whole foreign application's document, which
+            // nothing here can revive. Word's rendered preview picture comes
+            // through as an ordinary sibling drawing, so the *look* survives
+            // and only the liveness is lost — which is what this says, naming
+            // the producer so the note is actionable rather than merely
+            // truthful.
+            RunContent::EmbeddedObject { prog_id } => {
+                let detail = match prog_id {
+                    Some(id) => format!(
+                        "an embedded {id} object cannot be re-opened from Typst; Word's \
+                         preview picture is kept in its place"
+                    ),
+                    None => "an embedded OLE object cannot be re-opened from Typst; \
+                             Word's preview picture is kept in its place"
+                        .into(),
+                };
+                ctx.report.drop("embedded object", &detail);
+            }
         }
     }
 

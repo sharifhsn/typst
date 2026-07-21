@@ -1359,6 +1359,13 @@ fn parse_run(node: Node, tb_depth: usize) -> Run {
                 }
                 collect_vml_content(child, 0, &mut run.content);
             }
+            // An OLE embedding. Structurally a `w:pict` with an
+            // `o:OLEObject` beside the VML: the same `v:shape`/`v:imagedata`
+            // preview picture, which the shared VML walk turns into an
+            // ordinary drawing. Before this arm existed the whole element fell
+            // through, so the preview — the only part of an embedded object
+            // that *can* survive — was discarded with it.
+            "object" => parse_object(child, tb_depth, &mut run.content),
             "oMath" => {
                 run.content.push(RunContent::Math { xml: raw_xml(child), display: false })
             }
@@ -1903,6 +1910,37 @@ fn collect_vml_content(node: Node, depth: usize, out: &mut Vec<RunContent>) {
             _ => {}
         }
     }
+}
+
+/// Parse a `w:object` (an OLE embedding) into its salvageable parts: the
+/// preview picture Word rendered beside the payload, plus a note naming what
+/// the payload was.
+///
+/// The VML inside is structurally identical to a `w:pict`'s, so the same two
+/// scans run over it — a text box can legitimately appear here too (an
+/// embedded control with a caption).
+///
+/// The one difference is what an *unrecognized* shape means. Elsewhere a
+/// `v:shape` this importer can't draw is reported as unsupported geometry;
+/// inside a `w:object` that shape is the object's own placeholder, and the
+/// [`RunContent::EmbeddedObject`] note already says precisely what it was.
+/// Reporting both would be two notes for one loss, so the vaguer one is
+/// dropped in favour of the specific one.
+fn parse_object(node: Node, tb_depth: usize, out: &mut Vec<RunContent>) {
+    for txbx in direct_txbx_contents(node) {
+        out.push(RunContent::TextBox(parse_txbx_content(txbx, tb_depth)));
+    }
+    let mut vml = Vec::new();
+    collect_vml_content(node, 0, &mut vml);
+    vml.retain(|c| !matches!(c, RunContent::VmlUnsupported));
+    out.append(&mut vml);
+
+    let prog_id = node
+        .children()
+        .find(|n| is_element(*n, "OLEObject"))
+        .and_then(|ole| attr(ole, "ProgID"))
+        .map(EcoString::from);
+    out.push(RunContent::EmbeddedObject { prog_id });
 }
 
 /// A generic `v:shape`'s own content: a picture (`v:imagedata`), WordArt
