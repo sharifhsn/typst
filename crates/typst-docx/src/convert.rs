@@ -42,6 +42,17 @@ pub fn convert_children(
     // resolved paragraph properties (from the first `ParElem` seen).
     let mut pending: Vec<ParaChild> = Vec::new();
     let mut pending_page_markers: Vec<ParaChild> = Vec::new();
+    // A comment anchor (`mappers::comment::tag_children`) reaching here
+    // *without* a paragraph already in progress — a comment that opens at the
+    // very start of a top-level flow, e.g. the first word of a document/cell —
+    // arrives as a bare top-level `TagElem`, not nested inside a `ParElem`'s
+    // body (Typst only wraps flowing text it can attach to; a leading
+    // zero-content marker has nothing to attach to yet). Deferred here and
+    // spliced into the FRONT of the next `ParElem`'s content, mirroring
+    // `pending_page_markers` exactly, so the comment ends up bracketing the
+    // paragraph text that follows instead of becoming its own disconnected,
+    // content-free `<w:p>`.
+    let mut pending_comment_markers: Vec<ParaChild> = Vec::new();
     let mut pending_props: Option<ParaProps> = None;
     let mut have_pending = false;
     // Accumulated `#v(..)` spacing (twips) waiting to be folded into the
@@ -191,6 +202,9 @@ pub fn convert_children(
             if !pending_page_markers.is_empty() {
                 pending.splice(par_start..par_start, pending_page_markers.drain(..));
             }
+            if !pending_comment_markers.is_empty() {
+                pending.splice(par_start..par_start, pending_comment_markers.drain(..));
+            }
             // A labeled paragraph (`text … <spot>`) is a valid `#link(<spot>)`
             // target, so bracket its content with a bookmark (otherwise the link
             // anchor is dangling).
@@ -205,6 +219,19 @@ pub fn convert_children(
             have_pending = true;
             last_was_par = true;
             pending_from_paragraph = true;
+        } else if let Some(elem) = child.to_packed::<TagElem>()
+            && let Some(comment_children) =
+                mappers::comment::tag_children(ctx, &elem.tag, *styles)?
+        {
+            // A comment anchor reaching the top level (see
+            // `pending_comment_markers`'s doc comment): defer it if no
+            // paragraph is in progress yet, otherwise it belongs right where
+            // it is, in the paragraph already being assembled.
+            if have_pending {
+                pending.extend(comment_children);
+            } else {
+                pending_comment_markers.extend(comment_children);
+            }
         } else if let Some(elem) = child.to_packed::<TagElem>() {
             // Introspection tag: record as a block-level tag (kept for the
             // introspector). Transparent — does not change paragraph structure.
@@ -343,6 +370,14 @@ pub fn convert_children(
             pending_v = apply_pending_v(&mut blocks, from, pending_v);
             last_was_par = false;
         }
+    }
+    // A comment anchor deferred via `pending_comment_markers` that never found
+    // a following `ParElem` to splice into (e.g. it anchors the very last
+    // content in the document) would otherwise be silently dropped here —
+    // fold it into a final minimal paragraph instead.
+    if !pending_comment_markers.is_empty() {
+        pending.append(&mut pending_comment_markers);
+        have_pending = true;
     }
     let from = blocks.len();
     flush(

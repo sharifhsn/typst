@@ -205,6 +205,13 @@ pub fn build(
     // FootnoteText (paragraph) + FootnoteReference (character).
     style(&mut w, "FootnoteText", "footnote text", Some("Normal"), false, false);
     char_style(&mut w, "FootnoteReference", "footnote reference", true);
+    // CommentText (paragraph) + CommentReference (character) — Word's built-in
+    // comment styles. Their display names ("annotation text"/"annotation
+    // reference") are Word's own legacy naming (comments were "annotations" in
+    // the pre-OOXML binary format); not superscript, unlike footnotes, since
+    // the in-body `<w:commentReference>` mark carries no visible glyph.
+    style(&mut w, "CommentText", "annotation text", Some("Normal"), false, false);
+    char_style(&mut w, "CommentReference", "annotation reference", false);
     // Hyperlink (character) — blue + single underline, Word's default so links
     // actually look like links (the run suppresses its own default-black colour
     // for this style; an explicitly coloured link still overrides).

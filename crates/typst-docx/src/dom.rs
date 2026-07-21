@@ -60,6 +60,12 @@ pub struct DocxDocument {
     pub(crate) body: Vec<Block>,
     pub(crate) sect: SectPr,
     pub(crate) footnotes: Vec<Footnote>,
+    /// Word review comments routed to `word/comments.xml`. See
+    /// `mappers::comment`, which is also the sole producer of the
+    /// `ParaChild::CommentRangeStart`/`End`/`Run::CommentReference` anchors
+    /// that reference these bodies from wherever the comment's `#metadata`
+    /// anchor was lowered (body, a table cell, a footnote, a header/footer).
+    pub(crate) comments: Vec<Comment>,
     pub(crate) numbering: NumberingTable,
     pub(crate) media: Vec<MediaPart>,
     /// License-permitted font programs needed by editable text in this export.
@@ -70,6 +76,9 @@ pub struct DocxDocument {
     /// `word/_rels/footnotes.xml.rels`, not the document's, or Word rejects the
     /// file. Empty when no footnote contains an image/external link.
     pub(crate) footnote_rels: Rels,
+    /// Relationships created while lowering comment bodies — mirrors
+    /// `footnote_rels`, but for `word/_rels/comments.xml.rels`.
+    pub(crate) comment_rels: Rels,
     pub(crate) max_heading_level: u8,
     /// The document's root text properties, hoisted into `docDefaults`.
     pub(crate) text_defaults: TextDefaults,
@@ -324,6 +333,17 @@ pub enum ParaChild {
     BookmarkEnd {
         id: u32,
     },
+    /// `<w:commentRangeStart w:id="N"/>` — the start of a Word comment's
+    /// anchored span. See `mappers::comment`.
+    CommentRangeStart {
+        id: i32,
+    },
+    /// `<w:commentRangeEnd w:id="N"/>` — the end of a Word comment's anchored
+    /// span, always immediately followed by a `Run::CommentReference` for the
+    /// same id.
+    CommentRangeEnd {
+        id: i32,
+    },
     Tag(Tag),
 }
 
@@ -361,6 +381,15 @@ pub enum Run {
     /// `FootnoteReference`). Prepended to a footnote body's first paragraph so
     /// Word/LibreOffice render the footnote's auto-number next to its text.
     FootnoteRefMark,
+    /// `<w:commentReference w:id="N"/>` — a Word comment's in-body marker.
+    /// For a span comment it follows a `ParaChild::CommentRangeEnd` with the
+    /// same id; for a point comment (no range) it appears alone. Carries
+    /// `props` so the conventional `CommentReference` character style (see
+    /// `styles_part.rs`) can be applied, mirroring `FootnoteRef`.
+    CommentReference {
+        props: RunProps,
+        id: i32,
+    },
     Drawing(Drawing),
     /// An inline equation `<m:oMath>` (serialized XML).
     OmmlInline(String),
@@ -1098,6 +1127,17 @@ impl Default for SectPr {
 /// One footnote entry routed to `footnotes.xml`.
 pub struct Footnote {
     pub id: i32,
+    pub blocks: Vec<Block>,
+}
+
+/// One Word review comment routed to `word/comments.xml`. The id is our own
+/// allocation (see `DocxCtx::next_comment_id`) — never the foreign number
+/// carried by the imported `<comment-N>` label. See `mappers::comment`.
+pub struct Comment {
+    pub id: i32,
+    pub author: Option<EcoString>,
+    pub initials: Option<EcoString>,
+    pub date: Option<EcoString>,
     pub blocks: Vec<Block>,
 }
 

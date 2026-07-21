@@ -506,6 +506,8 @@ fn para_child_is_layout_empty(child: &ParaChild) -> bool {
         }),
         ParaChild::BookmarkStart { .. }
         | ParaChild::BookmarkEnd { .. }
+        | ParaChild::CommentRangeStart { .. }
+        | ParaChild::CommentRangeEnd { .. }
         | ParaChild::Tag(_) => true,
         ParaChild::Run(_) | ParaChild::OmmlPara(_) => false,
     }

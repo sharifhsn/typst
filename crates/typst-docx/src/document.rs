@@ -18,8 +18,8 @@ use typst_library::text::{
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
-    Block, BookmarkTable, DocxDocument, EmbeddedFontProgram, EmbeddedFontStyle, Field,
-    FieldCacheStatus as DomFieldCacheStatus, FieldDisplay, FieldMode, Footnote,
+    Block, BookmarkTable, Comment, DocxDocument, EmbeddedFontProgram, EmbeddedFontStyle,
+    Field, FieldCacheStatus as DomFieldCacheStatus, FieldDisplay, FieldMode, Footnote,
     HdrFtrPart, HdrFtrRef, HeadingStyle, HeadingStyleSample, LineNumbering, MediaPart,
     NumberingTable, Para, ParaChild, ParaProps, PgNumType, PicClip, ReviewCandidate,
     ReviewCandidateKind, ReviewOrigin, Run, RunProps, SectPr, SectType, Spacing,
@@ -45,10 +45,12 @@ struct LoweredDocx {
     header_parts: Vec<HdrFtrPart>,
     footer_parts: Vec<HdrFtrPart>,
     footnotes: Vec<Footnote>,
+    comments: Vec<Comment>,
     numbering: NumberingTable,
     media: Vec<MediaPart>,
     doc_rels: Rels,
     footnote_rels: Rels,
+    comment_rels: Rels,
     bookmarks: BookmarkTable,
     max_heading_level: u8,
     heading_style_samples: Vec<HeadingStyleSample>,
@@ -241,10 +243,12 @@ fn docx_document_impl(
         mut header_parts,
         mut footer_parts,
         mut footnotes,
+        mut comments,
         mut numbering,
         media,
         doc_rels,
         footnote_rels,
+        comment_rels,
         bookmarks,
         max_heading_level,
         heading_style_samples,
@@ -407,6 +411,7 @@ fn docx_document_impl(
                 header_parts,
                 footer_parts,
                 footnotes: std::mem::take(&mut ctx.footnotes),
+                comments: std::mem::take(&mut ctx.comments),
                 numbering: std::mem::take(&mut ctx.numbering),
                 media: std::mem::replace(
                     &mut ctx.media,
@@ -415,6 +420,7 @@ fn docx_document_impl(
                 .into_parts(),
                 doc_rels: std::mem::take(&mut ctx.doc_rels),
                 footnote_rels: std::mem::take(&mut ctx.footnote_rels),
+                comment_rels: std::mem::take(&mut ctx.comment_rels),
                 bookmarks: std::mem::take(&mut ctx.bookmarks),
                 max_heading_level: ctx.max_heading_level,
                 heading_style_samples: std::mem::take(&mut ctx.heading_style_samples),
@@ -483,6 +489,9 @@ fn docx_document_impl(
     crate::mappers::table::collapse_par_spacing(&mut body);
     for footnote in &mut footnotes {
         crate::mappers::table::collapse_par_spacing(&mut footnote.blocks);
+    }
+    for comment in &mut comments {
+        crate::mappers::table::collapse_par_spacing(&mut comment.blocks);
     }
 
     let review_candidates = collect_review_candidates(
@@ -590,18 +599,21 @@ fn docx_document_impl(
         &mut header_parts,
         &mut footer_parts,
         &mut footnotes,
+        &mut comments,
     );
     crate::invariants::resolve_leading_background_layers(
         &mut body,
         &mut header_parts,
         &mut footer_parts,
         &mut footnotes,
+        &mut comments,
     );
     for target in crate::invariants::fallback_dangling_internal_fields(
         &mut body,
         &mut header_parts,
         &mut footer_parts,
         &mut footnotes,
+        &mut comments,
     ) {
         fidelity_report.record_span(
             crate::report::ExportSource::new(
@@ -657,11 +669,13 @@ fn docx_document_impl(
         body,
         sect,
         footnotes,
+        comments,
         numbering,
         media,
         embedded_fonts,
         doc_rels,
         footnote_rels,
+        comment_rels,
         max_heading_level,
         text_defaults,
         heading_styles,
@@ -784,9 +798,13 @@ fn plain_review_text(para: &Para) -> Option<ecow::EcoString> {
     for child in &para.content {
         match child {
             ParaChild::Run(Run::Text { text: part, .. }) => text.push_str(part),
-            ParaChild::Run(Run::FootnoteRefMark | Run::Tab) => {}
+            ParaChild::Run(
+                Run::FootnoteRefMark | Run::Tab | Run::CommentReference { .. },
+            ) => {}
             ParaChild::BookmarkStart { .. }
             | ParaChild::BookmarkEnd { .. }
+            | ParaChild::CommentRangeStart { .. }
+            | ParaChild::CommentRangeEnd { .. }
             | ParaChild::Tag(_) => {}
             _ => return None,
         }
@@ -855,6 +873,8 @@ fn record_para_fields(report: &mut FidelityReport, snapshot_id: u128, para: &Par
             ParaChild::OmmlPara(_)
             | ParaChild::BookmarkStart { .. }
             | ParaChild::BookmarkEnd { .. }
+            | ParaChild::CommentRangeStart { .. }
+            | ParaChild::CommentRangeEnd { .. }
             | ParaChild::Tag(_) => {}
         }
     }
@@ -908,6 +928,7 @@ fn record_run_fields(report: &mut FidelityReport, snapshot_id: u128, run: &Run) 
         | Run::FillTab
         | Run::FootnoteRef { .. }
         | Run::FootnoteRefMark
+        | Run::CommentReference { .. }
         | Run::OmmlInline(_) => {}
     }
 }
@@ -997,6 +1018,8 @@ fn record_para_fonts(
             ParaChild::OmmlPara(_)
             | ParaChild::BookmarkStart { .. }
             | ParaChild::BookmarkEnd { .. }
+            | ParaChild::CommentRangeStart { .. }
+            | ParaChild::CommentRangeEnd { .. }
             | ParaChild::Tag(_) => {}
         }
     }
@@ -1009,7 +1032,9 @@ fn record_run_fonts(
     run: &Run,
 ) {
     match run {
-        Run::Text { props, .. } | Run::FootnoteRef { props, .. } => {
+        Run::Text { props, .. }
+        | Run::FootnoteRef { props, .. }
+        | Run::CommentReference { props, .. } => {
             record_run_props_font(report, snapshot_id, book, props);
         }
         Run::Field(field) => {
@@ -1199,6 +1224,8 @@ fn record_para_drawings(report: &mut FidelityReport, snapshot_id: u128, para: &P
             ParaChild::OmmlPara(_)
             | ParaChild::BookmarkStart { .. }
             | ParaChild::BookmarkEnd { .. }
+            | ParaChild::CommentRangeStart { .. }
+            | ParaChild::CommentRangeEnd { .. }
             | ParaChild::Tag(_) => {}
         }
     }
@@ -1241,6 +1268,7 @@ fn record_run_drawings(report: &mut FidelityReport, snapshot_id: u128, run: &Run
         | Run::FillTab
         | Run::FootnoteRef { .. }
         | Run::FootnoteRefMark
+        | Run::CommentReference { .. }
         | Run::OmmlInline(_) => {}
     }
 }
@@ -2581,6 +2609,8 @@ fn single_line_furniture_height(blocks: &[Block]) -> Option<i32> {
             }
             ParaChild::BookmarkStart { .. }
             | ParaChild::BookmarkEnd { .. }
+            | ParaChild::CommentRangeStart { .. }
+            | ParaChild::CommentRangeEnd { .. }
             | ParaChild::Tag(_) => {}
             ParaChild::OmmlPara(_) => return None,
         }
@@ -2593,7 +2623,9 @@ fn accumulate_single_line_run_size(run: &Run, maximum: &mut u32) -> Option<()> {
         Run::Text { props, .. } | Run::FootnoteRef { props, .. } => {
             *maximum = (*maximum).max(props.size_half_pt.unwrap_or(0));
         }
-        Run::Tab | Run::FillTab => {}
+        // Invisible in the flow (no `w:t`), so it neither contributes to nor
+        // disqualifies a single-line height measurement — like a bare tab.
+        Run::Tab | Run::FillTab | Run::CommentReference { .. } => {}
         Run::Break { .. }
         | Run::PageBreak
         | Run::ColumnBreak
@@ -2756,6 +2788,8 @@ fn para_child_text_chars(child: &ParaChild) -> usize {
         ParaChild::OmmlPara(_)
         | ParaChild::BookmarkStart { .. }
         | ParaChild::BookmarkEnd { .. }
+        | ParaChild::CommentRangeStart { .. }
+        | ParaChild::CommentRangeEnd { .. }
         | ParaChild::Tag(_) => 0,
     }
 }
@@ -2787,6 +2821,7 @@ fn run_text_chars(run: &Run) -> usize {
         | Run::FillTab
         | Run::FootnoteRef { .. }
         | Run::FootnoteRefMark
+        | Run::CommentReference { .. }
         | Run::OmmlInline(_) => 0,
     }
 }
@@ -3085,6 +3120,7 @@ fn sig_para_child(child: &ParaChild, out: &mut String) {
             out.push(')');
         }
         ParaChild::BookmarkStart { .. } | ParaChild::BookmarkEnd { .. } => {}
+        ParaChild::CommentRangeStart { .. } | ParaChild::CommentRangeEnd { .. } => {}
         ParaChild::Tag(_) => {}
     }
 }
@@ -3112,6 +3148,11 @@ fn sig_run(run: &Run, out: &mut String) {
             let _ = write!(out, "{id})");
         }
         Run::FootnoteRefMark => out.push_str("fnmark;"),
+        Run::CommentReference { props, id } => {
+            out.push_str("cref(");
+            sig_run_props(props, out);
+            let _ = write!(out, "{id})");
+        }
         Run::Drawing(drawing) => sig_drawing(drawing, out),
         Run::OmmlInline(xml) => {
             let _ = write!(out, "ommli({xml})");

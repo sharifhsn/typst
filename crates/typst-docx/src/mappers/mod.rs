@@ -3,6 +3,7 @@
 //! exactly one module each, keeping the public handler signatures identical.
 
 pub mod columns;
+pub mod comment;
 pub mod footnote;
 pub mod heading;
 pub mod image;

@@ -11,8 +11,8 @@ use std::fmt::{self, Display, Formatter};
 use ecow::EcoString;
 
 use crate::dom::{
-    Block, DocxDocument, FieldCacheStatus, FieldDisplay, FieldMode, Footnote, HdrFtrPart,
-    Para, ParaChild, Run,
+    Block, Comment, DocxDocument, FieldCacheStatus, FieldDisplay, FieldMode, Footnote,
+    HdrFtrPart, Para, ParaChild, Run,
 };
 
 /// Strips redundant re-emissions of the same bookmark within one part.
@@ -31,6 +31,7 @@ pub(crate) fn dedupe_repeated_bookmarks(
     headers: &mut [HdrFtrPart],
     footers: &mut [HdrFtrPart],
     footnotes: &mut [Footnote],
+    comments: &mut [Comment],
 ) {
     let mut scope = BookmarkScope::default();
     dedupe_blocks(body, &mut scope);
@@ -42,6 +43,11 @@ pub(crate) fn dedupe_repeated_bookmarks(
     let mut scope = BookmarkScope::default();
     for footnote in footnotes {
         dedupe_blocks(&mut footnote.blocks, &mut scope);
+    }
+    // All comments serialize into one part (word/comments.xml).
+    let mut scope = BookmarkScope::default();
+    for comment in comments {
+        dedupe_blocks(&mut comment.blocks, &mut scope);
     }
 }
 
@@ -59,6 +65,7 @@ pub(crate) fn resolve_leading_background_layers(
     headers: &mut [HdrFtrPart],
     footers: &mut [HdrFtrPart],
     footnotes: &mut [Footnote],
+    comments: &mut [Comment],
 ) {
     resolve_block_backgrounds(body);
     for part in headers.iter_mut().chain(footers.iter_mut()) {
@@ -66,6 +73,9 @@ pub(crate) fn resolve_leading_background_layers(
     }
     for footnote in footnotes {
         resolve_block_backgrounds(&mut footnote.blocks);
+    }
+    for comment in comments {
+        resolve_block_backgrounds(&mut comment.blocks);
     }
 }
 
@@ -128,6 +138,8 @@ fn para_child_has_flow_content(child: &ParaChild) -> bool {
         ParaChild::OmmlPara(_) => true,
         ParaChild::BookmarkStart { .. }
         | ParaChild::BookmarkEnd { .. }
+        | ParaChild::CommentRangeStart { .. }
+        | ParaChild::CommentRangeEnd { .. }
         | ParaChild::Tag(_) => false,
     }
 }
@@ -142,6 +154,7 @@ fn run_has_flow_content(run: &Run) -> bool {
         Run::OmmlInline(_)
         | Run::FootnoteRef { .. }
         | Run::FootnoteRefMark
+        | Run::CommentReference { .. }
         | Run::Break { .. }
         | Run::PageBreak
         | Run::ColumnBreak
@@ -185,6 +198,7 @@ pub(crate) fn fallback_dangling_internal_fields(
     headers: &mut [HdrFtrPart],
     footers: &mut [HdrFtrPart],
     footnotes: &mut [Footnote],
+    comments: &mut [Comment],
 ) -> Vec<EcoString> {
     let mut bookmarks = BTreeSet::new();
     collect_bookmark_names(body, &mut bookmarks);
@@ -194,6 +208,9 @@ pub(crate) fn fallback_dangling_internal_fields(
     for footnote in footnotes.iter() {
         collect_bookmark_names(&footnote.blocks, &mut bookmarks);
     }
+    for comment in comments.iter() {
+        collect_bookmark_names(&comment.blocks, &mut bookmarks);
+    }
 
     let mut missing = Vec::new();
     rewrite_dangling_fields_in_blocks(body, &bookmarks, &mut missing);
@@ -202,6 +219,9 @@ pub(crate) fn fallback_dangling_internal_fields(
     }
     for footnote in footnotes {
         rewrite_dangling_fields_in_blocks(&mut footnote.blocks, &bookmarks, &mut missing);
+    }
+    for comment in comments {
+        rewrite_dangling_fields_in_blocks(&mut comment.blocks, &bookmarks, &mut missing);
     }
     missing
 }
@@ -252,6 +272,8 @@ fn collect_para_bookmarks(para: &Para, names: &mut BTreeSet<EcoString>) {
                 }
             }
             ParaChild::BookmarkEnd { .. }
+            | ParaChild::CommentRangeStart { .. }
+            | ParaChild::CommentRangeEnd { .. }
             | ParaChild::OmmlPara(_)
             | ParaChild::Tag(_) => {}
         }
@@ -455,7 +477,12 @@ fn dedupe_para(para: &mut Para, scope: &mut BookmarkScope) {
             }
             true
         }
-        ParaChild::OmmlPara(_) | ParaChild::Tag(_) => true,
+        // Comment range ids are our own allocation (see `DocxCtx::register_comment`)
+        // and never legitimately repeat, so there is nothing to dedupe.
+        ParaChild::CommentRangeStart { .. }
+        | ParaChild::CommentRangeEnd { .. }
+        | ParaChild::OmmlPara(_)
+        | ParaChild::Tag(_) => true,
     });
 }
 
@@ -507,6 +534,12 @@ pub(crate) enum DocumentInvariantError {
     UnavailableFieldIsStatic(EcoString),
     HiddenFieldHasVisibleCache(EcoString),
     DanglingInternalFieldTarget(EcoString),
+    InvalidCommentId(i32),
+    DuplicateCommentId(i32),
+    MissingCommentBody(i32),
+    DuplicateCommentRangeId(i32),
+    OrphanCommentRangeEnd(i32),
+    MissingCommentRangeEnd(i32),
 }
 
 impl Display for DocumentInvariantError {
@@ -566,6 +599,22 @@ impl Display for DocumentInvariantError {
             Self::DanglingInternalFieldTarget(target) => {
                 write!(f, "internal field targets missing bookmark `{target}`")
             }
+            Self::InvalidCommentId(id) => {
+                write!(f, "comment ID `{id}` must not be negative")
+            }
+            Self::DuplicateCommentId(id) => write!(f, "duplicate comment ID `{id}`"),
+            Self::MissingCommentBody(id) => {
+                write!(f, "comment reference `{id}` has no matching body")
+            }
+            Self::DuplicateCommentRangeId(id) => {
+                write!(f, "duplicate comment range ID `{id}`")
+            }
+            Self::OrphanCommentRangeEnd(id) => {
+                write!(f, "comment range end `{id}` has no matching start")
+            }
+            Self::MissingCommentRangeEnd(id) => {
+                write!(f, "comment range start `{id}` has no matching end")
+            }
         }
     }
 }
@@ -581,12 +630,18 @@ pub(crate) fn validate(document: &DocxDocument) -> Result<(), DocumentInvariantE
     for footnote in &document.footnotes {
         collect_bookmark_names(&footnote.blocks, &mut available_bookmarks);
     }
+    for comment in &document.comments {
+        collect_bookmark_names(&comment.blocks, &mut available_bookmarks);
+    }
     validate_internal_field_targets(&document.body, &available_bookmarks)?;
     for part in document.header_parts.iter().chain(&document.footer_parts) {
         validate_internal_field_targets(&part.blocks, &available_bookmarks)?;
     }
     for footnote in &document.footnotes {
         validate_internal_field_targets(&footnote.blocks, &available_bookmarks)?;
+    }
+    for comment in &document.comments {
+        validate_internal_field_targets(&comment.blocks, &available_bookmarks)?;
     }
 
     let mut state = State::default();
@@ -616,6 +671,14 @@ pub(crate) fn validate(document: &DocxDocument) -> Result<(), DocumentInvariantE
             return Err(DocumentInvariantError::DuplicateFootnoteId(footnote.id));
         }
     }
+    for comment in &document.comments {
+        if comment.id < 0 {
+            return Err(DocumentInvariantError::InvalidCommentId(comment.id));
+        }
+        if !state.comment_ids.insert(comment.id) {
+            return Err(DocumentInvariantError::DuplicateCommentId(comment.id));
+        }
+    }
 
     // Bookmark identity is scoped PER PART, not document-wide: repeated page
     // furniture legitimately re-emits the same logical bookmark (same id and
@@ -635,7 +698,19 @@ pub(crate) fn validate(document: &DocxDocument) -> Result<(), DocumentInvariantE
     for footnote in &document.footnotes {
         state.visit_blocks(&footnote.blocks)?;
     }
-    state.finish_part()
+    state.finish_part()?;
+    // All comments serialize into one part (word/comments.xml).
+    for comment in &document.comments {
+        state.visit_blocks(&comment.blocks)?;
+    }
+    state.finish_part()?;
+
+    // Comment range markers are not part-scoped like bookmarks: a span's
+    // start and end always come from the same lowering pass (see
+    // `mappers::comment`) and land in the same story, so their balance is
+    // checked once, globally, after every part has been visited — rather than
+    // resetting per part the way `finish_part` does for bookmarks.
+    state.finish_comment_ranges()
 }
 
 fn validate_internal_field_targets(
@@ -728,6 +803,11 @@ struct State {
     bookmark_end_ids: BTreeSet<u32>,
     bookmark_names: BTreeSet<EcoString>,
     footnote_ids: BTreeSet<i32>,
+    comment_ids: BTreeSet<i32>,
+    /// Not cleared per part by `finish_part` — see the balance check at the
+    /// end of `validate`.
+    comment_range_start_ids: BTreeSet<i32>,
+    comment_range_end_ids: BTreeSet<i32>,
     abstract_numbering_ids: BTreeSet<u32>,
     numbering_ids: BTreeSet<u32>,
 }
@@ -791,6 +871,16 @@ impl State {
                         return Err(DocumentInvariantError::DuplicateBookmarkId(*id));
                     }
                 }
+                ParaChild::CommentRangeStart { id } => {
+                    if !self.comment_range_start_ids.insert(*id) {
+                        return Err(DocumentInvariantError::DuplicateCommentRangeId(*id));
+                    }
+                }
+                ParaChild::CommentRangeEnd { id } => {
+                    if !self.comment_range_end_ids.insert(*id) {
+                        return Err(DocumentInvariantError::DuplicateCommentRangeId(*id));
+                    }
+                }
                 ParaChild::OmmlPara(_) | ParaChild::Tag(_) => {}
             }
         }
@@ -802,6 +892,11 @@ impl State {
             Run::FootnoteRef { id, .. } => {
                 if !self.footnote_ids.contains(id) {
                     return Err(DocumentInvariantError::MissingFootnoteBody(*id));
+                }
+            }
+            Run::CommentReference { id, .. } => {
+                if !self.comment_ids.contains(id) {
+                    return Err(DocumentInvariantError::MissingCommentBody(*id));
                 }
             }
             Run::Drawing(drawing) => {
@@ -907,6 +1002,23 @@ impl State {
         self.bookmark_names.clear();
         Ok(())
     }
+
+    /// Checks start/end pairing for every comment range seen across the whole
+    /// document. Unlike [`Self::finish_part`], this is not scoped per part and
+    /// not called until every part has been visited — see `validate`.
+    fn finish_comment_ranges(&self) -> Result<(), DocumentInvariantError> {
+        if let Some(id) =
+            self.comment_range_end_ids.difference(&self.comment_range_start_ids).next()
+        {
+            return Err(DocumentInvariantError::OrphanCommentRangeEnd(*id));
+        }
+        if let Some(id) =
+            self.comment_range_start_ids.difference(&self.comment_range_end_ids).next()
+        {
+            return Err(DocumentInvariantError::MissingCommentRangeEnd(*id));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -940,7 +1052,13 @@ mod dangling_field_tests {
             ))
         );
         let missing =
-            fallback_dangling_internal_fields(&mut body, &mut [], &mut [], &mut []);
+            fallback_dangling_internal_fields(
+                &mut body,
+                &mut [],
+                &mut [],
+                &mut [],
+                &mut [],
+            );
 
         assert_eq!(missing, [EcoString::from("_MissingNumber")]);
         let Block::Para(para) = &body[0] else { panic!("paragraph") };
@@ -963,7 +1081,13 @@ mod dangling_field_tests {
             reference_paragraph("_TargetNumber"),
         ];
         let missing =
-            fallback_dangling_internal_fields(&mut body, &mut [], &mut [], &mut []);
+            fallback_dangling_internal_fields(
+                &mut body,
+                &mut [],
+                &mut [],
+                &mut [],
+                &mut [],
+            );
 
         assert!(missing.is_empty());
         let Block::Para(para) = &body[1] else { panic!("paragraph") };
@@ -984,7 +1108,13 @@ mod dangling_field_tests {
         ];
 
         let missing =
-            fallback_dangling_internal_fields(&mut body, &mut [], &mut [], &mut []);
+            fallback_dangling_internal_fields(
+                &mut body,
+                &mut [],
+                &mut [],
+                &mut [],
+                &mut [],
+            );
         assert!(missing.is_empty());
         let Block::Para(para) = &body[1] else { panic!("paragraph") };
         let [ParaChild::Run(Run::Field(field))] = para.content.as_slice() else {
@@ -1002,7 +1132,7 @@ mod dangling_field_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dom::{Drawing, Field, PicClip};
+    use crate::dom::{Drawing, Field, PicClip, RunProps};
 
     #[test]
     fn duplicate_drawing_ids_are_rejected() {
@@ -1097,5 +1227,53 @@ mod tests {
                 " PAGEREF _Ref1 ".into()
             ))
         );
+    }
+
+    #[test]
+    fn unpaired_comment_range_start_is_rejected() {
+        let mut state = State::default();
+        state.comment_range_start_ids.insert(3);
+        assert_eq!(
+            state.finish_comment_ranges(),
+            Err(DocumentInvariantError::MissingCommentRangeEnd(3))
+        );
+    }
+
+    #[test]
+    fn orphan_comment_range_end_is_rejected() {
+        let mut state = State::default();
+        state.comment_range_end_ids.insert(5);
+        assert_eq!(
+            state.finish_comment_ranges(),
+            Err(DocumentInvariantError::OrphanCommentRangeEnd(5))
+        );
+    }
+
+    #[test]
+    fn paired_comment_range_is_accepted() {
+        let mut state = State::default();
+        state.comment_range_start_ids.insert(1);
+        state.comment_range_end_ids.insert(1);
+        assert_eq!(state.finish_comment_ranges(), Ok(()));
+    }
+
+    #[test]
+    fn missing_comment_body_is_rejected() {
+        let mut state = State::default();
+        let props = RunProps::default();
+        let run = Run::CommentReference { props, id: 4 };
+        assert_eq!(
+            state.visit_run(&run),
+            Err(DocumentInvariantError::MissingCommentBody(4))
+        );
+    }
+
+    #[test]
+    fn comment_reference_with_registered_body_is_accepted() {
+        let mut state = State::default();
+        state.comment_ids.insert(4);
+        let props = RunProps::default();
+        let run = Run::CommentReference { props, id: 4 };
+        assert_eq!(state.visit_run(&run), Ok(()));
     }
 }

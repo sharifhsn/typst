@@ -34,10 +34,10 @@ use typst_ooxml_core::ns;
 use typst_syntax::{FileId, Span};
 
 use crate::dom::{
-    Block, BookmarkTable, BreakKind, Field, FieldCacheStatus, FieldDisplay, FieldMode,
-    Footnote, HeadingStyleSample, Jc, ListLevel, ListSpec, NumberingTable, ParaProps,
-    ReviewCandidateKind, ReviewJoinId, ReviewOrigin, Run, RunProps, TocFigure,
-    TocHeading, Underline, VertAlign,
+    Block, BookmarkTable, BreakKind, Comment, Field, FieldCacheStatus, FieldDisplay,
+    FieldMode, Footnote, HeadingStyleSample, Jc, ListLevel, ListSpec, NumberingTable,
+    ParaProps, ReviewCandidateKind, ReviewJoinId, ReviewOrigin, Run, RunProps,
+    TocFigure, TocHeading, Underline, VertAlign,
 };
 use crate::fallback::CachedOverlay;
 use crate::mappers;
@@ -74,6 +74,13 @@ pub struct DocxCtx<'a, 'e> {
     footnote_ids: FxHashMap<u128, (i32, u32, EcoString)>,
     next_footnote_id: i32,
 
+    pub(crate) comments: Vec<Comment>,
+    /// Word ids allocated for span comments still awaiting their closing
+    /// anchor, keyed by the label the opening `#metadata` anchor carries. See
+    /// `mappers::comment`.
+    open_comments: FxHashMap<EcoString, i32>,
+    next_comment_id: i32,
+
     pub(crate) numbering: NumberingTable,
     list_shapes: FxHashMap<ListSpec, u32>,
     next_num_id: u32,
@@ -85,6 +92,9 @@ pub struct DocxCtx<'a, 'e> {
     /// Relationships for footnote-body content (→ `footnotes.xml.rels`); used
     /// while [`Self::in_footnote`] is set.
     pub(crate) footnote_rels: Rels,
+    /// Relationships for comment-body content (→ `comments.xml.rels`); used
+    /// while [`Self::in_comment`] is set.
+    pub(crate) comment_rels: Rels,
     /// When `Some`, relationships are routed here instead of `doc_rels` — used to
     /// collect a header/footer part's own relationships while its content is
     /// lowered (an `r:id` in `headerN.xml` must resolve against `headerN.xml.rels`).
@@ -214,6 +224,13 @@ pub struct DocxCtx<'a, 'e> {
     /// is flattened to its body text inline instead of emitting a nested mark.
     pub(crate) in_footnote: bool,
 
+    /// Whether we are currently lowering a comment's body (into
+    /// `comments.xml`). Mirrors `in_footnote`'s relationship routing (an
+    /// image/link inside a comment body must resolve against
+    /// `comments.xml.rels`, not the document's own) — see
+    /// [`Self::active_rels`].
+    pub(crate) in_comment: bool,
+
     /// Whether the current block context will be *centered* (a figure body).
     /// A centered `wps:txbx` text box does not flow its text in LibreOffice (it
     /// renders as an empty frame with the text leaked to the margin); Word renders
@@ -251,6 +268,9 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             footnotes: Vec::new(),
             footnote_ids: FxHashMap::default(),
             next_footnote_id: 1,
+            comments: Vec::new(),
+            open_comments: FxHashMap::default(),
+            next_comment_id: 0,
             numbering: NumberingTable::default(),
             list_shapes: FxHashMap::default(),
             next_num_id: 1,
@@ -258,6 +278,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             media: MediaRegistry::new("word/media"),
             doc_rels: Rels::new(),
             footnote_rels: Rels::new(),
+            comment_rels: Rels::new(),
             part_rels: None,
             next_bookmark_id: 1,
             snapshot_bookmark_names: FxHashMap::default(),
@@ -296,6 +317,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             raw_ranges: Vec::new(),
             line_numbering_active: false,
             in_footnote: false,
+            in_comment: false,
             suppress_text_box: false,
             cell_owns_inline_block_geometry: false,
             overlay_cache: FxHashMap::default(),
@@ -687,16 +709,52 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         (id, bookmark_id, bookmark_name, true)
     }
 
+    /// Registers one comment body, routed to `word/comments.xml`. Allocates a
+    /// fresh Word id — our own allocation, never the foreign number carried by
+    /// the imported `<comment-N>` label (see `mappers::comment`). Called
+    /// exactly once per opening `#metadata` anchor, regardless of whether the
+    /// comment turns out to be point- or span-anchored.
+    pub(crate) fn register_comment(
+        &mut self,
+        author: Option<EcoString>,
+        initials: Option<EcoString>,
+        date: Option<EcoString>,
+        blocks: Vec<Block>,
+    ) -> i32 {
+        let id = self.next_comment_id;
+        self.next_comment_id += 1;
+        self.comments.push(Comment { id, author, initials, date, blocks });
+        id
+    }
+
+    /// Records that a span comment's opening anchor (labelled `label`) has
+    /// been lowered as `id`, awaiting its closing anchor.
+    pub(crate) fn open_comment_span(&mut self, label: EcoString, id: i32) {
+        self.open_comments.insert(label, id);
+    }
+
+    /// Consumes and returns the Word id opened under `label` (the closing
+    /// anchor's label with its `-end` suffix stripped), if any. `None` means
+    /// a closing anchor with no matching opening one — malformed input; the
+    /// caller reports it and drops the anchor.
+    pub(crate) fn close_comment_span(&mut self, label: &str) -> Option<i32> {
+        self.open_comments.remove(label)
+    }
+
     /// The relationships table the *current* content lowers into: a header/footer
     /// part's own table while one is being built, the footnote table while a
-    /// footnote body is lowered, else the document's. An `r:id` used in a part
-    /// must resolve against that part's `.rels`, so relationships created while
-    /// lowering header/footer/footnote content must NOT land in `document.xml.rels`.
+    /// footnote body is lowered, the comment table while a comment body is
+    /// lowered, else the document's. An `r:id` used in a part must resolve
+    /// against that part's `.rels`, so relationships created while lowering
+    /// header/footer/footnote/comment content must NOT land in
+    /// `document.xml.rels`.
     fn active_rels(&mut self) -> &mut Rels {
         if let Some(rels) = self.part_rels.as_mut() {
             rels
         } else if self.in_footnote {
             &mut self.footnote_rels
+        } else if self.in_comment {
+            &mut self.comment_rels
         } else {
             &mut self.doc_rels
         }
@@ -1617,12 +1675,24 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 .unwrap_or_else(|| child.span());
 
             if let Some(elem) = child.to_packed::<TagElem>() {
-                // Preserve inline introspection tags. These are how the
-                // introspector learns about inline elements (citations,
-                // references, inline labels, …); dropping them makes e.g.
-                // a bibliography unable to find its citations, so they never
-                // resolve and the document never converges.
-                out.push(ParaChild::Tag(elem.tag.clone()));
+                // A comment anchor `#metadata` from `typst-docx-import` (see
+                // `mappers::comment`) lowers to real `w:commentRange*`/
+                // `w:commentReference` markers instead of the generic tag
+                // passthrough. Every other tag — including ordinary metadata
+                // and this same element's own closing tag — falls through
+                // unchanged.
+                if let Some(children) =
+                    mappers::comment::tag_children(self, &elem.tag, child_styles)?
+                {
+                    out.extend(children);
+                } else {
+                    // Preserve inline introspection tags. These are how the
+                    // introspector learns about inline elements (citations,
+                    // references, inline labels, …); dropping them makes e.g.
+                    // a bibliography unable to find its citations, so they never
+                    // resolve and the document never converges.
+                    out.push(ParaChild::Tag(elem.tag.clone()));
+                }
             } else if let Some(elem) = child.to_packed::<LinkElem>() {
                 out.extend(self.link_children(elem, child_styles, &props)?);
             } else if let Some(elem) = child.to_packed::<DirectLinkElem>() {

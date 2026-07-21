@@ -10,10 +10,10 @@ use typst_ooxml_core::{dml, ns};
 use typst_syntax::Span;
 
 use crate::dom::{
-    Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, DocxDocument,
-    Drawing, Field, FieldDisplay, FieldMode, Footnote, GroupSpec, HdrFtrPart, Jc, Para,
-    ParaChild, ParaProps, PicGeom, ReviewJoinId, Row, Run, SectPr, SectType, ShapeFill,
-    ShapeGeom, ShapeSpec, Spacing, Tbl, Toc, VAlign, VMerge,
+    Anchor, AnchorPos, AnchorWrap, Block, Border, Cell, CellBorders, Comment,
+    DocxDocument, Drawing, Field, FieldDisplay, FieldMode, Footnote, GroupSpec,
+    HdrFtrPart, Jc, Para, ParaChild, ParaProps, PicGeom, ReviewJoinId, Row, Run, SectPr,
+    SectType, ShapeFill, ShapeGeom, ShapeSpec, Spacing, Tbl, Toc, VAlign, VMerge,
 };
 use crate::package::{DOCX_PACKAGE_OPTIONS, Package, RelMode, Rels};
 use crate::styles_part;
@@ -71,6 +71,16 @@ const REL_THEME: &str = ns::rel::THEME;
 const REL_FONT_TABLE: &str = ns::rel::FONT_TABLE;
 const REL_FONT: &str = ns::rel::FONT;
 const REL_WEB_SETTINGS: &str = ns::rel::WEB_SETTINGS;
+// `word/comments.xml`'s relationship type + content type are not in
+// `typst_ooxml_core::ns` (this feature only touches `crates/typst-docx`), so
+// they are declared here as literal values instead. Both are the well-known
+// ECMA-376 ("Office Open XML File Formats", Part 1, §11.3, `WordprocessingML
+// Comments Part`) identifiers — the same ones every OOXML-producing library
+// (python-docx, Open XML SDK, …) uses, following the same
+// `.../relationships/<part>` / `....wordprocessingml.<part>+xml` shape as
+// every other constant in this section.
+const REL_COMMENTS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
 
 // Content types.
 const CT_DOCUMENT: &str = ns::ct::WORD_DOCUMENT;
@@ -88,6 +98,8 @@ const CT_THEME: &str = ns::ct::THEME;
 const CT_FONT_TABLE: &str = ns::ct::WORD_FONT_TABLE;
 const CT_OBFUSCATED_FONT: &str = ns::ct::OBFUSCATED_FONT;
 const CT_WEB_SETTINGS: &str = ns::ct::WORD_WEB_SETTINGS;
+const CT_COMMENTS: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml";
 
 fn push_font(fonts: &mut Vec<String>, font: &str) {
     if !fonts.iter().any(|existing| existing == font) {
@@ -247,6 +259,20 @@ fn docx_impl(
     write_part_rels(&mut package, "word/footnotes.xml", &document.footnote_rels)?;
     package.add_xml("word/endnotes.xml", CT_ENDNOTES, build_endnotes(pretty));
     doc_rels.add(REL_ENDNOTES, "endnotes.xml", RelMode::Internal);
+
+    // -- word/comments.xml (conditional) --
+    // Unlike footnotes/endnotes, Word only writes this part when the document
+    // actually has review comments — an ordinary comment-free document has no
+    // `word/comments.xml` at all.
+    if !document.comments.is_empty() {
+        let comments_xml = build_comments(document, review_tags, pretty);
+        package.add_xml("word/comments.xml", CT_COMMENTS, comments_xml);
+        doc_rels.add(REL_COMMENTS, "comments.xml", RelMode::Internal);
+        // A comment body that holds an image / external link references it by
+        // r:id; that id resolves against comments.xml's OWN rels part, not the
+        // document's (same reasoning as footnotes above).
+        write_part_rels(&mut package, "word/comments.xml", &document.comment_rels)?;
+    }
 
     // -- header/footer parts --
     // The headerReference/footerReference relationships live in `doc_rels`; the
@@ -1428,6 +1454,12 @@ fn write_para_child(
         ParaChild::BookmarkEnd { id } => {
             w.open(xml::W_BOOKMARK_END).attr("w:id", &id.to_string()).empty();
         }
+        ParaChild::CommentRangeStart { id } => {
+            w.open("w:commentRangeStart").attr("w:id", &id.to_string()).empty();
+        }
+        ParaChild::CommentRangeEnd { id } => {
+            w.open("w:commentRangeEnd").attr("w:id", &id.to_string()).empty();
+        }
         ParaChild::Tag(_) => {}
     }
 }
@@ -1514,6 +1546,12 @@ fn write_run(w: &mut XmlWriter, run: &Run) {
             w.close(); // rPr
             w.open(xml::W_FOOTNOTE_REF_MARK).empty();
             w.close(); // r
+        }
+        Run::CommentReference { props, id } => {
+            w.open(xml::W_R).start_children();
+            props.write_rpr(w);
+            w.open("w:commentReference").attr("w:id", &id.to_string()).empty();
+            w.close();
         }
         Run::Drawing(drawing) => write_drawing(w, drawing),
         Run::OmmlInline(xml_str) => {
@@ -2076,6 +2114,56 @@ fn write_footnote(
         .start_children();
     let mut ended_para = false;
     for block in &footnote.blocks {
+        ended_para = write_block(w, block, Some(review_tags));
+    }
+    if !ended_para {
+        w.leaf(xml::W_P);
+    }
+    w.close();
+}
+
+// ---------------------------------------------------------------------------
+// word/comments.xml
+// ---------------------------------------------------------------------------
+
+fn build_comments(
+    document: &DocxDocument,
+    review_tags: &BTreeMap<ReviewJoinId, ReviewTag>,
+    pretty: bool,
+) -> String {
+    let mut w = XmlWriter::new(pretty);
+    // Comments get their own `w14:paraId` lane, disjoint from body/header/
+    // footer/footnote ranges (see `build_footnotes`).
+    w.set_para_base(0x7800_0000);
+    w.open("w:comments");
+    decl_ooxml_namespaces(&mut w);
+    w.attr("mc:Ignorable", "w14 wp14");
+    w.start_children();
+    for comment in &document.comments {
+        write_comment(&mut w, comment, review_tags);
+    }
+    w.close();
+    w.finish()
+}
+
+fn write_comment(
+    w: &mut XmlWriter,
+    comment: &Comment,
+    review_tags: &BTreeMap<ReviewJoinId, ReviewTag>,
+) {
+    w.open("w:comment").attr("w:id", &comment.id.to_string());
+    if let Some(author) = &comment.author {
+        w.attr("w:author", author);
+    }
+    if let Some(date) = &comment.date {
+        w.attr("w:date", date);
+    }
+    if let Some(initials) = &comment.initials {
+        w.attr("w:initials", initials);
+    }
+    w.start_children();
+    let mut ended_para = false;
+    for block in &comment.blocks {
         ended_para = write_block(w, block, Some(review_tags));
     }
     if !ended_para {
