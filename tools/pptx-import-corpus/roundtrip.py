@@ -262,10 +262,13 @@ def main() -> int:
         meta = sum(r.metafiles for r in good)
         tbls = sum(r.tables[1] for r in good), sum(r.tables[0] for r in good)
         reachable = max(src_pics - meta, 0)
+        # Can exceed the source count, and legitimately: a layout's and
+        # master's own pictures are drawn behind every slide that uses them,
+        # so one shared logo becomes one picture per slide.
         print(
-            f"pictures        : {kept_pics}/{src_pics} kept "
-            f"({meta} are EMF/WMF that Typst cannot decode; "
-            f"{kept_pics}/{reachable} of the rest)"
+            f"pictures        : {kept_pics} out of {src_pics} on the source slides "
+            f"({meta} are EMF/WMF Typst cannot decode; {reachable} reachable; "
+            f"inherited decoration adds more)"
         )
         print(f"tables          : {tbls[0]}/{tbls[1]} kept")
     return 0 if len(good) == len(rows) else 1
