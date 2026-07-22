@@ -384,7 +384,7 @@ fn compile_and_export(
                     if let Some(warning) = mixed_page_size_warning(&document, config) {
                         warnings.push(warning);
                     }
-                    export_paged(&document, config)
+                    export_paged(&document, world, config)
                 }
                 Err(errors) => Err(errors),
             };
@@ -1189,6 +1189,7 @@ fn export_html(document: &HtmlDocument, config: &CompileConfig) -> SourceResult<
 /// Export to a paged target format.
 fn export_paged(
     document: &PagedDocument,
+    world: &SystemWorld,
     config: &CompileConfig,
 ) -> SourceResult<Vec<Output>> {
     match config.output_format {
@@ -1202,7 +1203,7 @@ fn export_paged(
             export_image(document, config, ImageExportFormat::Svg).at(Span::detached())
         }
         OutputFormat::Pptx => {
-            export_pptx(document, config).map(|()| vec![config.output.clone()])
+            export_pptx(document, world, config).map(|()| vec![config.output.clone()])
         }
         OutputFormat::Html
         | OutputFormat::Bundle
@@ -1212,7 +1213,11 @@ fn export_paged(
 }
 
 /// Export to a PPTX.
-fn export_pptx(document: &PagedDocument, config: &CompileConfig) -> SourceResult<()> {
+fn export_pptx(
+    document: &PagedDocument,
+    world: &SystemWorld,
+    config: &CompileConfig,
+) -> SourceResult<()> {
     let mut exported_pages = EcoVec::new();
     let mut page_to_slide = vec![None; document.pages().len()];
     for (i, page) in document.pages().iter().enumerate() {
@@ -1246,6 +1251,7 @@ fn export_pptx(document: &PagedDocument, config: &CompileConfig) -> SourceResult
         .collect();
     let bytes = pptx_with_page_mapping(
         &filtered,
+        world,
         &PptxOptions { speaker_notes: Some(speaker_notes) },
         &page_to_slide,
     )?;

@@ -3620,6 +3620,7 @@ dependencies = [
 name = "typst-pptx"
 version = "0.15.0"
 dependencies = [
+ "comemo",
  "ecow",
  "rustc-hash",
  "time",

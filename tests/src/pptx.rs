@@ -70,7 +70,7 @@ fn pptx_bytes(src: &str) -> Vec<u8> {
     let doc = typst::compile::<PagedDocument>(&world)
         .output
         .expect("compilation failed");
-    pptx(&doc, &PptxOptions::default()).expect("pptx export failed")
+    pptx(&doc, &world, &PptxOptions::default()).expect("pptx export failed")
 }
 
 /// Compiles `src` to a PPTX and returns all package parts as `name -> bytes`.
@@ -1419,7 +1419,7 @@ Page three"#;
         .output
         .expect("compilation failed");
 
-    let full = text_parts(pptx(&document, &PptxOptions::default()).unwrap());
+    let full = text_parts(pptx(&document, &world, &PptxOptions::default()).unwrap());
     let full_rels = &full["ppt/slides/_rels/slide1.xml.rels"];
     assert!(
         full_rels.contains("slide2.xml"),
@@ -1435,6 +1435,7 @@ Page three"#;
     let filtered = text_parts(
         pptx_with_page_mapping(
             &filtered,
+            &world,
             &PptxOptions::default(),
             &[Some(0), None, Some(1)],
         )
@@ -1459,6 +1460,7 @@ Page three"#;
                 ecow::eco_vec![document.pages()[0].clone(), document.pages()[2].clone()],
                 document.info().clone(),
             ),
+            &world,
             &PptxOptions::default(),
             &[Some(0), None, Some(99)],
         )
@@ -1489,6 +1491,7 @@ Page three <third>"#;
     let parts = text_parts(
         pptx_with_page_mapping(
             &filtered,
+            &world,
             &PptxOptions::default(),
             &[Some(0), None, Some(1)],
         )

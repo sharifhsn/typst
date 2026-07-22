@@ -1,7 +1,10 @@
+use comemo::{Track, TrackedMut};
 use ecow::EcoString;
 use rustc_hash::FxHashMap;
 use typst_layout::{Page, PagedDocument};
-use typst_library::foundations::{NativeElement, StyleChain};
+use typst_library::World;
+use typst_library::engine::{Engine, Route, Sink, Traced};
+use typst_library::foundations::{NativeElement, Output, StyleChain};
 use typst_library::introspection::{CounterDisplayElem, Introspector, Location, Tag};
 use typst_library::layout::{
     Abs, ColumnRegion, Frame, FrameItem, Point, Ratio, Size, Transform,
@@ -10,6 +13,7 @@ use typst_library::math::EquationElem;
 use typst_library::model::{Destination, Numbering};
 use typst_library::visualize::{Geometry, Paint, Shape};
 use typst_ooxml_core::{dml, units};
+use typst_utils::Protected;
 
 use crate::dom::{
     FillSpec, LinkOverlay, MathBox, PicGeom, RunLink, SlideCtx, SlideIr, SlideShape,
@@ -21,7 +25,15 @@ use crate::table::{ActiveTable, ActiveTableCell, CapturedTableCell};
 use crate::text::{InlineMathSource, LinkTarget, TextSource};
 
 /// Convert all pages into slide IR.
-pub fn slides(document: &PagedDocument, ctx: &mut SlideCtx) -> Vec<SlideIr> {
+///
+/// `equations` is the document-wide math lowering from [`equation_sources`],
+/// keyed by location; it is resolved once for the whole deck and shared by
+/// every page's walker.
+pub fn slides(
+    document: &PagedDocument,
+    equations: &FxHashMap<Location, MathSource>,
+    ctx: &mut SlideCtx,
+) -> Vec<SlideIr> {
     let target_size = document
         .pages()
         .first()
@@ -31,21 +43,23 @@ pub fn slides(document: &PagedDocument, ctx: &mut SlideCtx) -> Vec<SlideIr> {
         .pages()
         .iter()
         .enumerate()
-        .map(|(index, page)| slide(document, page, index, target_size, ctx))
+        .map(|(index, page)| slide(document, page, index, target_size, equations, ctx))
         .collect()
 }
 
-fn slide(
-    document: &PagedDocument,
-    page: &Page,
+fn slide<'a>(
+    document: &'a PagedDocument,
+    page: &'a Page,
     slide_index: usize,
     target_size: Size,
+    equations: &'a FxHashMap<Location, MathSource>,
     ctx: &mut SlideCtx,
 ) -> SlideIr {
     // Free helpers that only receive `&mut SlideCtx` (fill/shape lowering)
     // read this back to record a fidelity decision against the right slide.
     ctx.current_slide = slide_index;
-    let mut walker = Walker::new(document, page, slide_index, target_size, ctx);
+    let mut walker =
+        Walker::new(document, page, slide_index, target_size, equations, ctx);
     walker.walk_frame(&page.frame, fit_page_transform(page.frame.size(), target_size));
     walker.emit_loose_tables();
     walker
@@ -93,7 +107,7 @@ pub(super) struct Walker<'a, 'b> {
     links: Vec<LinkRect>,
     pub(super) link_overlays: Vec<LinkOverlay>,
     highlight_candidates: Vec<HighlightCandidate>,
-    equations: FxHashMap<Location, MathSource>,
+    equations: &'a FxHashMap<Location, MathSource>,
     page_size: Size,
     slide_number_fallback: Option<EcoString>,
     active_math: Vec<ActiveMath>,
@@ -123,7 +137,9 @@ pub(super) struct HighlightCandidate {
     color: [u8; 4],
 }
 
-struct MathSource {
+/// One equation's OOXML lowering, plus the plain-text stand-in PowerPoint
+/// shows where OMML cannot be rendered.
+pub struct MathSource {
     omml: String,
     fallback: EcoString,
     block: bool,
@@ -178,6 +194,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         page: &Page,
         slide_index: usize,
         page_size: Size,
+        equations: &'a FxHashMap<Location, MathSource>,
         ctx: &'b mut SlideCtx,
     ) -> Self {
         Self {
@@ -190,7 +207,7 @@ impl<'a, 'b> Walker<'a, 'b> {
             links: Vec::new(),
             link_overlays: Vec::new(),
             highlight_candidates: Vec::new(),
-            equations: equation_sources(document),
+            equations,
             page_size,
             slide_number_fallback: slide_number_fallback(page, slide_index),
             active_math: Vec::new(),
@@ -1149,7 +1166,40 @@ fn slide_number_region(bounds: Rect, page_size: Size) -> bool {
     near_header_or_footer && width <= page_w * 0.25 && height <= page_h * 0.12
 }
 
-fn equation_sources(document: &PagedDocument) -> FxHashMap<Location, MathSource> {
+/// Lower every equation in the document into its OOXML source, keyed by the
+/// equation's location so the frame walk can pick it up from a tag.
+///
+/// This is the one place in the exporter that needs an [`Engine`]. A
+/// `PagedDocument` carries no world or library, but the caller has both, so we
+/// rebuild the minimal engine that equation lowering requires:
+///
+/// * `Route::root()` — there is no outer route to extend post-layout, and depth
+///   zero is the most permissive starting point.
+/// * A **throwaway** [`Sink`]. This pass runs after the introspection loop has
+///   converged, so any delayed error it produced here would be promoted to
+///   fatal with no chance of being resolved on a later iteration; and the one
+///   warning this path can emit was already emitted by the real compile, so
+///   discarding it avoids a duplicate. `typst-pandoc`'s re-layout sub-engine
+///   isolates its sink for exactly the same reason.
+///
+/// The engine is confined to this function: everything downstream works from
+/// the returned map.
+pub fn equation_sources(
+    document: &PagedDocument,
+    world: &dyn World,
+) -> FxHashMap<Location, MathSource> {
+    let traced = Traced::default();
+    let mut throwaway = Sink::new();
+    let mut tracked_sink = throwaway.track_mut();
+    let _engine = Engine {
+        world: world.track(),
+        library: world.library(),
+        introspector: Protected::new(Output::introspector(document).track()),
+        traced: traced.track(),
+        sink: TrackedMut::reborrow_mut(&mut tracked_sink),
+        route: Route::root(),
+    };
+
     let styles = StyleChain::default();
     document
         .introspector()
@@ -1829,7 +1879,7 @@ mod tests {
         let document =
             PagedDocument::new(eco_vec![first, second], DocumentInfo::default());
         let mut ctx = SlideCtx::default();
-        let slides = slides(&document, &mut ctx);
+        let slides = slides(&document, &FxHashMap::default(), &mut ctx);
 
         assert_eq!(slides.len(), 2);
         let decisions = ctx.fidelity_report.decisions();
@@ -1866,7 +1916,7 @@ mod tests {
         let page = Page { frame, ..page_with_fill(None) };
         let document = PagedDocument::new(eco_vec![page], DocumentInfo::default());
         let mut ctx = SlideCtx::default();
-        slides(&document, &mut ctx);
+        slides(&document, &FxHashMap::default(), &mut ctx);
 
         assert!(ctx.fidelity_report.decisions().is_empty());
         assert!(ctx.media.parts().is_empty());

@@ -4,7 +4,10 @@
 //! crate consumes the *laid-out* [`PagedDocument`] — one Typst page becomes one
 //! slide, with every element placed at its exact frame position. That makes it
 //! a sibling of the PNG/SVG renderers rather than of the DOCX exporter: there
-//! are no show rules, no convergence, and no engine.
+//! are no show rules and no convergence. The one exception is math: the
+//! equation pass builds a short-lived post-layout `Engine` (see
+//! `slide::equation_sources`) because equation lowering has to re-enter library
+//! routines that a frame walk cannot reach.
 //!
 //! Each page's frame is walked into a slide IR (`dom`): positioned text boxes
 //! (live, editable DrawingML runs), pictures, native vector shapes
@@ -26,6 +29,7 @@ mod text;
 mod xml;
 
 use typst_layout::PagedDocument;
+use typst_library::World;
 use typst_library::diag::{SourceResult, bail};
 use typst_library::foundations::{Label, Selector, Value};
 use typst_library::introspection::Introspector;
@@ -57,8 +61,18 @@ pub struct SpeakerNote {
 }
 
 /// Export a paged Typst document as a PowerPoint presentation.
-pub fn pptx(document: &PagedDocument, options: &PptxOptions) -> SourceResult<Vec<u8>> {
-    pptx_impl(document, options, None).map(PptxExport::into_bytes)
+///
+/// `world` is the compilation environment the document came from. The exporter
+/// consumes the laid-out document, so it needs no world for the frame walk
+/// itself; the world is required only to build a short-lived post-layout
+/// [`Engine`](typst_library::engine::Engine) for the math pass, which has to
+/// re-enter library routines that are not reachable from frames alone.
+pub fn pptx(
+    document: &PagedDocument,
+    world: &dyn World,
+    options: &PptxOptions,
+) -> SourceResult<Vec<u8>> {
+    pptx_impl(document, world, options, None).map(PptxExport::into_bytes)
 }
 
 /// Export a filtered paged document while retaining its original physical-page
@@ -68,10 +82,12 @@ pub fn pptx(document: &PagedDocument, options: &PptxOptions) -> SourceResult<Vec
 /// in `document`. Omitted or out-of-range targets are dropped.
 pub fn pptx_with_page_mapping(
     document: &PagedDocument,
+    world: &dyn World,
     options: &PptxOptions,
     physical_page_to_slide: &[Option<usize>],
 ) -> SourceResult<Vec<u8>> {
-    pptx_impl(document, options, Some(physical_page_to_slide)).map(PptxExport::into_bytes)
+    pptx_impl(document, world, options, Some(physical_page_to_slide))
+        .map(PptxExport::into_bytes)
 }
 
 /// Export a paged Typst document as a PowerPoint presentation, keeping the
@@ -84,19 +100,21 @@ pub fn pptx_with_page_mapping(
 /// OMML/text-fallback pair, and page-background substitution).
 pub fn pptx_with_report(
     document: &PagedDocument,
+    world: &dyn World,
     options: &PptxOptions,
 ) -> SourceResult<PptxExport> {
-    pptx_impl(document, options, None)
+    pptx_impl(document, world, options, None)
 }
 
 /// [`pptx_with_page_mapping`], keeping the structured [`FidelityReport`]
 /// alongside the package bytes. See [`pptx_with_report`].
 pub fn pptx_with_page_mapping_and_report(
     document: &PagedDocument,
+    world: &dyn World,
     options: &PptxOptions,
     physical_page_to_slide: &[Option<usize>],
 ) -> SourceResult<PptxExport> {
-    pptx_impl(document, options, Some(physical_page_to_slide))
+    pptx_impl(document, world, options, Some(physical_page_to_slide))
 }
 
 /// The result of a successful PPTX export: the finished OPC package bytes
@@ -137,6 +155,7 @@ impl PptxExport {
 
 fn pptx_impl(
     document: &PagedDocument,
+    world: &dyn World,
     options: &PptxOptions,
     physical_page_to_slide: Option<&[Option<usize>]>,
 ) -> SourceResult<PptxExport> {
@@ -144,7 +163,11 @@ fn pptx_impl(
         physical_page_to_slide: physical_page_to_slide.map(|mapping| mapping.to_vec()),
         ..SlideCtx::default()
     };
-    let slides = slide::slides(document, &mut ctx);
+    // Math is the one part of the export that cannot be read off the frames: it
+    // is lowered up front through a short-lived post-layout engine, then keyed
+    // by location for the page walk to pick up.
+    let equations = slide::equation_sources(document, world);
+    let slides = slide::slides(document, &equations, &mut ctx);
     let extracted;
     let notes = match &options.speaker_notes {
         Some(notes) => notes.as_slice(),
