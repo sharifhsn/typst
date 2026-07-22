@@ -25,6 +25,8 @@ Let's start with a broad overview of the directories in this repository:
 - `crates/typst-docx`: The experimental Microsoft Word exporter in this fork.
 - `crates/typst-ooxml-core`: Shared OOXML package, DrawingML, media, and math
   primitives for Word and PowerPoint.
+- `crates/typst-omml`: Shared lowering of Typst's math IR to OMML, for Word and
+  PowerPoint.
 - `crates/typst-pandoc`: The experimental Pandoc JSON-AST exporter in this fork.
 - `crates/typst-pptx`: The experimental Microsoft PowerPoint exporter in this
   fork.

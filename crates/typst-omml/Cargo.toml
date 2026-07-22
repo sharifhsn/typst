@@ -1,0 +1,23 @@
+[package]
+name = "typst-omml"
+description = "Lowers Typst's math IR to OMML (Office Math Markup Language)."
+version = { workspace = true }
+rust-version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+readme = { workspace = true }
+
+[dependencies]
+typst-library = { workspace = true }
+typst-ooxml-core = { workspace = true }
+typst-syntax = { workspace = true }
+ecow = { workspace = true }
+unicode-math-class = { workspace = true }
+
+[lints]
+workspace = true

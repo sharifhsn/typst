@@ -86,6 +86,14 @@ Pandoc is not an OOXML exporter. Shared mechanics such as safe raster fallback
 therefore live in `typst-export-common`, while packaging, DrawingML, OMML, and
 Office media primitives live in `typst-ooxml-core`.
 
+Math is the one place where two Office exporters share *policy*, not just
+mechanics: deciding which OMML construct a Typst construct becomes is the same
+decision for Word and PowerPoint. That lowering lives in `typst-omml`, one step
+above `typst-ooxml-core`. What it cannot know — how to route an introspection
+tag found inside an equation — it asks of its caller through the `MathHooks`
+trait, whose methods all default to a documented no-op so an exporter with no
+engine-side services can still call it.
+
 ## Ownership map
 
 | Layer | Crate/module | Owns |
@@ -93,6 +101,7 @@ Office media primitives live in `typst-ooxml-core`.
 | Compiler target selection | `typst-library`, `typst`, `typst-cli` | target, output format, orchestration |
 | Format-neutral export mechanics | `typst-export-common` | safe frame rendering and raster geometry |
 | OOXML mechanics | `typst-ooxml-core` | OPC, XML, namespaces, media, DrawingML, OMML, units |
+| Math lowering | `typst-omml` | `MathItem` IR → OMML, shared by Word and PowerPoint |
 | Word lowering | `typst-docx` | semantic realization, Word IR, WordprocessingML |
 | PowerPoint lowering | `typst-pptx` | frame walk, semantic recovery, slide IR, PresentationML |
 | Interchange lowering | `typst-pandoc` | native-element walk, Pandoc AST and JSON |

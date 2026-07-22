@@ -3281,12 +3281,12 @@ dependencies = [
  "typst-layout",
  "typst-library",
  "typst-macros",
+ "typst-omml",
  "typst-ooxml-core",
  "typst-svg",
  "typst-syntax",
  "typst-timing",
  "typst-utils",
- "unicode-math-class",
  "zip",
 ]
 
@@ -3543,6 +3543,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "typst-omml"
+version = "0.15.0"
+dependencies = [
+ "ecow",
+ "typst-library",
+ "typst-ooxml-core",
+ "typst-syntax",
+ "unicode-math-class",
 ]
 
 [[package]]
