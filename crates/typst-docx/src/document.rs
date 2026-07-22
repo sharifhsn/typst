@@ -16,6 +16,7 @@ use typst_library::text::{
     FontBook, FontInfo, FontStretch, FontStyle, FontVariant, FontWeight,
 };
 
+use crate::convert::contains_context;
 use crate::ctx::DocxCtx;
 use crate::dom::{
     Block, BookmarkTable, Comment, DocxDocument, EmbeddedFontProgram, EmbeddedFontStyle,
@@ -3040,21 +3041,6 @@ fn emit_furniture(
         blocks: lowered.blocks,
         rels: lowered.rels,
     });
-}
-
-fn contains_context(content: &Content) -> bool {
-    use std::ops::ControlFlow;
-    use typst_library::foundations::ContextElem;
-
-    content
-        .traverse(&mut |elem| {
-            if elem.is::<ContextElem>() {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            }
-        })
-        .is_break()
 }
 
 fn furniture_signature(blocks: &[Block]) -> String {

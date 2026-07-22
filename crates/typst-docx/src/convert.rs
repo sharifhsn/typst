@@ -2018,6 +2018,24 @@ pub(crate) fn is_framed_container(child: &Content) -> bool {
     child.is::<BoxElem>() || child.is::<RectElem>() || child.is::<SquareElem>()
 }
 
+/// Whether `content` holds a `context` expression anywhere inside it — content
+/// whose text and structure only exist once it has been realized under a style
+/// chain. Used as a cheap pre-filter before paying for that realization.
+pub(crate) fn contains_context(content: &Content) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::foundations::ContextElem;
+
+    content
+        .traverse(&mut |elem| {
+            if elem.is::<ContextElem>() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .is_break()
+}
+
 /// Cheap pre-filter for [`mappers::shape::transformed`]'s container path:
 /// whether `child` (a box/block/framed container) has a `#place(..)`
 /// *anywhere* inside it — the shape it should attempt to recover. Skipping

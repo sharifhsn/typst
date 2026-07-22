@@ -117,6 +117,10 @@ pub fn heading(
 
     // The heading title itself, lowered to flattened runs.
     let runs = ctx.inline_runs(&elem.body, styles, RunProps::default())?;
+    // A table of contents must list the same title this paragraph shows, so
+    // take it from the lowered runs. `body.plain_text()` would be empty for a
+    // title that only exists after realization (a `context` expression).
+    let body_text = run_text(&runs);
     content.extend(runs.into_iter().map(ParaChild::Run));
 
     if let Some((id, _)) = bookmark {
@@ -134,13 +138,12 @@ pub fn heading(
             text.push_str(numbers);
             text.push(' ');
         }
-        text.push_str(&elem.body.plain_text());
+        text.push_str(&body_text);
         if !text.is_empty() {
             ctx.toc_headings.push(crate::dom::TocHeading {
                 level,
                 location: elem.location(),
                 source_span: elem.span(),
-                page_text: None,
                 anchor: bookmark.map(|(_, name)| name),
                 text: text.into(),
             });
@@ -148,4 +151,20 @@ pub fn heading(
     }
 
     Ok(vec![Block::Para(Para { props, content })])
+}
+
+/// The visible text of a lowered run sequence, for the table of contents.
+/// Structural runs (breaks, drawings, footnote marks) contribute nothing; a
+/// field contributes its cached result, which is what a reader sees.
+fn run_text(runs: &[Run]) -> ecow::EcoString {
+    let mut out = ecow::EcoString::new();
+    for run in runs {
+        match run {
+            Run::Text { text, .. } => out.push_str(text),
+            Run::Tab | Run::FillTab => out.push(' '),
+            Run::Field(field) => out.push_str(&run_text(&field.result)),
+            _ => {}
+        }
+    }
+    out
 }

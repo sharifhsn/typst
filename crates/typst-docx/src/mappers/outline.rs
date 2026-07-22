@@ -91,34 +91,36 @@ pub fn outline(
 
     let caption_category = toc_category(elem, styles);
     let semantic_headings = if caption_category.is_none() {
-        elem.realize_flat(ctx.engine(), styles)?
-            .into_iter()
-            .filter_map(|entry| {
-                let heading = entry.element.to_packed::<HeadingElem>()?;
-                let mut text = String::new();
-                if let Some(numbers) = &heading.numbers
-                    && !numbers.is_empty()
-                {
-                    text.push_str(numbers);
-                    text.push(' ');
-                }
-                text.push_str(&heading.body.plain_text());
-                (!text.is_empty()).then(|| TocHeading {
-                    level: entry.level.get(),
-                    location: heading.location(),
-                    source_span: heading.span(),
-                    page_text: heading.location().map(|location| {
-                        location
-                            .page(ctx.engine(), heading.span())
-                            .get()
-                            .to_string()
-                            .into()
-                    }),
-                    anchor: None,
-                    text: text.into(),
-                })
-            })
-            .collect()
+        let entries = elem.realize_flat(ctx.engine(), styles)?;
+        let mut headings = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let Some(heading) = entry.element.to_packed::<HeadingElem>() else {
+                continue;
+            };
+            let mut text = EcoString::new();
+            if let Some(numbers) = &heading.numbers
+                && !numbers.is_empty()
+            {
+                text.push_str(numbers);
+                text.push(' ');
+            }
+            // Resolve the title under *this* outline's styles: a bilingual
+            // title built from `context text.lang` legitimately reads
+            // differently in a Chinese and an English table of contents of the
+            // same document.
+            text.push_str(&ctx.resolved_plain_text(&heading.body, styles)?);
+            if text.is_empty() {
+                continue;
+            }
+            headings.push(TocHeading {
+                level: entry.level.get(),
+                location: heading.location(),
+                source_span: heading.span(),
+                anchor: None,
+                text,
+            });
+        }
+        headings
     } else {
         Vec::new()
     };
@@ -202,17 +204,12 @@ pub(crate) fn fill_tocs(
             toc.entries = selected
                 .iter()
                 .map(|h| {
-                    let (page_text, cache_status) = h.page_text.clone().map_or_else(
-                        || {
-                            cached_page_text(
-                                planning.engine,
-                                planning.styles,
-                                h.location,
-                                planning.fidelity_report,
-                                planning.snapshot,
-                            )
-                        },
-                        |text| (text, FieldCacheStatus::Resolved),
+                    let (page_text, cache_status) = cached_page_text(
+                        planning.engine,
+                        planning.styles,
+                        h.location,
+                        planning.fidelity_report,
+                        planning.snapshot,
                     );
                     entry_para(
                         h.level,
@@ -389,7 +386,12 @@ fn cached_page_text(
     let span = Span::detached();
     let Some(numbering) = engine.introspect(PageNumberingIntrospection(location, span))
     else {
-        return unavailable(fidelity_report);
+        // No page numbering is in force, so the physical page *is* what Word
+        // shows for the PAGEREF. That is a resolved answer, not a fallback.
+        return (
+            location.page(engine, span).get().to_string().into(),
+            FieldCacheStatus::Resolved,
+        );
     };
     match Counter::new(CounterKey::Page).display_at(
         engine,
@@ -565,7 +567,6 @@ mod tests {
             level,
             location: Some(Location::new(location)),
             source_span: typst_syntax::Span::detached(),
-            page_text: None,
             anchor: anchor.map(Into::into),
             text: text.into(),
         }

@@ -5388,6 +5388,110 @@ fn outline_falls_back_to_introspected_headings() {
     assert_all_wellformed(&p);
 }
 
+/// The visible text of every paragraph whose style id starts with `prefix`, in
+/// document order. `TOCHeading` is excluded: it is the outline's title, not an
+/// entry, and would otherwise be caught by the `TOC` prefix.
+fn paragraphs_styled(doc_xml: &str, prefix: &str) -> Vec<String> {
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let doc = roxmltree::Document::parse(doc_xml).expect("document XML should parse");
+    let named = |node: &roxmltree::Node, name: &str| {
+        node.tag_name().name() == name && node.tag_name().namespace() == Some(W)
+    };
+    doc.descendants()
+        .filter(|node| named(node, "p"))
+        .filter_map(|para| {
+            let style = para
+                .children()
+                .find(|child| named(child, "pPr"))?
+                .children()
+                .find(|child| named(child, "pStyle"))?
+                .attribute((W, "val"))?;
+            if !style.starts_with(prefix) || style == "TOCHeading" {
+                return None;
+            }
+            Some(
+                para.descendants()
+                    .filter(|node| named(node, "t"))
+                    .filter_map(|node| node.text())
+                    .collect::<String>(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn outline_entries_list_titles_that_only_exist_after_realization() {
+    // An outline entry must show the same title its heading shows, whatever
+    // built that title. Here it is the bilingual-title idiom — a `context`
+    // expression that reads `text.lang` — so the heading body has no static
+    // text at all: it acquires text only when realized under a style chain.
+    // Each outline must therefore resolve titles under ITS OWN styles, which is
+    // what makes a German outline of an English document read in German.
+    let p = parts(
+        "#let title(..names) = context names.named().at(text.lang)\n\
+         #show outline.entry: it => if it.element.level == 1 { strong(it) } \
+         else { it }\n\
+         #set heading(numbering: \"1.1\")\n\
+         #outline()\n\
+         #[#set text(lang: \"de\")\n#outline()]\n\n\
+         = #title(en: \"Introduction\", de: \"Einleitung\")\n\n\
+         == #title(en: \"Details\", de: \"Einzelheiten\")\n",
+    );
+    let doc = &p["word/document.xml"];
+
+    let headings = paragraphs_styled(doc, "Heading");
+    assert_eq!(headings.len(), 2, "both headings are native: {headings:?}");
+    assert!(headings[0].contains("Introduction"), "{headings:?}");
+    assert!(headings[1].contains("Details"), "{headings:?}");
+
+    let entries = paragraphs_styled(doc, "TOC");
+    assert_eq!(entries.len(), 4, "two outlines of two headings: {entries:?}");
+    // No entry may degrade to bare numbering: the title is the point of a
+    // table of contents, and a heading that has one must contribute it.
+    for entry in &entries {
+        assert!(
+            entry.chars().any(char::is_alphabetic),
+            "outline entry kept only its numbering: {entry:?} of {entries:?}"
+        );
+    }
+    // The document's own outline mirrors the heading paragraphs verbatim.
+    for (entry, heading) in entries.iter().zip(&headings) {
+        let title = heading.trim_start_matches(|c: char| !c.is_alphabetic());
+        assert!(
+            entry.contains(title),
+            "entry {entry:?} must list its heading's title {title:?}"
+        );
+    }
+    // The German outline resolves the same headings in German.
+    assert!(entries[2].contains("Einleitung"), "{entries:?}");
+    assert!(entries[3].contains("Einzelheiten"), "{entries:?}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn outline_page_cache_follows_the_page_counter_not_the_physical_page() {
+    // Front matter numbered separately is the standard thesis shape. The baked
+    // page number is what a reader sees before any field refresh, so it must be
+    // the page counter's own display — "1" for the first body page — and not
+    // the physical sheet the heading happens to land on.
+    let p = parts(
+        "#set page(numbering: \"i\")\n\
+         #outline()\n\
+         #pagebreak()\n\
+         #set page(numbering: \"1\")\n\
+         #counter(page).update(1)\n\
+         = Alpha\n",
+    );
+    let doc = &p["word/document.xml"];
+    let entries = paragraphs_styled(doc, "TOC");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert!(
+        entries[0].ends_with('1') && !entries[0].ends_with("21"),
+        "the entry caches the page counter, not the physical page: {entries:?}"
+    );
+    assert_all_wellformed(&p);
+}
+
 #[test]
 fn header_link_relationship_lives_in_the_header_part_rels() {
     // A link/image in a header references a relationship by r:id; that id must

@@ -1623,6 +1623,43 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         Ok(runs)
     }
 
+    /// The plain text of an inline body, resolving `context` expressions.
+    ///
+    /// [`Content::plain_text`] walks the *unrealized* tree, so a body produced
+    /// by a `context` expression — the bilingual-title idiom
+    /// `#let t(..names) = context names.named().at(text.lang)`, for one — has
+    /// no static text at all and reads as empty. Such a body only acquires
+    /// text once it is realized under a style chain, because the style chain is
+    /// what the context expression asks about. Realizing is comparatively
+    /// expensive, so it is reserved for bodies that actually need it.
+    pub fn resolved_plain_text(
+        &mut self,
+        body: &Content,
+        styles: StyleChain,
+    ) -> SourceResult<EcoString> {
+        let direct = body.plain_text();
+        if !crate::convert::contains_context(body) {
+            return Ok(direct);
+        }
+        let arenas = Arenas::default();
+        let children = (self.engine.library.routines.realize)(
+            RealizationKind::Par,
+            self.engine,
+            self.locator,
+            &arenas,
+            body,
+            styles,
+        )?;
+        let mut out = EcoString::new();
+        for (child, _) in children.iter() {
+            out.push_str(&child.plain_text());
+        }
+        // A body can mix static text with a `context` expression, so realizing
+        // is what recovers the whole of it — but never trade text we already
+        // had for nothing.
+        Ok(if out.is_empty() { direct } else { out })
+    }
+
     /// Lowers a paragraph interior into paragraph children, preserving
     /// hyperlinks (`LinkElem` → `<w:hyperlink>`). Other inline elements lower to
     /// runs via [`Self::handle_inline`].

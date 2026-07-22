@@ -286,9 +286,6 @@ pub struct TocHeading {
     /// Stable source identity across semantic introspection and native
     /// conversion, whose locators may assign different runtime locations.
     pub source_span: Span,
-    /// Physical page captured from the semantic outline target before DOCX
-    /// lowering assigns its own locations.
-    pub page_text: Option<EcoString>,
     /// The heading's bookmark name, when it emitted one (else a plain entry).
     pub anchor: Option<EcoString>,
     pub text: EcoString,
