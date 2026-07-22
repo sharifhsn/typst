@@ -3319,3 +3319,37 @@ fn a_picture_inside_a_hyperlink_is_recovered_and_its_lost_link_reported() {
     let notes = format!("{:?}", result.report);
     assert!(notes.contains("loses the link"), "the lost link must be reported: {notes}");
 }
+
+/// `w:tblPrChange`, `w:trPrChange` and `w:tcPrChange` sit in `w:tblPr`,
+/// `w:trPr` and `w:tcPr` — never inside a `w:p` — so the paragraph-level
+/// descendant scan for `w:rPrChange` cannot see them. A table whose only
+/// tracked change was a formatting one therefore reported nothing at all,
+/// while the support matrix listed the whole family as detected.
+#[test]
+fn a_table_only_formatting_revision_is_reported() {
+    let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body><w:tbl>
+  <w:tblPr>
+    <w:tblPrChange w:id="0" w:author="A" w:date="2014-02-04T17:08:00Z"><w:tblPr/></w:tblPrChange>
+  </w:tblPr>
+  <w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>
+  <w:tr><w:tc>
+    <w:tcPr><w:tcPrChange w:id="2" w:author="A" w:date="2014-02-04T17:08:00Z"><w:tcPr/></w:tcPrChange></w:tcPr>
+    <w:p><w:r><w:t>Cell</w:t></w:r></w:p>
+  </w:tc></w:tr>
+</w:tbl></w:body>
+</w:document>"#;
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    package.add_xml("word/document.xml", "application/xml", doc.into());
+    package.add_relationships("word/document.xml", &Rels::new()).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let result = import_docx(&bytes).expect("import should succeed");
+    assert!(result.source.contains("Cell"), "content still imports:\n{}", result.source);
+    let notes = format!("{:?}", result.report);
+    assert!(
+        notes.contains("tracked table formatting change"),
+        "the table-level revision record must be reported: {notes}"
+    );
+}

@@ -2505,6 +2505,15 @@ fn parse_table(node: Node, depth: usize, tb_depth: usize) -> Table {
             _ => {}
         }
     }
+    // One descendant scan, for the same reason the paragraph parser uses one
+    // for `w:rPrChange`: the mapper only needs to know *that* a record exists,
+    // and these three sit at three different levels (`w:tblPr`, `w:trPr`,
+    // `w:tcPr`) — none of them inside a `w:p`, which is why a table whose only
+    // tracked change was a formatting one used to report nothing.
+    table.format_revision = node.descendants().any(|n| {
+        n.is_element()
+            && matches!(n.tag_name().name(), "tblPrChange" | "trPrChange" | "tcPrChange")
+    });
     table
 }
 

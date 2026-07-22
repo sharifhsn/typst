@@ -81,6 +81,12 @@ fn resolve_vertical_merges(rows: &[Row]) -> Vec<Vec<Merged>> {
 }
 
 pub(crate) fn lower_table(table: &WmlTable, ctx: &mut LowerCtx) -> tdoc::Table {
+    if table.format_revision {
+        crate::mappers::revision::report_unmapped(
+            "a tracked table formatting change (w:tblPrChange/w:trPrChange/w:tcPrChange)",
+            ctx,
+        );
+    }
     // The column count must accommodate the WIDEST row's total span, not just
     // `w:tblGrid`'s length: in real-world documents the declared grid and the
     // rows' actual `w:gridSpan`s routinely disagree, and a cell whose colspan

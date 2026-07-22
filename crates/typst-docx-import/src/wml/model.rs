@@ -712,6 +712,15 @@ pub struct Table {
     /// draws a 1pt grid by default, so an unread `w:tblBorders` stating `nil`
     /// silently added lines Word never drew.
     pub borders: TableBorders,
+    /// Whether this table carries a tracked *formatting* revision at the
+    /// table, row or cell level (`w:tblPrChange`, `w:trPrChange`,
+    /// `w:tcPrChange`).
+    ///
+    /// Kept separate from [`ParaProps::format_revision`] because none of
+    /// these live inside a `w:p`: they sit in `w:tblPr`/`w:trPr`/`w:tcPr`, so
+    /// the paragraph-level descendant scan cannot see them and a table whose
+    /// *only* revision records are these reported nothing at all.
+    pub format_revision: bool,
 }
 
 #[derive(Debug, Default)]

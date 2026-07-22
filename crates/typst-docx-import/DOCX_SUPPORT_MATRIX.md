@@ -290,7 +290,7 @@ Export walks the resolved `MathItem` IR and emits `m:` OMML directly; a whole eq
 |---|---|---|---|
 | Insertions (`w:ins` / `w:moveTo`) | — | ✅ | Rendered as accepted (the text is live) in **both** modes. Under the default `Preserve` the record survives beside it as two invisible anchors bracketing the inserted words — `<ins-N>` … `<ins-N-end>` — carrying author and timestamp, plus the `w:name` that links the two halves of a *move*. Export's "review tags" (`w:sdt` regions) are a different, opt-in concept. |
 | Deletions (`w:del` / `w:moveFrom`) | — | ✅ | Renders as accepted — the text is gone from the page — but under `Preserve` the removed runs are lowered **into the anchor's own value**, since there is no live content to bracket. `w:delText` is read only from inside a kept `w:del`, so it can never leak into the live text. A wholly-deleted paragraph keeps its record rather than being dropped as empty: a paragraph holding only `#metadata` renders pixel-identically to no paragraph at all. |
-| Format & paragraph-mark changes (`w:rPrChange`, `w:pPrChange`, `w:tblPrChange`, …) | — | ⊘ | Detected and reported, not mapped. These record what the formatting *used to be*, which would need a serialized mirror of Word's run/paragraph properties for something nothing in Typst consumes; a paragraph-mark change is the paragraph boundary itself rather than inline content, so it has nowhere to hang an anchor. Measured on the wide corpus: `w:ins`/`w:del` appear in 71/80 documents, these in 23/18. |
+| Format & paragraph-mark changes (`w:rPrChange`, `w:pPrChange`, `w:tblPrChange`, `w:trPrChange`, `w:tcPrChange`) | — | ⊘ | Detected and reported, not mapped. The table-level three needed their own detection and did not have it until the audit: they sit in `w:tblPr`/`w:trPr`/`w:tcPr`, never inside a `w:p`, so the paragraph's descendant scan for `w:rPrChange` could not see them and a table whose *only* tracked change was a formatting one reported nothing at all. These record what the formatting *used to be*, which would need a serialized mirror of Word's run/paragraph properties for something nothing in Typst consumes; a paragraph-mark change is the paragraph boundary itself rather than inline content, so it has nowhere to hang an anchor. Measured on the wide corpus: `w:ins`/`w:del` appear in 71/80 documents, these in 23/18. |
 | Comments (`w:comment` + ranges) | ✅ | ✅ | **Round-trips.** Export finds the comment `#metadata` in the tag stream — `Tag::Start` carries the real element content — allocates its own `w:id`, writes `word/comments.xml` with the body lowered through the same machinery footnote bodies use, and brackets the span with `w:commentRangeStart`/`End` + a `w:commentReference` run. Span-vs-point is decided by asking the introspector whether a matching `-end` anchor exists anywhere, never inferred from ordering. A `#metadata` that isn't a comment passes through completely untouched. Import lowers each comment to a labelled **`#metadata`** — the one Typst element that is invisible, carries an arbitrary value, and stays reachable via `#query`. So a comment reaches neither the page nor the bin: rendered output is identical to the comment-free import (verified: the comment text appears 0 times in the rendered PDF), while `#query(<comment-N>)` returns author / initials / date / body, the body kept as **content** so its own formatting survives. A commented *span* becomes two anchors (`<comment-N>` … `<comment-N-end>`) because a Typst label attaches to one element; a point-anchored comment — Word omits the range pair — carries its payload on the `w:commentReference` mark instead. `w:annotationRef` is suppressed like `w:footnoteRef`. A dangling anchor is reported. **Anchors on a heading are hoisted to their own block just before it**: a label binds to the element it follows *except* at the end of a heading, where it binds to the heading instead and the record becomes unreachable (lists, paragraphs and table cells all bind correctly and keep their anchors in place). |
 
 ## 19. Colors, fills, gradients, strokes
@@ -633,6 +633,36 @@ document happens to contain.
 compiled, 0 crashes**: with zero affected documents in POI and three in the
 wide set, neither gate *could* move. Verified rather than assumed, because a
 gate that cannot move is indistinguishable from a gate that did not run.)
+
+### Half three — is the loss self-reporting?
+
+The first two halves ask what the code covers. The linked-picture bug was not
+an uncovered feature — it was a covered one with a hole, invisible because
+nothing reported it. So the third question is the one that actually bounds the
+remaining risk: **when a document contains something known to be lossy, does
+the importer say so?**
+
+Method: bucket the corpus by construct, import each document, and check the
+report is non-empty. Three buckets, 25 documents each.
+
+| Bucket | Documents | Imported | Silent |
+|---|---:|---:|---:|
+| EMF/WMF media | 144 | 24 | 5 → all correct |
+| OLE object (`w:object`) | 65 | 23 | 0 |
+| Tracked format change | 36 | 24 | 1 → **real** |
+
+The five silent EMF documents each carry the metafile as an **unreferenced**
+media part — a leftover the body never draws. Nothing was lost, so nothing
+should be reported. Correct.
+
+The one real hole was `w:tblPrChange`/`w:trPrChange`/`w:tcPrChange`, now fixed
+and regression-tested.
+
+**A methodological warning worth keeping.** The first run of this check
+reported silent losses in the OLE bucket too — because it counted documents
+whose *import failed outright* (a corrupt zip) as silent successes. Separating
+"reported nothing" from "never got that far" removed the finding entirely. A
+check for silence has to prove the thing was not silent for the boring reason.
 
 ### What this says about writing one of these
 
