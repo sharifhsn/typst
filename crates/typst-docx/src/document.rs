@@ -350,12 +350,20 @@ fn docx_document_impl(
                     )?);
                     body.append(&mut blocks);
                     let full_width = ctx.page_content_width_dxa();
+                    // `build_section` allocates a `word/_rels/document.xml.rels`
+                    // entry for every header/footer part it decides to emit. The
+                    // fallback below throws those parts away, so the entries have
+                    // to go with them: a relationship whose target part is never
+                    // written is an invalid package, and OPC finalization rightly
+                    // refuses it.
+                    let rels_savepoint = ctx.doc_rels.savepoint();
                     let (mut s, mut h, mut f) = match ctx
                         .with_available_width(full_width, |ctx| {
                             build_section(ctx, &section.geom, styles)
                         }) {
                         Ok(parts) => parts,
                         Err(errors) => {
+                            ctx.doc_rels.rollback(rels_savepoint);
                             let source =
                                 ecow::eco_format!("section {} properties", idx + 1);
                             for diagnostic in errors {
@@ -2861,86 +2869,16 @@ fn lower_furniture(
 ) -> SourceResult<LoweredFurniture> {
     let page = NonZeroUsize::new(page).unwrap();
     crate::introspect::with_furniture_page(page, || {
+        // The part's own relationship table has to be reinstated even when the
+        // lowering fails, or every later `r:id` in the body would be filed
+        // against a table nobody writes (same shape as `DocxCtx::part_blocks`).
         let saved = ctx.part_rels.take();
         ctx.part_rels = Some(crate::package::Rels::new());
-        let mut blocks = Vec::new();
-
-        let mut has_background_overlay = false;
-        if slot.is_header()
-            && let Some(bg) = source.background
-            && let Some(block) =
-                page_overlay_block(ctx, bg, geom, styles, true, "Background")?
-        {
-            blocks.push(block);
-            has_background_overlay = true;
-        }
-
-        // A successful background raster already includes the solid page fill.
-        // Keeping a separate compatibility rectangle makes LibreOffice paint it
-        // over the raster because it reverses the two drawings' z-order.
-        if slot.is_header()
-            && !has_background_overlay
-            && let Some(color) = geom.background_color
-        {
-            blocks.push(solid_page_fill_block(ctx, color, geom));
-        }
-
-        if let Some(content) = source.content {
-            let saved_h = ctx.raster_height;
-            let saved_line_numbering = ctx.line_numbering_active;
-            ctx.line_numbering_active = false;
-            ctx.raster_height = match slot {
-                FurnitureSlot::Header => {
-                    typst_library::layout::Abs::pt(geom.margin_top as f64 / 20.0)
-                }
-                FurnitureSlot::Footer => {
-                    typst_library::layout::Abs::pt(geom.margin_bottom as f64 / 20.0)
-                }
-            }
-            .max(typst_library::layout::Abs::pt(6.0));
-            // A contextual page-counter callback is evaluated while its inline
-            // body is lowered, after the paragraph shell has been synthesized.
-            // Capture its effective nested alignment and transfer it onto the
-            // separate-part paragraph that actually owns the PAGE field.
-            ctx.reset_page_counter_paragraph_alignment();
-            let lowered = ctx.blocks(content, styles);
-            let page_counter_jc = ctx.take_page_counter_paragraph_alignment();
-            ctx.raster_height = saved_h;
-            ctx.line_numbering_active = saved_line_numbering;
-            let mut lowered = lowered?;
-            if let Some(jc) = furniture_horizontal_alignment(content, styles) {
-                for block in &mut lowered {
-                    if let Block::Para(para) = block
-                        && para.props.jc.is_none()
-                    {
-                        para.props.jc = Some(jc);
-                    }
-                }
-            } else if let Some(jc) = page_counter_jc {
-                for block in &mut lowered {
-                    if let Block::Para(para) = block
-                        && para.props.jc.is_none()
-                        && para_has_page_field(para)
-                    {
-                        para.props.jc = Some(jc);
-                    }
-                }
-            }
-            blocks.extend(lowered);
-        }
-
-        if slot.is_header()
-            && let Some(fg) = source.foreground
-            && let Some(block) =
-                page_overlay_block(ctx, fg, geom, styles, false, "Foreground")?
-        {
-            blocks.push(block);
-        }
-
-        crate::mappers::table::collapse_par_spacing(&mut blocks);
-
+        let outcome = lower_furniture_blocks(ctx, slot, geom, source, styles);
         let rels = ctx.part_rels.take().unwrap_or_default();
         ctx.part_rels = saved;
+
+        let blocks = outcome?;
         let signature = furniture_signature(&blocks);
         Ok(LoweredFurniture {
             blocks,
@@ -2949,6 +2887,92 @@ fn lower_furniture(
             emit_empty: source.content.is_some(),
         })
     })
+}
+
+fn lower_furniture_blocks(
+    ctx: &mut DocxCtx,
+    slot: FurnitureSlot,
+    geom: &SectGeom,
+    source: FurnitureSource<'_>,
+    styles: StyleChain,
+) -> SourceResult<Vec<Block>> {
+    let mut blocks = Vec::new();
+
+    let mut has_background_overlay = false;
+    if slot.is_header()
+        && let Some(bg) = source.background
+        && let Some(block) =
+            page_overlay_block(ctx, bg, geom, styles, true, "Background")?
+    {
+        blocks.push(block);
+        has_background_overlay = true;
+    }
+
+    // A successful background raster already includes the solid page fill.
+    // Keeping a separate compatibility rectangle makes LibreOffice paint it
+    // over the raster because it reverses the two drawings' z-order.
+    if slot.is_header()
+        && !has_background_overlay
+        && let Some(color) = geom.background_color
+    {
+        blocks.push(solid_page_fill_block(ctx, color, geom));
+    }
+
+    if let Some(content) = source.content {
+        let saved_h = ctx.raster_height;
+        let saved_line_numbering = ctx.line_numbering_active;
+        ctx.line_numbering_active = false;
+        ctx.raster_height = match slot {
+            FurnitureSlot::Header => {
+                typst_library::layout::Abs::pt(geom.margin_top as f64 / 20.0)
+            }
+            FurnitureSlot::Footer => {
+                typst_library::layout::Abs::pt(geom.margin_bottom as f64 / 20.0)
+            }
+        }
+        .max(typst_library::layout::Abs::pt(6.0));
+        // A contextual page-counter callback is evaluated while its inline
+        // body is lowered, after the paragraph shell has been synthesized.
+        // Capture its effective nested alignment and transfer it onto the
+        // separate-part paragraph that actually owns the PAGE field.
+        ctx.reset_page_counter_paragraph_alignment();
+        let lowered = ctx.blocks(content, styles);
+        let page_counter_jc = ctx.take_page_counter_paragraph_alignment();
+        ctx.raster_height = saved_h;
+        ctx.line_numbering_active = saved_line_numbering;
+        let mut lowered = lowered?;
+        if let Some(jc) = furniture_horizontal_alignment(content, styles) {
+            for block in &mut lowered {
+                if let Block::Para(para) = block
+                    && para.props.jc.is_none()
+                {
+                    para.props.jc = Some(jc);
+                }
+            }
+        } else if let Some(jc) = page_counter_jc {
+            for block in &mut lowered {
+                if let Block::Para(para) = block
+                    && para.props.jc.is_none()
+                    && para_has_page_field(para)
+                {
+                    para.props.jc = Some(jc);
+                }
+            }
+        }
+        blocks.extend(lowered);
+    }
+
+    if slot.is_header()
+        && let Some(fg) = source.foreground
+        && let Some(block) =
+            page_overlay_block(ctx, fg, geom, styles, false, "Foreground")?
+    {
+        blocks.push(block);
+    }
+
+    crate::mappers::table::collapse_par_spacing(&mut blocks);
+
+    Ok(blocks)
 }
 
 fn para_has_page_field(para: &Para) -> bool {

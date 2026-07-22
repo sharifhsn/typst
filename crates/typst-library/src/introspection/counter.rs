@@ -14,7 +14,7 @@ use crate::engine::{Engine, Route, Sink, Traced};
 use crate::foundations::{
     Args, Array, Construct, Content, Context, Element, Func, IntoValue, Label,
     LocatableSelector, NativeElement, Packed, Repr, Selector, ShowFn, Smart, Str,
-    StyleChain, Value, cast, elem, func, scope, select_where, ty,
+    StyleChain, Styles, Value, cast, elem, func, scope, select_where, ty,
 };
 use crate::introspection::{
     History, Introspect, Introspector, Locatable, Location, QueryFirstIntrospection, Tag,
@@ -22,7 +22,9 @@ use crate::introspection::{
 };
 use crate::layout::{Frame, FrameItem, PageElem};
 use crate::math::EquationElem;
-use crate::model::{FigureElem, FootnoteElem, HeadingElem, Numbering, NumberingPattern};
+use crate::model::{
+    DocumentElem, FigureElem, FootnoteElem, HeadingElem, Numbering, NumberingPattern,
+};
 use crate::{Library, World};
 
 /// Counts through pages, elements, and more.
@@ -456,10 +458,10 @@ impl Counter {
                 .pack()
                 .spanned(span)
                 // `context` evaluates outside the normal content traversal. Keep
-                // the complete effective style chain on the semantic marker so
-                // its eventual native lowering sees the same typography and
+                // the effective style chain on the semantic marker so its
+                // eventual native lowering sees the same typography and
                 // paragraph alignment as the formatted text would have seen.
-                .styled_with_map(styles.to_map())
+                .styled_with_map(container_safe(styles.to_map()))
                 .into_value());
         }
 
@@ -551,6 +553,30 @@ impl Repr for Counter {
     fn repr(&self) -> EcoString {
         eco_format!("counter({})", self.0.repr())
     }
+}
+
+/// Strips the styles that are only legal at the top level of a realization from
+/// an effective style chain snapshot.
+///
+/// A `context` block's chain routinely contains the document's own `set
+/// document(..)` and `set page(..)` rules, because those are in force wherever
+/// the block sits. Baking them onto a marker element is not merely redundant:
+/// the marker can be realized *inside a container* later (a `place` body, a
+/// header/footer fragment, a measured text box), and realization rejects both
+/// element kinds there ("document set rules are not allowed inside of
+/// containers" / "page configuration is not allowed inside of containers").
+/// Neither carries any of the typography or alignment the marker is meant to
+/// preserve, so dropping them loses nothing.
+fn container_safe(styles: Styles) -> Styles {
+    let mut out = Styles::new();
+    for style in styles.iter() {
+        let elem = style.element();
+        if elem == Some(DocumentElem::ELEM) || elem == Some(PageElem::ELEM) {
+            continue;
+        }
+        out.push(style.clone());
+    }
+    out
 }
 
 /// Identifies a counter.

@@ -304,6 +304,17 @@ struct RelRecord {
     mode: RelMode,
 }
 
+/// The dedupe key for a relationship: two `add` calls agreeing on all three
+/// fields reuse one rId.
+fn rel_key(type_uri: &str, target: &str, mode: RelMode) -> EcoString {
+    let mode_key = if mode == RelMode::Internal { 'I' } else { 'E' };
+    eco_format!("{type_uri}\u{0}{target}\u{0}{mode_key}")
+}
+
+/// A position in a [`Rels`] table, taken with [`Rels::savepoint`].
+#[derive(Copy, Clone)]
+pub struct RelsSavepoint(usize);
+
 /// A relationships container for one source part (the package root or
 /// `document.xml`). Hands out rIds and emits both the `r:id` used in XML and the
 /// matching `<Relationship>`.
@@ -323,10 +334,30 @@ impl Rels {
         }
     }
 
+    /// Records the current state so a speculative batch of relationships can be
+    /// undone with [`Rels::rollback`].
+    pub fn savepoint(&self) -> RelsSavepoint {
+        RelsSavepoint(self.entries.len())
+    }
+
+    /// Discards every relationship added since `savepoint` was taken.
+    ///
+    /// A caller that allocates relationships while building a part it may still
+    /// abandon (a section whose header/footer lowering fails) must undo them:
+    /// a relationship whose target part is never written makes the package
+    /// invalid. Ids are deliberately *not* reused — `rId`s only have to be
+    /// unique within their part, and a gap is harmless where a recycled id
+    /// pointing at unrelated content would not be.
+    pub fn rollback(&mut self, savepoint: RelsSavepoint) {
+        for record in self.entries.drain(savepoint.0..) {
+            let key = rel_key(&record.type_uri, &record.target, record.mode);
+            self.by_target.remove(&key);
+        }
+    }
+
     /// Allocates (or reuses) a relationship; returns the rId string (`"rId7"`).
     pub fn add(&mut self, type_uri: &str, target: &str, mode: RelMode) -> EcoString {
-        let mode_key = if mode == RelMode::Internal { 'I' } else { 'E' };
-        let key: EcoString = eco_format!("{type_uri}\u{0}{target}\u{0}{mode_key}");
+        let key = rel_key(type_uri, target, mode);
         if let Some(existing) = self.by_target.get(&key) {
             return existing.clone();
         }
@@ -956,6 +987,55 @@ mod tests {
         assert_eq!(rels.add("kind", "target.xml", RelMode::Internal), "rId1");
         package.add_relationships("word/document.xml", &rels).unwrap();
         assert!(package.finish(&Rels::new()).is_ok());
+    }
+
+    #[test]
+    fn rollback_drops_speculative_relationships_without_recycling_ids() {
+        let mut rels = Rels::new();
+        assert_eq!(rels.add("kind", "keep.xml", RelMode::Internal), "rId1");
+
+        // A part the caller ends up not writing.
+        let savepoint = rels.savepoint();
+        assert_eq!(rels.add("kind", "abandoned.xml", RelMode::Internal), "rId2");
+        rels.rollback(savepoint);
+
+        // The abandoned target is gone from the emitted table, and asking for it
+        // again allocates a fresh record rather than handing back the stale
+        // `rId2` from the dedupe index.
+        let xml = rels.to_xml();
+        assert!(!xml.contains("abandoned.xml"), "{xml}");
+        assert!(xml.contains("keep.xml"), "{xml}");
+        assert_eq!(rels.add("kind", "abandoned.xml", RelMode::Internal), "rId3");
+        assert!(rels.to_xml().contains("abandoned.xml"));
+    }
+
+    #[test]
+    fn rollback_to_an_empty_savepoint_clears_the_table() {
+        let mut rels = Rels::new();
+        let savepoint = rels.savepoint();
+        rels.add("kind", "a.xml", RelMode::Internal);
+        rels.add("kind", "b.xml", RelMode::Internal);
+        assert!(!rels.is_empty());
+        rels.rollback(savepoint);
+        assert!(rels.is_empty());
+    }
+
+    #[test]
+    fn a_relationship_to_a_missing_part_is_rejected() {
+        let mut package = package();
+        package.add_xml(
+            "word/document.xml",
+            "application/xml",
+            format!("<document xmlns:r=\"{}\" r:id=\"rId1\"/>", ns::R),
+        );
+        let mut rels = Rels::new();
+        rels.add("kind", "header4.xml", RelMode::Internal);
+        package.add_relationships("word/document.xml", &rels).unwrap();
+        assert!(matches!(
+            package.finish(&Rels::new()),
+            Err(PackageError::MissingRelationshipTarget { target, .. })
+                if target == "header4.xml"
+        ));
     }
 
     #[test]

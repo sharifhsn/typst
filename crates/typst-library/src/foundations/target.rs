@@ -101,6 +101,14 @@ pub struct TargetElem {
 ///   @reference:svg[SVG] export, or within an @html.frame[HTML frame]
 /// - `{"html"}` in @html[HTML] export
 /// - `{"bundle"}` in @reference:bundle[Bundle] export
+/// - `{"docx"}` in DOCX (Microsoft Word) export
+/// - `{"pandoc"}` in Pandoc (JSON AST) export
+///
+/// The set of targets grows as new export formats are added, so code that
+/// branches on this value should always keep a fallback branch rather than
+/// enumerate every known target and fail on the rest. A template that panics on
+/// an unrecognized target stops working the moment a new one ships, even though
+/// nothing about the template itself has changed.
 ///
 /// = When to use it <when-to-use-it>
 /// This function allows you to format your document properly across the paged,

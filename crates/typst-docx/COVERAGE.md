@@ -3179,3 +3179,32 @@ approximation is sampled page furniture. It remains one page against one with
 score `0.960150`. `radoman2-pmf-spa3-seminarski` now has zero approximations,
 rasters, or drops and renders 12 pages against 10 with score `0.957011`. All
 three packages validate, round-trip, and render successfully in LibreOffice.
+
+## 77. Third-party packages that match `target()` exhaustively
+
+`Target::Docx` is a value no published package knows about. A package that
+branches on `target()` and enumerates every case it recognizes therefore fails
+under `--format docx` — not because DOCX export lowered anything incorrectly,
+but because the package refuses to name a target it has never heard of. The
+corpus's `tracl` template is the observed instance: it calls
+`@preview/bullseye:0.1.0`'s `match-target(paged: .., html: ..)` without the
+optional `default:` branch, and bullseye ends with
+`panic("no value specified for current target `" + target + "`")`. The failure
+is a panic at `bullseye:0.1.0/src/lib.typ:72`, before any exporter code runs.
+
+This is not a defect the exporter can fix, and it must not be papered over.
+Reporting `"paged"` during DOCX export would make `target()` lie: our own
+lowering asks the same question (`counter(page).display()` produces a live
+`PAGE` field only under `Target::Docx`), and a template that legitimately
+wants a Word-specific branch would silently never get one. Nor is there a
+sound generic fallback — only the package author knows whether its paged or
+its HTML branch is the right approximation for Word.
+
+What is ours to fix is the documentation: `target()` now lists `"docx"` and
+`"pandoc"` among its return values and states that the set grows, so branching
+code should keep a fallback branch instead of enumerating. The same exposure
+exists for every future target and already existed when `"bundle"` was added;
+DOCX is only the first case where a package in the wild was observed to trip on
+it. The remedy for an affected document is one argument at the call site
+(`match-target(paged: .., html: .., default: ..)`) or a one-line `default:` in
+the package — an upstream change, not an export workaround.

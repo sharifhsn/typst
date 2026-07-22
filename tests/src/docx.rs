@@ -355,6 +355,76 @@ fn assert_no_dangling_anchors(parts: &HashMap<String, String>) {
     );
 }
 
+/// Fails when a relationship points at a part the package never wrote.
+///
+/// This is the packaging-level twin of [`assert_no_dangling_anchors`]: emit a
+/// reference, never emit the referent. A dead internal *link* merely goes
+/// nowhere, but a dead *relationship* makes the whole OPC package invalid —
+/// Word refuses to open it, and our own finalization refuses to write it. The
+/// check is deliberately shaped as an invariant over every `.rels` part rather
+/// than a probe for one known-bad target, because the leak can originate in any
+/// lowering step that allocates a relationship before deciding whether to keep
+/// the part (header/footer, image, hyperlink, footnote, comment, embedded font).
+fn assert_relationships_resolve(package: &HashMap<String, Vec<u8>>) {
+    let mut dangling = Vec::new();
+    let mut checked = 0usize;
+    let mut names: Vec<&String> =
+        package.keys().filter(|name| name.ends_with(".rels")).collect();
+    names.sort();
+
+    for rels_name in names {
+        // `word/_rels/document.xml.rels` describes `word/document.xml`, whose
+        // targets resolve against `word/`.
+        let base = rels_name
+            .rsplit_once("_rels/")
+            .map(|(prefix, _)| prefix.to_string())
+            .unwrap_or_default();
+        let xml = std::str::from_utf8(&package[rels_name])
+            .unwrap_or_else(|e| panic!("{rels_name} is not UTF-8: {e}"));
+        let doc = roxmltree::Document::parse(xml)
+            .unwrap_or_else(|e| panic!("{rels_name} does not parse: {e}"));
+        for node in doc.descendants().filter(|n| n.has_tag_name("Relationship")) {
+            if node.attribute("TargetMode") == Some("External") {
+                continue;
+            }
+            let Some(target) = node.attribute("Target") else { continue };
+            let resolved = resolve_part_name(&base, target);
+            checked += 1;
+            if !package.contains_key(&resolved) {
+                dangling.push(format!("{rels_name}: {target} -> {resolved}"));
+            }
+        }
+    }
+
+    assert!(checked > 0, "no internal relationships were checked at all");
+    let mut written: Vec<&String> = package.keys().collect();
+    written.sort();
+    assert!(
+        dangling.is_empty(),
+        "relationships pointing at parts that were never written: {dangling:#?}\n\
+         written parts: {written:#?}"
+    );
+}
+
+/// Resolves a relationship `Target` against the directory of its source part,
+/// the way OPC does (absolute targets are package-rooted, `..` walks up).
+fn resolve_part_name(base: &str, target: &str) -> String {
+    if let Some(rooted) = target.strip_prefix('/') {
+        return rooted.to_string();
+    }
+    let mut segments: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
+    for segment in target.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    segments.join("/")
+}
+
 /// The bookmark a field instruction resolves against, if it is an internal one.
 fn internal_field_target(instruction: &str) -> Option<String> {
     let mut words = instruction.split_whitespace();
@@ -547,6 +617,85 @@ fn package_is_wellformed_and_minimal() {
     assert!(p.contains_key("word/document.xml"));
     assert!(p.contains_key("_rels/.rels"));
     assert_all_wellformed(&p);
+}
+
+/// Regression: a relationship must never outlive the part it points at.
+///
+/// The exporter allocates a `word/_rels/document.xml.rels` entry for each
+/// header/footer part *while* building a section, but a section whose furniture
+/// lowering fails falls back to a geometry-only `sectPr` and drops those parts.
+/// Leaking their relationships produced `relationship from word/document.xml
+/// targets missing part header4.xml` — an export failure on a document that
+/// compiles to PDF perfectly. Run over documents that allocate relationships
+/// from several lowering paths at once, so the invariant holds for the class
+/// rather than for one reproducer.
+#[test]
+fn every_relationship_targets_a_written_part() {
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40"><rect width="80" height="40" fill="#0b6"/></svg>"##;
+
+    // Several page-geometry sections, each with its own contextual header and
+    // footer: the shape that hands out the most header/footer relationships.
+    let sectioned = r#"
+#let running = context align(center, counter(page).display("1"))
+#set document(title: "Sections", author: "Author")
+#set page(numbering: "1", header: running, footer: running)
+= Front matter
+First section body.
+
+#pagebreak()
+#set page(margin: 3cm, header: [Fixed head], footer: running)
+= Body
+Second section body.
+
+#pagebreak()
+#set page(margin: 2cm, numbering: "i", header: none, footer: running)
+= Back matter
+Third section body.
+"#;
+
+    for (label, package) in [
+        ("plain", package_bytes_with_files("Hello *world*.", &[])),
+        ("sectioned", package_bytes_with_files(sectioned, &[])),
+        (
+            "media and links",
+            package_bytes_with_files(
+                r#"
+#set page(header: image("logo.svg", width: 20pt))
+#link("https://example.com")[External] and a footnote.#footnote[Note text.]
+
+#image("logo.svg", width: 40pt)
+"#,
+                &[("logo.svg", SVG)],
+            ),
+        ),
+    ] {
+        eprintln!("checking relationships for the {label} document");
+        assert_relationships_resolve(&package);
+    }
+}
+
+/// Regression: `counter(page).display()` under `Target::Docx` lowers to a
+/// semantic marker carrying a snapshot of the effective style chain. Snapshotting
+/// the *whole* chain baked the document's own `set document(..)`/`set page(..)`
+/// rules onto the marker, so realizing it inside a container — a `place` body, a
+/// header/footer fragment, a measured text box — failed with "document set rules
+/// are not allowed inside of containers", even though the very same document
+/// exports to PDF without complaint.
+#[test]
+fn page_counter_marker_survives_realization_inside_a_container() {
+    let p = parts(
+        r#"
+#set document(title: "Thesis", author: "Author")
+#set page(numbering: "1")
+#context place(bottom + center, text(size: 10pt, counter(page).display("1")))
+Body text.
+"#,
+    );
+    assert_all_wellformed(&p);
+    assert!(
+        p["word/document.xml"].contains("PAGE"),
+        "the placed page counter should still lower to a live PAGE field"
+    );
 }
 
 #[test]
