@@ -143,9 +143,9 @@ Gate: text in placeholder shapes takes its font, size and colour from the
 layout, verified against a LibreOffice render.
 
 **Stage 3 — the shape vocabulary.** Pictures, preset and custom geometry,
-fills, lines, group shapes, connectors. Most of this inverts
-`typst-pptx`'s own exporter, and the DOCX importer's `mappers::dml_shape`
-already does the DrawingML half — it should be *shared*, not rewritten.
+fills, lines, group shapes, connectors. Most of this inverts `typst-pptx`'s own
+exporter, and the DOCX importer's `mappers::dml_shape` already reads the same
+DrawingML — but see the effort note below before assuming it can be shared.
 
 **Stage 4 — tables and charts.** `a:tbl` → `#table` and `p:graphicFrame` charts
 → the same data-table-or-plot treatment the DOCX importer gives them. Both
@@ -163,10 +163,37 @@ second convention would break both directions at once.
 
 ## Effort, honestly
 
-Stages 1 and 5 are small. Stage 3 and 4 are mostly *reuse* of code that
-already exists in `typst-docx-import` and `typst-pptx`, provided the shared
-DrawingML mappers are lifted into `typst-ooxml-core` rather than copied — that
-refactor is a prerequisite worth doing first, not an afterthought.
+Stages 1 and 5 are small.
+
+**Stage 3 and 4 are *not* mostly reuse — that estimate was wrong, and it is
+recorded here because acting on it would have misdirected the work.** The
+claim was that `typst-docx-import`'s `mappers::dml_shape` could be lifted into
+`typst-ooxml-core` and shared, making the shape stages cheap. Measured against
+the actual file: **3 of its 13 functions, 57 of 691 lines — 8% — are liftable
+as they stand** (`preset_vertices`, `preset_dash_name`, `emu_pt`). The other
+92% is coupled at *both* ends, to the DOCX importer's Word IR
+(`wml::model::Dml*`), its Typst IR (`tdoc::Inline`/`Block`), its `LowerCtx`,
+its `ImportReport` and its emit helpers.
+
+That is not an accident of style. A mapper's job *is* to join one IR to
+another, so a mapper is coupled to two IRs by definition; only the value
+mathematics in the middle — EMU conversion, `a:custGeom` segments → curve
+commands, gradient stop reparameterisation, dash run lengths relative to line
+width — is portable. And PowerPoint's shapes are `p:sp`, not `wps:wsp`, so the
+parse half does not transfer either.
+
+So the "lift it into `typst-ooxml-core` first" prerequisite should **not** be
+done as described. Two honest options when the time comes:
+
+1. Define a producer-neutral DrawingML *value* type in `typst-ooxml-core` that
+   both importers parse into and both lower from. That is a design task with a
+   real payoff, not a lift.
+2. Let the PPTX importer duplicate the mapping in its first pass and factor
+   afterwards, once two real consumers exist and the seam is visible rather
+   than guessed.
+
+Option 2 is the safer default: the seam that looks obvious from one side of a
+single implementation is exactly the one this estimate got wrong.
 
 **Stage 2 is the whole project.** Master/layout/theme resolution is where a
 naive importer produces text in the wrong font, wrong colour and wrong place on
