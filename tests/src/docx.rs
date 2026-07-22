@@ -7,7 +7,7 @@
 //! of bug that makes Word/LibreOffice refuse to open a file), plus targeted
 //! checks on the structural mappings.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::sync::Arc;
 
@@ -280,6 +280,87 @@ fn assert_all_wellformed(parts: &HashMap<String, String>) {
             roxmltree::Document::parse(xml)
                 .unwrap_or_else(|e| panic!("{name} is not namespace-well-formed: {e}"));
         }
+    }
+    assert_no_dangling_anchors(parts);
+}
+
+const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+/// Fails when an internal link has no bookmark to land on.
+///
+/// A `<w:hyperlink w:anchor="X">` or a `REF`/`PAGEREF`/`NOTEREF` field whose
+/// `X` has no `<w:bookmarkStart w:name="X">` is a link that goes nowhere: Word
+/// paints it like any other link and clicking it does nothing (a field also
+/// renders "Error! Bookmark not defined"). Checked over every `word/` part at
+/// once, which is the scope the exporter resolves anchor names in, and over
+/// every link kind rather than one construct, so no lowering path can start
+/// emitting dead anchors unnoticed.
+fn assert_no_dangling_anchors(parts: &HashMap<String, String>) {
+    let mut part_names: Vec<&String> = parts
+        .keys()
+        .filter(|name| name.starts_with("word/") && name.ends_with(".xml"))
+        .collect();
+    part_names.sort();
+
+    let mut bookmarks = BTreeSet::new();
+    let mut targets: Vec<(&str, String, String)> = Vec::new();
+    for part in part_names {
+        let Ok(doc) = roxmltree::Document::parse(&parts[part]) else { continue };
+        for node in doc.descendants() {
+            if node.tag_name().namespace() != Some(W_NS) {
+                continue;
+            }
+            match node.tag_name().name() {
+                "bookmarkStart" => {
+                    if let Some(name) = node.attribute((W_NS, "name")) {
+                        bookmarks.insert(name.to_string());
+                    }
+                }
+                "hyperlink" => {
+                    // An anchor alongside `r:id` names a fragment in the
+                    // *target* document, not a bookmark in this one.
+                    if let Some(anchor) = node.attribute((W_NS, "anchor"))
+                        && node.attribute((R_NS, "id")).is_none()
+                    {
+                        targets.push((part, "hyperlink".into(), anchor.to_string()));
+                    }
+                }
+                "instrText" => {
+                    if let Some(target) = node.text().and_then(internal_field_target) {
+                        targets.push((part, "field".into(), target));
+                    }
+                }
+                "fldSimple" => {
+                    if let Some(target) =
+                        node.attribute((W_NS, "instr")).and_then(internal_field_target)
+                    {
+                        targets.push((part, "field".into(), target));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let dangling: Vec<String> = targets
+        .into_iter()
+        .filter(|(_, _, target)| !bookmarks.contains(target))
+        .map(|(part, kind, target)| format!("{part}: {kind} -> {target}"))
+        .collect();
+    assert!(
+        dangling.is_empty(),
+        "internal links with no bookmark to land on: {dangling:#?}\n\
+         emitted bookmarks: {bookmarks:?}"
+    );
+}
+
+/// The bookmark a field instruction resolves against, if it is an internal one.
+fn internal_field_target(instruction: &str) -> Option<String> {
+    let mut words = instruction.split_whitespace();
+    match words.next()? {
+        "REF" | "PAGEREF" | "NOTEREF" => words.next().map(str::to_string),
+        _ => None,
     }
 }
 
@@ -6747,6 +6828,45 @@ fn citations_and_bibliography_converge_against_paged_introspection() {
             && decision.representation == Representation::Raster
     });
     assert!(raster.is_none(), "bibliography rasterized as: {raster:#?}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn citation_links_to_an_emitted_bibliography_bookmark() {
+    // A `#cite` lowers to `<w:hyperlink w:anchor>` aimed at its bibliography
+    // reference entry, but the entry is a synthesized sequence that no lowering
+    // site brackets with a bookmark — so the anchor used to name a bookmark
+    // that was never emitted, and clicking the citation in Word did nothing.
+    let p = parts_with_files(
+        "First @beta and then @alpha.\n\n#bibliography(\"refs.bib\", style: \"ieee\")",
+        &[("refs.bib", REFS_BIB)],
+    );
+    let doc = &p["word/document.xml"];
+    let anchors: Vec<&str> = doc
+        .match_indices("<w:hyperlink w:anchor=\"")
+        .map(|(i, m)| {
+            let rest = &doc[i + m.len()..];
+            &rest[..rest.find('"').unwrap()]
+        })
+        .collect();
+    assert_eq!(anchors.len(), 2, "both citations are clickable: {anchors:?}");
+    for anchor in &anchors {
+        assert!(
+            doc.contains(&format!("w:name=\"{anchor}\"/>")),
+            "citation anchor {anchor} has a bookmark to land on"
+        );
+    }
+    // …and the bookmark sits on the reference entry it names, not somewhere
+    // arbitrary: the first citation's target precedes the second's, matching
+    // the order the entries are printed in.
+    let position = |anchor: &str| {
+        doc.find(&format!("w:name=\"{anchor}\"/>"))
+            .expect("bookmark position")
+    };
+    assert!(
+        position(anchors[0]) < position(anchors[1]),
+        "each citation targets its own entry, in bibliography order"
+    );
     assert_all_wellformed(&p);
 }
 

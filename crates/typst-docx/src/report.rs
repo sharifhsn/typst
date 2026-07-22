@@ -66,6 +66,10 @@ pub enum DecisionReason {
     /// document, so its trustworthy Typst-computed cache was kept as static
     /// editable text instead of shipping a broken Word field.
     DanglingReferenceTextFallback,
+    /// An internal hyperlink's target could not be given a bookmark anywhere in
+    /// the finalized document, so its text was kept as plain runs rather than
+    /// shipping a link that silently goes nowhere.
+    DanglingLinkTextFallback,
     /// A figure number keeps Typst's computed value because its numbering
     /// pattern or function has no equivalent Word `SEQ` format.
     TypstOwnedFigureNumber,
@@ -278,7 +282,23 @@ pub struct ExportSource {
 
 impl ExportSource {
     pub(crate) fn from_content(content: &Content) -> Self {
-        Self::new(content.elem().name(), content.span(), content.location())
+        // Synthesized content (a bibliography reference entry, a generated
+        // caption) carries a detached span and therefore no source identity of
+        // its own. What it *says* is the stable substitute — see
+        // [`ExportSource::with_digest`] for why its `Location` is not.
+        let digest = content.span().is_detached().then(|| {
+            let label = content.label().map(|label| label.resolve());
+            typst_utils::hash128(&(
+                content.plain_text(),
+                label.as_ref().map(|label| label.as_str()),
+            ))
+        });
+        Self::with_digest(
+            content.elem().name(),
+            content.span(),
+            content.location(),
+            digest,
+        )
     }
 
     pub(crate) fn new(
@@ -286,12 +306,28 @@ impl ExportSource {
         span: Span,
         location: Option<Location>,
     ) -> Self {
+        Self::with_digest(element, span, location, None)
+    }
+
+    /// `digest` stands in for the source span when there is none: a stable
+    /// summary of the content this source describes.
+    fn with_digest(
+        element: impl Into<EcoString>,
+        span: Span,
+        location: Option<Location>,
+        digest: Option<u128>,
+    ) -> Self {
         let element = element.into();
         // Source spans survive independent paged/DOCX realizations; Typst
-        // locations do not. Keep locations as useful evidence, but exclude
-        // them from the stable identity unless the source is detached.
+        // locations do not. Keep locations as useful evidence, but never in the
+        // stable identity — a location is not even reproducible across runs of
+        // the *same* target, because an element's locator key reaches interned
+        // string ids whose numbering depends on the order threads happened to
+        // intern them. Hashing one here leaked that instability into bookmark
+        // names (`_Typst{logical_id}`) and into every manifest id derived from
+        // the export snapshot.
         let logical_id = if span.is_detached() {
-            typst_utils::hash128(&(span, location, &element))
+            typst_utils::hash128(&(span, digest, &element))
         } else {
             typst_utils::hash128(&(span, &element))
         };

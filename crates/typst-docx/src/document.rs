@@ -608,13 +608,25 @@ fn docx_document_impl(
         &mut footnotes,
         &mut comments,
     );
-    for target in crate::invariants::fallback_dangling_internal_fields(
+    // Names handed out by `add_bookmark` that no lowering site materialized:
+    // bind them to the target's own introspection tag so the link resolves,
+    // before anything still unbound is demoted below.
+    crate::invariants::bind_dangling_bookmarks(
         &mut body,
         &mut header_parts,
         &mut footer_parts,
         &mut footnotes,
         &mut comments,
-    ) {
+        &bookmarks,
+    );
+    let dangling = crate::invariants::fallback_dangling_internal_fields(
+        &mut body,
+        &mut header_parts,
+        &mut footer_parts,
+        &mut footnotes,
+        &mut comments,
+    );
+    for target in dangling.fields {
         fidelity_report.record_span(
             crate::report::ExportSource::new(
                 format!("reference target {target}"),
@@ -623,6 +635,19 @@ fn docx_document_impl(
             ),
             crate::report::Representation::Approximate,
             crate::report::DecisionReason::DanglingReferenceTextFallback,
+            crate::report::LossSet::DYNAMIC_BEHAVIOR,
+            0,
+        );
+    }
+    for target in dangling.links {
+        fidelity_report.record_span(
+            crate::report::ExportSource::new(
+                format!("link target {target}"),
+                typst_syntax::Span::detached(),
+                None,
+            ),
+            crate::report::Representation::Approximate,
+            crate::report::DecisionReason::DanglingLinkTextFallback,
             crate::report::LossSet::DYNAMIC_BEHAVIOR,
             0,
         );

@@ -878,6 +878,10 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
         self.next_bookmark_id += 1;
         let name = eco_format!("_TypstPage{page}");
         self.page_bookmarks.insert(page, (name.clone(), loc));
+        // Also record it against its location, so the late bookmark-binding
+        // pass can recover the anchor if this marker never reaches the IR (the
+        // paragraph it was staged for can be dropped before it flushes).
+        self.bookmarks.pages_by_location.insert(loc, (name.clone(), id));
         Some((id, name))
     }
 

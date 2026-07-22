@@ -1242,4 +1242,8 @@ use rustc_hash::FxHashMap;
 #[derive(Default)]
 pub struct BookmarkTable {
     pub by_location: FxHashMap<Location, (EcoString, u32)>,
+    /// Source-page anchors (`_TypstPageN`), keyed by the element whose position
+    /// stands in for the start of that page. Kept apart from `by_location`
+    /// because one element can own both its own bookmark and its page's.
+    pub pages_by_location: FxHashMap<Location, (EcoString, u32)>,
 }

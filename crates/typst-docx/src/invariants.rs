@@ -9,10 +9,12 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use ecow::EcoString;
+use rustc_hash::FxHashMap;
+use typst_library::introspection::Location;
 
 use crate::dom::{
-    Block, Comment, DocxDocument, FieldCacheStatus, FieldDisplay, FieldMode, Footnote,
-    HdrFtrPart, Para, ParaChild, Run,
+    Block, BookmarkTable, Comment, DocxDocument, FieldCacheStatus, FieldDisplay,
+    FieldMode, Footnote, HdrFtrPart, Para, ParaChild, Run,
 };
 
 /// Strips redundant re-emissions of the same bookmark within one part.
@@ -186,10 +188,373 @@ fn set_run_drawing_behind(run: &mut Run) {
     }
 }
 
+/// Emits the bookmark for every link target that lowering *named* but never
+/// materialized.
+///
+/// Anchor names are allocated per `Location` on demand (`DocxCtx::add_bookmark`),
+/// but the start/end marker pair is only emitted by the handful of lowering
+/// sites that know how to bracket a target's own runs: headings, figures,
+/// labeled paragraphs, equation numbers, footnote marks. Every other linkable
+/// target reaches the finalized IR with an anchor and nothing behind it — a
+/// bibliography reference entry, a labeled figure that lowered into a `w:tbl`,
+/// a label inside content that was rasterized. Word styles those as links and
+/// clicking them does nothing, which is the one outcome worse than not linking
+/// at all.
+///
+/// The introspection tags retained in the finalized IR sit at exactly those
+/// targets, so binding an orphaned name to its tag position recovers the real
+/// link. The bookmark is an empty start/end pair — the shape
+/// [`crate::ctx::DocxCtx::page_bookmark_for_emission`] already emits — because
+/// consumers resolve a bookmark to its start position and an empty marker
+/// cannot perturb the surrounding runs.
+///
+/// Runs after [`dedupe_repeated_bookmarks`], so a name that was emitted and
+/// then deduplicated is not mistaken for a missing one, and before
+/// [`fallback_dangling_internal_fields`], which demotes whatever still has no
+/// target anywhere in the package.
+pub(crate) fn bind_dangling_bookmarks(
+    body: &mut [Block],
+    headers: &mut [HdrFtrPart],
+    footers: &mut [HdrFtrPart],
+    footnotes: &mut [Footnote],
+    comments: &mut [Comment],
+    bookmarks: &BookmarkTable,
+) {
+    let mut emitted = BTreeSet::new();
+    collect_bookmark_names(body, &mut emitted);
+    for part in headers.iter().chain(footers.iter()) {
+        collect_bookmark_names(&part.blocks, &mut emitted);
+    }
+    for footnote in footnotes.iter() {
+        collect_bookmark_names(&footnote.blocks, &mut emitted);
+    }
+    for comment in comments.iter() {
+        collect_bookmark_names(&comment.blocks, &mut emitted);
+    }
+
+    let mut referenced = BTreeSet::new();
+    collect_referenced_anchors(body, &mut referenced);
+    for part in headers.iter().chain(footers.iter()) {
+        collect_referenced_anchors(&part.blocks, &mut referenced);
+    }
+    for footnote in footnotes.iter() {
+        collect_referenced_anchors(&footnote.blocks, &mut referenced);
+    }
+    for comment in comments.iter() {
+        collect_referenced_anchors(&comment.blocks, &mut referenced);
+    }
+
+    // Both source tables are hash maps, so sort the candidates before grouping
+    // them: emission order has to come from the anchors themselves, never from
+    // the order a map happened to hand them over.
+    let mut candidates: Vec<(u32, EcoString, Location)> = bookmarks
+        .by_location
+        .iter()
+        .chain(bookmarks.pages_by_location.iter())
+        .filter(|(_, (name, _))| referenced.contains(name) && !emitted.contains(name))
+        .map(|(location, (name, id))| (*id, name.clone(), *location))
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    candidates.sort_by(|(a_id, a_name, _), (b_id, b_name, _)| {
+        a_id.cmp(b_id).then_with(|| a_name.cmp(b_name))
+    });
+
+    // Two locations can legitimately own the same anchor name: a name is
+    // derived from the target's semantic identity, and repeated content
+    // realizes that identity more than once. Bind the lowest-numbered one only
+    // — `validate` rejects a duplicate `w:name`, and a consumer resolves a name
+    // to its first occurrence regardless of how many carry it.
+    let mut bound = BTreeSet::new();
+    candidates.retain(|(_, name, _)| bound.insert(name.clone()));
+
+    // One location can owe both its own anchor and its source page's, so a
+    // location maps to a list rather than a single name.
+    let mut wanted = Wanted::default();
+    for (id, name, location) in candidates {
+        wanted.entry(location).or_default().push((id, name));
+    }
+
+    // Document order, so a location realized in more than one part binds to its
+    // first occurrence — the same rule consumers use to resolve a bookmark.
+    bind_in_blocks(body, &mut wanted);
+    for part in headers.iter_mut().chain(footers.iter_mut()) {
+        bind_in_blocks(&mut part.blocks, &mut wanted);
+    }
+    for footnote in footnotes {
+        bind_in_blocks(&mut footnote.blocks, &mut wanted);
+    }
+    for comment in comments {
+        bind_in_blocks(&mut comment.blocks, &mut wanted);
+    }
+}
+
+/// Bookmark `(id, name)` pairs still owed, by the location that should host
+/// them.
+type Wanted = FxHashMap<Location, Vec<(u32, EcoString)>>;
+
+/// Walks one part's blocks in document order, so a target whose opening tag
+/// precedes its closing one binds to the opening position.
+fn bind_in_blocks(blocks: &mut [Block], wanted: &mut Wanted) {
+    if wanted.is_empty() {
+        return;
+    }
+
+    // Markers claimed by a block-level tag, which has no run context of its
+    // own: they ride along to the next paragraph the flow reaches, which is
+    // where a reader following the link should land.
+    let mut pending = Vec::new();
+    for block in blocks.iter_mut() {
+        match block {
+            Block::Tag(tag) => {
+                let location = tag.location();
+                if let Some(entries) = wanted.remove(&location) {
+                    pending.push((location, entries));
+                }
+            }
+            Block::Para(para) => {
+                prepend_markers(para, &mut pending);
+                bind_in_para(para, wanted);
+            }
+            Block::Table(table) => {
+                if let Some(para) = table
+                    .rows
+                    .iter_mut()
+                    .flat_map(|row| row.cells.iter_mut())
+                    .find_map(|cell| cell.blocks.iter_mut().find_map(host_para))
+                {
+                    prepend_markers(para, &mut pending);
+                }
+                for row in &mut table.rows {
+                    for cell in &mut row.cells {
+                        bind_in_blocks(&mut cell.blocks, wanted);
+                    }
+                }
+            }
+            Block::Toc(toc) => {
+                if let Some(entry) = toc.entries.first_mut() {
+                    prepend_markers(entry, &mut pending);
+                }
+                for entry in &mut toc.entries {
+                    bind_in_para(entry, wanted);
+                }
+            }
+            Block::FlowSpace { .. } | Block::SectionBreak(_) | Block::WeakPageBreak => {}
+        }
+    }
+
+    // A target that trails every paragraph of its part — a label after all
+    // content — still resolves if the marker lands on the last paragraph.
+    if !pending.is_empty()
+        && let Some(para) = blocks.iter_mut().rev().find_map(host_para)
+    {
+        for (_, entries) in pending.drain(..) {
+            for (id, name) in entries {
+                para.content.push(ParaChild::BookmarkStart { id, name });
+                para.content.push(ParaChild::BookmarkEnd { id });
+            }
+        }
+    }
+
+    // This part has no paragraph at all to host the leftovers. Return them so
+    // a later part can still claim the target; anything nobody claims is
+    // demoted by `fallback_dangling_internal_fields`.
+    for (location, entries) in pending {
+        wanted.insert(location, entries);
+    }
+}
+
+fn prepend_markers(
+    para: &mut Para,
+    pending: &mut Vec<(Location, Vec<(u32, EcoString)>)>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let markers = pending
+        .drain(..)
+        .flat_map(|(_, entries)| entries)
+        .flat_map(|(id, name)| {
+            [ParaChild::BookmarkStart { id, name }, ParaChild::BookmarkEnd { id }]
+        })
+        .collect::<Vec<_>>();
+    para.content.splice(0..0, markers);
+}
+
+/// The first paragraph inside a block that can carry a bookmark marker.
+fn host_para(block: &mut Block) -> Option<&mut Para> {
+    match block {
+        Block::Para(para) => Some(para),
+        Block::Table(table) => table
+            .rows
+            .iter_mut()
+            .flat_map(|row| row.cells.iter_mut())
+            .find_map(|cell| cell.blocks.iter_mut().find_map(host_para)),
+        Block::Toc(toc) => toc.entries.first_mut(),
+        Block::Tag(_)
+        | Block::FlowSpace { .. }
+        | Block::SectionBreak(_)
+        | Block::WeakPageBreak => None,
+    }
+}
+
+fn bind_in_para(para: &mut Para, wanted: &mut Wanted) {
+    for child in &mut para.content {
+        match child {
+            ParaChild::Run(run) => bind_in_run(run, wanted),
+            ParaChild::Hyperlink { runs, .. } => {
+                for run in runs {
+                    bind_in_run(run, wanted);
+                }
+            }
+            ParaChild::BookmarkStart { .. }
+            | ParaChild::BookmarkEnd { .. }
+            | ParaChild::CommentRangeStart { .. }
+            | ParaChild::CommentRangeEnd { .. }
+            | ParaChild::OmmlPara(_)
+            | ParaChild::Tag(_) => {}
+        }
+    }
+
+    let mut index = 0;
+    while index < para.content.len() {
+        let ParaChild::Tag(tag) = &para.content[index] else {
+            index += 1;
+            continue;
+        };
+        let Some(entries) = wanted.remove(&tag.location()) else {
+            index += 1;
+            continue;
+        };
+        let count = entries.len();
+        para.content.splice(
+            index..index,
+            entries.into_iter().flat_map(|(id, name)| {
+                [ParaChild::BookmarkStart { id, name }, ParaChild::BookmarkEnd { id }]
+            }),
+        );
+        index += 2 * count + 1;
+    }
+}
+
+fn bind_in_run(run: &mut Run, wanted: &mut Wanted) {
+    match run {
+        Run::Drawing(drawing) => {
+            if let Some(text_box) =
+                drawing.shape.as_mut().and_then(|shape| shape.txbx.as_mut())
+            {
+                bind_in_blocks(&mut text_box.blocks, wanted);
+            }
+            if let Some(group) = drawing.group.as_mut() {
+                for child in &mut group.children {
+                    if let Some(text_box) = child.shape.txbx.as_mut() {
+                        bind_in_blocks(&mut text_box.blocks, wanted);
+                    }
+                }
+            }
+        }
+        Run::Field(field) => {
+            for result in &mut field.result {
+                bind_in_run(result, wanted);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_referenced_anchors(blocks: &[Block], anchors: &mut BTreeSet<EcoString>) {
+    for block in blocks {
+        match block {
+            Block::WeakPageBreak => {}
+            Block::Para(para) => collect_para_anchors(para, anchors),
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        collect_referenced_anchors(&cell.blocks, anchors);
+                    }
+                }
+            }
+            Block::Toc(toc) => {
+                for entry in &toc.entries {
+                    collect_para_anchors(entry, anchors);
+                }
+                for run in &toc.fallback {
+                    collect_run_anchors(run, anchors);
+                }
+            }
+            Block::FlowSpace { .. } | Block::SectionBreak(_) | Block::Tag(_) => {}
+        }
+    }
+}
+
+fn collect_para_anchors(para: &Para, anchors: &mut BTreeSet<EcoString>) {
+    for child in &para.content {
+        match child {
+            ParaChild::Hyperlink { rel, anchor, runs } => {
+                // An anchor alongside an external relationship names a fragment
+                // in the *target* document, not a bookmark in this one.
+                if let Some(anchor) = anchor.as_ref().filter(|_| rel.is_none()) {
+                    anchors.insert(anchor.clone());
+                }
+                for run in runs {
+                    collect_run_anchors(run, anchors);
+                }
+            }
+            ParaChild::Run(run) => collect_run_anchors(run, anchors),
+            ParaChild::BookmarkStart { .. }
+            | ParaChild::BookmarkEnd { .. }
+            | ParaChild::CommentRangeStart { .. }
+            | ParaChild::CommentRangeEnd { .. }
+            | ParaChild::OmmlPara(_)
+            | ParaChild::Tag(_) => {}
+        }
+    }
+}
+
+fn collect_run_anchors(run: &Run, anchors: &mut BTreeSet<EcoString>) {
+    match run {
+        Run::Drawing(drawing) => {
+            if let Some(text_box) =
+                drawing.shape.as_ref().and_then(|shape| shape.txbx.as_ref())
+            {
+                collect_referenced_anchors(&text_box.blocks, anchors);
+            }
+            if let Some(group) = &drawing.group {
+                for child in &group.children {
+                    if let Some(text_box) = &child.shape.txbx {
+                        collect_referenced_anchors(&text_box.blocks, anchors);
+                    }
+                }
+            }
+        }
+        Run::Field(field) => {
+            if let Some(target) = internal_bookmark_target(&field.instr) {
+                anchors.insert(target.into());
+            }
+            for result in &field.result {
+                collect_run_anchors(result, anchors);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Link targets that were still missing once the finalized IR was checked.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct DanglingTargets {
+    /// Live internal fields (`REF`/`PAGEREF`/`NOTEREF`) flattened to their
+    /// Typst-computed cache.
+    pub fields: Vec<EcoString>,
+    /// Internal hyperlinks unwrapped to plain runs.
+    pub links: Vec<EcoString>,
+}
+
 /// Replaces an internal field whose target bookmark does not exist with its
-/// cached result. This is deliberately a final-IR pass: a reference can precede
-/// its target, and only after all lowering and bookmark deduplication do we know
-/// whether the target number was actually emitted.
+/// cached result, and unwraps an internal hyperlink whose anchor names no
+/// bookmark. This is deliberately a final-IR pass: a reference can precede its
+/// target, and only after all lowering, bookmark deduplication and
+/// [`bind_dangling_bookmarks`] do we know whether the target was emitted.
 ///
 /// Returning the missing target names lets the caller retain an explicit
 /// fidelity decision for the lost consumer-side update behavior.
@@ -199,7 +564,7 @@ pub(crate) fn fallback_dangling_internal_fields(
     footers: &mut [HdrFtrPart],
     footnotes: &mut [Footnote],
     comments: &mut [Comment],
-) -> Vec<EcoString> {
+) -> DanglingTargets {
     let mut bookmarks = BTreeSet::new();
     collect_bookmark_names(body, &mut bookmarks);
     for part in headers.iter().chain(footers.iter()) {
@@ -212,7 +577,7 @@ pub(crate) fn fallback_dangling_internal_fields(
         collect_bookmark_names(&comment.blocks, &mut bookmarks);
     }
 
-    let mut missing = Vec::new();
+    let mut missing = DanglingTargets::default();
     rewrite_dangling_fields_in_blocks(body, &bookmarks, &mut missing);
     for part in headers.iter_mut().chain(footers.iter_mut()) {
         rewrite_dangling_fields_in_blocks(&mut part.blocks, &bookmarks, &mut missing);
@@ -316,7 +681,7 @@ fn collect_run_bookmarks(run: &Run, names: &mut BTreeSet<EcoString>) {
 fn rewrite_dangling_fields_in_blocks(
     blocks: &mut [Block],
     bookmarks: &BTreeSet<EcoString>,
-    missing: &mut Vec<EcoString>,
+    missing: &mut DanglingTargets,
 ) {
     for block in blocks {
         match block {
@@ -349,7 +714,7 @@ fn rewrite_dangling_fields_in_blocks(
 fn rewrite_dangling_fields_in_para(
     para: &mut Para,
     bookmarks: &BTreeSet<EcoString>,
-    missing: &mut Vec<EcoString>,
+    missing: &mut DanglingTargets,
 ) {
     let old = std::mem::take(&mut para.content);
     for child in old {
@@ -361,6 +726,18 @@ fn rewrite_dangling_fields_in_para(
             }
             ParaChild::Hyperlink { rel, anchor, mut runs } => {
                 rewrite_dangling_fields_in_runs(&mut runs, bookmarks, missing);
+                // An internal anchor with no bookmark behind it is a link that
+                // goes nowhere: Word paints it as a link and clicking it does
+                // nothing. Keep the text, drop the dead target. (An anchor
+                // alongside an external relationship names a fragment in the
+                // target document and is none of our business.)
+                if let Some(name) = anchor.as_ref().filter(|_| rel.is_none())
+                    && !bookmarks.contains(name)
+                {
+                    missing.links.push(name.clone());
+                    para.content.extend(runs.into_iter().map(ParaChild::Run));
+                    continue;
+                }
                 para.content.push(ParaChild::Hyperlink { rel, anchor, runs });
             }
             other => para.content.push(other),
@@ -371,7 +748,7 @@ fn rewrite_dangling_fields_in_para(
 fn rewrite_dangling_fields_in_runs(
     runs: &mut Vec<Run>,
     bookmarks: &BTreeSet<EcoString>,
-    missing: &mut Vec<EcoString>,
+    missing: &mut DanglingTargets,
 ) {
     let old = std::mem::take(runs);
     for mut run in old {
@@ -421,7 +798,7 @@ fn rewrite_dangling_fields_in_runs(
                         runs.push(run);
                         continue;
                     }
-                    missing.push(target.into());
+                    missing.fields.push(target.into());
                     runs.append(&mut field.result);
                     continue;
                 }
@@ -1060,7 +1437,8 @@ mod dangling_field_tests {
                 &mut [],
             );
 
-        assert_eq!(missing, [EcoString::from("_MissingNumber")]);
+        assert_eq!(missing.fields, [EcoString::from("_MissingNumber")]);
+        assert!(missing.links.is_empty());
         let Block::Para(para) = &body[0] else { panic!("paragraph") };
         assert!(matches!(
             para.content.as_slice(),
@@ -1089,7 +1467,7 @@ mod dangling_field_tests {
                 &mut [],
             );
 
-        assert!(missing.is_empty());
+        assert_eq!(missing, DanglingTargets::default());
         let Block::Para(para) = &body[1] else { panic!("paragraph") };
         assert!(matches!(para.content.as_slice(), [ParaChild::Run(Run::Field(_))]));
     }
@@ -1115,7 +1493,7 @@ mod dangling_field_tests {
                 &mut [],
                 &mut [],
             );
-        assert!(missing.is_empty());
+        assert_eq!(missing, DanglingTargets::default());
         let Block::Para(para) = &body[1] else { panic!("paragraph") };
         let [ParaChild::Run(Run::Field(field))] = para.content.as_slice() else {
             panic!("locked field")
@@ -1125,6 +1503,64 @@ mod dangling_field_tests {
         assert!(matches!(
             field.result.as_slice(),
             [Run::Text { text, .. }] if text == "cached 7"
+        ));
+    }
+
+    fn link_paragraph(rel: Option<&str>, anchor: &str) -> Block {
+        Block::Para(Para {
+            props: ParaProps::default(),
+            content: vec![ParaChild::Hyperlink {
+                rel: rel.map(EcoString::from),
+                anchor: Some(anchor.into()),
+                runs: vec![Run::Text {
+                    props: RunProps::default(),
+                    text: "see there".into(),
+                }],
+            }],
+        })
+    }
+
+    #[test]
+    fn dangling_internal_link_becomes_plain_runs() {
+        let mut body = vec![link_paragraph(None, "_MissingTarget")];
+        let missing =
+            fallback_dangling_internal_fields(
+                &mut body,
+                &mut [],
+                &mut [],
+                &mut [],
+                &mut [],
+            );
+
+        assert_eq!(missing.links, [EcoString::from("_MissingTarget")]);
+        assert!(missing.fields.is_empty());
+        let Block::Para(para) = &body[0] else { panic!("paragraph") };
+        assert!(matches!(
+            para.content.as_slice(),
+            [ParaChild::Run(Run::Text { text, .. })] if text == "see there"
+        ));
+    }
+
+    #[test]
+    fn external_link_keeps_its_fragment_anchor() {
+        // `r:id` + `w:anchor` names a fragment in the *target* document; no
+        // bookmark of ours can or should back it.
+        let mut body = vec![link_paragraph(Some("rId4"), "section-two")];
+        let missing =
+            fallback_dangling_internal_fields(
+                &mut body,
+                &mut [],
+                &mut [],
+                &mut [],
+                &mut [],
+            );
+
+        assert_eq!(missing, DanglingTargets::default());
+        let Block::Para(para) = &body[0] else { panic!("paragraph") };
+        assert!(matches!(
+            para.content.as_slice(),
+            [ParaChild::Hyperlink { rel: Some(rel), anchor: Some(anchor), .. }]
+                if rel == "rId4" && anchor == "section-two"
         ));
     }
 }
