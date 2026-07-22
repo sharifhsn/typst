@@ -8,6 +8,7 @@
 //! shape mirrors `typst_docx::convert`, but the leaf vocabulary emits Pandoc
 //! AST nodes instead of OOXML runs.
 
+use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Content, StyleChain};
 use typst_library::introspection::TagElem;
@@ -50,6 +51,12 @@ pub fn convert_children(
     // content) — used to tell two adjacent paragraphs apart from one paragraph
     // Typst split into `[par, inline-equation, par]`.
     let mut last_was_par = false;
+    // Anchors owed by introspection tags seen since the last child we emitted
+    // (see the `TagElem` arm below). Held back rather than emitted on sight
+    // because the node kind depends on what comes *next* — a `Span` inside the
+    // following paragraph, a `Div` ahead of the following block — and emitting
+    // one eagerly would invent an empty paragraph whenever a block follows.
+    let mut owed: Vec<EcoString> = Vec::new();
 
     for (child, styles) in children {
         let styles = *styles;
@@ -65,6 +72,9 @@ pub fn convert_children(
             if !continues {
                 flush_para(&mut pending, &mut have_pending, &mut blocks);
             }
+            // After the flush, so an owed anchor lands in the paragraph it
+            // precedes rather than closing the one before it.
+            owed_as_spans(&mut owed, &mut pending);
             inline_into(ctx, &par.body, styles, &mut pending)?;
             have_pending = true;
             last_was_par = true;
@@ -72,11 +82,22 @@ pub fn convert_children(
             // Introspection tag. There is no Pandoc tag node, so defer it for the
             // introspector regardless of context (block or inline). Transparent —
             // does not change paragraph structure. Load-bearing for convergence.
+            //
+            // The tag is also the only trace an element leaves at its own
+            // position once its lowering site is gone: a `show heading:` rule
+            // replaces the `HeadingElem` with arbitrary content, and a label can
+            // sit on a bare text run. Both keep a `Location` that `@ref`,
+            // `#link(<lbl>)` and `outline()` still target, so owe an anchor here.
+            // `normalize` keeps only the ones something actually targets.
+            if let Some(id) = crate::ctx::tag_anchor(&elem.tag) {
+                owed.push(id);
+            }
             ctx.deferred_tags.push(elem.tag.clone());
         } else if let Some(eq) = child.to_packed::<EquationElem>()
             && !eq.block.get(styles)
         {
             // An *inline* equation stays in the current paragraph.
+            owed_as_spans(&mut owed, &mut pending);
             handle_inline(ctx, child, styles, &mut pending)?;
             have_pending = true;
             last_was_par = false;
@@ -88,21 +109,39 @@ pub fn convert_children(
             // `RawElem` survives realization and must be kept *inline* — routing
             // it to `handle_block` would flush the paragraph mid-sentence and
             // split one paragraph into three (the `… and `code`.` defect).
+            owed_as_spans(&mut owed, &mut pending);
             handle_inline(ctx, child, styles, &mut pending)?;
             have_pending = true;
             last_was_par = false;
         } else if is_inline(child) {
+            owed_as_spans(&mut owed, &mut pending);
             handle_inline(ctx, child, styles, &mut pending)?;
             have_pending = true;
             last_was_par = false;
         } else {
             flush_para(&mut pending, &mut have_pending, &mut blocks);
+            owed_as_divs(&mut owed, &mut blocks);
             handle_block(ctx, child, styles, &mut blocks)?;
             last_was_par = false;
         }
     }
     flush_para(&mut pending, &mut have_pending, &mut blocks);
+    owed_as_divs(&mut owed, &mut blocks);
     Ok(blocks)
+}
+
+/// Materializes owed anchors as empty `Span`s inside the paragraph being built.
+fn owed_as_spans(owed: &mut Vec<EcoString>, pending: &mut Vec<Inline>) {
+    for id in owed.drain(..) {
+        pending.push(Inline::Span(crate::ast::anchor_attr(id.to_string()), Vec::new()));
+    }
+}
+
+/// Materializes owed anchors as empty `Div`s ahead of the next block.
+fn owed_as_divs(owed: &mut Vec<EcoString>, blocks: &mut Vec<Block>) {
+    for id in owed.drain(..) {
+        blocks.push(Block::Div(crate::ast::anchor_attr(id.to_string()), Vec::new()));
+    }
 }
 
 /// Flushes buffered inline children into a `Para` block (dropping an empty one).
@@ -230,7 +269,12 @@ pub(crate) fn handle_inline(
     out: &mut Vec<Inline>,
 ) -> SourceResult<()> {
     if let Some(elem) = child.to_packed::<TagElem>() {
-        // Run-only context: defer the tag for the introspector.
+        // Run-only context: defer the tag for the introspector, and drop an
+        // anchor at its position so a label carried by a bare text run keeps
+        // something an internal link can land on (see `convert_children`).
+        if let Some(id) = crate::ctx::tag_anchor(&elem.tag) {
+            out.push(Inline::Span(crate::ast::anchor_attr(id.to_string()), Vec::new()));
+        }
         ctx.deferred_tags.push(elem.tag.clone());
     } else if child.is::<SpaceElem>() {
         out.push(Inline::Space);

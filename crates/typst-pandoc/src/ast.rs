@@ -64,6 +64,26 @@ pub fn class_attr(class: impl Into<String>) -> Attr {
     (String::new(), vec![class.into()], Vec::new())
 }
 
+/// The reserved class that marks a *synthesized anchor* — an empty `Span`/`Div`
+/// the converter drops at an introspection tag's position so that a location
+/// whose own lowering carries no [`Attr`] still has something an internal link
+/// can land on.
+///
+/// It never reaches the output: [`crate::normalize`] either strips it (the
+/// anchor is targeted, and becomes a plain id-only node) or deletes the node
+/// outright (nothing targets it). Nothing else may use this class name.
+pub const ANCHOR_CLASS: &str = "typst-anchor";
+
+/// An [`Attr`] for a synthesized anchor: the identifier plus [`ANCHOR_CLASS`].
+pub fn anchor_attr(id: impl Into<String>) -> Attr {
+    (id.into(), vec![ANCHOR_CLASS.to_string()], Vec::new())
+}
+
+/// Whether an [`Attr`] marks a synthesized anchor (see [`ANCHOR_CLASS`]).
+pub fn is_anchor_attr(attr: &Attr) -> bool {
+    attr.1.iter().any(|class| class == ANCHOR_CLASS)
+}
+
 #[derive(Serialize)]
 #[serde(tag = "t", content = "c")]
 pub enum MetaValue {

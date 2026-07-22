@@ -120,8 +120,9 @@ fn compile_files(src: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
         .expect("pandoc export failed")
 }
 
-/// Deserializes the bytes as generic JSON, asserting well-formedness and the
-/// document envelope (`pandoc-api-version` `[1,23,1,1]` + `meta` + `blocks`).
+/// Deserializes the bytes as generic JSON, asserting well-formedness, the
+/// document envelope (`pandoc-api-version` `[1,23,1,1]` + `meta` + `blocks`),
+/// and the whole-document invariants every export must satisfy.
 fn parse(bytes: &[u8]) -> serde_json::Value {
     let v: serde_json::Value =
         serde_json::from_slice(bytes).expect("output is not valid JSON");
@@ -132,7 +133,82 @@ fn parse(bytes: &[u8]) -> serde_json::Value {
     );
     assert!(v.get("meta").is_some(), "the envelope must carry a meta map");
     assert!(v["blocks"].is_array(), "the envelope must carry a blocks array");
+    assert_no_dangling_anchors(&v);
     v
+}
+
+/// Fails when an internal link has no id to land on.
+///
+/// In the Pandoc AST an internal link is a `Link` whose target starts with `#`,
+/// and the id it names must appear as the first field of some `Attr` — on a
+/// `Header`, `Div`, `Span`, `CodeBlock`, `Figure`, `Table`, or any of the
+/// row/cell attributes in between. A `#id` no `Attr` carries is a link that
+/// resolves nowhere in *every* format pandoc subsequently renders to (HTML,
+/// LaTeX, EPUB, docx), and nothing downstream reports it.
+///
+/// Checked over the whole document rather than per construct, and by finding
+/// `Attr`s structurally rather than by enumerating the node types that can carry
+/// one, so an element type nobody anticipated cannot start dangling silently.
+fn assert_no_dangling_anchors(doc: &serde_json::Value) {
+    let mut ids = std::collections::BTreeSet::new();
+    let mut links = std::collections::BTreeSet::new();
+    collect_anchors(&doc["blocks"], &mut ids, &mut links);
+    collect_anchors(&doc["meta"], &mut ids, &mut links);
+
+    let dangling: Vec<&String> = links.difference(&ids).collect();
+    assert!(
+        dangling.is_empty(),
+        "internal links point at ids nothing declares: {dangling:?}\n\
+         (declared: {ids:?})"
+    );
+}
+
+/// Walks arbitrary Pandoc JSON, collecting every declared `Attr` id and every
+/// `#`-fragment link target.
+fn collect_anchors(
+    node: &serde_json::Value,
+    ids: &mut std::collections::BTreeSet<String>,
+    links: &mut std::collections::BTreeSet<String>,
+) {
+    match node {
+        serde_json::Value::Object(map) => {
+            let content = map.get("c");
+            // `Link`/`Image` are `[Attr, [Inline], [target, title]]`.
+            if matches!(map.get("t").and_then(|t| t.as_str()), Some("Link" | "Image"))
+                && let Some(c) = content.and_then(|c| c.as_array())
+                && c.len() == 3
+                && let Some(target) =
+                    c[2].as_array().and_then(|t| t.first()).and_then(|t| t.as_str())
+                && let Some(id) = target.strip_prefix('#')
+            {
+                links.insert(id.to_string());
+            }
+            for value in map.values() {
+                collect_anchors(value, ids, links);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            // Any `Attr` is `[id, [classes], [[k,v],…]]`. Match that shape
+            // wherever it appears rather than listing the nodes that hold one —
+            // it also reaches the table head/body/row/cell attributes, which sit
+            // in bare positional arrays with no `{"t":…}` wrapper of their own.
+            for item in items {
+                if let Some(id) = attr_id(item) {
+                    ids.insert(id.to_string());
+                }
+                collect_anchors(item, ids, links);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The non-empty identifier of an `Attr`-shaped JSON array, if it is one.
+fn attr_id(node: &serde_json::Value) -> Option<&str> {
+    let array = node.as_array()?;
+    let [id, classes, kvs] = array.as_slice() else { return None };
+    let id = id.as_str().filter(|id| !id.is_empty())?;
+    (classes.is_array() && kvs.is_array()).then_some(id)
 }
 
 /// Whether the real `pandoc` binary is available on `PATH` (probed once).
@@ -266,6 +342,63 @@ fn heading_is_header_with_anchor() {
     assert!(out.contains("Header"), "a heading maps to Header");
     // The id (shared anchor namespace) is stamped on the header attr.
     assert!(out.contains("ref-"), "the heading carries a stable anchor id");
+}
+
+/// A `show heading:` rule replaces the `HeadingElem` outright, so the lowered
+/// output is whatever the rule produced and there is no `Header` left to carry
+/// the id. The outline entry and the `@ref` still target that location, so an
+/// anchor is synthesized at the heading's own position instead — the links stay
+/// live rather than degrading to text. This is the shape most corpus documents
+/// dangled in, since restyling headings is what real templates do.
+#[test]
+fn refs_survive_a_show_rule_that_replaces_the_heading() {
+    let src = "\
+#set heading(numbering: \"1.\")
+#show heading: it => block[#strong(it.body) #line(length: 100%)]
+#outline()
+= Introduction
+See @second.
+= Second <second>
+";
+    let bytes = compile(src);
+    let doc = parse(&bytes);
+
+    // `parse` already proved nothing dangles; assert the links are still *there*,
+    // because demoting every one of them would satisfy the invariant too.
+    let mut ids = std::collections::BTreeSet::new();
+    let mut links = std::collections::BTreeSet::new();
+    collect_anchors(&doc["blocks"], &mut ids, &mut links);
+    assert!(links.contains("second"), "the labelled heading is still linkable");
+    // Two distinct targets: the labelled heading (which `@second` and its
+    // outline entry share) and the unlabelled one, anchored by hash.
+    assert_eq!(links.len(), 2, "both headings are still linked to");
+    assert!(
+        links.iter().any(|id| id.starts_with("ref-")),
+        "the unlabelled heading keeps its outline link too"
+    );
+}
+
+/// A label may sit on a bare text run — `[#word #label("w-0")]` inside a table
+/// cell, as `vocabulo` does — where nothing in the lowered AST has an `Attr` to
+/// put it on. The synthesized anchor covers that too, and it has to work inside
+/// a table: table content was invisible to the normalization pass, which is how
+/// these got out.
+#[test]
+fn labels_on_bare_runs_inside_tables_stay_linkable() {
+    let src = "\
+#table(
+  columns: 2,
+  [#link(<word-0>)[go]], [target #label(\"word-0\")],
+)
+";
+    let bytes = compile(src);
+    let doc = parse(&bytes);
+
+    let mut ids = std::collections::BTreeSet::new();
+    let mut links = std::collections::BTreeSet::new();
+    collect_anchors(&doc["blocks"], &mut ids, &mut links);
+    assert!(links.contains("word-0"), "the link into the cell survives");
+    assert!(ids.contains("word-0"), "and an anchor was synthesized for it");
 }
 
 // ===========================================================================

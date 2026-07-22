@@ -54,6 +54,16 @@ pub struct PandocCtx<'a, 'e> {
     /// `pandoc --citeproc` can re-resolve. Empty when the document has no
     /// bibliography.
     pub(crate) cite_anchors: std::collections::HashMap<EcoString, EcoString>,
+
+    /// Overrides [`Self::anchor_id`] for bibliography entries whose citation key
+    /// is already a valid identifier: maps the entry's derived anchor id (the
+    /// `ref-<hash>` form) to `ref-<citation key>`, the id `pandoc --citeproc`
+    /// itself reads and writes. Consulted at that single choke point, so the
+    /// entry's own `Attr` and every in-text cite `Link` pick the same id up
+    /// automatically. Empty when the document has no bibliography, and missing
+    /// an entry whose key fails the safety guard in
+    /// [`Self::load_cite_anchors`].
+    pub(crate) bib_ids: std::collections::HashMap<EcoString, EcoString>,
 }
 
 impl<'a, 'e> PandocCtx<'a, 'e> {
@@ -71,6 +81,7 @@ impl<'a, 'e> PandocCtx<'a, 'e> {
             quoter: SmartQuoter::new(),
             last_char: None,
             cite_anchors: std::collections::HashMap::new(),
+            bib_ids: std::collections::HashMap::new(),
         }
     }
 
@@ -84,9 +95,38 @@ impl<'a, 'e> PandocCtx<'a, 'e> {
         &mut self,
         entry_keys: &[(typst_library::introspection::Location, EcoString)],
     ) {
-        for (loc, key) in entry_keys {
-            let anchor = self.anchor_id(*loc);
-            self.cite_anchors.insert(anchor, key.clone());
+        // The anchor id each entry would get on its own (the `ref-<hash>` form,
+        // since a synthesized entry body carries no label). Computed before any
+        // override is installed, because that is the key `bib_ids` is looked up
+        // by.
+        let raw: Vec<(EcoString, EcoString)> = entry_keys
+            .iter()
+            .map(|(loc, key)| (self.anchor_id(*loc), key.clone()))
+            .collect();
+
+        // Prefer pandoc's own reference-id convention, `ref-<citation key>`:
+        // that is exactly what citeproc reads and writes, so the emitted ids
+        // interoperate with `--citeproc` and with a bibliography the user
+        // supplies separately — an opaque hash interoperates with nothing.
+        //
+        // Only when the key needs no sanitizing, though. A key containing
+        // anything outside `[A-Za-z0-9_:-]` (`ä`, `.`, `+`, a space — all legal
+        // in BibTeX/hayagriva) would have to be rewritten to be a valid
+        // LaTeX/HTML id, and a rewritten key is no longer the key citeproc
+        // looks for; worse, two distinct keys can sanitize to the *same* id
+        // (`a.b` and `a-b`), which would silently merge two entries' anchors.
+        // Those keys keep the collision-free hash instead.
+        for (anchor, key) in &raw {
+            if !key.is_empty() && key.chars().all(is_id_char) {
+                self.bib_ids.insert(anchor.clone(), ecow::eco_format!("ref-{key}"));
+            }
+        }
+
+        // Finally record anchor → key under the *effective* id, so the
+        // post-walk pass can still recover the key behind a cite `Link`.
+        for (anchor, key) in raw {
+            let effective = self.bib_ids.get(&anchor).cloned().unwrap_or(anchor);
+            self.cite_anchors.insert(effective, key);
         }
     }
 
@@ -239,14 +279,17 @@ impl<'a, 'e> PandocCtx<'a, 'e> {
     ///
     /// ## Namespacing / collision handling
     ///
-    /// The `ref-` prefix followed by 16 lowercase hex digits is reserved for the
-    /// hash fallback (and, transitively, for bibliography entry anchors, which go
-    /// through this same fallback because their bodies are unlabeled). To keep a
-    /// user label from ever colliding with that namespace — or producing an id
+    /// The whole `ref-` prefix is the exporter's: the hash fallback writes
+    /// `ref-<hash>`, and a bibliography entry writes `ref-<citation key>`. To keep
+    /// a user label from ever colliding with that namespace — or producing an id
     /// that LaTeX/HTML reject — [`sanitize_label_id`] prefixes a label-derived id
-    /// with `L-` whenever it would be empty, start with a digit, or start with
-    /// the reserved `ref-` form. In the common case (`<intro>`) the id is just
+    /// with `L-` whenever it would be empty, start with a digit, or fall inside
+    /// the reserved prefix. In the common case (`<intro>`) the id is just
     /// `intro`, verbatim.
+    ///
+    /// A bibliography entry additionally goes through the [`Self::bib_ids`]
+    /// override, which swaps the hash for pandoc's `ref-<citation key>`
+    /// convention wherever the key allows it.
     pub fn anchor_id(&self, loc: typst_library::introspection::Location) -> EcoString {
         use typst_library::foundations::Selector;
         use typst_library::introspection::Introspector;
@@ -266,11 +309,49 @@ impl<'a, 'e> PandocCtx<'a, 'e> {
             .query_first(&Selector::Location(loc))
             .and_then(|content| content.label());
 
-        match label {
-            Some(label) => sanitize_label_id(&label.resolve()),
-            None => ecow::eco_format!("ref-{:016x}", typst_utils::hash128(&loc)),
-        }
+        let id = anchor_id_from(label, loc);
+        self.bib_ids.get(&id).cloned().unwrap_or(id)
     }
+}
+
+/// The anchor id an introspection [`Tag`] stands for, or `None` for a tag that
+/// marks no anchorable position (an `End` tag, or a `Start` without a location).
+///
+/// This is the *positional* counterpart to [`PandocCtx::anchor_id`]: the tag is
+/// the only thing left at the place of an element whose own lowering carries no
+/// [`Attr`] — a `show heading:` rule replaces the `HeadingElem` with arbitrary
+/// content, and a label may sit on a bare text run. The id comes from the tag's
+/// own content rather than an introspector query, which is both cheaper (this
+/// runs for every tag in the document) and identical: the introspector is built
+/// from exactly these tags, so querying the location returns this very content.
+///
+/// Note this deliberately does *not* apply the [`PandocCtx::bib_ids`] override.
+/// A bibliography entry is lowered by the citation mapper, which anchors it
+/// through `anchor_id`; the tag position would only ever duplicate that id, and
+/// [`crate::normalize`] drops a synthesized anchor whose id a real node already
+/// carries.
+pub(crate) fn tag_anchor(tag: &Tag) -> Option<EcoString> {
+    let Tag::Start(content, _) = tag else { return None };
+    let loc = content.location()?;
+    Some(anchor_id_from(content.label(), loc))
+}
+
+/// Derives an anchor id from an element's label (if any) and its location — the
+/// shared rule behind [`PandocCtx::anchor_id`] and [`tag_anchor`], which must
+/// agree byte for byte or a link would target an id that nothing carries.
+fn anchor_id_from(
+    label: Option<typst_library::foundations::Label>,
+    loc: typst_library::introspection::Location,
+) -> EcoString {
+    match label {
+        Some(label) => sanitize_label_id(&label.resolve()),
+        None => ecow::eco_format!("ref-{:016x}", typst_utils::hash128(&loc)),
+    }
+}
+
+/// Whether `ch` may appear in a Pandoc/LaTeX/HTML identifier unchanged.
+fn is_id_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':' | '-')
 }
 
 /// Sanitizes a Typst label name into a valid Pandoc/LaTeX/HTML id.
@@ -287,7 +368,7 @@ impl<'a, 'e> PandocCtx<'a, 'e> {
 fn sanitize_label_id(name: &str) -> EcoString {
     let mut out = String::with_capacity(name.len());
     for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':' | '-') {
+        if is_id_char(ch) {
             out.push(ch);
         } else {
             out.push('-');
@@ -310,17 +391,17 @@ fn sanitize_label_id(name: &str) -> EcoString {
     out.into()
 }
 
-/// Whether `s` begins with the reserved `ref-<16 lowercase hex digits>` form
-/// used by the hash fallback (and bibliography entry anchors).
+/// Whether `s` begins with the reserved `ref-` prefix.
+///
+/// The whole prefix is the exporter's, not just the hash form: `ref-<hash>` is
+/// the unlabelled fallback and `ref-<citation key>` is what a bibliography entry
+/// gets (see [`PandocCtx::load_cite_anchors`]). Reserving only the hash shape
+/// would leave a document that both writes `<ref-netwok>` and cites `netwok`
+/// with two nodes claiming one id — so a label is pushed out of the namespace
+/// whatever follows the prefix. Labels that merely *start* like it (`reference`,
+/// `refs`) are untouched: they have no `-`.
 fn starts_with_reserved_ref(s: &str) -> bool {
-    let Some(rest) = s.strip_prefix("ref-") else {
-        return false;
-    };
-    // The hash is formatted `{:016x}` — lowercase hex, exactly 16 digits.
-    rest.len() >= 16
-        && rest.as_bytes()[..16]
-            .iter()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+    s.starts_with("ref-")
 }
 
 /// Recursively collects introspection tags from a laid-out frame.
@@ -418,17 +499,18 @@ mod tests {
         assert_eq!(sanitize_label_id(""), "L-");
     }
 
-    /// A user label that literally spells the reserved `ref-<16 hex>` hash form
-    /// is namespaced away with `L-`, so it can never collide with the hash
-    /// fallback or a bibliography `ref-<hash>` anchor.
+    /// A user label inside the reserved `ref-` namespace is pushed out of it
+    /// with `L-`, so it can never collide with the hash fallback or with a
+    /// bibliography entry's `ref-<citation key>` anchor.
     #[test]
     fn reserved_ref_form_is_guarded() {
         assert_eq!(sanitize_label_id("ref-00000000deadbeef"), "L-ref-00000000deadbeef");
-        // Boundary cases that are NOT the reserved form pass through untouched.
-        assert!(!starts_with_reserved_ref("ref-short")); // too few hex digits
-        assert!(!starts_with_reserved_ref("ref-00000000DEADBEEF")); // uppercase ≠ {:016x}
-        assert!(!starts_with_reserved_ref("refs")); // the bib container id
+        // A label spelling a citation key's anchor is guarded just the same.
+        assert_eq!(sanitize_label_id("ref-netwok"), "L-ref-netwok");
         assert!(starts_with_reserved_ref("ref-0123456789abcdef"));
-        assert!(starts_with_reserved_ref("ref-0123456789abcdef-tail"));
+        // Names that merely start like the prefix keep their own id.
+        assert!(!starts_with_reserved_ref("refs")); // the bib container id
+        assert!(!starts_with_reserved_ref("reference"));
+        assert_eq!(sanitize_label_id("reference"), "reference");
     }
 }
