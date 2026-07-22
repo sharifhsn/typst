@@ -65,7 +65,10 @@ frames.
 
 The weak point is that tags currently carry only fragments of the compiler's
 resolved knowledge. The exporter still reconstructs paragraphs, spaces,
-placeholders, cell styling, and roles from geometry or default styles.
+placeholders, table gutters, and roles from geometry or default styles. Table
+cell styling is the one part that has been closed: `GridCellRegion` carries the
+resolver's final fill, stroke, alignment, and inset, so the exporter reads them
+instead of re-resolving under a style chain it does not have.
 
 ### Pandoc: semantic interchange
 
@@ -315,13 +318,6 @@ an essential compatibility target, not a substitute oracle for Microsoft Office.
 The following are verified from current source. They are not all fixed by the
 mechanical cleanup that introduced this document.
 
-### Critical
-
-- PPTX rotated or otherwise unsupported native-table regions can be accepted by
-  tag capture without producing a table or a whole-region raster fallback.
-- PPTX mixed-size pages are not transformed to the global slide size even
-  though current CLI text and documentation claim they are.
-
 ### High
 
 - DOCX contextual furniture that varies beyond Word's first/even/default model
@@ -336,15 +332,14 @@ mechanical cleanup that introduced this document.
   introspection-only placed bodies can no longer masquerade as visible flow,
   and inline placement distinguishes a failed layout from successful tag-only
   scaffolding.
-- PPTX table tags do not carry the resolver's final fill, stroke, inset,
-  alignment, gutter, or cell-math contract.
+- PPTX table tags now carry the resolver's final fill, stroke, alignment, and
+  inset as a `ResolvedCellStyle` on `GridCellRegion`, so the exporter no longer
+  re-derives them under a `StyleChain::default()` that cannot see the cell's
+  font size. Gutter and the cell-math contract are still not carried: gutter is
+  re-inferred geometrically from the gaps between captured cell rectangles, and
+  cell math is recaptured from frame items rather than from resolved math IR.
 - PPTX live text is regrouped heuristically and does not carry a complete font,
   language, shaping, or embedding policy.
-- PPTX page filtering remaps speaker notes but not all slide-jump links.
-- Pandoc raster fallback width defaults to 450pt despite comments claiming that
-  the driver supplies real geometry.
-- Pandoc builds an anchor-aware introspector but never installs the generated
-  anchor map.
 - Pandoc citation restructuring loses modes, supplements, and multi-cite
   grouping even though its formatted fallback remains readable.
 
@@ -359,6 +354,28 @@ mechanical cleanup that introduced this document.
   repair-sensitive container sequences it emits, while full Office-version XSD
   validation still needs a broader gate;
 - current feature matrices and comparison measurements drift behind the code.
+
+### Resolved after this register was written
+
+- PPTX table capture no longer accepts a region it cannot represent. A cell
+  whose transform is not classifiable flips the whole table to raster fallback
+  and discards the cells already captured, because mixing a partial native
+  table with fallback pictures would duplicate or reorder content
+  (`fe4afc3d9`).
+- PPTX mixed-size pages are fitted to the first page's size, which is the
+  canvas the deck declares, so the CLI text and documentation are true again
+  (`e62453ae9`).
+- PPTX page filtering remaps slide-jump links as well as speaker notes; a
+  destination whose slide was filtered out is dropped rather than pointing at
+  whichever slide inherited its index (`14d36e216`).
+- Pandoc resolves the real page content width from the document-level style
+  chain instead of assuming 450pt. The 450pt constant survives only as a
+  last-resort default for `page(width: auto)`, and the comments that claimed
+  the driver already supplied geometry now say what actually happens.
+- Pandoc's unused anchor map is gone. The introspector built one and never
+  installed it; the only tree-wide consumers of `Introspector::anchor` are
+  paged and HTML link resolution, so the machinery was deleted rather than
+  wired to nothing.
 
 ### Resolved on the rearchitecture branch
 
