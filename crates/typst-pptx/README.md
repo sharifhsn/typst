@@ -60,9 +60,15 @@ an error.
   and borderless spacer tracks for row/column gutters; broader table styling and
   transformed-table fallback are still incomplete, and consumer line-box
   metrics can expand automatic row heights.
-- **Math** — eligible equations are emitted as OMML inside an Office
-  compatibility wrapper, with an authored-size compact Unicode DrawingML text
-  fallback for consumers that do not support the native math branch.
+- **Math** — equations are lowered from Typst's resolved math IR by
+  `typst-omml` (the same code the DOCX exporter uses) and emitted as OMML inside
+  an Office compatibility wrapper, with an authored-size compact Unicode
+  DrawingML text fallback for consumers that do not support the native math
+  branch. Two things do not survive that route, because the equation is
+  re-resolved from the introspector after layout: an ambient `#show` recipe on a
+  math symbol does not fire, and a `#context` read inside math resolves against
+  default styles. An equation containing an inline `box(..)` is refused whole
+  and painted as ordinary text and shapes rather than shipped half-native.
 - **Presentation UX** — notes, slide numbers, and inferred title/body
   placeholders are preserved when the source exposes enough structure.
 

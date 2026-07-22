@@ -19,6 +19,7 @@ typst-export-common = { workspace = true }
 typst-layout = { workspace = true }
 typst-library = { workspace = true }
 typst-utils = { workspace = true }
+unicode-normalization = { workspace = true }
 zip = { workspace = true }
 
 [lints]

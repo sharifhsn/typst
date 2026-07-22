@@ -4,14 +4,19 @@ use rustc_hash::FxHashMap;
 use typst_layout::{Page, PagedDocument};
 use typst_library::World;
 use typst_library::engine::{Engine, Route, Sink, Traced};
-use typst_library::foundations::{NativeElement, Output, StyleChain};
-use typst_library::introspection::{CounterDisplayElem, Introspector, Location, Tag};
+use typst_library::foundations::{NativeElement, Output, ShowSet, StyleChain};
+use typst_library::introspection::{
+    CounterDisplayElem, Introspector, Locator, Location, Tag,
+};
 use typst_library::layout::{
     Abs, ColumnRegion, Frame, FrameItem, Point, Ratio, Size, Transform,
 };
 use typst_library::math::EquationElem;
+use typst_library::math::ir::resolve_equation;
 use typst_library::model::{Destination, Numbering};
+use typst_library::routines::Arenas;
 use typst_library::visualize::{Geometry, Paint, Shape};
+use typst_omml::Lowered;
 use typst_ooxml_core::{dml, units};
 use typst_utils::Protected;
 
@@ -31,7 +36,7 @@ use crate::text::{InlineMathSource, LinkTarget, TextSource};
 /// every page's walker.
 pub fn slides(
     document: &PagedDocument,
-    equations: &FxHashMap<Location, MathSource>,
+    equations: &EquationSources,
     ctx: &mut SlideCtx,
 ) -> Vec<SlideIr> {
     let target_size = document
@@ -52,7 +57,7 @@ fn slide<'a>(
     page: &'a Page,
     slide_index: usize,
     target_size: Size,
-    equations: &'a FxHashMap<Location, MathSource>,
+    equations: &'a EquationSources,
     ctx: &mut SlideCtx,
 ) -> SlideIr {
     // Free helpers that only receive `&mut SlideCtx` (fill/shape lowering)
@@ -107,7 +112,7 @@ pub(super) struct Walker<'a, 'b> {
     links: Vec<LinkRect>,
     pub(super) link_overlays: Vec<LinkOverlay>,
     highlight_candidates: Vec<HighlightCandidate>,
-    equations: &'a FxHashMap<Location, MathSource>,
+    equations: &'a EquationSources,
     page_size: Size,
     slide_number_fallback: Option<EcoString>,
     active_math: Vec<ActiveMath>,
@@ -143,6 +148,51 @@ pub struct MathSource {
     omml: String,
     fallback: EcoString,
     block: bool,
+}
+
+/// Every equation in the document, sorted into the ones that became native
+/// OMML and the ones the lowering would not carry.
+///
+/// A refused equation is deliberately *absent* from `sources`: the frame walk
+/// then never starts collecting it as one math box, so its glyphs and rules
+/// flow on through the ordinary text and shape paths and the equation is
+/// painted rather than dropped. Keeping the refusal here — instead of just
+/// forgetting the equation — is what lets the walk record that fallback
+/// against the slide it happened on.
+#[derive(Default)]
+pub struct EquationSources {
+    sources: FxHashMap<Location, MathSource>,
+    /// Why each refused equation was refused, ready to record against whatever
+    /// slide the walk finds it on. The distinction the refusal *kind* carries
+    /// (`box` versus external content) is already spelled out in the reason's
+    /// documentation; this exporter has no per-equation diagnostic channel to
+    /// carry it any further.
+    refused: FxHashMap<Location, DecisionReason>,
+}
+
+/// The engine-side services the shared OMML lowering asks of its caller,
+/// answered for PowerPoint.
+struct PptxHooks;
+
+impl typst_omml::MathHooks for PptxHooks {
+    /// Drop a tag found inside the equation body — the default, and the only
+    /// correct answer here. `typst-docx` re-attaches such a tag to the
+    /// surrounding paragraph *while realizing*; this exporter runs after the
+    /// introspection loop has converged, so a tag handed back now could not
+    /// influence any query that has already been answered. The cost is that a
+    /// `#ref` to a label declared inside an equation does not resolve.
+    fn defer_tag(&mut self, _tag: &typst_library::introspection::Tag) {}
+
+    /// Emit no colour. The default spelling is Wordprocessing's `w:rPr` /
+    /// `w:color`, which has no business inside a slide: DrawingML run
+    /// properties are `a:rPr`, and the `w:` prefix is not even declared in a
+    /// slide part. Colouring math here would mean emitting `a:rPr` with an
+    /// `a:solidFill`, which is what this hook is the place for — but it is not
+    /// implemented, so a coloured equation is currently exported in the default
+    /// colour.
+    fn run_color(&mut self, _rgb: [u8; 3]) -> Option<String> {
+        None
+    }
 }
 
 struct ActiveMath {
@@ -194,7 +244,7 @@ impl<'a, 'b> Walker<'a, 'b> {
         page: &Page,
         slide_index: usize,
         page_size: Size,
-        equations: &'a FxHashMap<Location, MathSource>,
+        equations: &'a EquationSources,
         ctx: &'b mut SlideCtx,
     ) -> Self {
         Self {
@@ -433,7 +483,7 @@ impl<'a, 'b> Walker<'a, 'b> {
                     return;
                 }
                 let loc = tag.location();
-                if self.equations.contains_key(&loc) {
+                if self.equations.sources.contains_key(&loc) {
                     self.active_math.push(ActiveMath {
                         loc,
                         order,
@@ -443,6 +493,17 @@ impl<'a, 'b> Walker<'a, 'b> {
                         fallback: EcoString::new(),
                         fallback_size: Abs::zero(),
                     });
+                } else if let Some(&reason) = self.equations.refused.get(&loc) {
+                    // No math box is started, so the equation's own glyphs and
+                    // rules stay in the frame walk and are painted as ordinary
+                    // text runs and shapes: it is visible and roughly right,
+                    // but it is no longer an equation.
+                    self.record_decision(
+                        Representation::Approximate,
+                        reason,
+                        LossSet::MATH_LAID_OUT_TEXT,
+                        0,
+                    );
                 }
             }
             Tag::End(loc, ..) => {
@@ -716,7 +777,7 @@ impl<'a, 'b> Walker<'a, 'b> {
     }
 
     fn emit_math_box(&mut self, active: ActiveMath) {
-        let Some(source) = self.equations.get(&active.loc) else {
+        let Some(source) = self.equations.sources.get(&active.loc) else {
             self.record_decision(
                 Representation::Drop,
                 DecisionReason::MathSourceUnavailableDrop,
@@ -1183,15 +1244,12 @@ fn slide_number_region(bounds: Rect, page_size: Size) -> bool {
 ///   isolates its sink for exactly the same reason.
 ///
 /// The engine is confined to this function: everything downstream works from
-/// the returned map.
-pub fn equation_sources(
-    document: &PagedDocument,
-    world: &dyn World,
-) -> FxHashMap<Location, MathSource> {
+/// the returned [`EquationSources`].
+pub fn equation_sources(document: &PagedDocument, world: &dyn World) -> EquationSources {
     let traced = Traced::default();
     let mut throwaway = Sink::new();
     let mut tracked_sink = throwaway.track_mut();
-    let _engine = Engine {
+    let mut engine = Engine {
         world: world.track(),
         library: world.library(),
         introspector: Protected::new(Output::introspector(document).track()),
@@ -1200,25 +1258,73 @@ pub fn equation_sources(
         route: Route::root(),
     };
 
-    let styles = StyleChain::default();
-    document
-        .introspector()
-        .query(&EquationElem::ELEM.select())
-        .into_iter()
-        .filter_map(|content| {
-            let elem = content.to_packed::<EquationElem>()?;
-            let block = elem.block.get(styles);
-            let loc = elem.location()?;
-            let omml = typst_ooxml_core::omml::equation_omml_fragment(elem)?;
-            let fallback = elem
-                .alt
-                .get_cloned(styles)
-                .filter(|text| !text.is_empty())
-                .or_else(|| typst_ooxml_core::omml::omml_fallback_text(&omml))
-                .unwrap_or_else(|| elem.body.plain_text());
-            Some((loc, MathSource { omml, fallback, block }))
-        })
-        .collect()
+    let mut out = EquationSources::default();
+    for content in document.introspector().query(&EquationElem::ELEM.select()) {
+        let Some(elem) = content.to_packed::<EquationElem>() else { continue };
+        // An equation resolved this way needs a location for its locator; one
+        // was assigned during realization to every equation in a real document.
+        let Some(loc) = elem.location() else { continue };
+
+        // Re-apply the element's own show-set styles. `EquationElem::size` is
+        // chain-only (`#[ghost]`), so it does not survive the introspector
+        // query: an element read back under a default chain claims to be
+        // inline, and then a *block* sum would put its bounds beside the
+        // operator (`subSup`) instead of under and over it (`undOvr`). This is
+        // exact rather than approximate because `show_set` reads nothing but
+        // `self.block`, which is a materialized field.
+        let root = StyleChain::default();
+        let show_set = ShowSet::show_set(elem, root);
+        let styles = root.chain(&show_set);
+        let block = elem.block.get(styles);
+
+        // The `MathItem` borrows from `arenas`, which lives only for this
+        // iteration — fine, because it is serialized to a `String` immediately.
+        let arenas = Arenas::default();
+        let item = match resolve_equation(
+            elem,
+            &mut engine,
+            Locator::synthesize(loc),
+            &arenas,
+            styles,
+        ) {
+            Ok(item) => item,
+            // Resolution failed (`mat(..)`'s `augment` offsets are the one
+            // known case). The document reached this exporter, so it already
+            // compiled: the error would have to be re-raised out of a *post*
+            // layout pass, failing an export of a document that is fine. Refuse
+            // this one equation instead and let the frame walk paint it.
+            Err(_) => {
+                out.refused
+                    .insert(loc, DecisionReason::UnresolvableMathTextFallback);
+                continue;
+            }
+        };
+
+        // `NoHooks` would do; `PptxHooks` exists to say what PowerPoint gives
+        // up and why. Capability planning is atomic at the equation boundary,
+        // so this either yields the whole equation or refuses it.
+        let omml = match typst_omml::lower_equation(&item, &mut PptxHooks) {
+            Ok(Lowered::Native(omml)) => omml,
+            Ok(Lowered::Unsupported(_)) => {
+                out.refused.insert(loc, DecisionReason::UnsupportedMathTextFallback);
+                continue;
+            }
+            Err(_) => {
+                out.refused
+                    .insert(loc, DecisionReason::UnresolvableMathTextFallback);
+                continue;
+            }
+        };
+
+        let fallback = elem
+            .alt
+            .get_cloned(styles)
+            .filter(|text| !text.is_empty())
+            .or_else(|| typst_ooxml_core::omml_text::omml_fallback_text(&omml))
+            .unwrap_or_else(|| elem.body.plain_text());
+        out.sources.insert(loc, MathSource { omml, fallback, block });
+    }
+    out
 }
 
 fn math_fallback_size_100pt(size: Abs) -> i32 {
@@ -1879,7 +1985,7 @@ mod tests {
         let document =
             PagedDocument::new(eco_vec![first, second], DocumentInfo::default());
         let mut ctx = SlideCtx::default();
-        let slides = slides(&document, &FxHashMap::default(), &mut ctx);
+        let slides = slides(&document, &EquationSources::default(), &mut ctx);
 
         assert_eq!(slides.len(), 2);
         let decisions = ctx.fidelity_report.decisions();
@@ -1916,7 +2022,7 @@ mod tests {
         let page = Page { frame, ..page_with_fill(None) };
         let document = PagedDocument::new(eco_vec![page], DocumentInfo::default());
         let mut ctx = SlideCtx::default();
-        slides(&document, &FxHashMap::default(), &mut ctx);
+        slides(&document, &EquationSources::default(), &mut ctx);
 
         assert!(ctx.fidelity_report.decisions().is_empty());
         assert!(ctx.media.parts().is_empty());

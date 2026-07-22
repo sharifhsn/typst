@@ -4,10 +4,13 @@
 //! crate consumes the *laid-out* [`PagedDocument`] — one Typst page becomes one
 //! slide, with every element placed at its exact frame position. That makes it
 //! a sibling of the PNG/SVG renderers rather than of the DOCX exporter: there
-//! are no show rules and no convergence. The one exception is math: the
-//! equation pass builds a short-lived post-layout `Engine` (see
-//! `slide::equation_sources`) because equation lowering has to re-enter library
-//! routines that a frame walk cannot reach.
+//! are no show rules and no convergence. The one exception is math: an
+//! equation's frames are glyphs, and OMML needs the *structure* those glyphs
+//! were laid out from. So the equation pass builds a short-lived post-layout
+//! `Engine` (see `slide::equation_sources`), resolves each queried equation
+//! back into Typst's math IR, and lowers that with `typst-omml` — the same
+//! Typst→OMML mapping the DOCX exporter uses. What the detour costs, and what
+//! happens to an equation it refuses, is recorded in the `FidelityReport`.
 //!
 //! Each page's frame is walked into a slide IR (`dom`): positioned text boxes
 //! (live, editable DrawingML runs), pictures, native vector shapes

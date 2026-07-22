@@ -231,5 +231,3 @@ fn raster_fallback(
     );
     Ok(text_fallback(elem, styles, block, ctx))
 }
-
-pub use typst_ooxml_core::omml::equation_omml_fragment;

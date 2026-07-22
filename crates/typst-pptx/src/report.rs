@@ -109,10 +109,34 @@ pub enum DecisionReason {
     /// compatibility switch, with a compact plain-text DrawingML run as the
     /// fallback branch for consumers without the `a14`/OMML extension (older
     /// Office versions, or LibreOffice Impress).
+    ///
+    /// Two things do not survive even on this, the best path, because the
+    /// equation is re-resolved from the introspector after layout rather than
+    /// during realization:
+    ///
+    /// * An ambient `#show` recipe on a math symbol does not fire. A document
+    ///   that rewrites, say, every `x` in math gets the unrewritten symbol.
+    /// * A `#context` read inside math resolves against default styles, not
+    ///   the styles in force where the equation sits.
+    ///
+    /// The element's own show-set styles *are* re-applied, so display-versus-
+    /// inline sizing (and with it the placement of an n-ary operator's limits)
+    /// is exact.
     MathOmmlWithTextFallback,
     /// An equation's start/end tag pair produced no discoverable OMML source
     /// or no non-empty geometry bounds, so nothing was emitted for it at all.
     MathSourceUnavailableDrop,
+    /// An equation contains a construct with no faithful OMML form (an inline
+    /// `box(..)`, or package-built external content), so no math object was
+    /// started for it and its laid-out glyphs and rules were painted as
+    /// ordinary text runs and shapes instead.
+    UnsupportedMathTextFallback,
+    /// An equation body could not be resolved to Typst's math IR after layout,
+    /// so it took the same painted-text fallback as
+    /// [`Self::UnsupportedMathTextFallback`]. The document itself compiled —
+    /// only this post-layout re-resolution failed — so the export continues
+    /// rather than failing.
+    UnresolvableMathTextFallback,
 }
 
 /// Independent dimensions in which a representation can lose information.
@@ -195,6 +219,21 @@ impl LossSet {
         editability: false,
         dynamic_behavior: true,
         accessibility: false,
+        portability: false,
+    };
+
+    /// An equation that stayed in the frame walk: its glyphs and rules are
+    /// painted as ordinary text runs and shapes. Everything about it being an
+    /// equation is gone — it cannot be edited as math, reads to a screen
+    /// reader as loose characters, and its glyph positions are now subject to
+    /// the text clustering every other run goes through rather than to math
+    /// layout.
+    pub const MATH_LAID_OUT_TEXT: Self = Self {
+        visual_fidelity: true,
+        semantic_structure: true,
+        editability: true,
+        dynamic_behavior: true,
+        accessibility: true,
         portability: false,
     };
 }

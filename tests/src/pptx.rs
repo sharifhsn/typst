@@ -2195,3 +2195,263 @@ fn table_level_stroke_and_alignment_survive_on_the_region_tag() {
     );
     assert_all_wellformed(&p);
 }
+
+// ===========================================================================
+// Math: exact OMML per construct.
+//
+// These are the reviewable artifact for lowering math through Typst's resolved
+// `MathItem` IR (`typst-omml`, shared with the DOCX exporter) instead of
+// walking unrealized content. The point of the exercise is that constructs the
+// old walk flattened to concatenated text — matrices, vectors, cases,
+// cancellation, over/underbraces, aligned rows — now have real OMML
+// structures, so the fragments are asserted whole rather than probed for a
+// substring: a whole fragment is what a reviewer can actually read, and it
+// pins the child order OOXML requires.
+// ===========================================================================
+
+/// Compiles a one-equation slide and returns its `<m:oMath>` fragment.
+fn omath(equation: &str) -> String {
+    let p = parts(&format!(
+        "#set page(width: 320pt, height: 180pt, margin: 12pt)\n{equation}"
+    ));
+    let slide = p["ppt/slides/slide1.xml"].clone();
+    let start = slide.find("<m:oMath>").expect("slide should contain native OMML");
+    let end = slide.find("</m:oMath>").expect("OMML should be closed")
+        + "</m:oMath>".len();
+    slide[start..end].to_owned()
+}
+
+#[test]
+fn trivial_math_is_prestyled_plane_one_with_upright_runs() {
+    // Typst applies math italics by *remapping* the letter to its Plane-1
+    // math-alphanumeric codepoint (`a` → 𝑎 U+1D44E), so every run also carries
+    // `m:nor` to stop Word slanting an already-slanted glyph a second time.
+    assert_eq!(
+        omath("$a + b = c$"),
+        "<m:oMath>\
+           <m:r><m:rPr><m:nor/></m:rPr><m:t>\u{1D44E}</m:t></m:r>\
+           <m:r><m:rPr><m:nor/></m:rPr><m:t>+</m:t></m:r>\
+           <m:r><m:rPr><m:nor/></m:rPr><m:t>\u{1D44F}</m:t></m:r>\
+           <m:r><m:rPr><m:nor/></m:rPr><m:t>=</m:t></m:r>\
+           <m:r><m:rPr><m:nor/></m:rPr><m:t>\u{1D450}</m:t></m:r>\
+         </m:oMath>"
+    );
+}
+
+#[test]
+fn block_operator_takes_under_over_limits_and_an_integral_does_not() {
+    // This is the assertion that guards the one non-obvious step in lowering a
+    // *queried* equation: `EquationElem::size` is chain-only (`#[ghost]`), so
+    // an element read back from the introspector has lost it and claims to be
+    // inline. Re-applying the element's own show-set is what makes a display
+    // sum put its bounds under and over the operator. `show_set` reads nothing
+    // but `self.block` today; if that ever changes, this fails loudly instead
+    // of silently moving every limit in every deck.
+    let block_sum = omath("$ sum_(i=1)^n i $");
+    assert!(
+        block_sum.contains(r#"<m:limLoc m:val="undOvr"/>"#),
+        "a display sum's bounds go under and over: {block_sum}"
+    );
+
+    // The same sum inline keeps its bounds beside the operator.
+    let inline_sum = omath("$sum_(i=1)^n i$");
+    assert!(
+        inline_sum.contains(r#"<m:limLoc m:val="subSup"/>"#),
+        "an inline sum's bounds stay beside it: {inline_sum}"
+    );
+
+    // An integral keeps sub/superscript limits even in display: that is the
+    // typographic convention, and it proves `undOvr` above is not just the
+    // constant every n-ary gets.
+    let integral = omath("$ integral_0^1 x dif x $");
+    assert!(
+        integral.contains(r#"<m:limLoc m:val="subSup"/>"#),
+        "an integral's bounds stay beside it: {integral}"
+    );
+}
+
+#[test]
+fn matrix_vector_and_cases_become_real_omml_matrices() {
+    assert_eq!(
+        omath("$ mat(a, b; c, d) $"),
+        "<m:oMath><m:d><m:e>\
+           <m:m>\
+             <m:mPr><m:baseJc m:val=\"center\"/><m:plcHide m:val=\"on\"/>\
+               <m:mcs><m:mc><m:mcPr>\
+                 <m:count m:val=\"2\"/><m:mcJc m:val=\"center\"/>\
+               </m:mcPr></m:mc></m:mcs>\
+             </m:mPr>\
+             <m:mr>\
+               <m:e><m:r><m:rPr><m:nor/></m:rPr><m:t>\u{1D44E}</m:t></m:r></m:e>\
+               <m:e><m:r><m:rPr><m:nor/></m:rPr><m:t>\u{1D44F}</m:t></m:r></m:e>\
+             </m:mr>\
+             <m:mr>\
+               <m:e><m:r><m:rPr><m:nor/></m:rPr><m:t>\u{1D450}</m:t></m:r></m:e>\
+               <m:e><m:r><m:rPr><m:nor/></m:rPr><m:t>\u{1D451}</m:t></m:r></m:e>\
+             </m:mr>\
+           </m:m>\
+         </m:e></m:d></m:oMath>"
+    );
+
+    // A vector is the same structure with one column.
+    let vector = omath("$ vec(a, b) $");
+    assert!(vector.contains(r#"<m:count m:val="1"/>"#), "one column: {vector}");
+    assert_eq!(vector.matches("<m:mr>").count(), 2, "two rows: {vector}");
+
+    // `cases` differs only in its fence: a left brace and no right delimiter.
+    let cases = omath("$ cases(a, b) $");
+    assert!(
+        cases.contains(r#"<m:begChr m:val="{"/><m:endChr m:val=""/>"#),
+        "a one-sided brace fence: {cases}"
+    );
+    assert!(cases.contains("<m:m>"), "cases is a matrix body: {cases}");
+}
+
+#[test]
+fn cancel_becomes_a_struck_border_box() {
+    assert_eq!(
+        omath("$ cancel(x) $"),
+        "<m:oMath>\
+           <m:borderBox>\
+             <m:borderBoxPr>\
+               <m:hideTop m:val=\"on\"/><m:hideBot m:val=\"on\"/>\
+               <m:hideLeft m:val=\"on\"/><m:hideRight m:val=\"on\"/>\
+               <m:strikeBLTR m:val=\"on\"/>\
+             </m:borderBoxPr>\
+             <m:e><m:r><m:rPr><m:nor/></m:rPr><m:t>\u{1D465}</m:t></m:r></m:e>\
+           </m:borderBox>\
+         </m:oMath>"
+    );
+}
+
+#[test]
+fn braces_stretch_as_group_chars_with_their_annotation_as_a_limit() {
+    assert_eq!(
+        omath("$ underbrace(x, n) $"),
+        "<m:oMath>\
+           <m:limLow>\
+             <m:e><m:groupChr>\
+               <m:groupChrPr>\
+                 <m:chr m:val=\"\u{23DF}\"/><m:pos m:val=\"bot\"/>\
+                 <m:vertJc m:val=\"top\"/>\
+               </m:groupChrPr>\
+               <m:e><m:r><m:rPr><m:nor/></m:rPr><m:t>\u{1D465}</m:t></m:r></m:e>\
+             </m:groupChr></m:e>\
+             <m:lim><m:r><m:rPr><m:nor/></m:rPr><m:t>\u{1D45B}</m:t></m:r></m:lim>\
+           </m:limLow>\
+         </m:oMath>"
+    );
+
+    let over = omath("$ overbrace(x, n) $");
+    assert!(over.contains("<m:limUpp>"), "the annotation goes above: {over}");
+    assert!(
+        over.contains(r#"<m:chr m:val="&#x23DE;"/><m:pos m:val="top"/>"#)
+            || over.contains("<m:chr m:val=\"\u{23DE}\"/><m:pos m:val=\"top\"/>"),
+        "an over-brace grouping char: {over}"
+    );
+}
+
+#[test]
+fn aligned_rows_become_a_gapless_two_column_matrix() {
+    // `m:eqArr` cannot express per-column alignment, so an aligned body is a
+    // borderless matrix whose columns alternate right/left with no column gap
+    // — the same thing Word's own aligned equations do.
+    let aligned = omath(r"$ a &= b \ c &= d $");
+    assert!(
+        aligned.contains(
+            "<m:mc><m:mcPr><m:count m:val=\"1\"/><m:mcJc m:val=\"right\"/></m:mcPr>\
+             </m:mc><m:mc><m:mcPr><m:count m:val=\"1\"/><m:mcJc m:val=\"left\"/>\
+             </m:mcPr></m:mc>"
+        ),
+        "columns alternate right then left: {aligned}"
+    );
+    assert!(
+        aligned.contains(r#"<m:cGp m:val="0"/>"#),
+        "no gap at the alignment point: {aligned}"
+    );
+}
+
+#[test]
+fn slide_math_never_carries_wordprocessing_markup() {
+    // OMML has no colour of its own and borrows the host format's run
+    // properties. Word's are `w:rPr`/`w:color`; a slide has no `w:` prefix
+    // declared at all, so PowerPoint's answer to that hook is "no colour"
+    // rather than a foreign element PowerPoint merely tolerates.
+    let p = parts(
+        r#"#set page(width: 320pt, height: 180pt, margin: 12pt)
+$ sum_(i=1)^n #text(red)[x] = #text(blue)[y] $"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(slide.contains("<m:oMath>"), "the equation is still native OMML");
+    assert!(!slide.contains("w:"), "no Wordprocessing markup in a slide part");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn math_fallback_text_reads_back_the_new_structures() {
+    // The compatibility branch is what LibreOffice Impress shows. It must
+    // survive the richer OMML: matrices need separators, aligned rows need to
+    // stay separate lines, and the Plane-1 codepoints have to come back to
+    // ASCII, because the fallback is an ordinary text run in whatever font the
+    // consumer resolves and most have no Plane-1 math coverage.
+    fn fallback(equation: &str) -> String {
+        let p = parts(&format!(
+            "#set page(width: 320pt, height: 180pt, margin: 12pt)\n{equation}"
+        ));
+        let slide = &p["ppt/slides/slide1.xml"];
+        let doc = roxmltree::Document::parse(slide).unwrap();
+        doc.descendants()
+            .find(|node| {
+                node.tag_name().name() == "Fallback"
+                    && node.tag_name().namespace()
+                        == Some("http://schemas.openxmlformats.org/markup-compatibility/2006")
+            })
+            .expect("math should have a compatibility fallback")
+            .descendants()
+            .filter(|node| node.tag_name().name() == "t")
+            .filter_map(|node| node.text())
+            .collect()
+    }
+
+    assert_eq!(fallback("$a + b = c$"), "a+b=c");
+    assert_eq!(fallback("$ mat(a, b; c, d) $"), "(a, b; c, d)");
+    assert_eq!(fallback(r"$ a &= b \ c &= d $"), "a=b; c=d");
+    assert_eq!(fallback("$ underbrace(x, n) $"), "⏟x\u{2099}");
+    assert_eq!(fallback("$ cancel(x) $"), "x");
+}
+
+#[test]
+fn math_with_an_inline_box_falls_back_to_painted_text_and_says_so() {
+    // A `box(..)` inside math is arbitrary laid-out content: OMML has no form
+    // for it, and a native subtree may not simply omit one child, because that
+    // changes the equation while still looking plausible. So the whole
+    // equation is refused — and refusing it means *not* starting a math box,
+    // which leaves the equation's own glyphs in the frame walk to be painted
+    // as ordinary runs. The content survives; only its mathness does not.
+    let world = TestWorld::new(
+        r#"#set page(width: 320pt, height: 180pt, margin: 12pt)
+$ x = #box(width: 20pt, rect()) + y $"#,
+    );
+    let doc = typst::compile::<PagedDocument>(&world)
+        .output
+        .expect("compilation failed");
+    let export = typst_pptx::pptx_with_report(&doc, &world, &PptxOptions::default())
+        .expect("pptx export failed");
+
+    let decision = export
+        .fidelity_report()
+        .decisions()
+        .iter()
+        .find(|decision| {
+            decision.reason == typst_pptx::DecisionReason::UnsupportedMathTextFallback
+        })
+        .expect("the refusal should be recorded, not silent");
+    assert_eq!(decision.representation, typst_pptx::Representation::Approximate);
+    assert!(decision.losses.semantic_structure && decision.losses.editability);
+
+    let p = text_parts(export.into_bytes());
+    let slide = &p["ppt/slides/slide1.xml"];
+    assert!(!slide.contains("<m:oMath"), "no half-native equation is emitted");
+    assert!(slide.contains("<a:t>"), "the equation is still painted as text");
+    assert_all_wellformed(&p);
+}

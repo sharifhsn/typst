@@ -103,7 +103,12 @@ Two columns, because they answer different questions:
 
 | Feature | Export | In the wild | Notes |
 |---|---|---:|---|
-| **Equations** | ◐ native+fallback | 0.2% | `MathOmmlWithTextFallback` — native OMML behind `mc:AlternateContent`, with a plain-text branch for consumers without the extension (older Office, LibreOffice Impress). |
+| **Equations** | ◐ native+fallback | 0.2% | `MathOmmlWithTextFallback` — native OMML behind `mc:AlternateContent`, with a plain-text branch for consumers without the extension (older Office, LibreOffice Impress). Lowered from Typst's resolved math IR by `typst-omml`, the same code the DOCX exporter uses, so matrices, vectors, `cases`, `cancel`, over/underbraces, pre-scripts and aligned rows are real OMML structures. |
+| Equation styled by an ambient `#show` or reading `#context` | ◐ | — | Named, not fixed. The equation is re-resolved from the introspector *after* layout, so a `#show` recipe on a math symbol does not fire and a `#context` read inside math resolves against default styles. The equation's own show-set styles are re-applied, so display-versus-inline sizing — and with it the placement of an n-ary operator's limits — is exact. |
+| Coloured math | ◐ | — | The equation is native; the colour is not. OMML borrows the host's run properties for colour, and the DrawingML spelling (`a:rPr`/`a:solidFill`) is not implemented — Word's `w:rPr` would be schema-alien in a slide. |
+| Label declared inside an equation | ⊘ | — | A `#ref` to it does not resolve: this pass runs after the introspection loop has converged, so a tag handed back now could not influence any query already answered. |
+| Equation containing an inline `box(..)` or external content | ◐ painted text | — | `UnsupportedMathTextFallback` — no OMML form exists and a native subtree may not silently omit one child, so no math object is started and the equation's laid-out glyphs and rules are painted as ordinary runs and shapes. Visible and positioned; no longer editable as math. |
+| Equation that cannot be re-resolved after layout | ◐ painted text | — | `UnresolvableMathTextFallback` — same painted-text fallback. The document compiled, so only this one equation is refused; the export does not fail. |
 | Equation with no recoverable source | ⊘ | — | `MathSourceUnavailableDrop`. |
 | Charts | — | 30.7% | Typst has no chart element; the exporter never emits `chartSpace`. (A *graphicFrame* in the wild is a table, chart or SmartArt.) |
 | SmartArt | — | 14.1% | A diagram language, not a shape. |

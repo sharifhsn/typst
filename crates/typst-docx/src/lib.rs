@@ -35,7 +35,6 @@ pub use self::document::{
 pub use self::dom::{DocxDocument, ReviewCandidate, ReviewCandidateKind, ReviewJoinId};
 pub use self::encode::{DocxOptions, ReviewTag, docx, docx_with_review_tags};
 pub use self::introspect::DocxIntrospector;
-pub use self::mappers::math::equation_omml_fragment;
 pub use self::report::{
     DecisionReason, DrawingAccessibilityFact, DynamicFieldFact, ExportDecision,
     ExportSource, ExportStage, FidelityReport, FieldCacheStatus, FieldOwner,

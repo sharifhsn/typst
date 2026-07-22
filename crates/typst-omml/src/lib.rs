@@ -74,6 +74,32 @@ pub trait MathHooks {
     /// label declared inside an equation will not resolve. The emitted math is
     /// unaffected.
     fn defer_tag(&mut self, _tag: &Tag) {}
+
+    /// The run properties that colour one emitted math run, returned as a raw
+    /// fragment spliced into `<m:r>` after `m:rPr` and before `m:t`.
+    ///
+    /// Colour is the one property whose *spelling* is not shared: OMML has no
+    /// colour of its own, so it borrows the host format's run properties, and
+    /// those differ per host. Wordprocessing's are `w:rPr`/`w:color`;
+    /// DrawingML's are `a:rPr`/`a:solidFill`. A `w:` element inside a slide is
+    /// schema-alien even where PowerPoint tolerates it, and its prefix is not
+    /// even declared there — so this cannot be decided by the lowering.
+    ///
+    /// The default is Word's spelling, because that is where a coloured
+    /// equation is known to render. Returning `None` drops the colour: the run
+    /// is emitted in the default colour, which is exactly what a host with no
+    /// expressible colour should do.
+    fn run_color(&mut self, rgb: [u8; 3]) -> Option<String> {
+        let [r, g, b] = rgb;
+        let mut props = Omml::new();
+        props.open("w:rPr").children();
+        props
+            .open("w:color")
+            .attr("w:val", &format!("{r:02X}{g:02X}{b:02X}"))
+            .empty();
+        props.close();
+        Some(props.into_string())
+    }
 }
 
 /// A [`MathHooks`] implementation that provides nothing — every hook takes its
@@ -265,7 +291,8 @@ struct Emitter<'h> {
     hooks: &'h mut dyn MathHooks,
     buf: Omml,
     /// The current run colour (a non-default solid `text(fill:)` on the enclosing
-    /// math component), applied to emitted runs via a `w:rPr`. `None` = default.
+    /// math component), applied to emitted runs via the host's run properties
+    /// ([`MathHooks::run_color`]). `None` = default.
     color: Option<[u8; 3]>,
 }
 
@@ -445,15 +472,13 @@ impl<'h> Emitter<'h> {
             self.buf.leaf("m:nor");
             self.buf.close();
         }
-        // A non-default colour rides on a regular `w:rPr` inside the math run
-        // (this is how Word colours math), placed after `m:rPr`, before `m:t`.
-        if let Some([r, g, b]) = self.color {
-            self.buf.open("w:rPr").children();
-            self.buf
-                .open("w:color")
-                .attr("w:val", &format!("{r:02X}{g:02X}{b:02X}"))
-                .empty();
-            self.buf.close();
+        // A non-default colour rides on the host format's run properties inside
+        // the math run, placed after `m:rPr` and before `m:t`. Which properties
+        // those are is the caller's to say; see `MathHooks::run_color`.
+        if let Some(rgb) = self.color
+            && let Some(props) = self.hooks.run_color(rgb)
+        {
+            self.buf.raw(&props);
         }
         // Preserve significant whitespace.
         self.buf.open("m:t");

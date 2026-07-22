@@ -3567,6 +3567,7 @@ dependencies = [
  "typst-layout",
  "typst-library",
  "typst-utils",
+ "unicode-normalization",
  "zip",
 ]
 
@@ -3628,6 +3629,7 @@ dependencies = [
  "typst-export-common",
  "typst-layout",
  "typst-library",
+ "typst-omml",
  "typst-ooxml-core",
  "typst-render",
  "typst-syntax",
