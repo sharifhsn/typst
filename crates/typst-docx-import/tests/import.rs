@@ -3266,3 +3266,56 @@ fn direct_table_and_cell_properties_beat_the_style_defaults() {
         "w:tblStylePr went unreported"
     );
 }
+
+/// A picture inside a `w:hyperlink` used to reach neither handler and vanish
+/// without a report entry: `lower_run` skips `RunContent::Drawing` because a
+/// paragraph's picture is hoisted to block level, and the block-level search
+/// declined to look inside wrappers. `typst-docx` writes exactly this shape
+/// for `#link("…")[#image(..)]`, so the round trip lost its own output.
+#[test]
+fn a_picture_inside_a_hyperlink_is_recovered_and_its_lost_link_reported() {
+    let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+<w:body><w:p><w:hyperlink r:id="rId2"><w:r><w:drawing><wp:inline>
+  <wp:extent cx="914400" cy="914400"/>
+  <a:graphic><a:graphicData>
+    <pic:pic><pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill></pic:pic>
+  </a:graphicData></a:graphic>
+</wp:inline></w:drawing></w:r></w:hyperlink></w:p></w:body>
+</w:document>"#;
+    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut rels = Rels::new();
+    rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        "media/image1.png",
+        RelMode::Internal,
+    );
+    rels.add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        "https://example.com/",
+        RelMode::External,
+    );
+
+    let mut png_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    png_bytes.extend_from_slice(&[0u8; 16]);
+    package.add_xml("word/document.xml", "application/xml", doc.into());
+    package.add_media("word/media/image1.png", "png", "image/png", png_bytes);
+    package.add_relationships("word/document.xml", &rels).unwrap();
+    let bytes = package.finish(&Rels::new()).unwrap();
+
+    let result = import_docx(&bytes).expect("import should succeed");
+    assert!(
+        result.source.contains("assets/image1.png"),
+        "the linked picture must survive:\n{}",
+        result.source
+    );
+    assert_eq!(result.assets.len(), 1, "the picture should be extracted once");
+    // The image is kept, the link is not — and that residual loss is stated
+    // rather than left for the reader to discover.
+    let notes = format!("{:?}", result.report);
+    assert!(notes.contains("loses the link"), "the lost link must be reported: {notes}");
+}

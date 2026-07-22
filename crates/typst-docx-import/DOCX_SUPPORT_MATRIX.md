@@ -9,6 +9,18 @@ Comprehensive, source-grounded coverage of the two Word-interop crates:
 
 Every row below traces to actual code (not documentation or intent). Enumerated 2026-07-20, and **updated after both gap-closing passes** described in the changelog at the end, against branch `codex/office-export` (which now carries all the Office work — export, import, and PowerPoint — on one branch). A `typst-docx-roundtrip` crate exercises the composition of the two.
 
+**Audited 2026-07-21 by running the code, not reading it** — the method the
+[PPTX matrix](../typst-pptx/PPTX_SUPPORT_MATRIX.md) argues for, applied here in
+the direction this document needed. Being code-derived, it was reliable about
+*what the code does* and unreliable in two other ways, both of which the audit
+found: rows that went stale when the code moved underneath them, and a
+whole-document summary that its own tables contradicted. Every ✗/⊘/— claim was
+re-checked by exporting a fixture and reading the XML back, or by importing one
+and reading the emitted source; the corrections are marked in place, and the
+method and its results are written up at the end under
+[Audit](#audit--2026-07-21). Claims verified *true* are not annotated — only
+the ones that had to change.
+
 ## Legend
 
 Each feature carries one rating per direction. Ratings are direction-specific: "Full" export + "None" import is common and expected.
@@ -68,7 +80,7 @@ A cell may combine a symbol for the *mechanism* with a note for the *loss*. "Non
 | Line spacing / leading | ✅ | ◐ | Import ignores `w:lineRule` (auto/atLeast/exact), reads twips as absolute leading. |
 | keep-with-next / keep-lines | ✅ | ◐ | Import: `w:keepLines` → `#block(breakable: false)`. `w:keepNext` has no Typst counterpart — nothing binds a block to its successor — so it is reported rather than dropped silently. |
 | page-break-before | ✅ | ✅ | Import via the break path. |
-| Contextual spacing | ✅ | — | |
+| Contextual spacing | ✅ | ✗ | Export emits `w:contextualSpacing`; import has no code path for it (22.7% of the wide corpus states it). Rated "—" until the audit — but a construct the exporter writes is by definition applicable to the importer. |
 | Tab stops (+ leader) | ✅ | ◐ | Import → plain tab char. |
 | Paragraph shading / background | ✅ | ✅ | Import wraps the paragraph in `#block(fill:, width: 100%)`. |
 | Paragraph borders | ✅ (per-side) | ✅ | Export is the only construct that expresses non-uniform strokes. Import reads all four `w:pBdr` sides into `#block(stroke:)`, with `@w:space` as the inset — except the lone-bottom-border-on-an-empty-paragraph idiom, which stays a `#line` rule because that is what it looks like. |
@@ -168,7 +180,7 @@ A cell may combine a symbol for the *mechanism* with a note for the *loss*. "Non
 | Floating / anchored | ✅ | ◐ | Export → `wp:anchor` (align/offset/wrap). Import keeps the *named* placement (`#align`) but deliberately not the absolute offset or wrap: Word's offsets are page-relative and Typst's `#place` reserves no space, so emitting them would overlap body text. |
 | Alt text | ✅ | ✅ | |
 | Cropping / corner clip (`a:srcRect`) | ✅ | ✅ | Export emits native `roundRect` + `a:srcRect` (ported from the pptx sibling) instead of rasterizing. Import inverts both: the radius becomes a clipping `#box(radius:)`, and — since Typst's `image` has no crop parameter — the crop becomes geometry, oversizing the image to `W / (1 − l − r)` inside that box and `#place`-ing it by the hidden band so the box doesn't grow. |
-| Image inside hyperlink / field | ✅ | ⊘ | Import v1 simplification: skips drawings inside hyperlink/field runs. |
+| Image inside hyperlink / field | ✅ | ◐ | The picture is kept; only the link is lost, and that is reported. It used to be silently *dropped*. The mechanism is the one worth remembering: run lowering skips `RunContent::Drawing` because a paragraph's picture is hoisted to block level, and the block-level search declined to look inside wrappers — so the drawing was seen by neither handler and fell between them, the same between-two-handlers shape as the `w:sdt` wrapper loss. The link cannot come along: Typst's figure is a block and `#link` an inline. Rare in the wild (3 of 2,460 wide-corpus documents, 0 of 128 POI), which is exactly why a corpus gate never caught it — it was found by round-tripping the *exporter's own* `#link[#image]` output. |
 
 ## 10. Math (OMML)
 
@@ -214,7 +226,7 @@ Export walks the resolved `MathItem` IR and emits `m:` OMML directly; a whole eq
 | Feature | Export T→D | Import D→T | Notes |
 |---|---|---|---|
 | Footnote reference + body | ✅ | ✅ | Export writes `word/footnotes.xml` with its own rels part; import inlines `#footnote[body]` at the reference. |
-| Endnotes | ✗ | ◐ | Typst has no endnote element. Export routes all notes to footnotes.xml. Import now leaves a superscript mark in place and collects the bodies, numbered, at the document's end — Word's own placement — rather than scattering them across page feet. |
+| Endnotes | ✗ (content) | ◐ | Typst has no endnote element, so export routes all notes to footnotes.xml and writes no endnote *content*. It does still write a `word/endnotes.xml` part holding the separator boilerplate Word expects (ids −1 and 0) — verified — so "no code path touches it" is about the content, not the part. Import leaves a superscript mark in place and collects the bodies, numbered, at the document's end — Word's own placement — rather than scattering them across page feet. |
 | Re-reference (`#footnote(<lbl>)` / NOTEREF) | ◐ | — | Export → static `NOTEREF` (avoids renumbering). |
 | Nested footnotes | ◐ | ⊘ | Export flattens (nested `w:footnoteReference` is illegal); import drops on cycle/depth. |
 | Separators / continuation | ✅ | ⊘ | Export writes separator ids −1/0; import skips the boilerplate note furniture. |
@@ -286,12 +298,12 @@ Export walks the resolved `MathItem` IR and emits `m:` OMML directly; a whole eq
 | Feature | Export T→D | Import D→T | Notes |
 |---|---|---|---|
 | RGB / CMYK / luma / oklab | ✅ | ✅ | Export composites everything to `[u8;3]` hex; import reads rgb hex. |
-| Alpha / opacity | ⊘ | — | Export composites translucent colors onto white (Word has no alpha primitive). |
+| Alpha / opacity | ✅ (shapes) / ⊘ (shading) | ✅ | Split, because Word is: a DrawingML shape fill takes a native `<a:alpha>` and export emits one (verified: `rgb(255,0,0,128)` → `<a:alpha val="50196"/>`), and import folds it back into the fourth channel. `w:shd` has no alpha at all, so a translucent *paragraph or cell* fill is composited onto white instead (verified: `rgb(0,0,255,100)` → `w:fill="9B9BFF"`). |
 | Linear gradient (shapes) | ✅ native | ✅ | Export → `a:gradFill` (stops sampled); import reads the stop list and `a:lin@ang` back into `gradient.linear`. |
 | Radial gradient | ✅ | ✅ | Export emits `a:gradFill` with a reparameterised stop list; import recovers it from `a:path`'s `a:fillToRect`. **Conic** still rasterizes in both directions — no OOXML path sweeps by angle. |
 | Gradient text / paragraph / cell fill | ✅ / ◐ | ✗ | Export: **text is now native** (`w14:textFill`, sharing `dml::gradient_fill`'s Oklab stop sampling and angle/focus maths with the shape exporter, so the two cannot drift); block/highlight → first-stop shade; cells → mean-of-stops. |
 | Tiling / pattern fill | 🖼 / ⊘ | ✗ | Export: shapes → rasterized PNG tile; cells dropped; **text dropped but now reported** (`tiling text fill`) — no Word primitive tiles glyphs. |
-| Solid stroke | ✅ | ◐ | Export → `a:ln` (dash → nearest preset); import: VML hex only. |
+| Solid stroke | ✅ | ✅ | Export → `a:ln` with the exact dash (see §8: `a:custDash` run lengths, `a:prstDash` only on an exact preset match — verified: a `(5pt, 3pt)` dash emits `<a:ds d="250000" sp="150000"/>` and no `prstDash`). Import reads `a:ln`'s width, colour and **both** dash spellings; VML strokes are the legacy path, not the only one. |
 
 ## 20. Boxes, blocks, containers *(Typst-source constructs — export-centric)*
 
@@ -377,10 +389,21 @@ Two severities: **Approximate** ("mapped, detail lost") and **Drop** ("content d
 The two directions are **not** inverses. Most of the gaps that used to matter
 have since been closed (see the changelog below); what remains:
 
-**Export-rich, import-blind** — *nothing left.* Every construct the exporter
-writes that the importer once ignored has been closed: table borders, row
+**Export-rich, import-blind** — a long list has been closed (table borders, row
 heights, paragraph borders, keeps, furniture bands, mirrored margins, shapes,
-image crops, the bibliography, and linked styles.
+image crops, the bibliography, linked styles), but the claim that *nothing* is
+left did not survive the audit. Three cases remain, each visible in the tables
+above once you look for them:
+
+- **Gradient text fill** — export writes native `w14:textFill` with the real
+  stop list; import has no `textFill` code path at all (§19).
+- **Custom bullet markers** — export emits the authored glyph as `w:lvlText`;
+  import still emits `-` (§7).
+- **`w:contextualSpacing`** — export writes it; import has no code path (§3).
+
+A fourth, **a picture inside a hyperlink**, was found by round-tripping the
+exporter's own output and has been fixed: the image now survives and the lost
+link is reported.
 
 **Import-capable, export-absent** — import reads it, export has no counterpart:
 - Word charts (`c:chart` / `cx:chart`) — import gives a table or an opt-in
@@ -536,3 +559,87 @@ Still open, and deliberately so:
   and replace* a span, which point markers cannot express. That is the
   structural difference from comments, which only ever *point* at a position,
   and it is why comments round-trip and these do not.
+
+---
+
+## Audit — 2026-07-21
+
+The [PPTX matrix](../typst-pptx/PPTX_SUPPORT_MATRIX.md) was built from a corpus
+and diffed against the code by reading a *fidelity report* — which by
+construction only enumerates what goes wrong, so four features it already had
+were listed as unsupported. This one is the opposite artefact, derived from the
+code, and it fails the opposite way. Both halves have to be measured. So both
+were.
+
+### Half one — verify every claim by running it
+
+Each ✗/⊘/— cell was re-checked by building a fixture, exporting or importing
+it, and reading the result back. Five rows were wrong:
+
+| Row | Claimed | Actually |
+|---|---|---|
+| §19 Solid stroke | export snaps a dash to the nearest preset; import reads VML hex only | export emits exact `a:custDash` run lengths (`<a:ds d="250000" sp="150000"/>`, no `prstDash`); import reads `a:ln` width, colour and both dash spellings. Contradicted by §8 and §15 in this same document |
+| §19 Alpha / opacity | ⊘ — composited onto white | native `<a:alpha val="50196"/>` on a shape fill; composited only for `w:shd`, which has no alpha |
+| §9 Image in hyperlink | ⊘ "v1 simplification" | silently dropped, with no report entry — now fixed |
+| §3 Contextual spacing | import "—" (not applicable) | export writes it, so it is applicable; import has no path → ✗ |
+| §12 Endnotes (export) | ✗ | no endnote *content*, but a `word/endnotes.xml` part is written with the separator boilerplate |
+
+And the whole-document summary **"Export-rich, import-blind — nothing left"**
+was refuted four times, three of them by rows in its own tables (gradient text
+fill, custom bullet markers, `w:contextualSpacing`) and once by a round trip
+(the linked picture).
+
+Claims that verified **true**, so they are not annotated above: export names no
+`w:tblStyle`; export emits no `m:func`; `#hide` content is absent from the XML;
+`table.footer` becomes an ordinary row; a shaded paragraph's corner radius is
+lost; import has no `w14:textFill` path; `w:smartTag` unwraps and keeps its
+runs.
+
+### Half two — sweep the corpus for what the code never mentions
+
+The blind spot of a code-derived matrix is the *format*: a feature nothing in
+the code names cannot appear in a document written from the code. That is how
+`w:tblStyle` hid for months. So: element-frequency sweep across the 2,440
+readable documents of the wide corpus, counting **document** frequency (not
+occurrences), then diffed against every string literal in the importer.
+
+Two candidates survived triage, and **both dissolved on measurement** — which
+is the finding:
+
+- **`w:tcW` / `w:tblW` (25% of documents)** — the importer takes column widths
+  from `w:tblGrid` and never reads the per-cell width. But only **13 of 1,003
+  tables (1.3%)** lack a usable grid, so the fallback holds and the row is
+  right as written.
+- **`w:textDirection` (13.6% of documents)** — unhandled entirely. But of its
+  460 occurrences, **440 are `lrTb`** — documents stating the default
+  explicitly. Only **17 documents (0.7%)** ask for a rotated direction.
+
+Raw element frequency overstates; the *values* are what decide. Nothing of
+`w:tblStyle`'s weight remains unhandled.
+
+### Why the corpus could not have found the one real bug
+
+The linked picture appears in **3 of 2,460** wide-corpus documents and **0 of
+128** POI documents. No corpus gate was ever going to surface it, and its own
+loss report was silent, so nothing would have. What found it was asking a
+different question — *does the importer read what the exporter writes?* — and
+the exporter emits that shape for one line of ordinary Typst. A round trip
+tests the pair against each other rather than either against the world, which
+is the only check that covers a construct both crates handle but no real
+document happens to contain.
+
+(It is also why the POI coverage figure is unchanged at **mean 98.3% / median
+100%**, and the wide corpus unchanged at **2432/2460 imported, 2432/2432
+compiled, 0 crashes**: with zero affected documents in POI and three in the
+wide set, neither gate *could* move. Verified rather than assumed, because a
+gate that cannot move is indistinguishable from a gate that did not run.)
+
+### What this says about writing one of these
+
+A support matrix has two independent failure modes and needs two independent
+measurements. Derive it from the code and it will be honest about the code and
+blind to the format, and its rows will go stale silently as the code moves.
+Derive it from a corpus and it will be honest about the format and blind to the
+code. Neither error is visible from inside the artefact that caused it — the
+PPTX matrix could not see its four working features, and this one could not see
+its four export-rich/import-blind gaps while asserting there were none.

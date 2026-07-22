@@ -122,7 +122,20 @@ pub(crate) fn lower_paragraph(p: &Paragraph, ctx: &mut LowerCtx) -> ParaResult {
     // field the way the drawing branch does (chart lowering also reads
     // `ctx.options` to decide table-vs-plot, so it needs the whole context).
     let anchored = drawing_ref
-        .and_then(|d| drawing::lower_drawing(d, package, &mut *ctx.report))
+        .and_then(|(d, nested)| {
+            let figure = drawing::lower_drawing(d, package, &mut *ctx.report)?;
+            // Reported only once the picture is actually recovered: an
+            // unresolvable drawing has already reported its own, larger loss.
+            if nested {
+                ctx.report.approximate(
+                    "image",
+                    "a picture inside a hyperlink or a field result keeps the image \
+                     but loses the link: Typst's figure is a block and the link an \
+                     inline, so the two cannot wrap each other here",
+                );
+            }
+            Some(figure)
+        })
         .map(|mut figure| {
             // A picture Word floated states its own placement
             // (`wp:anchor/wp:positionH`), but an *inline* one is placed by the
@@ -133,7 +146,10 @@ pub(crate) fn lower_paragraph(p: &Paragraph, ctx: &mut LowerCtx) -> ParaResult {
                 figure.align.or_else(|| eff_para.jc.as_deref().and_then(lower_jc));
             Block::Figure(figure)
         })
-        .or_else(|| first_chart(p).and_then(|d| chart::lower_chart(d, ctx)).map(Block::Chart));
+        .or_else(|| {
+            let (d, _nested) = first_chart(p)?;
+            chart::lower_chart(d, ctx).map(Block::Chart)
+        });
 
     if p.props.format_revision {
         revision::report_unmapped(
@@ -278,40 +294,57 @@ fn sole_break_kind(p: &Paragraph) -> Option<BreakKind> {
     kind
 }
 
-fn first_drawing(p: &Paragraph) -> Option<&DrawingRef> {
-    p.runs.iter().find_map(|run_item| match run_item {
-        RunItem::Run(r) => r.content.iter().find_map(|c| match c {
-            RunContent::Drawing(d) => Some(d),
-            _ => None,
-        }),
-        // A drawing nested inside a hyperlink or a field's cached result
-        // isn't discovered as the paragraph's figure — same simplification
-        // as the pre-existing hyperlink exclusion; out of scope for v1.
-        RunItem::Hyperlink { .. }
-        | RunItem::Field(_)
-        | RunItem::Bookmark(_)
-        | RunItem::CommentRange { .. }
-        | RunItem::RevisionStart(_)
-        | RunItem::RevisionEnd
-        | RunItem::Deletion { .. } => None,
+/// The first drawing this paragraph carries, and whether it was found inside
+/// a wrapper (a hyperlink, or a field's cached result).
+///
+/// Descending into those wrappers is not a refinement, it is the difference
+/// between keeping the picture and losing it. [`lower_run`] deliberately
+/// ignores `RunContent::Drawing` because a paragraph's picture is hoisted to
+/// block level *here* — so a drawing this function declines to find is seen by
+/// no other code path at all and disappears without so much as a report entry.
+/// `typst-docx` writes exactly that shape: `#link("…")[#image(..)]` is a
+/// `w:drawing` inside a `w:hyperlink`.
+fn first_drawing(p: &Paragraph) -> Option<(&DrawingRef, bool)> {
+    find_drawing(&p.runs, false, &|c| match c {
+        RunContent::Drawing(d) => Some(d),
+        _ => None,
     })
 }
 
-/// The first chart reference among this paragraph's own runs — same
-/// simplification (and same reasoning) as [`first_drawing`] just above.
-fn first_chart(p: &Paragraph) -> Option<&DrawingRef> {
-    p.runs.iter().find_map(|run_item| match run_item {
-        RunItem::Run(r) => r.content.iter().find_map(|c| match c {
-            RunContent::Chart(d) => Some(d),
-            _ => None,
-        }),
-        RunItem::Hyperlink { .. }
-        | RunItem::Field(_)
+/// The first chart reference this paragraph carries — same walk, same
+/// reasoning, as [`first_drawing`] just above.
+fn first_chart(p: &Paragraph) -> Option<(&DrawingRef, bool)> {
+    find_drawing(&p.runs, false, &|c| match c {
+        RunContent::Chart(d) => Some(d),
+        _ => None,
+    })
+}
+
+/// Depth-first search for the first run content `pick` accepts, tracking
+/// whether it was reached through a wrapper.
+///
+/// `pick` is a `&dyn Fn` rather than a generic parameter on purpose: this
+/// function recurses, and a generic recursive function monomorphizes into an
+/// infinite family of instantiations (the trap `splice_children` documents).
+fn find_drawing<'a>(
+    items: &'a [RunItem],
+    nested: bool,
+    pick: &dyn Fn(&'a RunContent) -> Option<&'a DrawingRef>,
+) -> Option<(&'a DrawingRef, bool)> {
+    items.iter().find_map(|run_item| match run_item {
+        RunItem::Run(r) => r.content.iter().find_map(pick).map(|d| (d, nested)),
+        // A hyperlink's runs and a field's cached result are ordinary run
+        // content that happens to sit under a wrapper.
+        RunItem::Hyperlink { runs, .. } => find_drawing(runs, true, pick),
+        RunItem::Field(f) => find_drawing(&f.result, true, pick),
+        // A *deleted* picture is meant to be gone: both tracked-change modes
+        // render the accepted view, so recovering it here would put back
+        // content the author removed.
+        RunItem::Deletion { .. }
         | RunItem::Bookmark(_)
         | RunItem::CommentRange { .. }
         | RunItem::RevisionStart(_)
-        | RunItem::RevisionEnd
-        | RunItem::Deletion { .. } => None,
+        | RunItem::RevisionEnd => None,
     })
 }
 
