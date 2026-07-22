@@ -458,9 +458,13 @@ impl PhKind {
         matches!(self, Self::Title | Self::CtrTitle)
     }
 
-    /// Furniture PowerPoint draws from the layout: slide number, footer, date.
-    /// Not slide content, and reproducing it per-slide would double it up
-    /// against the theme's own.
+    /// Furniture PowerPoint also draws from the layout: slide number, footer,
+    /// date.
+    ///
+    /// These are *not* skipped on import. The importer does not reproduce a
+    /// layout's own shapes, so nothing else would draw them — one corpus deck
+    /// (`lo-sd-multiplelayoutfooter`) has a single footer placeholder as its
+    /// entire visible content, and skipping it emitted an empty slide.
     pub fn is_furniture(self) -> bool {
         matches!(self, Self::SlideNumber | Self::Footer | Self::Date)
     }

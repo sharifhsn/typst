@@ -27,12 +27,31 @@ PowerPoint shape instead carries an absolute `a:off`/`a:ext` in EMU, and there
 is no flow to recover. Two consequences shape the whole crate:
 
 **Fidelity is a choice, not a quality.** `Placed` (the default) reproduces
-every shape at its authored coordinates with `#place`. It is the only mode
-that **round-trips**: `typst-pptx` exports from laid-out frames, so a shape
-placed at its original offset comes back out at that same offset.
-`--idiomatic` promotes the placeholders PowerPoint itself labelled `title`
-into touying headings — nicer to edit, and wrong the moment a designer put a
-"body" box somewhere the flow would not.
+every shape at its authored coordinates with `#place`, and is the mode to use
+when the round trip matters. `--idiomatic` promotes the placeholders
+PowerPoint itself labelled `title` into touying headings — nicer to edit, and
+wrong the moment a designer put a "body" box somewhere the flow would not.
+
+**What "round-trips" actually means, measured rather than claimed.** Running
+`.pptx` → Typst → `.pptx` over the corpus:
+
+| | Result |
+|---|---|
+| Text | median **100%** of words kept, mean 95.5% |
+| Tables | **11/11** kept |
+| Pictures | **54/58** kept, of those Typst can decode (85 of the 143 are EMF/WMF) |
+| Picture and frame **offsets** | median **100%** within 1pt, mean 76% |
+| Text-box offsets | **do not** round-trip exactly — see below |
+
+A picture or drawn shape comes back at the offset it went in at, because
+`typst-pptx` exports it from a laid-out frame that `#place` put exactly where
+PowerPoint had it. A **text box does not**: the exporter derives a text box's
+top from the laid-out first baseline (`box_top = baseline − max_font_size`),
+and Typst's first baseline sits at a different offset from the box top than
+PowerPoint's does. On a 40pt title the box comes back ~14pt higher. The text,
+its formatting and its horizontal position are unaffected; it is the vertical
+box origin that shifts, and it shifts because two typesetters disagree about
+where a line begins rather than because anything was lost.
 
 **Nothing states its own formatting.** A slide's shapes inherit position,
 size, font, colour and bullet style from the matching placeholder on their
@@ -63,6 +82,7 @@ corpus (LibreOffice `sd/qa`, Apache POI, Tika).
 | Slide layouts / masters | ✅ | 100% | Resolved, not reproduced: the chain supplies each placeholder's geometry and text defaults. |
 | Theme colours | ✅ | 34.1% | `a:schemeClr` → the master's `p:clrMap` → `theme1.xml`, with `lumMod`/`lumOff`/`shade`/`tint`/`alpha` applied. |
 | Speaker notes | ✅ | 13.9% | Emitted as the `<pdfpc-file>` metadata `typst-pptx` reads back, so notes survive the round trip rather than needing a second convention. |
+| Footer / date / slide-number placeholders | ✅ | — | Kept as ordinary placed text. They were skipped at first on the theory that the theme would draw them; nothing does, and one corpus deck's entire visible content is a single footer. |
 | Hidden slides | ◐ | — | Kept, with a comment saying PowerPoint hid them. Dropping authored content silently is the one thing this crate tries never to do. |
 | Slide background | ✅ | — | Slide → layout → master, the same three-level fallback the shapes use. |
 | Transitions | — | 13.6% | Typst output is static; there is no timeline. |

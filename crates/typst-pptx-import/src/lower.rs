@@ -286,19 +286,12 @@ fn lower_shape(
 ) {
     match shape {
         Shape::Text(text_shape) | Shape::Connector(text_shape) => {
-            if let Some(ph) = &text_shape.placeholder
-                && ph.kind.is_furniture()
-            {
-                // Slide numbers, footers and dates are drawn by the layout in
-                // PowerPoint. Reproducing them per-slide would double them
-                // against whatever the touying theme draws.
-                ctx.report.approximate(
-                    "slide furniture",
-                    "a slide-number, footer or date placeholder is left to the \
-                     theme rather than reproduced per slide",
-                );
-                return;
-            }
+            // Footer, date and slide-number placeholders are *kept*. They
+            // were skipped at first on the theory that the theme would draw
+            // them, which was wrong in the way assumptions usually are:
+            // nothing reproduces the layout's own shapes, so skipping them
+            // dropped the text outright. One corpus deck's entire visible
+            // content is a single footer placeholder.
             let inherited =
                 inherit::resolve(text_shape, layout, &pkg.masters).unwrap_or_default();
             let xfrm = text_shape.xfrm.or(inherited.xfrm);
