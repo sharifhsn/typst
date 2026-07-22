@@ -359,8 +359,13 @@ fn styled(props: &TextProps, body: &str) -> String {
     if let Some(size) = props.size {
         params.push(format!("size: {}", len(size)));
     }
-    if let Some(font) = &props.font {
-        params.push(format!("font: {}", string_lit(font)));
+    match props.font.as_slice() {
+        [] => {}
+        [one] => params.push(format!("font: {}", string_lit(one))),
+        many => params.push(format!(
+            "font: ({})",
+            many.iter().map(|f| string_lit(f)).collect::<Vec<_>>().join(", ")
+        )),
     }
     if let Some(fill) = &props.fill {
         params.push(format!("fill: {}", paint(fill)));

@@ -295,6 +295,8 @@ pub struct Line {
     pub dash: Option<EcoString>,
     /// `a:custDash` run lengths in 1/1000 %, relative to the line width.
     pub custom_dash: Vec<(i64, i64)>,
+    /// `a:headEnd`/`a:tailEnd` — an arrowhead at either end.
+    pub arrowheads: bool,
 }
 
 /// A colour as PowerPoint states it, *before* theme resolution — the whole
@@ -389,6 +391,13 @@ pub struct RunProps {
     pub strike: Option<EcoString>,
     pub color: Option<Color>,
     pub font: Option<EcoString>,
+    /// `a:ea/@typeface` — the face for East-Asian text.
+    ///
+    /// A run's `a:latin` and `a:ea` are two faces for *one* run, chosen per
+    /// glyph by script. Typst's `font:` takes a list and falls back per glyph,
+    /// which is the same rule — so both must be carried, or every CJK deck
+    /// gets its Latin face and tofu.
+    pub east_asian: Option<EcoString>,
     /// `@spc` — tracking in hundredths of a point.
     pub spacing: Option<i32>,
     /// `@baseline` in 1/1000 %: positive superscript, negative subscript.
@@ -411,6 +420,7 @@ impl RunProps {
             strike: self.strike.clone().or_else(|| base.strike.clone()),
             color: self.color.clone().or_else(|| base.color.clone()),
             font: self.font.clone().or_else(|| base.font.clone()),
+            east_asian: self.east_asian.clone().or_else(|| base.east_asian.clone()),
             spacing: self.spacing.or(base.spacing),
             baseline: self.baseline.or(base.baseline),
             highlight: self.highlight.clone().or_else(|| base.highlight.clone()),

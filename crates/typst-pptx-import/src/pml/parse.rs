@@ -555,6 +555,10 @@ impl<'a> Parser<'a> {
                 .and_then(|l| attr(l, "typeface"))
                 .filter(|t| !t.is_empty() && !t.starts_with('+'))
                 .map(Into::into),
+            east_asian: child(pr, "ea")
+                .and_then(|l| attr(l, "typeface"))
+                .filter(|t| !t.is_empty() && !t.starts_with('+'))
+                .map(Into::into),
             spacing: attr(pr, "spc").and_then(|v| v.parse().ok()),
             baseline: attr(pr, "baseline").and_then(|v| v.parse().ok()),
             highlight: child(pr, "highlight").and_then(color_in),
@@ -588,6 +592,7 @@ impl<'a> Parser<'a> {
             width: num(ln, "w"),
             fill: self.parse_fill_container(ln),
             dash: child(ln, "prstDash").and_then(|d| attr(d, "val")).map(Into::into),
+            arrowheads: child(ln, "headEnd").is_some() || child(ln, "tailEnd").is_some(),
             custom_dash: child(ln, "custDash")
                 .map(|c| {
                     c.children()

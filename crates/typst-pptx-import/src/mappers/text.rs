@@ -74,7 +74,16 @@ fn lower_run(
         underline: props.underline.is_some(),
         strike: props.strike.is_some(),
         fill: props.color.as_ref().and_then(|c| ctx.paint(c)),
-        font: props.font.clone(),
+        font: [props.font.clone(), props.east_asian.clone()]
+            .into_iter()
+            .flatten()
+            // A run whose two faces are the same name needs it once.
+            .fold(Vec::new(), |mut acc, f| {
+                if !acc.contains(&f) {
+                    acc.push(f);
+                }
+                acc
+            }),
         tracking: props.spacing.map(|v| v as f64 / 100.0),
         // `@baseline` is a percentage of the font size; its sign is the only
         // thing that distinguishes a superscript from a subscript.
@@ -85,6 +94,19 @@ fn lower_run(
     };
     if !styled.is_empty() {
         inline = tdoc::Inline::Styled { props: styled, body: vec![inline] };
+    }
+
+    // Typst's `#underline` draws one plain rule. A double or wavy underline
+    // is a different mark, and saying so is cheaper than pretending.
+    if props
+        .underline
+        .as_deref()
+        .is_some_and(|u| u != "sng" && u != "single")
+    {
+        ctx.report.approximate(
+            "underline",
+            "Typst draws one plain rule, so a double, wavy or heavy underline              comes across as a single line",
+        );
     }
 
     // A slide-number field wrapped in a link is not a thing; a text run

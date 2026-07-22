@@ -297,6 +297,16 @@ fn custom_curve(
 }
 
 fn lower_stroke(line: &Line, ctx: &mut LowerCtx<'_, '_>) -> Option<String> {
+    // Typst strokes have no arrowhead. Drawing one by hand would mean
+    // synthesising a triangle at an end whose direction this mapper does not
+    // always know, so it is named instead — 7.5% of real decks have them.
+    if line.arrowheads {
+        ctx.report.approximate(
+            "arrowhead",
+            "a line or connector's arrowhead has no Typst counterpart; the line \
+             is drawn plain",
+        );
+    }
     // An explicit `a:noFill` on the line means "no outline" — distinct from
     // stating no line at all, which inherits one.
     if matches!(line.fill, Some(Fill::None)) {

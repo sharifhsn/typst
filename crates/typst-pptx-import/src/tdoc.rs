@@ -136,7 +136,10 @@ pub struct TextProps {
     pub underline: bool,
     pub strike: bool,
     pub fill: Option<Paint>,
-    pub font: Option<EcoString>,
+    /// One or more families, in fallback order. PowerPoint states a Latin and
+    /// an East-Asian face for the same run and picks per glyph; Typst's
+    /// `font:` list falls back per glyph too, so the pair maps exactly.
+    pub font: Vec<EcoString>,
     pub tracking: Option<f64>,
     pub sub: bool,
     pub super_: bool,

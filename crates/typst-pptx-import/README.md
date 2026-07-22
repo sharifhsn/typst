@@ -93,7 +93,7 @@ corpus (LibreOffice `sd/qa`, Apache POI, Tika).
 
 | Feature | | In the wild | Notes |
 |---|---|---:|---|
-| Runs, fonts, size, bold, italic | ✅ | 65.7% | |
+| Runs, fonts, size, bold, italic | ✅ | 65.7% | A run states a Latin *and* an East-Asian face (`a:latin`, `a:ea`) and PowerPoint picks per glyph; both are emitted as a Typst `font:` list, which falls back per glyph by the same rule. 10.2% of decks state one — reading only the Latin face gives a CJK deck the wrong font. |
 | Colour, highlight, tracking, caps | ✅ | — | |
 | Super/subscript | ✅ | — | From `@baseline`'s sign. |
 | Placeholders (`p:ph`) | ✅ | 36.3% | Matched to the layout by `idx` first and `type` second — the order PowerPoint uses, and the only way to tell two body placeholders apart. |
@@ -103,6 +103,7 @@ corpus (LibreOffice `sd/qa`, Apache POI, Tika).
 | Body insets (`lIns`/`tIns`/`rIns`/`bIns`) | ✅ | — | Reserved inside the box, as PowerPoint reserves them. |
 | Hyperlinks | ✅ | 7.3% | External by URL; same-deck jumps resolve to the target slide's index. |
 | Slide-number fields | ✅ | — | Become touying's live counter rather than the cached number. |
+| Underline style | ◐ | 0.2% | Typst draws one plain rule, so a double, wavy or heavy underline arrives as a single line, reported. |
 | Vertical text (`vert`) | — | — | Typst has no vertical writing mode. |
 
 ### Shapes and pictures
@@ -115,6 +116,7 @@ corpus (LibreOffice `sd/qa`, Apache POI, Tika).
 | Rectangle, ellipse, rounded rect | ✅ | 56.3% | |
 | Custom geometry (`a:custGeom`) | ✅ | 4.0% | `#curve`, command for command, scaled from the path's own coordinate space. |
 | Lines and connectors | ◐ | 4.7% | Drawn as a line; the *connection* to the shapes at each end has no Typst counterpart. |
+| Arrowheads (`a:headEnd`/`a:tailEnd`) | ⊘ | 7.5% | A Typst stroke has no arrowhead. Synthesising one would mean drawing a triangle at an end whose direction is not always known here, so the line is drawn plain and the loss is named. |
 | Solid, gradient fills; strokes and dashes | ✅ | 3.8% | Gradient stops are sorted and extended to span 0..1, which Typst requires and PowerPoint does not provide. |
 | Groups | ✅ | 5.6% | The child coordinate space (`a:chOff`/`a:chExt`) is composed properly, including nested groups — a group states both where it sits and what space its children are drawn in, and the two are routinely different. |
 | Rotation | ✅ | — | `a:xfrm/@rot` about the box centre, which is `#rotate`'s own default origin. |
