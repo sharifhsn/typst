@@ -130,7 +130,7 @@ corpus (LibreOffice `sd/qa`, Apache POI, Tika).
 | Feature | | In the wild | Notes |
 |---|---|---:|---|
 | Tables (`a:tbl`) | ✅ | 10.0% | Grid, spans, cell fills, vertical alignment and **per-cell borders** (`a:lnL`/`lnT`/`lnR`/`lnB`), which 49% of corpus tables state directly. The table's own stroke is `none`: PowerPoint draws a table's edges from its cells and its style, so a table stating no borders has none — emitting Typst's default 1pt grid would put lines on the page that nobody drew. Merged cells are dropped rather than emitted, since a covered cell holds no content and would widen the row. |
-| Table styles (`a:tableStyleId`) | ⊘ | — | The other 51%: borders and banding live in `ppt/tableStyles.xml`, which this importer does not resolve. Such a table is drawn **without** borders and says so, rather than with a guessed grid. |
+| Table styles (`a:tableStyleId`) | ⊘ | — | The other 51%, and **not closable from the file**: 414 of the 487 corpus packages that carry `ppt/tableStyles.xml` define no style in it at all — they are 182-byte stubs naming a built-in that lives inside PowerPoint. Resolving them would mean hard-coding Microsoft's built-in style table, which is an application data dump rather than anything the format supplies. Such a table is drawn **without** borders and says so, rather than with a guessed grid. |
 | Table row heights | ◐ | — | PowerPoint's height is a *minimum* that grows with content; a Typst track is exactly its stated size, so honouring it would clip. |
 | Charts → data table | ◐ | 3.5% | Typst has no chart element and the live data lives in an embedded workbook — but the chart part **caches** every value it last drew (`c:strCache`, `c:numCache`), and that cache is recovered as a `#table` of categories and series. The plot, its axes and its styling are not drawn, and the report says so. Points are read by their `@idx`, since a cache omits empty points entirely and reading positionally would shift every later value against its category. |
 | SmartArt | ⊘ | 14.1% | A diagram *language*, not a shape. |
@@ -155,6 +155,27 @@ decoder that does not exist in Rust:
 - **Vertical writing mode**, **shape shadows**, **picture fills**.
 
 Everything in this list is reported at import time. A silent loss is a bug.
+
+### The line between "not yet" and "cannot"
+
+Everything a `.pptx` actually *contains* is now read. What remains is not
+unwritten code — it is information that is not in the file, or a Typst feature
+that does not exist:
+
+- **Not in the file.** A built-in table style's borders live inside PowerPoint,
+  not the package (measured: 85% of `tableStyles.xml` parts are empty stubs). An
+  EMF/WMF picture is a stream of GDI drawing commands with no Rust decoder. A
+  chart's live data is in an embedded workbook — its *cached* values are
+  recovered, which is everything the file itself knows.
+- **Not in Typst.** Animations and transitions need a timeline; 3-D needs a
+  renderer; shape shadows and vertical writing mode need language features.
+  SmartArt needs a diagram layout engine.
+
+Two things are genuine approximations rather than absences, and both are stated
+where they occur: a preset shape's *adjustment guides* are not read, so a
+dragged chevron gets default proportions; and a text box's vertical origin
+shifts on a round trip, because two typesetters disagree about where a line
+begins.
 
 ## Gates
 
