@@ -431,6 +431,16 @@ impl<'a> Parser<'a> {
             table.xfrm = xfrm;
             return Some(Shape::Table(table));
         }
+        // A chart names its part by relationship, and that part holds the
+        // cached values PowerPoint last drew — enough to rebuild the data.
+        if uri.contains("/chart")
+            && let Some(id) = descend(data, "chart").and_then(rel_attr)
+        {
+            return Some(Shape::Chart {
+                rel_id: eco_format!("{part}!{id}"),
+                xfrm,
+            });
+        }
         let kind: EcoString = if uri.contains("/chart") {
             "a chart".into()
         } else if uri.contains("/diagram") {
@@ -438,7 +448,6 @@ impl<'a> Parser<'a> {
         } else if uri.contains("/ole") {
             "an embedded OLE object".into()
         } else {
-            let _ = part;
             "an unrecognised graphic frame".into()
         };
         Some(Shape::Unsupported { kind, xfrm })
@@ -448,6 +457,10 @@ impl<'a> Parser<'a> {
         let mut table = Table::default();
         if let Some(pr) = child(node, "tblPr") {
             table.first_row_header = attr(pr, "firstRow") == Some("1");
+            table.style_id = child(pr, "tableStyleId")
+                .and_then(|s| s.text())
+                .filter(|t| !t.is_empty())
+                .map(Into::into);
         }
         if let Some(grid) = child(node, "tblGrid") {
             for col in grid.children().filter(|n| is_el(*n, "gridCol")) {
@@ -471,6 +484,12 @@ impl<'a> Parser<'a> {
                         .collect();
                 }
                 if let Some(pr) = child(tc, "tcPr") {
+                    // Order matters: left, top, right, bottom, matching the
+                    // order the mapper reads them back in.
+                    for (index, name) in ["lnL", "lnT", "lnR", "lnB"].iter().enumerate() {
+                        cell.borders[index] =
+                            child(pr, name).map(|l| self.parse_line(l));
+                    }
                     cell.anchor = attr(pr, "anchor").map(Into::into);
                     cell.fill = self.parse_fill_container(pr);
                     let d = Insets::default();

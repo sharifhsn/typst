@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use ecow::{eco_format, EcoString};
 use rustc_hash::FxHashMap;
 
-use crate::mappers::{picture, shape as shape_mapper, table as table_mapper, text};
+use crate::mappers::{
+    chart as chart_mapper, picture, shape as shape_mapper, table as table_mapper, text,
+};
 use crate::opts::{Fidelity, ImportOptions};
 use crate::pml::model::*;
 use crate::pml::parse::Parser;
@@ -397,6 +399,16 @@ fn lower_shape(
             // group itself contributes no box — flattening here keeps the
             // emitted source one level shallower without moving anything.
             items.extend(inner);
+        }
+        Shape::Chart { rel_id, xfrm } => {
+            let Some(target) = ctx.parser.target(rel_id) else {
+                ctx.report.drop("chart", "the chart's relationship could not be resolved");
+                return;
+            };
+            let part = target.part.clone();
+            if let Some(block) = chart_mapper::lower(&part, ctx) {
+                items.push(place(*xfrm, block, parent, ctx));
+            }
         }
         Shape::Unsupported { kind, .. } => {
             ctx.report.drop(

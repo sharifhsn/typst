@@ -151,10 +151,13 @@ impl TextProps {
 }
 
 pub struct Table {
-    /// Column widths in points.
+    /// Column widths in points. Empty when the table sizes itself.
     pub columns: Vec<f64>,
     pub rows: Vec<Row>,
     pub header_rows: usize,
+    /// Column count for a table with no stated widths — a chart's recovered
+    /// data, whose numbers want their own width rather than the plot's.
+    pub auto_columns: usize,
 }
 
 pub struct Row {
@@ -168,6 +171,10 @@ pub struct Cell {
     pub rowspan: usize,
     pub fill: Option<Paint>,
     pub align_y: Option<EcoString>,
+    /// Left, top, right, bottom. A side PowerPoint never stated stays `None`
+    /// and draws nothing — the table's own stroke is `none`, so an unstated
+    /// edge must not inherit Typst's default grid.
+    pub stroke: [Option<EcoString>; 4],
 }
 
 #[derive(Debug, Clone, PartialEq)]

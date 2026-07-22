@@ -142,8 +142,10 @@ pub enum Shape {
     /// A `p:cxnSp`. Geometrically a shape; semantically a line between two
     /// other shapes, and the "between" half has no Typst counterpart.
     Connector(TextShape),
+    /// A chart, whose *cached* data can still be recovered as a table.
+    Chart { rel_id: EcoString, xfrm: Option<Xfrm> },
     /// Recognised, and deliberately not mapped. The payload names it for the
-    /// report ("SmartArt diagram", "chart", "embedded OLE object").
+    /// report ("SmartArt diagram", "embedded OLE object").
     Unsupported { kind: EcoString, xfrm: Option<Xfrm> },
 }
 
@@ -217,6 +219,10 @@ pub struct Table {
     pub grid: Vec<Emu>,
     pub rows: Vec<TableRow>,
     pub first_row_header: bool,
+    /// `a:tableStyleId` — the style whose `ppt/tableStyles.xml` entry supplies
+    /// the borders and banding for a table that states none itself. Half the
+    /// tables in the wild rely on it.
+    pub style_id: Option<EcoString>,
 }
 
 #[derive(Debug, Default)]
@@ -228,6 +234,8 @@ pub struct TableRow {
 #[derive(Debug, Default)]
 pub struct TableCell {
     pub paras: Vec<Para>,
+    /// `a:tcPr/a:lnL`, `a:lnR`, `a:lnT`, `a:lnB` — the cell's own four edges.
+    pub borders: [Option<Line>; 4],
     pub grid_span: usize,
     pub row_span: usize,
     /// Covered by another cell's span — carries no content of its own.

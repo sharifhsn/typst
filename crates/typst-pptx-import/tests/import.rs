@@ -28,6 +28,10 @@ struct Deck {
     layout_body: String,
     master_extra: String,
     theme_colors: String,
+    /// Extra relationships on the slide part, as `(type, target)`.
+    extra_slide_rels: Vec<(&'static str, &'static str)>,
+    /// Extra XML parts, as `(part name, body)`.
+    extra_parts: Vec<(&'static str, &'static str)>,
 }
 
 impl Default for Deck {
@@ -40,6 +44,8 @@ impl Default for Deck {
                  <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
                  <a:accent1><a:srgbClr val="4472C4"/></a:accent1>"#
                 .into(),
+            extra_slide_rels: Vec::new(),
+            extra_parts: Vec::new(),
         }
     }
 }
@@ -93,6 +99,9 @@ impl Deck {
         );
         let mut slide_rels = Rels::new();
         slide_rels.add(REL_LAYOUT, "../slideLayouts/slideLayout1.xml", RelMode::Internal);
+        for (kind, target) in &self.extra_slide_rels {
+            slide_rels.add(kind, target, RelMode::Internal);
+        }
 
         let theme = format!(
             r#"<?xml version="1.0"?>
@@ -107,6 +116,9 @@ impl Deck {
         package.add_xml("ppt/slideLayouts/slideLayout1.xml", "application/xml", layout);
         package.add_xml("ppt/slides/slide1.xml", "application/xml", slide);
         package.add_xml("ppt/theme/theme1.xml", "application/xml", theme);
+        for (name, body) in &self.extra_parts {
+            package.add_xml(name, "application/xml", (*body).into());
+        }
         package.add_relationships("ppt/presentation.xml", &pres_rels).unwrap();
         package
             .add_relationships("ppt/slideMasters/slideMaster1.xml", &master_rels)
@@ -354,4 +366,84 @@ fn text_is_anchored_where_powerpoint_anchors_it() {
         "a centred body must not be top-aligned:\n{}",
         result.source
     );
+}
+
+#[test]
+fn a_charts_cached_data_is_recovered_as_a_table() {
+    // Typst has no chart element and PowerPoint keeps the live data in an
+    // embedded workbook — but the chart part caches every value it last drew,
+    // and that cache is the data.
+    const CHART: &str = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+ <c:chart><c:plotArea><c:barChart>
+  <c:ser>
+   <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Revenue</c:v></c:pt>
+   </c:strCache></c:strRef></c:tx>
+   <c:cat><c:strRef><c:strCache>
+     <c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt>
+   </c:strCache></c:strRef></c:cat>
+   <c:val><c:numRef><c:numCache>
+     <c:pt idx="0"><c:v>120</c:v></c:pt><c:pt idx="1"><c:v>145</c:v></c:pt>
+   </c:numCache></c:numRef></c:val>
+  </c:ser>
+ </c:barChart></c:plotArea></c:chart>
+</c:chartSpace>"#;
+
+    let deck = Deck {
+        slide_body: r#"<p:graphicFrame><p:xfrm><a:off x="0" y="0"/>
+            <a:ext cx="4000000" cy="3000000"/></p:xfrm>
+            <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+            <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+                     xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                     r:id="rId2"/>
+            </a:graphicData></a:graphic></p:graphicFrame>"#
+            .into(),
+        extra_slide_rels: vec![(
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart",
+            "../charts/chart1.xml",
+        )],
+        extra_parts: vec![("ppt/charts/chart1.xml", CHART)],
+        ..Deck::default()
+    };
+    let result = import_pptx(&deck.build()).expect("import should succeed");
+    for want in ["Revenue", "Q1", "Q2", "120", "145"] {
+        assert!(result.source.contains(want), "chart data `{want}` must survive:\n{}", result.source);
+    }
+    let notes = format!("{}", result.report);
+    assert!(notes.contains("chart"), "the undrawn plot must be reported: {notes}");
+}
+
+#[test]
+fn an_absurd_chart_point_index_does_not_allocate_the_world() {
+    // `@idx` is an attacker-controlled integer that the cache reader resizes a
+    // vector to. A few bytes of XML must not ask for gigabytes.
+    const CHART: &str = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+ <c:chart><c:plotArea><c:barChart><c:ser>
+  <c:val><c:numRef><c:numCache>
+    <c:pt idx="4000000000"><c:v>1</c:v></c:pt>
+    <c:pt idx="0"><c:v>7</c:v></c:pt>
+  </c:numCache></c:numRef></c:val>
+ </c:ser></c:barChart></c:plotArea></c:chart>
+</c:chartSpace>"#;
+
+    let deck = Deck {
+        slide_body: r#"<p:graphicFrame><p:xfrm><a:off x="0" y="0"/>
+            <a:ext cx="100" cy="100"/></p:xfrm>
+            <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+            <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+                     xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                     r:id="rId2"/>
+            </a:graphicData></a:graphic></p:graphicFrame>"#
+            .into(),
+        extra_slide_rels: vec![(
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart",
+            "../charts/chart1.xml",
+        )],
+        extra_parts: vec![("ppt/charts/chart1.xml", CHART)],
+        ..Deck::default()
+    };
+    let result = import_pptx(&deck.build()).expect("import should succeed");
+    // The sane point survives; the absurd one is skipped rather than sized to.
+    assert!(result.source.contains('7'), "{}", result.source);
 }

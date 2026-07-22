@@ -417,11 +417,15 @@ fn image_call(image: &Image) -> String {
 fn table_call(table: &Table, depth: usize) -> String {
     let pad = "  ".repeat(depth);
     let mut out = String::from("#table(\n");
-    let _ = writeln!(
-        out,
-        "{pad}  columns: ({}),",
-        table.columns.iter().map(|w| len(*w)).collect::<Vec<_>>().join(", ")
-    );
+    if table.columns.is_empty() {
+        let _ = writeln!(out, "{pad}  columns: {},", table.auto_columns.max(1));
+    } else {
+        let _ = writeln!(
+            out,
+            "{pad}  columns: ({}),",
+            table.columns.iter().map(|w| len(*w)).collect::<Vec<_>>().join(", ")
+        );
+    }
     if table.rows.iter().any(|r| r.height.is_some()) {
         let rows: Vec<String> = table
             .rows
@@ -431,6 +435,17 @@ fn table_call(table: &Table, depth: usize) -> String {
         let _ = writeln!(out, "{pad}  rows: ({}),", rows.join(", "));
     }
     let _ = writeln!(out, "{pad}  inset: 5pt,");
+    // `none`, not Typst's default: PowerPoint draws a table's edges from the
+    // cells and the style, so a table that states no borders has none. The
+    // Word importer learned this the hard way — a deliberately borderless
+    // table arriving with a 1pt grid nobody drew.
+    // A recovered chart is a data table and reads as one; a slide's own table
+    // draws only what its cells state.
+    if table.columns.is_empty() {
+        let _ = writeln!(out, "{pad}  stroke: 0.5pt + gray,");
+    } else {
+        let _ = writeln!(out, "{pad}  stroke: none,");
+    }
 
     for (index, row) in table.rows.iter().enumerate() {
         let cells: Vec<String> = row
@@ -450,6 +465,16 @@ fn table_call(table: &Table, depth: usize) -> String {
                 }
                 if let Some(align) = &cell.align_y {
                     params.push(format!("align: {align}"));
+                }
+                let sides = ["left", "top", "right", "bottom"];
+                let stated: Vec<String> = cell
+                    .stroke
+                    .iter()
+                    .zip(sides)
+                    .filter_map(|(s, name)| s.as_ref().map(|v| format!("{name}: {v}")))
+                    .collect();
+                if !stated.is_empty() {
+                    params.push(format!("stroke: ({})", stated.join(", ")));
                 }
                 if params.is_empty() {
                     format!("[{body}]")

@@ -129,9 +129,10 @@ corpus (LibreOffice `sd/qa`, Apache POI, Tika).
 
 | Feature | | In the wild | Notes |
 |---|---|---:|---|
-| Tables (`a:tbl`) | ✅ | 10.0% | Grid, spans, cell fills and vertical alignment. Merged cells are dropped rather than emitted, since a covered cell holds no content and would widen the row. |
+| Tables (`a:tbl`) | ✅ | 10.0% | Grid, spans, cell fills, vertical alignment and **per-cell borders** (`a:lnL`/`lnT`/`lnR`/`lnB`), which 49% of corpus tables state directly. The table's own stroke is `none`: PowerPoint draws a table's edges from its cells and its style, so a table stating no borders has none — emitting Typst's default 1pt grid would put lines on the page that nobody drew. Merged cells are dropped rather than emitted, since a covered cell holds no content and would widen the row. |
+| Table styles (`a:tableStyleId`) | ⊘ | — | The other 51%: borders and banding live in `ppt/tableStyles.xml`, which this importer does not resolve. Such a table is drawn **without** borders and says so, rather than with a guessed grid. |
 | Table row heights | ◐ | — | PowerPoint's height is a *minimum* that grows with content; a Typst track is exactly its stated size, so honouring it would clip. |
-| Charts | ⊘ | 30.7% | The data lives in an embedded workbook part; the chart itself is a live object with no Typst counterpart. Reported by name. |
+| Charts → data table | ◐ | 3.5% | Typst has no chart element and the live data lives in an embedded workbook — but the chart part **caches** every value it last drew (`c:strCache`, `c:numCache`), and that cache is recovered as a `#table` of categories and series. The plot, its axes and its styling are not drawn, and the report says so. Points are read by their `@idx`, since a cache omits empty points entirely and reading positionally would shift every later value against its category. |
 | SmartArt | ⊘ | 14.1% | A diagram *language*, not a shape. |
 | Embedded OLE | ⊘ | 7.7% | A foreign application's document cannot be revived. |
 | Audio / video | — | 1.9% | No Typst media element. |
