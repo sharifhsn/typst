@@ -15,12 +15,9 @@ keywords = { workspace = true }
 ecow = { workspace = true }
 roxmltree = { workspace = true }
 rustc-hash = { workspace = true }
-typst-library = { workspace = true }
 typst-ooxml-core = { workspace = true }
-typst-utils = { workspace = true }
 
 [dev-dependencies]
-typst-ooxml-core = { workspace = true }
 zip = { workspace = true }
 
 [lints]

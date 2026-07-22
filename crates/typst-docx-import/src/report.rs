@@ -1,41 +1,39 @@
 //! Loss/uncertainty reporting — the mirror of `typst-docx`'s `FidelityReport`.
 //! Every construct the importer dropped or approximated is recorded here, so
 //! "usually good, sometimes literal" output is *auditable* rather than silent.
-
-use std::collections::HashSet;
+//!
+//! The two-severity dedup mechanism lives in
+//! [`typst_ooxml_core::report`]; this module keeps only the DOCX-facing
+//! surface — the public `notes` list and the severity-sorted [`summary`].
+//!
+//! [`summary`]: ImportReport::summary
 
 use ecow::EcoString;
+use rustc_hash::FxHashSet;
+use typst_ooxml_core::report::{Entry, dedup_push};
 
-/// A record of one construct the importer could not map cleanly.
-#[derive(Debug, Clone)]
-pub struct Note {
-    pub severity: Severity,
-    /// What construct (e.g. "OMML equation", "content control", "field").
-    pub what: EcoString,
-    /// How it was handled ("emitted as fallback text", "dropped", …).
-    pub detail: EcoString,
-}
+pub use typst_ooxml_core::report::Severity;
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum Severity {
-    /// Mapped, but approximately (a visual/semantic detail was lost).
-    Approximate,
-    /// The content was dropped entirely.
-    Drop,
-}
+/// A record of one construct the importer could not map cleanly: a severity,
+/// what construct (e.g. "OMML equation", "field"), and how it was handled.
+pub type Note = Entry;
 
 #[derive(Debug, Default, Clone)]
 pub struct ImportReport {
     pub notes: Vec<Note>,
-    /// De-dup key (severity, what, detail) for everything already in
-    /// `notes`. A document that repeats the same unmapped construct many
-    /// times over — e.g. 200 `PAGE` fields, or 50 unresolved hyperlinks —
-    /// must not produce one identical summary line per occurrence.
-    seen: HashSet<(Severity, EcoString, EcoString)>,
+    /// De-dup key for everything already in `notes`. A document that repeats
+    /// the same unmapped construct many times over — e.g. 200 `PAGE` fields,
+    /// or 50 unresolved hyperlinks — must not produce one identical summary
+    /// line per occurrence.
+    seen: FxHashSet<Note>,
 }
 
 impl ImportReport {
-    pub fn approximate(&mut self, what: impl Into<EcoString>, detail: impl Into<EcoString>) {
+    pub fn approximate(
+        &mut self,
+        what: impl Into<EcoString>,
+        detail: impl Into<EcoString>,
+    ) {
         self.push(Severity::Approximate, what.into(), detail.into());
     }
 
@@ -44,9 +42,7 @@ impl ImportReport {
     }
 
     fn push(&mut self, severity: Severity, what: EcoString, detail: EcoString) {
-        if self.seen.insert((severity, what.clone(), detail.clone())) {
-            self.notes.push(Note { severity, what, detail });
-        }
+        dedup_push(&mut self.notes, &mut self.seen, Note { severity, what, detail });
     }
 
     /// A one-line-per-note human summary, most severe first.

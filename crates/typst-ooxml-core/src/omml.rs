@@ -2,6 +2,8 @@
 
 use ecow::EcoString;
 use roxmltree::Node;
+
+use crate::xmlread::child;
 use typst_library::foundations::{
     Content, Packed, SequenceElem, StyleChain, StyledElem, SymbolElem,
 };
@@ -142,11 +144,6 @@ fn linearize_omml(node: Node<'_, '_>) -> String {
             .map(linearize_omml)
             .collect(),
     }
-}
-
-fn child<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Option<Node<'a, 'input>> {
-    node.children()
-        .find(|child| child.is_element() && child.tag_name().name() == name)
 }
 
 fn child_text(node: Node<'_, '_>, name: &str) -> String {

@@ -1,36 +1,14 @@
 //! What the import could not carry across, recorded rather than lost.
 //!
-//! Same two-severity shape as
-//! [`typst_docx_import::ImportReport`](../../typst-docx-import/src/report.rs),
-//! and for the same reason: a converter that silently drops a construct is
-//! indistinguishable from one that never saw it, and the difference is the
-//! whole value of the tool. **Approximate** means "mapped, detail lost";
-//! **Drop** means "content did not come across".
-//!
-//! Entries are deduplicated by `(severity, what, detail)`, so a deck with two
-//! hundred animated shapes reports animation once rather than two hundred
-//! times.
+//! The two-severity dedup mechanism lives in [`typst_ooxml_core::report`] (its
+//! doc explains the Approximate/Drop distinction and the dedup); this module
+//! keeps only the PPTX-facing surface — the `entries()` accessor and the
+//! [`Display`](std::fmt::Display) rendering.
 
-use ecow::EcoString;
 use rustc_hash::FxHashSet;
+use typst_ooxml_core::report::dedup_push;
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub enum Severity {
-    /// Mapped, but with a stated difference.
-    Approximate,
-    /// Not carried across at all.
-    Drop,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub struct Entry {
-    pub severity: Severity,
-    /// The construct, named the way a reader would name it ("animation",
-    /// "SmartArt diagram").
-    pub what: EcoString,
-    /// What exactly was lost, and why.
-    pub detail: EcoString,
-}
+pub use typst_ooxml_core::report::{Entry, Severity};
 
 #[derive(Debug, Default, Clone)]
 pub struct ImportReport {
@@ -47,19 +25,24 @@ impl ImportReport {
         self.entries.is_empty()
     }
 
-    pub fn approximate(&mut self, what: impl Into<EcoString>, detail: impl Into<EcoString>) {
+    pub fn approximate(
+        &mut self,
+        what: impl Into<ecow::EcoString>,
+        detail: impl Into<ecow::EcoString>,
+    ) {
         self.push(Severity::Approximate, what.into(), detail.into());
     }
 
-    pub fn drop(&mut self, what: impl Into<EcoString>, detail: impl Into<EcoString>) {
+    pub fn drop(
+        &mut self,
+        what: impl Into<ecow::EcoString>,
+        detail: impl Into<ecow::EcoString>,
+    ) {
         self.push(Severity::Drop, what.into(), detail.into());
     }
 
-    fn push(&mut self, severity: Severity, what: EcoString, detail: EcoString) {
-        let entry = Entry { severity, what, detail };
-        if self.seen.insert(entry.clone()) {
-            self.entries.push(entry);
-        }
+    fn push(&mut self, severity: Severity, what: ecow::EcoString, detail: ecow::EcoString) {
+        dedup_push(&mut self.entries, &mut self.seen, Entry { severity, what, detail });
     }
 }
 

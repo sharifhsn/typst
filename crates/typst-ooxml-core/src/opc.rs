@@ -209,6 +209,83 @@ impl<'a> Reader<'a> {
     }
 }
 
+// --- Relationship reading ---------------------------------------------------
+
+/// One relationship parsed from a `.rels` part, verbatim.
+#[derive(Clone, Debug)]
+pub struct RelEntry {
+    pub id: EcoString,
+    /// The full relationship `Type` URI, unmodified.
+    pub type_uri: EcoString,
+    /// The raw `Target`, exactly as written — relative, possibly with `../`,
+    /// and *not* resolved. Apply [`resolve_target`] when a package-absolute
+    /// part name is needed.
+    pub target: EcoString,
+    /// `TargetMode="External"`.
+    pub external: bool,
+}
+
+/// The `.rels` part name for a source part: `word/document.xml` →
+/// `word/_rels/document.xml.rels`; a root-level `foo` → `_rels/foo.rels`. The
+/// OPC convention every part-owned relationships part follows, and the inverse
+/// the write side uses when it emits one.
+pub fn rels_part_name(source_part: &str) -> String {
+    match source_part.rsplit_once('/') {
+        Some((dir, file)) => format!("{dir}/_rels/{file}.rels"),
+        None => format!("_rels/{source_part}.rels"),
+    }
+}
+
+/// Every `<Relationship>` found beneath `root` (a parsed `.rels` document's
+/// root node), in document order. Reads by local name; targets come back raw,
+/// unresolved (see [`RelEntry::target`]).
+pub fn rel_entries(root: roxmltree::Node) -> Vec<RelEntry> {
+    root.descendants()
+        .filter(|n| crate::xmlread::is_el(*n, "Relationship"))
+        .filter_map(|node| {
+            let id = crate::xmlread::attr(node, "Id")?;
+            let target = crate::xmlread::attr(node, "Target")?;
+            let type_uri = crate::xmlread::attr(node, "Type").unwrap_or("");
+            let external =
+                crate::xmlread::attr(node, "TargetMode") == Some("External");
+            Some(RelEntry {
+                id: id.into(),
+                type_uri: type_uri.into(),
+                target: target.into(),
+                external,
+            })
+        })
+        .collect()
+}
+
+/// Resolve a relationship `target` against the `source_part` that declared it,
+/// including `../` segments — OOXML targets are relative and PowerPoint uses
+/// `../` for nearly every cross-directory reference. A leading `/` is treated
+/// as package-absolute. This is the lenient read-side resolver (it skips `.`
+/// and empty segments rather than rejecting them); the strict validating
+/// resolver used when *writing* a package is separate.
+pub fn resolve_target(source_part: &str, target: &str) -> EcoString {
+    if target.starts_with('/') {
+        return EcoString::from(target.trim_start_matches('/'));
+    }
+    let base = source_part.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+    let mut segments: Vec<&str> = if base.is_empty() {
+        Vec::new()
+    } else {
+        base.split('/').collect()
+    };
+    for seg in target.split('/') {
+        match seg {
+            "." | "" => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    EcoString::from(segments.join("/"))
+}
+
 // --- Write side -------------------------------------------------------------
 
 /// Relationship target mode.
@@ -218,9 +295,9 @@ pub enum RelMode {
     External,
 }
 
-/// One relationship entry.
+/// One relationship record held by a [`Rels`] set as it is built for writing.
 #[derive(Clone)]
-struct RelEntry {
+struct RelRecord {
     id: EcoString,
     type_uri: EcoString,
     target: EcoString,
@@ -233,7 +310,7 @@ struct RelEntry {
 #[derive(Clone)]
 pub struct Rels {
     next: u32,
-    entries: Vec<RelEntry>,
+    entries: Vec<RelRecord>,
     by_target: FxHashMap<EcoString, EcoString>,
 }
 
@@ -255,7 +332,7 @@ impl Rels {
         }
         let id: EcoString = eco_format!("rId{}", self.next);
         self.next += 1;
-        self.entries.push(RelEntry {
+        self.entries.push(RelRecord {
             id: id.clone(),
             type_uri: type_uri.into(),
             target: target.into(),
@@ -490,7 +567,7 @@ impl Package {
         if !valid_part_name(source_part) {
             return Err(PackageError::InvalidPartName(source_part.into()));
         }
-        let rels_name = relationship_part_name(source_part);
+        let rels_name = rels_part_name(source_part);
         self.add_xml(&rels_name, CT_RELS, rels.to_xml());
         self.relationship_sets.push((source_part.into(), rels.clone()));
         Ok(())
@@ -665,13 +742,6 @@ impl Package {
             }
         }
         Ok(())
-    }
-}
-
-fn relationship_part_name(source_part: &str) -> String {
-    match source_part.rsplit_once('/') {
-        Some((dir, file)) => format!("{dir}/_rels/{file}.rels"),
-        None => format!("_rels/{source_part}.rels"),
     }
 }
 

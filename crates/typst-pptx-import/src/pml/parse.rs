@@ -12,7 +12,7 @@
 
 use ecow::{eco_format, EcoString};
 use roxmltree::{Document, Node};
-use typst_ooxml_core::opc::Reader;
+use typst_ooxml_core::opc::{self, Reader, rels_part_name, resolve_target};
 
 use super::model::*;
 use crate::report::ImportReport;
@@ -119,20 +119,15 @@ impl<'a> Parser<'a> {
         let rels_name = rels_part_name(part);
         let Ok(Some(xml)) = self.reader.xml_part(&rels_name) else { return };
         let Ok(doc) = Document::parse(&xml) else { return };
-        for rel in doc.root_element().children().filter(|n| is_el(*n, "Relationship")) {
-            let (Some(id), Some(target)) = (attr(rel, "Id"), attr(rel, "Target")) else {
-                continue;
-            };
-            let kind = attr(rel, "Type").unwrap_or("");
-            let external = attr(rel, "TargetMode") == Some("External");
-            let resolved = if external {
-                EcoString::from(target)
+        for rel in opc::rel_entries(doc.root()) {
+            let resolved = if rel.external {
+                rel.target.clone()
             } else {
-                resolve_target(part, target)
+                resolve_target(part, &rel.target)
             };
-            let kind = kind.rsplit('/').next().unwrap_or(kind);
+            let kind = rel.type_uri.rsplit('/').next().unwrap_or(&rel.type_uri);
             self.rels.push((
-                eco_format!("{part}!{id}"),
+                eco_format!("{part}!{}", rel.id),
                 EcoString::from(kind),
                 resolved,
             ));
@@ -611,25 +606,13 @@ fn parse_xml(text: &str) -> Result<Document<'_>, crate::ImportError> {
     Document::parse(text).map_err(|e| crate::ImportError::Xml(eco_format!("{e}")))
 }
 
-pub fn local<'i>(node: Node<'_, 'i>) -> &'i str {
-    node.tag_name().name()
-}
-
-pub fn is_el(node: Node, name: &str) -> bool {
-    node.is_element() && local(node) == name
-}
-
-pub fn child<'a, 'i>(node: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
-    node.children().find(|n| is_el(*n, name))
-}
+// The local-name XML read helpers are shared with the DOCX importer; re-export
+// them so the rest of this crate keeps referring to `crate::pml::parse::*`.
+pub use typst_ooxml_core::xmlread::{attr, child, is_el, local};
 
 /// A descendant search, for the elements OOXML buries a level or two down.
 pub fn descend<'a, 'i>(node: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
     node.descendants().find(|n| is_el(*n, name))
-}
-
-pub fn attr<'a>(node: Node<'a, '_>, name: &str) -> Option<&'a str> {
-    node.attributes().find(|a| a.name() == name).map(|a| a.value())
 }
 
 /// `r:id` / `r:embed`, whichever the element uses.
@@ -907,39 +890,6 @@ fn notes_text(root: Node) -> EcoString {
         }
     }
     out
-}
-
-/// `ppt/slides/slide1.xml` → `ppt/slides/_rels/slide1.xml.rels`.
-fn rels_part_name(part: &str) -> EcoString {
-    match part.rsplit_once('/') {
-        Some((dir, file)) => eco_format!("{dir}/_rels/{file}.rels"),
-        None => eco_format!("_rels/{part}.rels"),
-    }
-}
-
-/// Resolve a relationship target against the part that declared it, including
-/// `../` segments — OOXML targets are relative and PowerPoint uses `../` for
-/// nearly every cross-directory reference.
-fn resolve_target(part: &str, target: &str) -> EcoString {
-    if target.starts_with('/') {
-        return EcoString::from(target.trim_start_matches('/'));
-    }
-    let base = part.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-    let mut segments: Vec<&str> = if base.is_empty() {
-        Vec::new()
-    } else {
-        base.split('/').collect()
-    };
-    for seg in target.split('/') {
-        match seg {
-            "." | "" => {}
-            ".." => {
-                segments.pop();
-            }
-            other => segments.push(other),
-        }
-    }
-    EcoString::from(segments.join("/"))
 }
 
 #[cfg(test)]

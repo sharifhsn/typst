@@ -120,34 +120,24 @@ fn cell(text: EcoString) -> tdoc::Cell {
 /// point entirely, and reading positionally would then shift every later value
 /// up a row against its category.
 fn cache_values(node: roxmltree::Node) -> Vec<Option<EcoString>> {
-    // A cache index is an attacker-controlled integer that this function
-    // resizes a vector to. `idx="4000000000"` would ask for four billion
-    // entries from a few bytes of XML — the same shape of unguarded
-    // allocation the OPC reader already caps elsewhere. No real chart has
-    // more points than a spreadsheet has rows.
-    const MAX_POINTS: usize = 1 << 20;
-
-    let mut out: Vec<Option<EcoString>> = Vec::new();
+    // The first cache that yields any point wins; a `c:tx`/`c:cat`/`c:val` can
+    // hold both a `*Ref` (with its cache) and a `*Lit`, and reading past the
+    // one that has data would double-count.
     for cache in node
         .descendants()
         .filter(|n| matches!(local(*n), "strCache" | "numCache" | "strLit" | "numLit"))
     {
-        for pt in cache.children().filter(|n| is_el(*n, "pt")) {
-            let Some(index) = attr(pt, "idx").and_then(|v| v.parse::<usize>().ok()) else {
-                continue;
-            };
-            if index >= MAX_POINTS {
-                continue;
-            }
-            let value = child(pt, "v").and_then(|v| v.text()).unwrap_or("");
-            if out.len() <= index {
-                out.resize(index + 1, None);
-            }
-            out[index] = Some(EcoString::from(value.trim()));
-        }
+        let out = typst_ooxml_core::chart::indexed_points(
+            cache.children().filter(|n| is_el(*n, "pt")),
+            |pt| attr(pt, "idx").and_then(|v| v.parse::<usize>().ok()),
+            |pt| {
+                let value = child(pt, "v").and_then(|v| v.text()).unwrap_or("");
+                EcoString::from(value.trim())
+            },
+        );
         if !out.is_empty() {
-            break;
+            return out;
         }
     }
-    out
+    Vec::new()
 }

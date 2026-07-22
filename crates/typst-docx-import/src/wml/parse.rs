@@ -11,7 +11,9 @@
 use ecow::{EcoString, eco_format};
 use roxmltree::{Document, Node, TextPos};
 use rustc_hash::{FxHashMap, FxHashSet};
-use typst_ooxml_core::{ns, opc::Reader};
+use typst_ooxml_core::opc::{self, Reader};
+use typst_ooxml_core::xmlread::{attr, attr_ns, is_el as is_element};
+use typst_ooxml_core::ns;
 
 use crate::ImportError;
 use crate::report::ImportReport;
@@ -590,21 +592,15 @@ fn parse_rels_for(
     part_name: &str,
     report: &mut ImportReport,
 ) -> Vec<(EcoString, Relationship)> {
-    let rels_name = match part_name.rsplit_once('/') {
-        Some((dir, file)) => format!("{dir}/_rels/{file}.rels"),
-        None => format!("_rels/{part_name}.rels"),
-    };
+    let rels_name = opc::rels_part_name(part_name);
     let Some(xml) = read_optional_part(reader, &rels_name, &rels_name, report) else {
         return Vec::new();
     };
     parse_xml(&xml, &rels_name, report, Vec::new(), |document| {
-        document
-            .descendants()
-            .filter(|n| is_element(*n, "Relationship"))
-            .filter_map(|node| {
-                let (id, target) = (attr(node, "Id")?, attr(node, "Target")?);
-                let external = attr(node, "TargetMode") == Some("External");
-                Some((EcoString::from(id), Relationship { target: target.into(), external }))
+        opc::rel_entries(document.root())
+            .into_iter()
+            .map(|rel| {
+                (rel.id, Relationship { target: rel.target, external: rel.external })
             })
             .collect()
     })
@@ -2926,23 +2922,17 @@ fn collect_indexed_pts<'a>(
     container: Node<'a, 'a>,
     text_of: impl Fn(Node<'a, 'a>) -> Option<EcoString>,
 ) -> Vec<EcoString> {
-    let mut points: Vec<(usize, EcoString)> = Vec::new();
-    let mut max_idx = 0usize;
-    for pt in container.descendants().filter(|n| is_element(*n, "pt")) {
-        let Some(idx) = attr(pt, "idx").and_then(|s| s.parse::<usize>().ok()) else {
-            continue;
-        };
-        max_idx = max_idx.max(idx);
-        points.push((idx, text_of(pt).unwrap_or_default()));
-    }
-    if points.is_empty() {
-        return Vec::new();
-    }
-    let mut out = vec![EcoString::new(); max_idx + 1];
-    for (idx, text) in points {
-        out[idx] = text;
-    }
-    out
+    // The shared reader caps `@idx` (an attacker-controlled allocation size);
+    // it hands back gaps as `None`, which a Word cached list renders as the
+    // empty string it always has.
+    typst_ooxml_core::chart::indexed_points(
+        container.descendants().filter(|n| is_element(*n, "pt")),
+        |pt| attr(pt, "idx").and_then(|s| s.parse::<usize>().ok()),
+        |pt| text_of(pt).unwrap_or_default(),
+    )
+    .into_iter()
+    .map(Option::unwrap_or_default)
+    .collect()
 }
 
 /// A classic chart's `c:pt`: text lives on a nested `c:v` child.
@@ -3207,27 +3197,11 @@ fn parse_numbering(document: Document) -> Numbering {
 }
 
 // --- Small XML helpers ---------------------------------------------------------
-
-fn is_element(node: Node, name: &str) -> bool {
-    node.is_element() && node.tag_name().name() == name
-}
-
-/// Attribute lookup by local name only — namespace prefixes are a red
-/// herring across real-world OOXML producers, and none of the local names
-/// this importer reads collide across namespaces on the same element (see
-/// [`attr_ns`] for the handful that could).
-fn attr<'a>(node: Node<'a, 'a>, name: &str) -> Option<&'a str> {
-    node.attributes().find(|a| a.name() == name).map(|a| a.value())
-}
-
-/// Namespace-scoped attribute lookup, for `r:id`/`r:embed` — these share a
-/// local name with unrelated attributes in other namespaces, so a plain
-/// [`attr`] lookup isn't safe for them.
-fn attr_ns<'a>(node: Node<'a, 'a>, namespace: &str, name: &str) -> Option<&'a str> {
-    node.attributes()
-        .find(|a| a.namespace() == Some(namespace) && a.name() == name)
-        .map(|a| a.value())
-}
+//
+// The local-name element/attribute readers (`is_element` — the shared
+// `is_el` under this crate's historical name — plus `attr` and `attr_ns`) are
+// shared with the other OOXML importers and now live in
+// [`typst_ooxml_core::xmlread`]; they are imported at the top of this module.
 
 fn parse_i64(s: &str) -> Option<i64> {
     s.parse().ok()

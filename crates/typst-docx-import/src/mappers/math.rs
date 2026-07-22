@@ -45,6 +45,7 @@
 
 use ecow::{eco_format, EcoString};
 use roxmltree::Node;
+use typst_ooxml_core::xmlread::{child, children, local};
 
 use crate::report::ImportReport;
 use crate::tdoc::Inline;
@@ -1175,21 +1176,6 @@ fn convert_phant(node: Node, report: &mut ImportReport, depth: usize) -> EcoStri
 // ===========================================================================
 // Small helpers.
 // ===========================================================================
-
-fn local<'a>(node: Node<'a, 'a>) -> &'a str {
-    node.tag_name().name()
-}
-
-fn child<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Option<Node<'a, 'input>> {
-    node.children().find(|n| n.is_element() && local(*n) == name)
-}
-
-fn children<'a, 'input>(
-    node: Node<'a, 'input>,
-    name: &'static str,
-) -> impl Iterator<Item = Node<'a, 'input>> {
-    node.children().filter(move |n| n.is_element() && local(*n) == name)
-}
 
 /// The first element child of `node` if it is the *sole* element child and
 /// has local name `name` — used to detect "a delimiter whose only content is

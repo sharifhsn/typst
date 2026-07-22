@@ -53,3 +53,9 @@ pub fn eighth_point_to_pt(eighth_pt: f64) -> f64 {
 pub fn emu_to_abs(emu: f64) -> Abs {
     Abs::pt(emu / EMU_PER_PT)
 }
+
+/// EMU → points, in plain `f64` for callers that stay in point space rather
+/// than [`Abs`]. Same conversion as [`emu_to_abs`], without the type.
+pub fn emu_to_pt(emu: f64) -> f64 {
+    emu / EMU_PER_PT
+}

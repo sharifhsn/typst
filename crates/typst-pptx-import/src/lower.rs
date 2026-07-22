@@ -20,11 +20,12 @@ use crate::report::ImportReport;
 use crate::resolve::{color, inherit};
 use crate::tdoc;
 
-/// EMU per point. 914400 per inch, 72 points per inch.
-pub const EMU_PER_PT: f64 = 12700.0;
-
+/// EMU (English Metric Units) → points: 914400 EMU per inch, 72 points per
+/// inch. The ratio and the conversion are shared with the exporters in
+/// [`typst_ooxml_core::units`]; this importer deliberately stays in plain
+/// `f64` points rather than `Abs`, so it takes the untyped helper.
 pub fn emu(value: Emu) -> f64 {
-    value as f64 / EMU_PER_PT
+    typst_ooxml_core::units::emu_to_pt(value as f64)
 }
 
 /// Two lifetimes rather than one: the package bytes the parser borrows

@@ -16,7 +16,6 @@ ecow = { workspace = true }
 roxmltree = { workspace = true }
 rustc-hash = { workspace = true }
 typst-ooxml-core = { workspace = true }
-typst-utils = { workspace = true }
 
 [dev-dependencies]
 zip = { workspace = true }
