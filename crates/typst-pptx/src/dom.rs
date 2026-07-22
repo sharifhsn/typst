@@ -21,6 +21,9 @@ pub enum SlideShape {
     TableBox(TableBox),
     Pic(Pic),
     Geom(GeomShape),
+    // Complete native group-shape path (see `write_group_shape`) that no slide
+    // walker constructs yet; kept until a caller wires it up.
+    #[allow(dead_code)]
     Group(GroupShape),
     LinkOverlay(LinkOverlay),
 }
@@ -286,7 +289,6 @@ pub struct GroupShape {
 /// A path geometry.
 pub enum PathGeom {
     Rect,
-    Ellipse,
     Custom(Vec<PathSegment>),
 }
 

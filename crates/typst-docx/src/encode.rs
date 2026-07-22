@@ -300,7 +300,7 @@ fn docx_impl(
         package.add_media(
             &media.part_name,
             &media.ext,
-            media_content_type(&media.ext),
+            typst_ooxml_core::media::image_content_type(&media.ext),
             media.bytes.clone(),
         );
     }
@@ -412,11 +412,6 @@ fn docx_impl(
 /// document's own relationship table.
 fn clone_rels(src: &Rels) -> Rels {
     src.clone()
-}
-
-/// Picks the content type for a media extension.
-fn media_content_type(ext: &str) -> &'static str {
-    typst_ooxml_core::media::image_content_type(ext)
 }
 
 // ---------------------------------------------------------------------------

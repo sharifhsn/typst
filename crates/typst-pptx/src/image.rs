@@ -21,7 +21,6 @@ pub(crate) struct EmbeddedImage {
 /// PNG/JPEG/GIF exchange rasters are embedded verbatim. WebP, raw-pixel rasters,
 /// and PDF are rendered at the supplied display size and embedded as PNG. SVG
 /// embeds both a native SVG media part and a rendered PNG fallback.
-#[allow(dead_code)]
 pub(crate) fn embed_image(
     ctx: &mut SlideCtx,
     image: &Image,
@@ -101,7 +100,6 @@ pub(crate) fn embed_original_image(
 ///
 /// The returned offset is relative to the input frame's origin and includes both
 /// the geometric ink rect offset and any subsequent transparent-pixel crop.
-#[allow(dead_code)]
 pub(crate) fn raster_fallback(
     ctx: &mut SlideCtx,
     frame: Frame,
@@ -112,18 +110,6 @@ pub(crate) fn raster_fallback(
     )?;
     let media = ctx.add_media(&raster.png, "png");
     Some((media, raster.offset, raster.size))
-}
-
-/// Rasterize a single item by wrapping it in a soft frame of the supplied size.
-#[allow(dead_code)]
-pub(crate) fn raster_fallback_item(
-    ctx: &mut SlideCtx,
-    item: FrameItem,
-    size: Size,
-) -> Option<(MediaId, Point, Size)> {
-    let mut frame = Frame::soft(size);
-    frame.push(Point::zero(), item);
-    raster_fallback(ctx, frame)
 }
 
 /// Whether a group's clip provably clips nothing, so its children can be

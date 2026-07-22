@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::dom::{FillSpec, GeomKind, GeomShape, PathGeom, PicGeom, SlideCtx};
 use crate::report::{DecisionReason, LossSet, Representation};
 

@@ -14,7 +14,6 @@
 //! deterministic, schema-strict OPC package that opens without repair in
 //! Microsoft PowerPoint and LibreOffice Impress.
 
-#[allow(dead_code)]
 mod dom;
 mod encode;
 mod image;
@@ -24,7 +23,6 @@ mod shape;
 mod slide;
 mod table;
 mod text;
-#[allow(dead_code)]
 mod xml;
 
 use typst_layout::PagedDocument;

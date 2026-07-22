@@ -842,7 +842,6 @@ fn write_xfrm_with_flips(
 fn write_geom(w: &mut XmlWriter, geom: &PathGeom, w_emu: i64, h_emu: i64) {
     match geom {
         PathGeom::Rect => dml::write_prst_geom(w, "rect"),
-        PathGeom::Ellipse => dml::write_prst_geom(w, "ellipse"),
         PathGeom::Custom(segments) => {
             dml::write_custom_geom(w, segments, w_emu.max(1), h_emu.max(1))
         }

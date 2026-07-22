@@ -215,7 +215,7 @@ pub fn write(
         package.add_media(
             &media.part_name,
             &media.ext,
-            media_content_type(&media.ext),
+            typst_ooxml_core::media::image_content_type(&media.ext),
             media.bytes.clone(),
         );
     }
@@ -930,10 +930,6 @@ fn app_xml(slides: usize, notes: usize) -> String {
     w.elem_text("AppVersion", "16.0000");
     w.close();
     w.finish()
-}
-
-fn media_content_type(ext: &str) -> &'static str {
-    typst_ooxml_core::media::image_content_type(ext)
 }
 
 struct PackageSlideRels<'a> {
