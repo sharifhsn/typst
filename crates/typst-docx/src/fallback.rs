@@ -668,7 +668,15 @@ fn positioned_text_to_string(mut items: Vec<(Point, EcoString, Abs, Abs)>) -> St
         {
             output.push('\n');
         } else if let Some(x_end) = last_x_end
-            && pos.x - x_end > size * 0.25
+            // Two runs continue the same word only when the second starts
+            // exactly where the first ended. A *gap* is the ordinary word
+            // separator; an OVERLAP (the second run starting back inside the
+            // first) means they are independent pieces of text that merely
+            // share a line — separately placed labels, or table cells whose
+            // content outgrew a squeezed column. Gluing those produced
+            // `BoostHandlingClimbStallSpeed` from five header cells, a word no
+            // reader or search can find. Neither direction may join silently.
+            && (pos.x - x_end).abs() > size * 0.25
             && !output.ends_with(char::is_whitespace)
         {
             output.push(' ');
@@ -703,8 +711,45 @@ fn frame_to_placed_text(frame: &Frame) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::slice_png_tiles;
+    use super::{Abs, EcoString, Point, positioned_text_to_string, slice_png_tiles};
     use typst_syntax::Span;
+
+    fn run(x: f64, y: f64, text: &str, width: f64) -> (Point, EcoString, Abs, Abs) {
+        (
+            Point::new(Abs::pt(x), Abs::pt(y)),
+            text.into(),
+            Abs::pt(10.0),
+            Abs::pt(width),
+        )
+    }
+
+    #[test]
+    fn recovered_text_joins_only_runs_that_continue_each_other() {
+        // Exactly abutting runs are one word (a formatting change mid-word);
+        // a gap is a space. Both were already true.
+        assert_eq!(
+            positioned_text_to_string(vec![
+                run(0.0, 0.0, "Job", 15.0),
+                run(15.0, 0.0, "ber", 15.0),
+                run(60.0, 0.0, "Tagline", 30.0),
+            ]),
+            "Jobber Tagline"
+        );
+    }
+
+    #[test]
+    fn recovered_text_never_glues_overlapping_runs() {
+        // Independent runs that overlap — separately placed labels, or cells
+        // whose text outgrew a squeezed column — are not a continuation of each
+        // other. Gluing them made `BoostHandling`, a word nothing can find.
+        assert_eq!(
+            positioned_text_to_string(vec![
+                run(0.0, 0.0, "Boost", 25.0),
+                run(10.0, 0.0, "Handling", 40.0),
+            ]),
+            "Boost Handling"
+        );
+    }
 
     #[test]
     fn tall_raster_tiles_prefer_transparent_seams_and_preserve_rows() {

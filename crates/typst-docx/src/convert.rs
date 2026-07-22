@@ -894,7 +894,7 @@ pub(crate) fn body_is_wrap_figure(body: &Content) -> bool {
 /// content value, returning whatever is structurally underneath. Used to see
 /// through the styling/joining Typst's own realization wraps around a bare
 /// expression so the *actual* element can be identified.
-fn peel_wrappers(mut body: &Content) -> &Content {
+pub(crate) fn peel_wrappers(mut body: &Content) -> &Content {
     use typst_library::foundations::{SequenceElem, StyledElem};
     use typst_library::introspection::TagElem;
     use typst_library::model::ParbreakElem;

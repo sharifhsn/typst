@@ -6,7 +6,8 @@
 //!   one after another → emit each child's blocks in stacking order.
 //! - A **horizontal** stack (`dir: ltr`/`rtl`) places its children side by side
 //!   → a single borderless table row, one cell per child (mirroring how a
-//!   layout `#grid` lowers to a `w:tbl`).
+//!   layout `#grid` lowers to a `w:tbl`). A child that states its own width
+//!   gets a track of exactly that width; the rest share what is left.
 //!
 //! Fixed inter-child spacing is structural layout information: vertical gaps
 //! become [`Block::FlowSpace`] and horizontal gaps become borderless table
@@ -16,7 +17,7 @@
 
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Content, Packed, Resolve, StyleChain};
-use typst_library::layout::{Axis, Spacing as StackSpacing, StackChild, StackElem};
+use typst_library::layout::{Abs, Axis, Spacing as StackSpacing, StackChild, StackElem};
 
 use crate::ctx::DocxCtx;
 use crate::dom::{
@@ -27,6 +28,12 @@ use crate::report::{DecisionReason, ExportSource, LossSet, Representation};
 
 enum HorizontalItem<'a> {
     Body(&'a Content),
+    /// A child that states its own width (`box(width: 59%, ..)`). Its track is
+    /// that width rather than an equal share, and — crucially — it is lowered
+    /// against the *stack's* width budget, not the track's: the child resolves
+    /// its own ratio against the ambient budget exactly as it does everywhere
+    /// else, so narrowing first would resolve the same percentage twice.
+    SizedBody(&'a Content, i32),
     FixedSpace(i32),
     FlexibleSpace(f64),
 }
@@ -132,13 +139,23 @@ fn horizontal_stack(
                     approximate |=
                         push_horizontal_spacing(&mut items, spacing, styles, available);
                 }
-                items.push(HorizontalItem::Body(body));
+                items.push(
+                    match explicit_child_width(body, styles, ctx.available_width) {
+                        Some(width) => HorizontalItem::SizedBody(
+                            body,
+                            crate::props::abs_to_twip(width).clamp(1, available.max(1)),
+                        ),
+                        None => HorizontalItem::Body(body),
+                    },
+                );
                 deferred = default_spacing;
             }
         }
     }
 
-    if !items.iter().any(|item| matches!(item, HorizontalItem::Body(_))) {
+    if !items.iter().any(|item| {
+        matches!(item, HorizontalItem::Body(_) | HorizontalItem::SizedBody(..))
+    }) {
         return Ok(Vec::new());
     }
 
@@ -149,6 +166,11 @@ fn horizontal_stack(
             HorizontalItem::Body(body) => {
                 let mut blocks =
                     ctx.with_available_width(col_w, |ctx| ctx.blocks(body, styles))?;
+                ensure_ends_in_para(&mut blocks);
+                cells.push(cell(col_w, blocks));
+            }
+            HorizontalItem::SizedBody(body, _) => {
+                let mut blocks = ctx.blocks(body, styles)?;
                 ensure_ends_in_para(&mut blocks);
                 cells.push(cell(col_w, blocks));
             }
@@ -201,23 +223,25 @@ fn push_horizontal_spacing<'a>(
 }
 
 fn allocate_horizontal_widths(items: &[HorizontalItem<'_>], available: i32) -> Vec<i32> {
-    let fixed: i32 = items
-        .iter()
-        .filter_map(|item| match item {
+    /// A track whose width the item itself dictates, so the leftover budget is
+    /// shared only among the tracks that have no width of their own.
+    fn stated(item: &HorizontalItem<'_>) -> Option<i32> {
+        match item {
             HorizontalItem::FixedSpace(width) => Some(*width),
+            HorizontalItem::SizedBody(_, width) => Some(*width),
             _ => None,
-        })
-        .sum();
-    let flexible_count = items
-        .iter()
-        .filter(|item| !matches!(item, HorizontalItem::FixedSpace(_)))
-        .count() as i32;
+        }
+    }
+
+    let fixed: i32 = items.iter().filter_map(stated).sum();
+    let flexible_count =
+        items.iter().filter(|item| stated(item).is_none()).count() as i32;
     let weight: f64 = items
         .iter()
         .map(|item| match item {
             HorizontalItem::Body(_) => 1.0,
             HorizontalItem::FlexibleSpace(weight) => *weight,
-            HorizontalItem::FixedSpace(_) => 0.0,
+            HorizontalItem::FixedSpace(_) | HorizontalItem::SizedBody(..) => 0.0,
         })
         .sum();
     let target = available.max(fixed + flexible_count.max(1));
@@ -225,7 +249,9 @@ fn allocate_horizontal_widths(items: &[HorizontalItem<'_>], available: i32) -> V
     let mut widths: Vec<i32> = items
         .iter()
         .map(|item| match item {
-            HorizontalItem::FixedSpace(width) => *width,
+            HorizontalItem::FixedSpace(width) | HorizontalItem::SizedBody(_, width) => {
+                *width
+            }
             HorizontalItem::Body(_) => {
                 ((distributable as f64 / weight.max(1.0)).round() as i32).max(1)
             }
@@ -236,14 +262,47 @@ fn allocate_horizontal_widths(items: &[HorizontalItem<'_>], available: i32) -> V
         })
         .collect();
 
+    // Rounding slack goes to the last track that has no width of its own. When
+    // every track states one, the row is exactly as wide as its children asked
+    // to be — stretching it to the page would misplace them.
     let delta = target - widths.iter().sum::<i32>();
-    if let Some(index) = items
-        .iter()
-        .rposition(|item| !matches!(item, HorizontalItem::FixedSpace(_)))
-    {
+    if let Some(index) = items.iter().rposition(|item| stated(item).is_none()) {
         widths[index] = (widths[index] + delta).max(1);
     }
     widths
+}
+
+/// The width a stack child states for itself, resolved against the stack's own
+/// budget — the same base the child would resolve it against if it were lowered
+/// in place. `None` when the child takes its width from its content.
+fn explicit_child_width(
+    body: &Content,
+    styles: StyleChain,
+    available: Abs,
+) -> Option<Abs> {
+    use typst_library::foundations::Smart;
+    use typst_library::layout::{BlockElem, BoxElem, Sizing};
+
+    let child = crate::convert::peel_wrappers(body);
+    let rel = if let Some(boxed) = child.to_packed::<BoxElem>() {
+        match boxed.width.get(styles) {
+            Sizing::Rel(rel) => rel,
+            Sizing::Auto | Sizing::Fr(_) => return None,
+        }
+    } else if let Some(block) = child.to_packed::<BlockElem>() {
+        match block.width.get(styles) {
+            Smart::Custom(rel) => rel,
+            Smart::Auto => return None,
+        }
+    } else {
+        return None;
+    };
+
+    let width = rel.resolve(styles).relative_to(available);
+    // A child wider than the whole stack cannot get an honest track; fall back
+    // to an even share rather than emitting a row wider than the page.
+    (width.to_pt().is_finite() && width > Abs::zero() && width <= available)
+        .then_some(width)
 }
 
 fn record_flexible_spacing(elem: &Packed<StackElem>, ctx: &mut DocxCtx) {

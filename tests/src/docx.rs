@@ -3194,6 +3194,63 @@ fn horizontal_stack_fractional_spacing_is_retained_and_reported() {
 }
 
 #[test]
+fn horizontal_stack_child_keeps_its_own_stated_width() {
+    // A child that states its own width (`box(width: 59%, ..)`, the two-panel
+    // idiom) must get a track of exactly that width instead of an equal share —
+    // and must be lowered against the STACK's budget, not the track's. Narrowing
+    // first resolves the same percentage twice: 59% of 59% squeezed the panel to
+    // a third of its size, and the content inside it then overflowed its own
+    // columns (see `sized_stack_child_does_not_merge_adjacent_cell_words`).
+    let p = parts(
+        "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+         #stack(dir: ltr, spacing: 1%, box(width: 59%)[L], box(width: 40%)[R])",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    let widths = grid_widths(tables[0]);
+    assert_eq!(widths.len(), 3, "body, fixed gap, body");
+    // 100mm text width = 5669 twips.
+    assert!((widths[0] - 3345).abs() <= 4, "59% track: {widths:?}");
+    assert!((widths[1] - 57).abs() <= 4, "1% gap: {widths:?}");
+    assert!((widths[2] - 2268).abs() <= 4, "40% track: {widths:?}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn sized_stack_child_does_not_merge_adjacent_cell_words() {
+    // Recovered text from a rasterized region is reading-order reconstruction:
+    // separate pieces of text that merely share a line must stay separate words.
+    // A squeezed table used to hand the reconstruction overlapping runs, which it
+    // glued into `BoostHandlingClimbStallSpeed` — a token no reader or search can
+    // find, and nothing reported it. Assert the general property, not the layout:
+    // every header cell survives as its own word.
+    let src = "#set page(width: 150mm, height: 100mm, margin: 10mm)\n\
+               #let t = table(\n\
+                 columns: 6,\n\
+                 align: center,\n\
+                 [], [Boost], [Handling], [Climb], [Stall], [Speed],\n\
+                 [Fuel], [2], [100], [5], [6], [14],\n\
+               )\n\
+               #stack(dir: ltr, spacing: 1%, box(width: 59%, t), box(width: 40%)[R])";
+    let p = parts(src);
+    let doc = &p["word/document.xml"];
+    for (left, right) in [
+        ("Boost", "Handling"),
+        ("Handling", "Climb"),
+        ("Climb", "Stall"),
+        ("Stall", "Speed"),
+    ] {
+        assert!(
+            !doc.contains(&format!("{left}{right}")),
+            "{left}/{right} come from different cells and must not merge into one word"
+        );
+    }
+    for word in ["Boost", "Handling", "Climb", "Stall", "Speed"] {
+        assert!(doc.contains(word), "{word} reaches the package at all");
+    }
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn layout_closure_is_invoked_and_extracted() {
     // `#layout(size => ..)` is the responsive-CV/poster idiom. Its closure is
     // invoked with the page's content size and the result lowered natively, so
