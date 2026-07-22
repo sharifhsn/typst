@@ -887,11 +887,47 @@ impl From<Content> for GridCell {
     }
 }
 
+/// The grid resolver's final per-cell presentation.
+///
+/// The resolver computes each of these with the cell's real style chain, with
+/// table-level args, `#set` rules on the cell, and `Celled` funcs/arrays all
+/// already folded in. Carrying them on the region tag means post-layout
+/// consumers (e.g. the PPTX exporter) never have to re-derive them under a
+/// synthetic style chain, which cannot see the cell's font size.
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub struct ResolvedCellStyle {
+    /// The final fill, already reduced to a single paint.
+    pub fill: Option<Paint>,
+    /// The final stroke, already resolved to absolute units on every side.
+    pub stroke: Sides<Option<Arc<Stroke<Abs>>>>,
+    /// The final alignment. `auto` means "inherit the outer alignment",
+    /// exactly as the resolver left it.
+    pub align: Smart<Alignment>,
+    /// The final inset. Font-relative (`em`) lengths are already resolved
+    /// against the cell's real style chain, so a consumer only needs to apply
+    /// the ratio component against the physical cell size.
+    pub inset: Smart<Sides<Option<Rel<Abs>>>>,
+}
+
+impl Default for ResolvedCellStyle {
+    fn default() -> Self {
+        Self {
+            fill: None,
+            stroke: Sides::splat(None),
+            align: Smart::Auto,
+            inset: Smart::Auto,
+        }
+    }
+}
+
 /// Internal post-layout marker for native table export.
 ///
 /// The grid/table layouter emits this as a hidden tag around the physical cell
 /// region. It is intentionally non-introspectable; consumers that do not know
 /// about it simply ignore the tag.
+///
+/// Beyond the cell's geometry, this carries the resolver's final per-cell
+/// presentation in [`ResolvedCellStyle`].
 #[elem(Construct, Unqueriable, Locatable)]
 pub struct GridCellRegion {
     /// The resolved `GridCell` or `TableCell` body.
@@ -928,6 +964,15 @@ pub struct GridCellRegion {
     #[required]
     #[internal]
     pub height: Abs,
+
+    /// The resolver's final fill, stroke, alignment, and inset for this cell.
+    ///
+    /// Carried as one record rather than as separate required fields so that
+    /// the generated constructor stays readable, and because these four facts
+    /// are only ever produced and consumed together.
+    #[synthesized]
+    #[internal]
+    pub style: ResolvedCellStyle,
 }
 
 impl Construct for GridCellRegion {

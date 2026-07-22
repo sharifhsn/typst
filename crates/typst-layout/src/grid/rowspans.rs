@@ -206,6 +206,7 @@ impl GridLayouter<'_> {
                     ),
                     Size::new(width, *first_height),
                     locator,
+                    self.styles,
                     engine,
                 )
             } else {

@@ -4,11 +4,13 @@
 //! hidden table/grid cell-region tags emitted during layout, captures the frame
 //! items inside each cell, and rebuilds editable DrawingML table rows and cells.
 
-use typst_library::foundations::{Resolve, Smart, StyleChain};
+use std::sync::Arc;
+
+use typst_library::foundations::Smart;
 use typst_library::introspection::{Location, Tag};
 use typst_library::layout::{
-    Abs, Alignment, FrameItem, GridCell, GridCellRegion, GridElem, HAlignment, Point,
-    Sides, Size, Transform, VAlignment,
+    Abs, Alignment, FrameItem, GridCellRegion, GridElem, HAlignment, Point, Rel, Sides,
+    Size, Transform, VAlignment,
 };
 use typst_library::model::{TableCell as TypstTableCell, TableElem};
 use typst_library::visualize::{Paint, Stroke};
@@ -150,13 +152,19 @@ impl<'a, 'b> Walker<'a, 'b> {
         let origin = Point::zero().transform(item_transform);
         let size =
             Size::new(region.width * similarity.scale, region.height * similarity.scale);
-        let styles = StyleChain::default();
-        let fill = region_fill(self.ctx, &region.body, styles);
-        let borders = region_borders(&region.body, styles);
-        let (h_align, v_align) = region_alignment(&region.body, styles);
+        // Consume the resolver's final per-cell facts carried on the region
+        // tag itself. These were computed under the cell's real style chain at
+        // layout time, so we do not re-derive them here under a synthetic
+        // `StyleChain::default()`, which cannot see the cell's font size and
+        // therefore mis-resolved font-relative (`em`) insets. Every fact the
+        // DrawingML cell needs — fill, stroke, alignment, inset — is carried,
+        // so nothing is re-derived from the body element any more.
+        let style = region.style.clone().unwrap_or_default();
+        let fill = region_fill(self.ctx, &style.fill);
+        let borders = borders_from_sides(&style.stroke);
+        let (h_align, v_align) = region_alignment(style.align);
         let insets = region_insets(
-            &region.body,
-            styles,
+            style.inset,
             Size::new(region.width, region.height),
             similarity.scale,
         );
@@ -688,52 +696,11 @@ fn track_widths(
         .collect()
 }
 
-fn region_fill(
-    ctx: &mut crate::dom::SlideCtx,
-    body: &typst_library::foundations::Content,
-    styles: StyleChain,
-) -> Option<FillSpec> {
-    let fill = body
-        .to_packed::<TypstTableCell>()
-        .and_then(|cell| smart_fill(cell.fill.get_cloned(styles)))
-        .or_else(|| {
-            body.to_packed::<GridCell>()
-                .and_then(|cell| smart_fill(cell.fill.get_cloned(styles)))
-        })?;
-    crate::shape::resolved_fill(ctx, &Some(fill)).flatten()
+fn region_fill(ctx: &mut crate::dom::SlideCtx, fill: &Option<Paint>) -> Option<FillSpec> {
+    crate::shape::resolved_fill(ctx, fill).flatten()
 }
 
-fn smart_fill(fill: Smart<Option<Paint>>) -> Option<Paint> {
-    match fill {
-        Smart::Custom(fill) => fill,
-        Smart::Auto => None,
-    }
-}
-
-fn region_borders(
-    body: &typst_library::foundations::Content,
-    styles: StyleChain,
-) -> CellBorders {
-    if let Some(cell) = body.to_packed::<TypstTableCell>() {
-        return borders_from_sides(cell.stroke.resolve(styles));
-    }
-    if let Some(cell) = body.to_packed::<GridCell>() {
-        return borders_from_sides(cell.stroke.resolve(styles));
-    }
-    CellBorders::default()
-}
-
-fn region_alignment(
-    body: &typst_library::foundations::Content,
-    styles: StyleChain,
-) -> (Option<CellHAlign>, Option<CellVAlign>) {
-    let align = if let Some(cell) = body.to_packed::<TypstTableCell>() {
-        cell.align.get(styles)
-    } else if let Some(cell) = body.to_packed::<GridCell>() {
-        cell.align.get(styles)
-    } else {
-        return (None, None);
-    };
+fn region_alignment(align: Smart<Alignment>) -> (Option<CellHAlign>, Option<CellVAlign>) {
     let Smart::Custom(align) = align else {
         return (None, None);
     };
@@ -741,29 +708,20 @@ fn region_alignment(
 }
 
 fn region_insets(
-    body: &typst_library::foundations::Content,
-    styles: StyleChain,
+    inset: Smart<Sides<Option<Rel<Abs>>>>,
     size: Size,
     scale: f64,
 ) -> CellInsets {
-    let inset = if let Some(cell) = body.to_packed::<TypstTableCell>() {
-        cell.inset.get(styles)
-    } else if let Some(cell) = body.to_packed::<GridCell>() {
-        cell.inset.get(styles)
-    } else {
-        return CellInsets::default();
-    };
     let Smart::Custom(inset) = inset else {
         return CellInsets::default();
     };
 
-    let resolve =
-        |value: Option<typst_library::layout::Rel<typst_library::layout::Length>>,
-         reference: Abs| {
-            value.map_or(0, |value| {
-                crate::text::emu(value.resolve(styles).relative_to(reference) * scale)
-            })
-        };
+    // Font-relative (`em`) lengths were already resolved to absolute units by
+    // the layouter under the cell's real style chain, so only the ratio
+    // component remains to be applied against the physical cell size here.
+    let resolve = |value: Option<Rel<Abs>>, reference: Abs| {
+        value.map_or(0, |value| crate::text::emu(value.relative_to(reference) * scale))
+    };
     CellInsets {
         left_emu: resolve(inset.left, size.x),
         top_emu: resolve(inset.top, size.y),
@@ -788,30 +746,12 @@ fn alignment_parts(align: Alignment) -> (Option<CellHAlign>, Option<CellVAlign>)
     (horizontal, vertical)
 }
 
-fn borders_from_sides(
-    sides: Sides<Option<Option<std::sync::Arc<Stroke<Abs>>>>>,
-) -> CellBorders {
+fn borders_from_sides(sides: &Sides<Option<Arc<Stroke<Abs>>>>) -> CellBorders {
     CellBorders {
-        left: sides
-            .left
-            .as_ref()
-            .and_then(|side| side.as_deref())
-            .and_then(stroke_spec),
-        right: sides
-            .right
-            .as_ref()
-            .and_then(|side| side.as_deref())
-            .and_then(stroke_spec),
-        top: sides
-            .top
-            .as_ref()
-            .and_then(|side| side.as_deref())
-            .and_then(stroke_spec),
-        bottom: sides
-            .bottom
-            .as_ref()
-            .and_then(|side| side.as_deref())
-            .and_then(stroke_spec),
+        left: sides.left.as_deref().and_then(stroke_spec),
+        right: sides.right.as_deref().and_then(stroke_spec),
+        top: sides.top.as_deref().and_then(stroke_spec),
+        bottom: sides.bottom.as_deref().and_then(stroke_spec),
     }
 }
 

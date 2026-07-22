@@ -2006,3 +2006,189 @@ fn bytes_literal(bytes: &[u8]) -> String {
     out.push_str("))");
     out
 }
+
+/// Collects every `<a:tcPr ...>...</a:tcPr>` block in document order.
+fn tc_props(slide: &str) -> Vec<String> {
+    let mut blocks = vec![];
+    let mut rest = slide;
+    while let Some(start) = rest.find("<a:tcPr") {
+        let after = &rest[start..];
+        let end = after.find("</a:tcPr>").map(|e| e + "</a:tcPr>".len());
+        // A cell with no borders self-closes, so fall back to that form.
+        let end = end.or_else(|| after.find("/>").map(|e| e + 2)).unwrap_or(after.len());
+        blocks.push(after[..end].to_string());
+        rest = &after[end..];
+    }
+    blocks
+}
+
+#[test]
+fn table_cell_em_inset_uses_the_cell_font_size_not_a_default_chain() {
+    // A font-relative inset must be measured against the font the cell is
+    // actually set in. The cell-region tag carries the resolver's inset with
+    // its `em` component already resolved under the cell's real style chain,
+    // so 1em at 30pt is 30pt (381000 EMU).
+    //
+    // Before the region tag carried it, the exporter re-resolved the body
+    // element's inset under `StyleChain::default()`, whose font size is the
+    // 11pt default: both of the documents below emitted the *same*
+    // `marL="139700"` (11pt), silently shrinking every cell margin in a deck
+    // whose text is not 11pt.
+    let big = parts(
+        r#"#set page(width: 600pt, height: 400pt)
+#set text(size: 30pt)
+#table(columns: 2, inset: 1em, [a], [b], [c], [d])"#,
+    );
+    let big_slide = &big["ppt/slides/slide1.xml"];
+    let big_props = tc_props(big_slide);
+    assert_eq!(big_props.len(), 4, "four native cells");
+    for block in &big_props {
+        assert!(
+            block.starts_with(
+                "<a:tcPr marL=\"381000\" marT=\"381000\" marR=\"381000\" marB=\"381000\""
+            ),
+            "1em at 30pt text must be a 30pt cell margin, got {block}"
+        );
+    }
+
+    // The default-size document is the control: it was already correct, and
+    // must stay correct.
+    let small = parts(
+        r#"#set page(width: 600pt, height: 400pt)
+#table(columns: 2, inset: 1em, [a], [b], [c], [d])"#,
+    );
+    let small_props = tc_props(&small["ppt/slides/slide1.xml"]);
+    assert_eq!(small_props.len(), 4);
+    for block in &small_props {
+        assert!(
+            block.starts_with(
+                "<a:tcPr marL=\"139700\" marT=\"139700\" marR=\"139700\" marB=\"139700\""
+            ),
+            "1em at the 11pt default must stay an 11pt cell margin, got {block}"
+        );
+    }
+    assert_all_wellformed(&big);
+    assert_all_wellformed(&small);
+}
+
+#[test]
+fn table_cell_fills_survive_every_resolver_route() {
+    // Cell fill now comes from the resolved `Cell` carried on the region tag
+    // rather than from re-reading the body element under a synthetic style
+    // chain. Every route the grid resolver can produce a fill by must land in
+    // the DrawingML cell: a table-level value, a `Celled` function, a `Celled`
+    // array, a `#set table.cell` rule, and an explicit per-cell fill.
+    let fill_of = |src: &str| -> Vec<Option<String>> {
+        let p = parts(src);
+        let slide = &p["ppt/slides/slide1.xml"];
+        assert_all_wellformed(&p);
+        tc_props(slide)
+            .iter()
+            .map(|block| {
+                // The cell fill is the first child of `tcPr`; everything from
+                // the first `<a:ln*>` onward is border paint, not cell paint.
+                let body = &block[block.find('>')? + 1..];
+                let body = &body[..body.find("<a:ln").unwrap_or(body.len())];
+                let start = body.find("<a:solidFill><a:srgbClr val=\"")?;
+                let rest = &body[start + "<a:solidFill><a:srgbClr val=\"".len()..];
+                Some(rest[..6].to_string())
+            })
+            .collect()
+    };
+
+    let page = "#set page(width: 360pt, height: 200pt)\n";
+
+    // A plain table-level fill reaches every cell.
+    assert_eq!(
+        fill_of(&format!("{page}#table(columns: 2, fill: red, [a], [b], [c], [d])")),
+        vec![Some("FF4136".into()); 4],
+    );
+
+    // `Celled::Func` is evaluated per coordinate, so the columns alternate.
+    assert_eq!(
+        fill_of(&format!(
+            "{page}#table(columns: 2, fill: (x, _) => if calc.even(x) {{ blue }} \
+             else {{ green }}, [a], [b], [c], [d])"
+        )),
+        vec![
+            Some("0074D9".into()),
+            Some("2ECC40".into()),
+            Some("0074D9".into()),
+            Some("2ECC40".into()),
+        ],
+    );
+
+    // `Celled::Array` cycles across the columns.
+    assert_eq!(
+        fill_of(&format!(
+            "{page}#table(columns: 2, fill: (aqua, yellow), [a], [b], [c], [d])"
+        )),
+        vec![
+            Some("7FDBFF".into()),
+            Some("FFDC00".into()),
+            Some("7FDBFF".into()),
+            Some("FFDC00".into()),
+        ],
+    );
+
+    // A `#set table.cell` rule reaches every cell.
+    assert_eq!(
+        fill_of(&format!(
+            "{page}#set table.cell(fill: purple)\n\
+             #table(columns: 2, [a], [b], [c], [d])"
+        )),
+        vec![Some("B10DC9".into()); 4],
+    );
+
+    // An explicit per-cell fill applies to exactly that cell; the rest stay
+    // unfilled rather than inheriting it.
+    assert_eq!(
+        fill_of(&format!(
+            "{page}#table(columns: 2, table.cell(fill: orange)[a], [b], [c], [d])"
+        )),
+        vec![Some("FF851B".into()), None, None, None],
+    );
+}
+
+#[test]
+fn table_level_stroke_and_alignment_survive_on_the_region_tag() {
+    // Stroke and alignment also come off the region tag now. A table-level
+    // stroke must reach every cell edge, and a `#set table.cell` alignment
+    // must reach the cell's paragraph and body anchors.
+    let p = parts(
+        r#"#set page(width: 360pt, height: 200pt)
+#set table.cell(align: right + bottom)
+#table(
+  columns: 2,
+  stroke: 2pt + blue,
+  [a], [b], [c], [d],
+)"#,
+    );
+    let slide = &p["ppt/slides/slide1.xml"];
+    let props = tc_props(slide);
+    assert_eq!(props.len(), 4, "four native cells");
+    for block in &props {
+        for side in ["lnL", "lnR", "lnT", "lnB"] {
+            assert!(
+                block.contains(&format!("<a:{side} w=\"25400\" cap=\"flat\">")),
+                "2pt table stroke must reach {side}, got {block}"
+            );
+        }
+        assert_eq!(
+            block.matches("<a:srgbClr val=\"0074D9\"/>").count(),
+            4,
+            "every side keeps the authored blue, got {block}"
+        );
+    }
+    assert_eq!(
+        slide.matches("algn=\"r\"").count(),
+        4,
+        "the set rule's horizontal alignment reaches every cell paragraph"
+    );
+    assert_eq!(
+        slide.matches("anchor=\"b\"").count(),
+        4,
+        "the set rule's vertical alignment reaches every cell body"
+    );
+    assert_all_wellformed(&p);
+}

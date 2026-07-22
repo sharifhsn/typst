@@ -3,16 +3,17 @@ use std::fmt::Debug;
 use rustc_hash::FxHashMap;
 use typst_library::diag::{SourceResult, bail};
 use typst_library::engine::Engine;
-use typst_library::foundations::{Packed, Resolve, StyleChain};
+use typst_library::foundations::{Packed, Resolve, Smart, StyleChain};
 use typst_library::introspection::{Locator, Tag, TagFlags};
 use typst_library::layout::grid::resolve::{
     Cell, CellGrid, Header, LinePosition, Repeatable,
 };
 use typst_library::layout::resolve::Entry;
 use typst_library::layout::{
-    Abs, Axes, Dir, Fr, Fragment, Frame, FrameItem, GridCellRegion, Length, Point,
-    Region, Regions, Rel, Size, Sizing,
+    Abs, Axes, Dir, Fr, Fragment, Frame, FrameItem, GridCell, GridCellRegion, Length,
+    Point, Region, Regions, Rel, ResolvedCellStyle, Size, Sizing,
 };
+use typst_library::model::TableCell;
 use typst_library::text::TextElem;
 use typst_library::visualize::Geometry;
 use typst_syntax::Span;
@@ -242,18 +243,22 @@ pub(super) fn tag_cell_region(
     logical_pos: Axes<usize>,
     size: Size,
     locator: Locator,
+    styles: StyleChain,
     engine: &mut Engine,
 ) -> Frame {
     let span = cell.body.span();
-    let mut region = Packed::new(GridCellRegion::new(
-        cell.body.clone(),
-        logical_pos.x,
-        logical_pos.y,
-        cell.colspan,
-        cell.rowspan,
-        size.x,
-        size.y,
-    ))
+    let mut region = Packed::new(
+        GridCellRegion::new(
+            cell.body.clone(),
+            logical_pos.x,
+            logical_pos.y,
+            cell.colspan,
+            cell.rowspan,
+            size.x,
+            size.y,
+        )
+        .with_style(resolved_cell_style(cell, styles)),
+    )
     .spanned(span);
     let key = typst_utils::hash128(&region);
     let loc = locator.split().next_location(engine, key, span);
@@ -263,6 +268,31 @@ pub(super) fn tag_cell_region(
     frame.prepend(Point::zero(), FrameItem::Tag(Tag::Start(region.pack(), flags)));
     frame.push(Point::zero(), FrameItem::Tag(Tag::End(loc, key, flags)));
     frame
+}
+
+/// Collect the resolver's final presentation for a cell.
+///
+/// `fill` and `stroke` are read straight off the resolved [`Cell`], which
+/// already holds the resolver's final values. `align` and `inset` were instead
+/// folded back onto the resolved body element (as `Smart::Custom`), so they are
+/// recovered from there — crucially under the cell's real `styles`, so that a
+/// font-relative (`em`) inset resolves against the font the cell is actually
+/// set in rather than against a synthetic default chain. Only the inset's ratio
+/// component is left for the consumer to apply against the cell size.
+fn resolved_cell_style(cell: &Cell, styles: StyleChain) -> ResolvedCellStyle {
+    let (align, inset) = if let Some(cell) = cell.body.to_packed::<TableCell>() {
+        (cell.align.get(styles), cell.inset.get(styles))
+    } else if let Some(cell) = cell.body.to_packed::<GridCell>() {
+        (cell.align.get(styles), cell.inset.get(styles))
+    } else {
+        (Smart::Auto, Smart::Auto)
+    };
+    ResolvedCellStyle {
+        fill: cell.fill.clone(),
+        stroke: cell.stroke.clone(),
+        align,
+        inset: inset.map(|sides| sides.map(|s| s.map(|rel| rel.resolve(styles)))),
+    }
 }
 
 impl<'a> GridLayouter<'a> {
@@ -1555,6 +1585,7 @@ impl<'a> GridLayouter<'a> {
                         ),
                         Size::new(width, height),
                         region_locator,
+                        self.styles,
                         engine,
                     );
                     output.push_frame(pos, frame);
