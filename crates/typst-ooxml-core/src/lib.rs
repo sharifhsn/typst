@@ -6,6 +6,7 @@ pub mod dml;
 pub mod media;
 pub mod ns;
 pub mod omml;
+pub mod omml_build;
 pub mod opc;
 pub mod report;
 pub mod units;
