@@ -356,8 +356,13 @@ mechanical cleanup that introduced this document.
 
 - target-specific normalization is partly registered from `typst-layout`, so
   ownership is not visible from exporter crates;
-- math lowering has three implementations with different access to styles and
-  resolved IR;
+- math lowering has two implementations, down from three. Word and PowerPoint
+  now share `typst-omml` and the same `MathItem` IR; Pandoc keeps a separate
+  emitter because it targets LaTeX, where the arms share dispatch *shape* with
+  the OMML ones but no arm body. The two error models are also both correct
+  where they are: OMML preflights the whole tree, because a native subtree must
+  not partially emit, while LaTeX bails on the whole string. Unifying those
+  would serve neither;
 - shared package finalization now proves part/content-type uniqueness and typed
   internal relationship targets; DOCX additionally validates the
   repair-sensitive container sequences it emits, while full Office-version XSD

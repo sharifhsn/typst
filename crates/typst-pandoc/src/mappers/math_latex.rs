@@ -496,8 +496,13 @@ fn push_text_escaped(buf: &mut String, c: char) {
 }
 
 /// Whether the base of a scripts item is a large/n-ary operator that should use
-/// `\limits` for stacked top/bottom limits (∑ ∏ ⋃ ⋂ ⋀ ⋁ ∐ …, but *not*
-/// integrals, which keep sub/sup).
+/// `\limits` for stacked top/bottom limits (∑ ∏ ⋃ ⋂ ⋀ ⋁ ∐ …).
+///
+/// Integrals are excluded deliberately, and this list is therefore *not* the
+/// same set as the OMML path's `is_nary_operator`. LaTeX renders `\int` with
+/// its bounds beside the sign by convention, so forcing `\limits` there would
+/// fight the reader's expectations; OMML has to state the placement either way
+/// and says `subSup`. Same intent, different convention — do not unify them.
 fn is_nary_base(item: &MathItem) -> bool {
     let MathItem::Component(comp) = item else { return false };
     let MathKind::Glyph(glyph) = &comp.kind else { return false };
@@ -520,7 +525,7 @@ fn is_nary_base(item: &MathItem) -> bool {
             | '⨀'
             | '⨁'
             | '⨂'
-    ) || c == '⋃'
+    )
 }
 
 /// Extracts a single-character glyph from a fence/accent side item.
