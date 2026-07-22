@@ -3633,6 +3633,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "typst-pptx-import"
+version = "0.15.0"
+dependencies = [
+ "ecow",
+ "roxmltree 0.21.1",
+ "rustc-hash",
+ "typst-ooxml-core",
+ "typst-utils",
+ "zip",
+]
+
+[[package]]
 name = "typst-realize"
 version = "0.15.0"
 dependencies = [

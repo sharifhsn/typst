@@ -1,0 +1,25 @@
+[package]
+name = "typst-pptx-import"
+description = "Convert PowerPoint presentations (.pptx) into Typst source."
+version = { workspace = true }
+rust-version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+
+[dependencies]
+ecow = { workspace = true }
+roxmltree = { workspace = true }
+rustc-hash = { workspace = true }
+typst-ooxml-core = { workspace = true }
+typst-utils = { workspace = true }
+
+[dev-dependencies]
+zip = { workspace = true }
+
+[lints]
+workspace = true
