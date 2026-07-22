@@ -101,6 +101,9 @@ pub fn pandoc_document(
             route: typst_library::engine::Route::extend(engine.route.track()),
         };
         let mut ctx = PandocCtx::new(&mut sub, &mut locator);
+        if let Some(width) = page_content_width(styles) {
+            ctx.raster_width = width;
+        }
         ctx.load_cite_anchors(&entry_keys);
         let blocks = crate::convert::run(&mut ctx, &pairs)?;
         let deferred_tags = std::mem::take(&mut ctx.deferred_tags);
@@ -126,6 +129,53 @@ pub fn pandoc_document(
         introspector: Arc::new(introspector),
         bibliography,
     })
+}
+
+/// Derives the page content width (page width minus the horizontal margins)
+/// from the document-level style chain, so rasterized width-relative content
+/// (`layout(size => ..)`, `width: 100%`, container-sized gradients) lays out
+/// against the document's real text width rather than a hardcoded guess.
+///
+/// This mirrors the paged layout's own margin resolution
+/// (`typst_layout::pages::run`) — the same `2.5/21 * min(w, h)` default margin
+/// and percentage-relative-to-page-size handling — reading the page setup that
+/// reached this export from the root styles.
+///
+/// Returns `None` when the page has no finite width (e.g. `set page(width:
+/// auto)`, where the paged layout fits the page to its content and there is no
+/// meaningful container width). The caller then keeps the finite fallback,
+/// since laying width-relative content out under an *infinite* width makes such
+/// closures produce pathologically wide output.
+fn page_content_width(styles: StyleChain) -> Option<typst_library::layout::Abs> {
+    use typst_library::foundations::{Resolve, Smart};
+    use typst_library::layout::{Abs, Length, PageElem, Paper, Rel, Size};
+
+    // When a length is `auto` the paged layout fits the page to its content
+    // along that axis; represent that here as an infinite extent.
+    let width = styles.resolve(PageElem::width).unwrap_or(Abs::inf());
+    let height = styles.resolve(PageElem::height).unwrap_or(Abs::inf());
+    let mut size = Size::new(width, height);
+    if styles.get(PageElem::flipped) {
+        std::mem::swap(&mut size.x, &mut size.y);
+    }
+
+    // The default margin is relative to the smaller finite page dimension,
+    // falling back to A4's width when neither dimension is finite.
+    let mut min = width.min(height);
+    if !min.to_pt().is_finite() {
+        min = Paper::A4.width();
+    }
+
+    let default = Rel::<Length>::from((2.5 / 21.0) * min);
+    let margin = styles.get(PageElem::margin).unwrap_or_default();
+    let margin = margin
+        .sides
+        .map(|side| side.and_then(Smart::custom).unwrap_or(default))
+        .resolve(styles)
+        .relative_to(size);
+
+    let content = size.x - margin.left - margin.right;
+    (content.to_pt().is_finite() && content > Abs::zero()).then_some(content)
 }
 
 /// Builds the Pandoc `meta` map from the document info (title/author/date/

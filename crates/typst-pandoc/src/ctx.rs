@@ -35,7 +35,10 @@ pub struct PandocCtx<'a, 'e> {
     /// content (`layout(size => ..)`, `width: 100%`, gradients sized to the
     /// container) must lay out against a real page width: laying it out under an
     /// *infinite* width makes such a closure produce pathologically wide output.
-    /// Set from the page geometry in [`crate::document::pandoc_document`].
+    /// Set from the document's page geometry (page width minus horizontal
+    /// margins) by [`crate::document::pandoc_document`]; only when the page has
+    /// no finite width (`set page(width: auto)`) does it keep the [`Self::new`]
+    /// fallback.
     pub(crate) raster_width: Abs,
 
     /// Smart-quote state, threaded through inline runs.
@@ -60,8 +63,10 @@ impl<'a, 'e> PandocCtx<'a, 'e> {
             engine,
             locator,
             deferred_tags: Vec::new(),
-            // A sane finite default (~A4 text width); the document driver may
-            // override from real page geometry before any conversion happens.
+            // A sane finite default (~A4 text width), used only as a last resort
+            // when the page has no finite width. `pandoc_document` overrides this
+            // from the document's real page geometry (width minus horizontal
+            // margins) before any conversion happens.
             raster_width: Abs::pt(450.0),
             quoter: SmartQuoter::new(),
             last_char: None,

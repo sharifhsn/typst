@@ -3,15 +3,22 @@
 //! Pandoc is pageless at export time, so this reuses the target-agnostic
 //! [`ElementIntrospector`] over the introspection [`Tag`]s collected while
 //! walking the IR (a near-copy of `typst_docx::DocxIntrospector`). Positions
-//! are not meaningful, so a trivial [`HtmlPosition`] is used. Only `anchor()`
-//! differs from DOCX: it stores the Pandoc `Attr` id (heading/figure/span)
-//! instead of a `_Ref{id}` bookmark name.
+//! are not meaningful, so a trivial [`HtmlPosition`] is used.
+//!
+//! `anchor()` returns `None`: the Pandoc converter never routes internal links
+//! through the introspector. Every heading/figure/equation id and every
+//! reference/citation/outline target is resolved *inline during the walk* via
+//! [`crate::ctx::PandocCtx::anchor_id`] and baked into the emitted AST as a
+//! literal `#id`, so — unlike the HTML/paged link resolvers ([`LateLinkResolver`]
+//! and `EarlyLinkResolver`), which are the trait method's only consumers and run
+//! for neither DOCX nor Pandoc — nothing here ever queries an anchor map.
+//!
+//! [`LateLinkResolver`]: typst_library::model::LateLinkResolver
 
 use std::fmt::{self, Debug, Formatter};
 use std::num::NonZeroUsize;
 
 use ecow::{EcoString, EcoVec};
-use rustc_hash::FxHashMap;
 use typst_library::diag::StrResult;
 use typst_library::foundations::{Content, Label, Selector};
 use typst_library::introspection::{
@@ -25,7 +32,6 @@ use typst_syntax::VirtualPath;
 #[derive(Clone)]
 pub struct PandocIntrospector {
     elements: ElementIntrospector<HtmlPosition>,
-    anchors: FxHashMap<Location, EcoString>,
 }
 
 impl PandocIntrospector {
@@ -38,20 +44,12 @@ impl PandocIntrospector {
         for tag in tags {
             builder.discover_tag(tag, pos.clone());
         }
-        PandocIntrospector {
-            elements: builder.finalize(),
-            anchors: FxHashMap::default(),
-        }
+        PandocIntrospector { elements: builder.finalize() }
     }
 
     /// The underlying element introspector.
     pub fn elements(&self) -> &ElementIntrospector<HtmlPosition> {
         &self.elements
-    }
-
-    /// Enriches the introspector with the late-assigned `Attr`-id anchors.
-    pub fn set_anchors(&mut self, anchors: FxHashMap<Location, EcoString>) {
-        self.anchors = anchors;
     }
 }
 
@@ -108,8 +106,10 @@ impl Introspector for PandocIntrospector {
         None
     }
 
-    fn anchor(&self, location: Location) -> Option<&EcoString> {
-        self.anchors.get(&location)
+    fn anchor(&self, _: Location) -> Option<&EcoString> {
+        // Unused for Pandoc: links are resolved inline during the walk (see the
+        // module docs), never through this trait method.
+        None
     }
 
     fn document(&self, _: Location) -> Option<Location> {
