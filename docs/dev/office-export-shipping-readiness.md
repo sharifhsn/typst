@@ -1,10 +1,10 @@
 # Office export shipping readiness
 
-Status date: 2026-07-18
+Status date: 2026-07-18, revised 2026-07-22.
 
 This is the current product and validation snapshot after consolidating the DOCX,
-PPTX, Pandoc, shared Office, DOCX review, corpus-hardening, and OOXML-math branch
-histories onto `codex/office-export`. Performance branches remain separate.
+PPTX, Pandoc, shared Office, DOCX review, and corpus-hardening branch histories
+onto `codex/office-export`. Performance branches remain separate.
 
 ## Executive verdict
 
@@ -17,8 +17,11 @@ histories onto `codex/office-export`. Performance branches remain separate.
 - **Pandoc:** retained as known-incomplete historical/development code. It is not
   a supported preview or release gate and should be treated as broken for general
   use.
-- **OOXML math import:** the inverse OMML-to-Typst converter is consolidated, but it
-  is an import-side utility rather than part of DOCX/PPTX export.
+- **OMML math import:** the inverse OMML-to-Typst conversion lives inside
+  `typst-docx-import`, where the documents that need it are read. The standalone
+  `typst-ooxml-math` crate that used to duplicate it was deleted on 2026-07-22
+  with nothing depending on it; this is an import-side capability and was never
+  part of DOCX/PPTX export.
 
 The safe product wording is: **Typst can export experimental `.docx` and `.pptx`
 files with substantial native editability and image fallbacks. Compatibility and
@@ -399,15 +402,22 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
 - Paged geometry, exact line breaking, floats, and columns cannot survive the semantic
   AST by design.
 - Citation normalization loses some mode, supplement, and grouping distinctions.
-- Anchor installation, deep table-cell dangling-link discovery, responsive fallback
-  width, and transactional JSON/sidecar writes remain incomplete.
+- Deep table-cell dangling-link discovery and transactional JSON/sidecar writes
+  remain incomplete.
+- Raster fallback width is no longer fixed: it is derived from the document's
+  page width minus its margins. Mid-document `#set page(width:)` is still not
+  seen, because this target has no page model, and `page(width: auto)` keeps a
+  finite default because an infinite container width would lay width-relative
+  content out pathologically wide.
+- Anchor installation is no longer listed as incomplete because there is nothing
+  to install. Pandoc resolves every id inline during the walk and bakes it into
+  the AST, so the introspector's anchor map had no consumer and was removed.
 
 ## Validation completed on the combined branch
 
 - DOCX integration: 233 tests passed.
 - PPTX integration: 65 tests passed.
 - DOCX review round trip: 22 tests passed.
-- OOXML math conversion: 27 tests passed.
 - Strict Clippy across the CLI and supported DOCX/PPTX crates: passed with
   warnings denied.
 - DOCX corpus Python tools: bytecode compilation passed.

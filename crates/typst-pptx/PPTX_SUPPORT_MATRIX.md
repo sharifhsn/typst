@@ -96,7 +96,7 @@ Two columns, because they answer different questions:
 | Feature | Export | In the wild | Notes |
 |---|---|---:|---|
 | Native table (`a:tbl`) | ✅ | 10.0% | Real editable table, not a picture. |
-| Cell fills, borders, spans | ✅ | — | |
+| Cell fills, borders, spans | ✅ | — | Fill, stroke, alignment and per-side inset come from the resolver's `ResolvedCellStyle` on the region tag, not from re-resolving the cell. Font-relative insets therefore track the cell's real font size; they were previously measured against the 11pt default. |
 | **Transformed table** | 🖼 | — | `TransformedTableRasterFallback` — if the region's transform is not an axis-aligned similarity, the whole table rasterizes cell by cell rather than mixing native cells with pictures. |
 
 ## 6. Maths and other content

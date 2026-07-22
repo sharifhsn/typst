@@ -47,9 +47,12 @@ Raster fallback lives in `ctx.rs` and uses the shared
 - Citation normalization currently loses some Typst grouping, mode, and
   supplement distinctions.
 - Dangling-link discovery does not yet recurse through every table-cell path.
-- The Pandoc introspector does not yet populate all realized anchor positions.
-- Visual fallback uses a fixed default width rather than deriving a responsive
-  width from the surrounding Pandoc layout.
+- Visual fallback width comes from the document's page width minus its margins,
+  resolved from the document-level style chain. Two cases are not covered: a
+  mid-document `#set page(width:)` is not seen, because this target has no page
+  model and only reads the root styles; and `page(width: auto)` keeps a finite
+  default, because laying width-relative content out against an infinite
+  container width would produce pathologically wide output.
 - The JSON and optional bibliography sidecar are separate writes, not one
   transactional output operation.
 

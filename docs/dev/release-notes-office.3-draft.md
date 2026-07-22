@@ -125,9 +125,8 @@ Carried forward as a pre-fix baseline from revision
 - PPTX: all 120 compilable presentation templates exported valid OOXML with
   zero export errors; mean LibreOffice visual similarity `0.992` across all
   120 decks.
-- DOCX integration (212), PPTX integration (65), DOCX review round-trip (22),
-  and OOXML math conversion (27) test suites passed; strict Clippy passed
-  with warnings denied.
+- DOCX integration (212), PPTX integration (65), and DOCX review round-trip (22)
+  test suites passed; strict Clippy passed with warnings denied.
 
 See
 [`docs/dev/office-export-shipping-readiness.md`](office-export-shipping-readiness.md)
