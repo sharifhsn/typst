@@ -31,7 +31,25 @@ pub struct Slide {
 
 pub enum Item {
     /// A shape at its authored position, in points from the slide's top-left.
-    Placed { x: f64, y: f64, w: f64, h: f64, rot: f64, block: Block },
+    Placed {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        rot: f64,
+        /// `a:xfrm/@flipH`/`@flipV`. Typst mirrors with a negative scale, so
+        /// these are reproducible after all.
+        flip_h: bool,
+        flip_v: bool,
+        /// `a:bodyPr` insets in points, which PowerPoint reserves inside the
+        /// box before any text is set.
+        inset: Option<(f64, f64, f64, f64)>,
+        /// `a:bodyPr/@anchor`: where the text sits vertically in a box that is
+        /// usually taller than it. Ignoring it top-aligns every centred
+        /// caption in the deck.
+        anchor: Option<VAlign>,
+        block: Block,
+    },
     /// Ordinary flow content, laid out by Typst.
     Flow(Block),
 }
@@ -77,6 +95,13 @@ pub struct ListItem {
     pub ordered: bool,
     /// The literal marker, when it is not one Typst would produce itself.
     pub marker: Option<EcoString>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum VAlign {
+    Top,
+    Middle,
+    Bottom,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

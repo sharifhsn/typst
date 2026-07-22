@@ -249,3 +249,109 @@ fn slides_keep_presentation_order_not_archive_order() {
     let result = import_pptx(&Deck::default().build()).expect("import should succeed");
     assert_eq!(result.source.matches("#slide").count(), 1, "{}", result.source);
 }
+
+#[test]
+fn a_layouts_decoration_is_drawn_behind_every_slide() {
+    // A themed deck's logo and graphics live on the layout, and no slide
+    // mentions them. Reproducing them is the difference between a themed
+    // deck and a blank one.
+    let deck = Deck {
+        layout_body: r#"<p:sp><p:nvSpPr><p:cNvPr id="7" name="Logo"/><p:cNvSpPr/>
+            <p:nvPr/></p:nvSpPr>
+            <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+            <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+            <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></p:spPr>
+            <p:txBody><a:bodyPr/><a:p/></p:txBody></p:sp>"#
+            .into(),
+        slide_body: text_shape(0, 0, 100, 100, "<a:p><a:r><a:t>Body</a:t></a:r></a:p>"),
+        ..Deck::default()
+    };
+    let result = import_pptx(&deck.build()).expect("import should succeed");
+    assert!(
+        result.source.contains("#ff0000"),
+        "the layout's own decoration must be drawn:\n{}",
+        result.source
+    );
+}
+
+#[test]
+fn a_layouts_placeholder_prompt_text_is_not_reproduced() {
+    // A master's placeholder holds "Click to edit Master title style". It is
+    // a template prompt, not content, and importing it would put those words
+    // on every slide.
+    let deck = Deck {
+        layout_body: r#"<p:sp><p:nvSpPr><p:cNvPr id="8" name="Title"/><p:cNvSpPr/>
+            <p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+            <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm></p:spPr>
+            <p:txBody><a:bodyPr/><a:p><a:r><a:t>Click to edit Master title</a:t></a:r></a:p>
+            </p:txBody></p:sp>"#
+            .into(),
+        slide_body: text_shape(0, 0, 100, 100, "<a:p><a:r><a:t>Real</a:t></a:r></a:p>"),
+        ..Deck::default()
+    };
+    let result = import_pptx(&deck.build()).expect("import should succeed");
+    assert!(result.source.contains("Real"), "{}", result.source);
+    assert!(
+        !result.source.contains("Click to edit"),
+        "template prompt text must not reach the output:\n{}",
+        result.source
+    );
+}
+
+#[test]
+fn a_triangle_is_drawn_as_a_triangle() {
+    let deck = Deck {
+        slide_body: r#"<p:sp><p:nvSpPr><p:cNvPr id="3" name="T"/><p:cNvSpPr/>
+            <p:nvPr/></p:nvSpPr>
+            <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+            <a:prstGeom prst="triangle"><a:avLst/></a:prstGeom>
+            <a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></p:spPr>
+            <p:txBody><a:bodyPr/><a:p/></p:txBody></p:sp>"#
+            .into(),
+        ..Deck::default()
+    };
+    let result = import_pptx(&deck.build()).expect("import should succeed");
+    // Three vertices and a close, not a rectangle.
+    assert!(result.source.contains("curve.move"), "{}", result.source);
+    assert_eq!(result.source.matches("curve.line").count(), 2, "{}", result.source);
+}
+
+#[test]
+fn a_mirrored_shape_is_mirrored() {
+    let deck = Deck {
+        slide_body: r#"<p:sp><p:nvSpPr><p:cNvPr id="3" name="F"/><p:cNvSpPr/>
+            <p:nvPr/></p:nvSpPr>
+            <p:spPr><a:xfrm flipH="1"><a:off x="0" y="0"/>
+            <a:ext cx="914400" cy="914400"/></a:xfrm>
+            <a:prstGeom prst="rtTriangle"><a:avLst/></a:prstGeom>
+            <a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></p:spPr>
+            <p:txBody><a:bodyPr/><a:p/></p:txBody></p:sp>"#
+            .into(),
+        ..Deck::default()
+    };
+    let result = import_pptx(&deck.build()).expect("import should succeed");
+    assert!(
+        result.source.contains("scale(x: -100%"),
+        "flipH must mirror rather than be reported as impossible:\n{}",
+        result.source
+    );
+}
+
+#[test]
+fn text_is_anchored_where_powerpoint_anchors_it() {
+    let deck = Deck {
+        slide_body: r#"<p:sp><p:nvSpPr><p:cNvPr id="3" name="A"/><p:cNvSpPr/>
+            <p:nvPr/></p:nvSpPr>
+            <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm></p:spPr>
+            <p:txBody><a:bodyPr anchor="ctr"/><a:p><a:r><a:t>Middle</a:t></a:r></a:p>
+            </p:txBody></p:sp>"#
+            .into(),
+        ..Deck::default()
+    };
+    let result = import_pptx(&deck.build()).expect("import should succeed");
+    assert!(
+        result.source.contains("align(horizon"),
+        "a centred body must not be top-aligned:\n{}",
+        result.source
+    );
+}

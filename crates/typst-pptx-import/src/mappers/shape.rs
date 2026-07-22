@@ -98,16 +98,159 @@ fn preset(
             "rect".into()
         }
         _ => {
+            // Most presets are just polygons, and PowerPoint states them as a
+            // name because a name is smaller than a path. Drawing the real
+            // outline is worth the table: a triangle rendered as a rectangle
+            // is a visible lie, and these are the shapes decks actually use.
+            if let Some(points) = preset_polygon(name) {
+                return polygon(points, size, params);
+            }
             ctx.report.approximate(
                 "preset shape",
                 eco_format!(
                     "`{name}` is a named PowerPoint preset with no Typst \
-                     primitive; it is drawn as its bounding rectangle"
+                     primitive and no polygon outline here; it is drawn as its \
+                     bounding rectangle"
                 ),
             );
             "rect".into()
         }
     }
+}
+
+/// Vertices for the presets that are plain polygons, as fractions of the
+/// shape's own width and height.
+///
+/// Deliberately not parameterised by the preset's adjustment guides: the
+/// guides shift a chevron's notch or an arrow's head, and reproducing the
+/// default outline is far closer than reproducing a rectangle. A shape whose
+/// guides were moved is drawn in its default proportions.
+fn preset_polygon(name: &str) -> Option<&'static [(f64, f64)]> {
+    Some(match name {
+        "triangle" => &[(0.5, 0.0), (1.0, 1.0), (0.0, 1.0)],
+        "rtTriangle" => &[(0.0, 0.0), (0.0, 1.0), (1.0, 1.0)],
+        "diamond" => &[(0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0, 0.5)],
+        "parallelogram" => &[(0.25, 0.0), (1.0, 0.0), (0.75, 1.0), (0.0, 1.0)],
+        "trapezoid" => &[(0.25, 0.0), (0.75, 0.0), (1.0, 1.0), (0.0, 1.0)],
+        "pentagon" => &[
+            (0.5, 0.0),
+            (1.0, 0.382),
+            (0.809, 1.0),
+            (0.191, 1.0),
+            (0.0, 0.382),
+        ],
+        "hexagon" => &[
+            (0.25, 0.0),
+            (0.75, 0.0),
+            (1.0, 0.5),
+            (0.75, 1.0),
+            (0.25, 1.0),
+            (0.0, 0.5),
+        ],
+        "octagon" => &[
+            (0.293, 0.0),
+            (0.707, 0.0),
+            (1.0, 0.293),
+            (1.0, 0.707),
+            (0.707, 1.0),
+            (0.293, 1.0),
+            (0.0, 0.707),
+            (0.0, 0.293),
+        ],
+        "rightArrow" => &[
+            (0.0, 0.25),
+            (0.5, 0.25),
+            (0.5, 0.0),
+            (1.0, 0.5),
+            (0.5, 1.0),
+            (0.5, 0.75),
+            (0.0, 0.75),
+        ],
+        "leftArrow" => &[
+            (1.0, 0.25),
+            (0.5, 0.25),
+            (0.5, 0.0),
+            (0.0, 0.5),
+            (0.5, 1.0),
+            (0.5, 0.75),
+            (1.0, 0.75),
+        ],
+        "upArrow" => &[
+            (0.25, 1.0),
+            (0.25, 0.5),
+            (0.0, 0.5),
+            (0.5, 0.0),
+            (1.0, 0.5),
+            (0.75, 0.5),
+            (0.75, 1.0),
+        ],
+        "downArrow" => &[
+            (0.25, 0.0),
+            (0.25, 0.5),
+            (0.0, 0.5),
+            (0.5, 1.0),
+            (1.0, 0.5),
+            (0.75, 0.5),
+            (0.75, 0.0),
+        ],
+        "chevron" | "homePlate" => &[
+            (0.0, 0.0),
+            (0.75, 0.0),
+            (1.0, 0.5),
+            (0.75, 1.0),
+            (0.0, 1.0),
+        ],
+        "plus" => &[
+            (0.35, 0.0),
+            (0.65, 0.0),
+            (0.65, 0.35),
+            (1.0, 0.35),
+            (1.0, 0.65),
+            (0.65, 0.65),
+            (0.65, 1.0),
+            (0.35, 1.0),
+            (0.35, 0.65),
+            (0.0, 0.65),
+            (0.0, 0.35),
+            (0.35, 0.35),
+        ],
+        "star5" => &[
+            (0.5, 0.0),
+            (0.618, 0.382),
+            (1.0, 0.382),
+            (0.691, 0.618),
+            (0.809, 1.0),
+            (0.5, 0.764),
+            (0.191, 1.0),
+            (0.309, 0.618),
+            (0.0, 0.382),
+            (0.382, 0.382),
+        ],
+        _ => return None,
+    })
+}
+
+/// Emit a polygon as a closed `curve`, scaled to the shape's box.
+fn polygon(
+    points: &[(f64, f64)],
+    size: Option<(f64, f64)>,
+    params: &mut Vec<String>,
+) -> EcoString {
+    let (w, h) = size.unwrap_or((0.0, 0.0));
+    // `width`/`height` were pushed for a box; a curve takes neither.
+    params.retain(|p| !p.starts_with("width:") && !p.starts_with("height:"));
+    let mut parts: Vec<String> = Vec::new();
+    for (i, (fx, fy)) in points.iter().enumerate() {
+        let point = format!("({}, {})", len(fx * w), len(fy * h));
+        parts.push(if i == 0 {
+            format!("curve.move({point})")
+        } else {
+            format!("curve.line({point})")
+        });
+    }
+    parts.push("curve.close()".into());
+    params.extend(parts);
+    "curve".into()
 }
 
 /// `a:custGeom` → `#curve`, command for command.

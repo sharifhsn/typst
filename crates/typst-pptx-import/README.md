@@ -79,12 +79,13 @@ corpus (LibreOffice `sd/qa`, Apache POI, Tika).
 |---|---|---:|---|
 | Slide order | ✅ | — | From `p:sldIdLst`, which is the running order. Archive order is not. |
 | Slide size | ✅ | — | `p:sldSz` becomes an exact `config-page(width:, height:)`. Stated absolutely rather than as an aspect ratio, because 4:3, 16:9, A4-landscape and custom poster sizes all occur and only the exact size keeps `#place` coordinates meaning what they meant. |
-| Slide layouts / masters | ✅ | 100% | Resolved, not reproduced: the chain supplies each placeholder's geometry and text defaults. |
+| Slide layouts / masters | ✅ | 100% | Two jobs. **Resolved** for placeholders: geometry from the matching layout/master shape, and text defaults from the master's `p:txStyles` overlaid by the layout placeholder's own `a:lstStyle` — the middle link that carries "the title on this layout is right-aligned and 54pt". **Reproduced** for decoration: a layout's and master's non-placeholder shapes are drawn behind every slide that uses them, which is where a themed deck's logo and graphics live. `@showMasterSp="0"` suppresses the master's half. |
 | Theme colours | ✅ | 34.1% | `a:schemeClr` → the master's `p:clrMap` → `theme1.xml`, with `lumMod`/`lumOff`/`shade`/`tint`/`alpha` applied. |
 | Speaker notes | ✅ | 13.9% | Emitted as the `<pdfpc-file>` metadata `typst-pptx` reads back, so notes survive the round trip rather than needing a second convention. |
 | Footer / date / slide-number placeholders | ✅ | — | Kept as ordinary placed text. They were skipped at first on the theory that the theme would draw them; nothing does, and one corpus deck's entire visible content is a single footer. |
 | Hidden slides | ◐ | — | Kept, with a comment saying PowerPoint hid them. Dropping authored content silently is the one thing this crate tries never to do. |
 | Slide background | ✅ | — | Slide → layout → master, the same three-level fallback the shapes use. |
+| Title / author | ✅ | — | `docProps/core.xml` → touying's `config-info`. |
 | Transitions | — | 13.6% | Typst output is static; there is no timeline. |
 | Animations (`p:timing`) | — | 23.2% | Same. |
 
@@ -96,8 +97,10 @@ corpus (LibreOffice `sd/qa`, Apache POI, Tika).
 | Colour, highlight, tracking, caps | ✅ | — | |
 | Super/subscript | ✅ | — | From `@baseline`'s sign. |
 | Placeholders (`p:ph`) | ✅ | 36.3% | Matched to the layout by `idx` first and `type` second — the order PowerPoint uses, and the only way to tell two body placeholders apart. |
-| Bullets and numbering | ✅ | 8.1% | `a:buChar`/`a:buAutoNum` with the outline level as nesting depth. An authored glyph is reproduced literally; Typst's own `•` is not. `a:buNone` correctly beats an inherited bullet. |
+| Bullets and numbering | ✅ | 8.1% | `a:buChar`/`a:buAutoNum` with the outline level as nesting depth. `a:buNone` correctly beats an inherited bullet. A **symbol-font** bullet is translated to the Unicode character it depicts — `char="q"` in Wingdings is a hollow square, and reproducing the letter renders a tofu box on every bullet of every themed deck. |
 | Alignment, indents, spacing | ✅ | — | `a:lnSpc` percentages become leading relative to the font size; 100% is left to Typst's own default rather than replaced with an approximation of it. |
+| Vertical anchoring (`a:bodyPr/@anchor`) | ✅ | — | `ctr`/`b` become `#align(horizon/bottom)` inside the box. A PowerPoint text box is usually taller than its text, so ignoring this top-aligns every centred caption in the deck. |
+| Body insets (`lIns`/`tIns`/`rIns`/`bIns`) | ✅ | — | Reserved inside the box, as PowerPoint reserves them. |
 | Hyperlinks | ✅ | 7.3% | External by URL; same-deck jumps resolve to the target slide's index. |
 | Slide-number fields | ✅ | — | Become touying's live counter rather than the cached number. |
 | Vertical text (`vert`) | — | — | Typst has no vertical writing mode. |
@@ -115,8 +118,9 @@ corpus (LibreOffice `sd/qa`, Apache POI, Tika).
 | Solid, gradient fills; strokes and dashes | ✅ | 3.8% | Gradient stops are sorted and extended to span 0..1, which Typst requires and PowerPoint does not provide. |
 | Groups | ✅ | 5.6% | The child coordinate space (`a:chOff`/`a:chExt`) is composed properly, including nested groups — a group states both where it sits and what space its children are drawn in, and the two are routinely different. |
 | Rotation | ✅ | — | `a:xfrm/@rot` about the box centre, which is `#rotate`'s own default origin. |
-| Other presets (stars, arrows, callouts) | ◐ | — | ~180 named presets exist and Typst has four primitives; the rest are drawn as their bounding rectangle **and reported by name**. |
-| Flipped shapes (`flipH`/`flipV`) | ◐ | — | Drawn unmirrored; Typst has no reflection on a laid-out box. |
+| Common presets (triangle, diamond, hexagon, arrows, chevron, star, plus…) | ✅ | — | Drawn as real polygons rather than bounding rectangles. Their *adjustment guides* are not read, so a chevron whose notch was dragged is drawn in default proportions. |
+| Other presets (callouts, banners, brackets…) | ◐ | — | ~180 named presets exist; the ones with no polygon here are drawn as their bounding rectangle **and reported by name**. |
+| Flipped shapes (`flipH`/`flipV`) | ✅ | — | A negative `#scale`. (Reported as unsupported in the first draft of this file — Typst mirrors perfectly well.) |
 | Picture and pattern fills on a shape | ⊘ | 3.4% | A Typst fill takes a paint, not a picture. A pattern's foreground colour stands in. |
 | Shape effects (shadow, glow) | — | 8.7% | No Typst shadow on this branch. |
 | 3-D, text warp | — | 2.4% | |

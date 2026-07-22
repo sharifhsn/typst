@@ -181,6 +181,7 @@ impl<'a> Parser<'a> {
         let mut slide = Slide {
             part: part.into(),
             hidden: attr(root, "show") == Some("0"),
+            hide_master_shapes: attr(root, "showMasterSp") == Some("0"),
             bg: child(root, "cSld")
                 .and_then(|c| child(c, "bg"))
                 .and_then(|b| self.parse_bg(b)),
@@ -209,6 +210,7 @@ impl<'a> Parser<'a> {
         let root = doc.root_element();
         let mut layout = SlideLayout {
             name: child(root, "cSld").and_then(|c| attr(c, "name")).unwrap_or("").into(),
+            hide_master_shapes: attr(root, "showMasterSp") == Some("0"),
             bg: child(root, "cSld")
                 .and_then(|c| child(c, "bg"))
                 .and_then(|b| self.parse_bg(b)),
@@ -354,6 +356,9 @@ impl<'a> Parser<'a> {
             shape.line = child(pr, "ln").map(|l| self.parse_line(l));
         }
         if let Some(body) = child(node, "txBody") {
+            if let Some(list) = child(body, "lstStyle") {
+                shape.list_style = level_styles(list);
+            }
             if let Some(body_pr) = child(body, "bodyPr") {
                 shape.anchor = attr(body_pr, "anchor").map(Into::into);
                 let d = Insets::default();
@@ -782,8 +787,17 @@ fn parse_para_props(pr: Node) -> ParaProps {
         match local(c) {
             "buNone" => props.bullet = Some(Bullet::None),
             "buChar" => {
-                props.bullet =
-                    attr(c, "char").map(|ch| Bullet::Char(EcoString::from(ch)));
+                // `a:buFont` is a sibling, not a child — and it is the whole
+                // difference between a bullet and a tofu box, since most
+                // themed decks pick their glyph out of Wingdings.
+                let font = child(pr, "buFont")
+                    .and_then(|f| attr(f, "typeface"))
+                    .filter(|t| !t.is_empty())
+                    .map(EcoString::from);
+                props.bullet = attr(c, "char").map(|ch| Bullet::Char {
+                    glyph: EcoString::from(ch),
+                    font,
+                });
             }
             "buAutoNum" => {
                 props.bullet = Some(Bullet::AutoNum {

@@ -69,7 +69,31 @@ pub fn resolve(
         };
     }
 
+    // The layout's own placeholder sits *between* the slide and the master, so
+    // its `a:lstStyle` overlays the master's defaults. This is the link that
+    // carries "the title on this layout is right-aligned": read only the
+    // master and every slide using the layout comes out left-aligned.
+    if let Some(layout) = layout
+        && let Some(matched) = find_placeholder(&layout.shapes, ph)
+        && !matched.list_style.is_empty()
+    {
+        out.levels = overlay(&matched.list_style, &out.levels);
+    }
+
     Some(out)
+}
+
+/// Layer one level-style list over another, level by level.
+fn overlay(over: &[LevelStyle], base: &[LevelStyle]) -> Vec<LevelStyle> {
+    let n = over.len().max(base.len());
+    (0..n)
+        .map(|i| {
+            let empty = LevelStyle::default();
+            let o = over.get(i).unwrap_or(&empty);
+            let b = base.get(i).unwrap_or(&empty);
+            LevelStyle { run: o.run.over(&b.run), para: o.para.over(&b.para) }
+        })
+        .collect()
 }
 
 /// The placeholder in `shapes` that `want` inherits from.

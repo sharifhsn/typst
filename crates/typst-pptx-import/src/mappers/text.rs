@@ -129,17 +129,70 @@ fn lower_list(props: &ParaProps) -> Option<tdoc::ListItem> {
         // An explicit `a:buNone` is the whole reason `Bullet::None` exists as
         // a value rather than an absence: it must beat an inherited bullet.
         Bullet::None => None,
-        Bullet::Char(ch) => Some(tdoc::ListItem {
-            level: props.level,
-            ordered: false,
-            // Typst's own bullet is `•`; anything else is authored and has to
-            // be reproduced literally.
-            marker: (ch.as_str() != "\u{2022}").then(|| ch.clone()),
-        }),
+        Bullet::Char { glyph, font } => {
+            let glyph = symbol_bullet(glyph, font.as_deref());
+            Some(tdoc::ListItem {
+                level: props.level,
+                ordered: false,
+                // Typst's own bullet is `•`; anything else is authored and
+                // has to be reproduced literally.
+                marker: (glyph.as_str() != "\u{2022}").then_some(glyph),
+            })
+        }
         Bullet::AutoNum { .. } => {
             Some(tdoc::ListItem { level: props.level, ordered: true, marker: None })
         }
     }
+}
+
+/// Translate a symbol-font bullet into the Unicode character it depicts.
+///
+/// A themed deck almost always takes its bullet from Wingdings or Symbol,
+/// where the *character* is an ordinary letter and the font is what makes it
+/// a glyph — `a:buChar char="q"` with `buFont typeface="Wingdings"` is a
+/// hollow square, not a `q`. Reproducing the letter and hoping Wingdings is
+/// installed yields a tofu box on every bullet of every such deck, so the
+/// common ones are mapped to the Unicode characters that mean the same thing.
+///
+/// Anything unmapped keeps its own character: a wrong guess is worse than a
+/// letter, and non-symbol fonts state real characters already.
+fn symbol_bullet(glyph: &str, font: Option<&str>) -> ecow::EcoString {
+    let Some(font) = font else { return glyph.into() };
+    let symbolic = font.eq_ignore_ascii_case("wingdings")
+        || font.eq_ignore_ascii_case("wingdings 2")
+        || font.eq_ignore_ascii_case("wingdings 3")
+        || font.eq_ignore_ascii_case("webdings")
+        || font.eq_ignore_ascii_case("symbol");
+    if !symbolic {
+        return glyph.into();
+    }
+    let mut chars = glyph.chars();
+    let (Some(ch), None) = (chars.next(), chars.next()) else {
+        return glyph.into();
+    };
+    // Symbol fonts are also addressed through the private use area at U+F0xx,
+    // which is the same code point with the high byte set.
+    let code = match ch as u32 {
+        c @ 0xF000..=0xF0FF => c - 0xF000,
+        c => c,
+    };
+    let mapped = match (font.to_ascii_lowercase().as_str(), code) {
+        ("symbol", 0xB7) => '\u{2022}',       // ·  → •
+        ("symbol", 0x2D) => '\u{2013}',       // -  → –
+        (_, 0x6C) => '\u{25CF}',              // l  → ●
+        (_, 0x6E) => '\u{25A0}',              // n  → ■
+        (_, 0x71) => '\u{2751}',              // q  → ❑
+        (_, 0x76) => '\u{2756}',              // v  → ❖
+        (_, 0x75) => '\u{2022}',              // u  → •
+        (_, 0xA7) => '\u{25AA}',              // §  → ▪
+        (_, 0xA8) => '\u{25AB}',              // ¨  → ▫
+        (_, 0xD8) => '\u{27A2}',              // Ø  → ➢
+        (_, 0xFC) => '\u{2713}',              // ü  → ✓
+        (_, 0xFE) => '\u{2611}',              // þ  → ☑
+        (_, 0x4A) => '\u{263A}',              // J  → ☺
+        _ => return glyph.into(),
+    };
+    ecow::EcoString::from(mapped)
 }
 
 /// `a:lnSpc`/`a:spcBef`/`a:spcAft` → points.
@@ -179,13 +232,40 @@ mod tests {
 
     #[test]
     fn typsts_own_bullet_glyph_is_not_repeated_literally() {
-        let props =
-            ParaProps { bullet: Some(Bullet::Char("\u{2022}".into())), ..ParaProps::default() };
-        assert!(lower_list(&props).unwrap().marker.is_none());
+        let bullet = |g: &str, f: Option<&str>| ParaProps {
+            bullet: Some(Bullet::Char { glyph: g.into(), font: f.map(Into::into) }),
+            ..ParaProps::default()
+        };
+        assert!(lower_list(&bullet("\u{2022}", None)).unwrap().marker.is_none());
+        assert_eq!(
+            lower_list(&bullet("\u{25B8}", None)).unwrap().marker.as_deref(),
+            Some("\u{25B8}")
+        );
+    }
 
-        let props =
-            ParaProps { bullet: Some(Bullet::Char("\u{25B8}".into())), ..ParaProps::default() };
-        assert_eq!(lower_list(&props).unwrap().marker.as_deref(), Some("\u{25B8}"));
+    #[test]
+    fn a_wingdings_bullet_becomes_the_glyph_it_depicts() {
+        let bullet = |g: &str, f: Option<&str>| ParaProps {
+            bullet: Some(Bullet::Char { glyph: g.into(), font: f.map(Into::into) }),
+            ..ParaProps::default()
+        };
+        // `q` in Wingdings is a hollow square. Emitting the letter renders a
+        // tofu box wherever Wingdings is not installed, which is everywhere
+        // this importer's output is likely to be compiled.
+        assert_eq!(
+            lower_list(&bullet("q", Some("Wingdings"))).unwrap().marker.as_deref(),
+            Some("\u{2751}")
+        );
+        // The same code point addressed through the private use area.
+        assert_eq!(
+            lower_list(&bullet("\u{F071}", Some("Wingdings"))).unwrap().marker.as_deref(),
+            Some("\u{2751}")
+        );
+        // A real font states real characters; leave them alone.
+        assert_eq!(
+            lower_list(&bullet("q", Some("Arial"))).unwrap().marker.as_deref(),
+            Some("q")
+        );
     }
 
     #[test]

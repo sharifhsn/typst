@@ -107,32 +107,75 @@ fn emit_slide(out: &mut String, slide: &Slide, index: usize, doc: &TypstDoc) {
 fn emit_item(out: &mut String, item: &Item, depth: usize, doc: &TypstDoc) {
     let pad = "  ".repeat(depth);
     match item {
-        Item::Placed { x, y, w, h, rot, block } => {
+        Item::Placed { x, y, w, h, rot, flip_h, flip_v, inset, anchor, block } => {
             // `#place` with an explicit box is the pair that reproduces a
             // PowerPoint shape: the place fixes the origin, the box fixes the
             // extent, and neither disturbs the flow around it.
-            let body = block_string(block, depth + 1, doc);
+            let mut body = block_string(block, depth + 1, doc);
+            // PowerPoint anchors text vertically inside a box that is usually
+            // taller than the text. Ignoring it top-aligns every centred
+            // caption in the deck.
+            if let Some(slot) = anchor {
+                let name = match slot {
+                    VAlign::Top => "top",
+                    VAlign::Middle => "horizon",
+                    VAlign::Bottom => "bottom",
+                };
+                body = format!("#align({name} + left)[{body}]");
+            }
             // A rotation of a whole turn is the identity; real decks state
             // `rot="21600000"` and it only adds noise.
             let rot = rot.rem_euclid(360.0);
+            // A mirrored shape is a negative scale, which Typst has and this
+            // importer once claimed it did not.
+            if *flip_h || *flip_v {
+                body = format!(
+                    "#scale(x: {}%, y: {}%, reflow: false, box(width: {}, height: {})[{body}])",
+                    if *flip_h { -100 } else { 100 },
+                    if *flip_v { -100 } else { 100 },
+                    len(*w),
+                    len(*h)
+                );
+            }
             let inner = if rot.abs() > 0.001 {
                 // PowerPoint turns a shape about its own centre, which is
                 // `#rotate`'s default origin too.
                 format!(
-                    "rotate({}, box(width: {}, height: {})[{}])",
+                    "rotate({}, box(width: {}, height: {}{})[{}])",
                     angle(rot),
                     len(*w),
                     len(*h),
+                    inset_arg(inset),
                     body
                 )
             } else {
-                format!("box(width: {}, height: {})[{}]", len(*w), len(*h), body)
+                format!(
+                    "box(width: {}, height: {}{})[{}]",
+                    len(*w),
+                    len(*h),
+                    inset_arg(inset),
+                    body
+                )
             };
             let _ = writeln!(out, "{pad}#place(top + left, dx: {}, dy: {}, {inner})", len(*x), len(*y));
         }
         Item::Flow(block) => {
             let _ = writeln!(out, "{pad}{}", block_string(block, depth, doc));
         }
+    }
+}
+
+/// `a:bodyPr`'s insets as a `box` argument, when they are not all zero.
+fn inset_arg(inset: &Option<(f64, f64, f64, f64)>) -> String {
+    match inset {
+        Some((l, t, r, b)) if *l > 0.0 || *t > 0.0 || *r > 0.0 || *b > 0.0 => format!(
+            ", inset: (left: {}, top: {}, right: {}, bottom: {})",
+            len(*l),
+            len(*t),
+            len(*r),
+            len(*b)
+        ),
+        _ => String::new(),
     }
 }
 

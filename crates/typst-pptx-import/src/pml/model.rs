@@ -58,6 +58,11 @@ pub struct Slide {
     pub bg: Option<Fill>,
     /// `p:sld/@show="0"` — a slide hidden from the presentation.
     pub hidden: bool,
+    /// `@showMasterSp="0"` — suppress the master's own decoration behind this
+    /// slide. Phrased negatively so `false` is PowerPoint's default and
+    /// `derive(Default)` stays honest: a deck's logo appears on every slide
+    /// precisely because no slide mentions it.
+    pub hide_master_shapes: bool,
 }
 
 #[derive(Debug, Default)]
@@ -66,6 +71,7 @@ pub struct SlideLayout {
     pub shapes: Vec<Shape>,
     pub master: Option<usize>,
     pub bg: Option<Fill>,
+    pub hide_master_shapes: bool,
 }
 
 #[derive(Debug, Default)]
@@ -167,6 +173,14 @@ pub struct TextShape {
     /// The shape carries a `p:nvSpPr/p:cNvSpPr/@txBox="1"` marker: it is a
     /// plain text box rather than a shape that happens to hold text.
     pub is_text_box: bool,
+    /// `a:lstStyle` on this shape's own `p:txBody`.
+    ///
+    /// On a *layout's* placeholder this is the middle link of the text
+    /// inheritance chain — the level defaults that sit between the slide's own
+    /// properties and the master's `p:txStyles`. It is where a template puts
+    /// "the title on this layout is right-aligned and 54pt", and reading only
+    /// the master leaves every such slide left-aligned at the wrong size.
+    pub list_style: Vec<LevelStyle>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -332,7 +346,7 @@ pub enum Spacing {
 pub enum Bullet {
     /// `a:buNone` — explicitly no bullet, which must override an inherited one.
     None,
-    Char(EcoString),
+    Char { glyph: EcoString, font: Option<EcoString> },
     /// `a:buAutoNum/@type` plus its start.
     AutoNum { kind: EcoString, start: u32 },
 }

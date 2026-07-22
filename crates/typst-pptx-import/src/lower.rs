@@ -56,6 +56,27 @@ impl LowerCtx<'_, '_> {
         resolved
     }
 
+    /// `docProps/core.xml`'s title and author, for touying's `config-info`.
+    ///
+    /// Parsed here rather than in `pml::parse` because it is Dublin Core
+    /// metadata rather than PresentationML — the part is shared with every
+    /// other OOXML format and has nothing to do with slides.
+    fn core_properties(&mut self) -> (Option<EcoString>, Option<EcoString>) {
+        let Some(bytes) = self.parser.bytes("docProps/core.xml") else {
+            return (None, None);
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let field = |tag: &str| -> Option<EcoString> {
+            let open = format!("<{tag}>");
+            let close = format!("</{tag}>");
+            let start = text.find(&open)? + open.len();
+            let end = text[start..].find(&close)? + start;
+            let value = text[start..end].trim();
+            (!value.is_empty()).then(|| EcoString::from(value))
+        };
+        (field("dc:title"), field("dc:creator"))
+    }
+
     /// Extract a media part and return the path to write it at.
     pub fn media(&mut self, rel_id: &str) -> Option<EcoString> {
         if let Some(path) = self.seen_media.get(rel_id) {
@@ -179,11 +200,12 @@ pub fn lower(
         slides.push(lower_slide(slide, index, pkg, &mut ctx));
     }
 
+    let (title, author) = ctx.core_properties();
     let doc = tdoc::TypstDoc {
         width: emu(pkg.size.cx),
         height: emu(pkg.size.cy),
-        title: None,
-        author: None,
+        title,
+        author,
         slides,
     };
     (doc, ctx.assets)
@@ -220,55 +242,79 @@ fn lower_slide(
         hidden: slide.hidden,
     };
 
-    for shape in &slide.shapes {
-        lower_shape(shape, layout, pkg, ctx, &mut out.items, None);
+    // A themed deck's logo, rule and background graphic live on the master
+    // and the layout, and *every* slide shows them without mentioning them.
+    // They are drawn first, so the slide's own content sits on top.
+    //
+    // Placeholders are skipped here on purpose: on a layout they are empty
+    // templates, and on a master they hold prompt text ("Click to edit Master
+    // title style") that no reader ever authored and no import should
+    // reproduce.
+    let master = layout.and_then(|l| l.master).and_then(|i| pkg.masters.get(i));
+    if let Some(master) = master
+        && !slide.hide_master_shapes
+        && layout.is_none_or(|l| !l.hide_master_shapes)
+    {
+        for shape in &master.shapes {
+            if !is_placeholder(shape) {
+                lower_shape(shape, layout, pkg, ctx, &mut out.items, None);
+            }
+        }
+    }
+    if let Some(layout) = layout {
+        for shape in &layout.shapes {
+            if !is_placeholder(shape) {
+                lower_shape(shape, Some(layout), pkg, ctx, &mut out.items, None);
+            }
+        }
     }
 
     // In idiomatic fidelity the title stops being a positioned box and becomes
-    // a touying heading. Done here rather than in the emitter because it is a
-    // judgement — the geometry is discarded, and only a placeholder PowerPoint
-    // itself labelled a title earns that.
-    if ctx.opts.fidelity == Fidelity::Idiomatic {
-        promote_title(slide, layout, pkg, ctx, &mut out);
+    // a touying heading. Decided *before* the shapes are lowered, so the title
+    // is simply skipped rather than lowered and then removed: `lower_shape`
+    // pushes at most one item per shape but sometimes none, so no arithmetic
+    // over shape indices can find the item a given shape produced.
+    let title_index = (ctx.opts.fidelity == Fidelity::Idiomatic)
+        .then(|| {
+            slide.shapes.iter().position(|s| {
+                matches!(s, Shape::Text(t)
+                    if t.placeholder.as_ref().is_some_and(|p| p.kind.is_title()))
+            })
+        })
+        .flatten();
+
+    for (index, shape) in slide.shapes.iter().enumerate() {
+        if Some(index) == title_index {
+            let Shape::Text(title) = shape else { continue };
+            let inherited =
+                inherit::resolve(title, layout, &pkg.masters).unwrap_or_default();
+            let paras = text::lower_paragraphs(&title.paras, &inherited, ctx);
+            let inlines: Vec<tdoc::Inline> =
+                paras.into_iter().flat_map(|p| p.inlines).collect();
+            if !inlines.is_empty() {
+                out.heading = Some(inlines);
+                continue;
+            }
+            // An empty title placeholder is not a heading; fall through and
+            // let it lower as an ordinary shape so nothing is lost.
+        }
+        lower_shape(shape, layout, pkg, ctx, &mut out.items, None);
     }
 
     let _ = index;
     out
 }
 
-/// Move the title placeholder's text out of the item list and into a heading.
-fn promote_title(
-    slide: &Slide,
-    layout: Option<&SlideLayout>,
-    pkg: &PmlPackage,
-    ctx: &mut LowerCtx<'_, '_>,
-    out: &mut tdoc::Slide,
-) {
-    let Some(position) = slide.shapes.iter().position(|s| {
-        matches!(s, Shape::Text(t) if t.placeholder.as_ref().is_some_and(|p| p.kind.is_title()))
-    }) else {
-        return;
-    };
-    let Shape::Text(title) = &slide.shapes[position] else { return };
-
-    let inherited = inherit::resolve(title, layout, &pkg.masters).unwrap_or_default();
-    let paras = text::lower_paragraphs(&title.paras, &inherited, ctx);
-    let inlines: Vec<tdoc::Inline> =
-        paras.into_iter().flat_map(|p| p.inlines).collect();
-    if inlines.is_empty() {
-        return;
+/// Whether a shape is a placeholder, at any depth.
+///
+/// A group on a layout may hold one, and a placeholder inside a group is
+/// still a template rather than decoration.
+fn is_placeholder(shape: &Shape) -> bool {
+    match shape {
+        Shape::Text(text) | Shape::Connector(text) => text.placeholder.is_some(),
+        Shape::Group(group) => group.shapes.iter().any(is_placeholder),
+        _ => false,
     }
-    out.heading = Some(inlines);
-
-    // Drop the item the title produced. Counting placed items up to this
-    // shape is safe because `lower_shape` pushes at most one item per shape
-    // and preserves order.
-    let mut seen = 0;
-    out.items.retain(|_| {
-        let keep = seen != position;
-        seen += 1;
-        keep
-    });
 }
 
 /// Lower one shape, appending zero or one item.
@@ -310,7 +356,24 @@ fn lower_shape(
                 },
                 None => tdoc::Block::Paras(paras),
             };
-            items.push(place(xfrm, block, parent, ctx));
+            let insets = if has_text {
+                let i = inherited.insets.unwrap_or(text_shape.insets);
+                Some((emu(i.l), emu(i.t), emu(i.r), emu(i.b)))
+            } else {
+                None
+            };
+            let anchor = text_shape
+                .anchor
+                .clone()
+                .or_else(|| inherited.anchor.clone())
+                .as_deref()
+                .and_then(lower_anchor);
+            let mut item = place(xfrm, block, parent, ctx);
+            if let tdoc::Item::Placed { inset, anchor: slot, .. } = &mut item {
+                *inset = insets;
+                *slot = anchor;
+            }
+            items.push(item);
         }
         Shape::Picture(pic) => {
             if let Some(block) = picture::lower(pic, ctx) {
@@ -407,22 +470,29 @@ fn place(
         w *= frame.scale_x;
         h *= frame.scale_y;
     }
-    if xfrm.flip_h || xfrm.flip_v {
-        ctx.report.approximate(
-            "flipped shape",
-            "a shape mirrored by `flipH`/`flipV` is drawn unmirrored: Typst has \
-             no reflection on a laid-out box",
-        );
-    }
+    let _ = &ctx;
     tdoc::Item::Placed {
         x,
         y,
         w,
         h,
+        flip_h: xfrm.flip_h,
+        flip_v: xfrm.flip_v,
+        inset: None,
+        anchor: None,
         // 60000ths of a degree, clockwise, about the box centre — which is
         // `#rotate`'s own default origin.
         rot: xfrm.rot as f64 / 60000.0,
         block,
+    }
+}
+
+/// `a:bodyPr/@anchor`. `t` is the default and needs no wrapper.
+fn lower_anchor(value: &str) -> Option<tdoc::VAlign> {
+    match value {
+        "ctr" => Some(tdoc::VAlign::Middle),
+        "b" => Some(tdoc::VAlign::Bottom),
+        _ => None,
     }
 }
 
