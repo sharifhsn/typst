@@ -38,6 +38,7 @@ import statistics
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -99,6 +100,32 @@ def _pages(pdf: Path, out_prefix: Path, max_pages: int) -> list[Path]:
         capture_output=True, timeout=300,
     )
     return sorted(out_prefix.parent.glob(out_prefix.name + "-*.png"))
+
+
+def _soffice_pdf(office: Path, work: Path, timeout: int = 300) -> Path | None:
+    """Convert one Office file to PDF through LibreOffice, guarding the hang.
+
+    A single soffice invocation can wedge on a pathological document. An
+    unguarded `TimeoutExpired` there raised straight through the sweep loop
+    and destroyed every score already computed — a whole run lost to one bad
+    document. Here a timeout, a crash, or a missing output is a per-document
+    failure the caller records and steps past, exactly like a failed export."""
+    out = work / (office.stem + ".pdf")
+    out.unlink(missing_ok=True)
+    try:
+        subprocess.run(
+            [SOFFICE, "--headless", "--convert-to", "pdf", "--outdir", str(work),
+             str(office)],
+            capture_output=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        # The launcher dies on timeout but the soffice.bin daemon it forked
+        # survives, still chewing the pathological document and holding the
+        # profile lock — which then hangs every conversion after it. Reaping it
+        # is what turns one bad document into one skip instead of a dead sweep.
+        subprocess.run(["pkill", "-9", "-f", "soffice.bin"], capture_output=True)
+        return None
+    return out if out.exists() else None
 
 
 def _thumb(png: Path):
@@ -258,6 +285,7 @@ def cmd_visual(args) -> int:
     fmt = "pptx" if is_deck else "docx"
     window = 0 if is_deck else 2  # decks are one page per slide by design
     scores, failures = {}, []
+    out = Path(args.out) / "scores.json"
 
     for src in docs(args.n, args.kind, args.filter):
         gold_pdf, office = work / "g.pdf", work / f"o.{fmt}"
@@ -266,13 +294,8 @@ def cmd_visual(args) -> int:
             continue
         for stale in work.glob("*.png"):
             stale.unlink()
-        subprocess.run(
-            [SOFFICE, "--headless", "--convert-to", "pdf", "--outdir", str(work),
-             str(office)],
-            capture_output=True, timeout=600,
-        )
-        conv = work / f"o.pdf"
-        if not conv.exists():
+        conv = _soffice_pdf(office, work)
+        if conv is None:
             failures.append(f"{src} (soffice)")
             continue
         gold_pngs = _pages(gold_pdf, work / "gold", args.pages)
@@ -310,8 +333,10 @@ def cmd_visual(args) -> int:
             "per_page": per_page,
             "per_tile": per_tile,
         }
+        # Written every document, not once at the end: a soffice hang on doc N
+        # must not throw away the N-1 scores already earned.
+        out.write_text(json.dumps(scores, indent=1))
 
-    out = Path(args.out) / "scores.json"
     out.write_text(json.dumps(scores, indent=1))
     _report_run(failures, {}, "")
     print(f"{len(scores)} documents scored -> {out}")
@@ -499,11 +524,8 @@ def cmd_abdiff(args) -> int:
             if not export(binary, src, fmt, office):
                 thumbs = {}
                 break
-            subprocess.run([SOFFICE, "--headless", "--convert-to", "pdf",
-                            "--outdir", str(work), str(office)],
-                           capture_output=True, timeout=600)
-            pdf = work / f"{label}.pdf"
-            if not pdf.exists():
+            pdf = _soffice_pdf(office, work)
+            if pdf is None:
                 thumbs = {}
                 break
             for stale in work.glob(f"{label}t-*.png"):
@@ -575,9 +597,8 @@ def cmd_sheet(args) -> int:
         gold_pdf, office = work / "g.pdf", work / f"o.{fmt}"
         if not (export(binary, src, "pdf", gold_pdf) and export(binary, src, fmt, office)):
             continue
-        subprocess.run([SOFFICE, "--headless", "--convert-to", "pdf",
-                        "--outdir", str(work), str(office)],
-                       capture_output=True, timeout=600)
+        if _soffice_pdf(office, work) is None:
+            continue
         for side, pdf in (("L", gold_pdf), ("R", work / "o.pdf")):
             subprocess.run(["pdftoppm", "-png", "-r", "90", "-f", str(page),
                             "-l", str(page), str(pdf), str(work / side)],
@@ -610,11 +631,14 @@ def cmd_resave(args) -> int:
             failures.append(str(src)); continue
         for stale in redir.glob("*.docx"):
             stale.unlink()
-        subprocess.run(
-            [SOFFICE, "--headless", "--convert-to", "docx:MS Word 2007 XML",
-             "--outdir", str(redir), str(ours)],
-            capture_output=True, timeout=600,
-        )
+        try:
+            subprocess.run(
+                [SOFFICE, "--headless", "--convert-to", "docx:MS Word 2007 XML",
+                 "--outdir", str(redir), str(ours)],
+                capture_output=True, timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            failures.append(f"{src} (soffice timeout)"); continue
         redone = redir / "orig.docx"
         if not redone.exists():
             failures.append(f"{src} (soffice)"); continue
