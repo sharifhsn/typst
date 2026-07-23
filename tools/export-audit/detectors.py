@@ -314,12 +314,17 @@ def text_loss_from_parts(parts: dict[str, bytes], pdf_text: str) -> dict:
 # order-blind: a perfectly scrambled paragraph passes every one of them. This
 # compares the two word STREAMS in order.
 _SEQ_TOK = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
-# Empirical floor over 30 clean corpus documents was 0.539, and every document
-# under 0.80 was a multi-column/CV layout whose geometric read order in the PDF
-# legitimately differs from the linearized docx flow (altacv, ratio 0.763, has
-# zero text loss). The flag sits UNDER that floor so it only fires on a stream
-# more scrambled than any clean document — including heavy multi-column ones.
-SEQ_FLAG = 0.50
+# The floor is lower than a 30-document sample suggested. A 200-document run put
+# clean multi-column layouts (cover letters, cheatsheets) as low as 0.286 —
+# their PDF read order is geometric while the docx linearizes column by column,
+# with zero text loss. An earlier 0.50 flag sat ABOVE that floor and reported
+# those benign reorderings as findings; the flag now sits under the widest
+# observed benign ratio, so it fires only on gross scrambling (a fully reversed
+# stream tends toward 0). The cost of the honest threshold is that the signal
+# no longer catches subtle reordering — which a single global cutoff cannot
+# separate from column linearization anyway. Reading order is advisory, like the
+# rest of the text layer; the flag marks only the unmistakable cases.
+SEQ_FLAG = 0.25
 
 
 def _seq_words(text: str, cap: int = 4000) -> list[str]:
