@@ -269,6 +269,7 @@ fn cellgrid(
         || resolve_column_widths(grid, ctx.available_width_dxa(), has_column_gutter),
         |geometry| geometry.columns_dxa.clone(),
     );
+    let col_dxa = clamp_implausible_columns(col_dxa, ctx.available_width_dxa());
     let width_dxa: i32 = col_dxa.iter().copied().sum();
 
     // -- Header rows (mark `table.header` rows for `w:tblHeader`) -----------
@@ -1453,6 +1454,44 @@ fn median_positive(mut values: Vec<f64>) -> Option<f64> {
 fn pt_to_positive_dxa(points: f64) -> Option<i32> {
     let dxa = (points * 20.0).round();
     (dxa.is_finite() && dxa >= 1.0 && dxa <= i32::MAX as f64).then_some(dxa as i32)
+}
+
+/// Guards against a `w:tblGrid` no Word reader can honour. Typst resolves a
+/// track wider than the page — the `grid(columns: (100000pt, 1fr))` cancelled
+/// by a negative block inset, a margin-positioning idiom — literally, so the
+/// exported `w:gridCol` can be orders of magnitude past the available width.
+/// Word then caps the table at the page and hands each track its *proportional*
+/// share, which drives the sibling content column to a single-glyph width whose
+/// text stacks one character per line.
+///
+/// When the totals are grossly implausible — any single track wider than the
+/// whole available width, or the sum half-again past it — each track is capped
+/// at the available width (a lone track can never legitimately exceed the page)
+/// and the set is scaled to fit. That removes the dominating track without
+/// flattening the surviving proportions, so small gutter tracks stay small and
+/// the content column keeps a legible share. Ordinary tables — CV sidebars,
+/// layout grids — sum to about the available width, trip neither test, and are
+/// returned byte-for-byte unchanged.
+fn clamp_implausible_columns(mut cols: Vec<i32>, available: i32) -> Vec<i32> {
+    if available <= 0 || cols.len() < 2 {
+        return cols;
+    }
+    let sum: i64 = cols.iter().map(|&c| i64::from(c)).sum();
+    let any_over = cols.iter().any(|&c| c > available);
+    let grossly_over = sum > i64::from(available) * 3 / 2;
+    if !(any_over || grossly_over) {
+        return cols;
+    }
+    for c in cols.iter_mut() {
+        *c = (*c).clamp(1, available);
+    }
+    let capped: i64 = cols.iter().map(|&c| i64::from(c)).sum();
+    if capped > i64::from(available) {
+        for c in cols.iter_mut() {
+            *c = ((i64::from(*c) * i64::from(available) / capped) as i32).max(1);
+        }
+    }
+    cols
 }
 
 /// Per-track widths in dxa for `w:tblGrid`, including Typst gutter tracks.
