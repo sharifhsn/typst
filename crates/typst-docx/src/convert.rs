@@ -1704,6 +1704,7 @@ fn handle_block_box(
         ),
         _ => None,
     };
+    let clips = elem.clip.get(styles);
     if let (Some(Paint::Solid(color)), Some(height)) = (&fill, fixed_height)
         && height.to_pt().is_finite()
         && height.to_pt() > 0.0
@@ -1732,7 +1733,15 @@ fn handle_block_box(
             rows: vec![Row {
                 header: false,
                 cant_split: true,
-                height: Some(RowHeight { val: height_dxa, exact: false }),
+                // `atLeast` by default, so a font substitution that makes the
+                // content slightly taller can never silently truncate it. An
+                // explicit `clip: true` is the opposite instruction, though —
+                // the author has already declared that overflow is cut off, and
+                // Typst's own layout clips it — so honour that with `exact`.
+                // Without this a fixed-height clipped pane (a terminal emulator
+                // showing its last lines) grows in Word to reveal the whole
+                // scrollback Typst deliberately hid.
+                height: Some(RowHeight { val: height_dxa, exact: clips }),
                 cells: vec![Cell {
                     w_dxa: Some(width_dxa),
                     grid_span: 1,
