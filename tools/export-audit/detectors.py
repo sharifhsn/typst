@@ -13,10 +13,13 @@ plausible passing output; every failure mode named there is a canary here.
 
 from __future__ import annotations
 
+import collections
+import difflib
+import html
 import re
 from typing import Any, Callable
 
-from corpuslib import cjk_pair_counts, word_counts
+from corpuslib import cjk_pair_counts, norm, word_counts
 
 # ---------------------------------------------------------------------------
 # DOCX invariants
@@ -146,6 +149,87 @@ def unresolved_rids(parts: dict[str, bytes]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Uniqueness of element ids (both formats)
+# ---------------------------------------------------------------------------
+
+_DOCPR = re.compile(rb'<wp:docPr\b[^>]*\bid="([^"]+)"')
+_BOOKMARK_NAME = re.compile(rb'<w:bookmarkStart\b[^>]*\bw:name="([^"]+)"')
+_CNVPR = re.compile(rb'<p:cNvPr\b[^>]*\bid="([^"]+)"')
+_SLDID = re.compile(rb'<p:sldId\b[^>]*\bid="([^"]+)"')
+
+
+def _dups_within(values: list[bytes]) -> list[bytes]:
+    counts = collections.Counter(values)
+    return sorted(v for v, c in counts.items() if c > 1)
+
+
+def duplicate_ids(parts: dict[str, bytes]) -> list[str]:
+    """Element ids whose duplication makes a consumer reject or repair the file.
+
+    Four uniqueness rules, each scoped exactly where the format demands it —
+    a scanner that widens the scope forges defects (docPr ids legitimately
+    repeat ACROSS parts; cNvPr ids legitimately repeat across slides):
+
+      docPr id     — unique WITHIN one wordprocessing part; a repeat inside a
+                     single header/footer/document part is Word's repair-dialog
+                     trigger (a picture placed twice keeping one id),
+      bookmark name— unique ACROSS all wordprocessing parts; a second
+                     `w:bookmarkStart w:name=` makes every cross-reference to
+                     that name ambiguous,
+      cNvPr id     — unique WITHIN one slide,
+      sldId id     — unique within presentation.xml's slide-id list.
+    """
+    bad = []
+    seen_bookmarks: collections.Counter = collections.Counter()
+    for n, d in parts.items():
+        if n.startswith("word/") and n.endswith(".xml"):
+            for v in _dups_within(_DOCPR.findall(d)):
+                bad.append(f"{n}: docPr id {v.decode()}")
+            for name in _BOOKMARK_NAME.findall(d):
+                if not any(name.startswith(p) for p in _RESERVED):
+                    seen_bookmarks[name] += 1
+        elif n.startswith("ppt/slides/") and n.endswith(".xml"):
+            for v in _dups_within(_CNVPR.findall(d)):
+                bad.append(f"{n}: cNvPr id {v.decode()}")
+    for name, c in seen_bookmarks.items():
+        if c > 1:
+            bad.append(f"bookmark name {name.decode()} x{c}")
+    for v in _dups_within(_SLDID.findall(parts.get("ppt/presentation.xml", b""))):
+        bad.append(f"ppt/presentation.xml: sldId {v.decode()}")
+    return sorted(bad)
+
+
+# ---------------------------------------------------------------------------
+# External-link survival (advisory; a show rule may legitimately drop a link)
+# ---------------------------------------------------------------------------
+
+
+def external_link_survival(dests: list[str], parts: dict[str, bytes]) -> list[str]:
+    """Source http(s) link destinations that reach neither an external
+    relationship Target nor a HYPERLINK field in the package. Advisory: a
+    show rule can legitimately transform or remove a link, so this reports
+    a count to look at, never a hard failure."""
+    haystack = []
+    for n, d in parts.items():
+        if n.endswith(".rels"):
+            for rel in _REL.findall(d):
+                mode = _ATTR["mode"].search(rel)
+                if mode and b"External" in mode.group(1):
+                    t = _ATTR["target"].search(rel)
+                    if t:
+                        haystack.append(t.group(1).decode("utf-8", "replace"))
+        elif n.endswith(".xml"):
+            for instr in _INSTR.findall(d) + _FLDSIMPLE.findall(d):
+                if b"HYPERLINK" in instr:
+                    haystack.append(instr.decode("utf-8", "replace"))
+    # A rel Target with an `&` is stored XML-escaped (`&amp;`); the source dest
+    # is not. Unescape the haystack so a query-string URL is not reported lost
+    # purely because of entity encoding.
+    hay = html.unescape("\n".join(haystack))
+    return sorted(u for u in dict.fromkeys(dests) if u not in hay)
+
+
+# ---------------------------------------------------------------------------
 # Shared invariants
 # ---------------------------------------------------------------------------
 
@@ -212,6 +296,46 @@ def text_loss(pdf_text: str, body_text: str, furniture_text: str) -> dict:
     return {"missing": missing, "deficit": deficit, "cjk_pair_loss": cjk_loss}
 
 
+# Reading-order signal. The bags above (word sets, occurrence counts) are
+# order-blind: a perfectly scrambled paragraph passes every one of them. This
+# compares the two word STREAMS in order.
+_SEQ_TOK = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
+# Empirical floor over 30 clean corpus documents was 0.539, and every document
+# under 0.80 was a multi-column/CV layout whose geometric read order in the PDF
+# legitimately differs from the linearized docx flow (altacv, ratio 0.763, has
+# zero text loss). The flag sits UNDER that floor so it only fires on a stream
+# more scrambled than any clean document — including heavy multi-column ones.
+SEQ_FLAG = 0.50
+
+
+def _seq_words(text: str, cap: int = 4000) -> list[str]:
+    return _SEQ_TOK.findall(norm(text))[:cap]
+
+
+def sequence_similarity(pdf_text: str, body_text: str, cap: int = 4000) -> float:
+    """difflib ratio of the PDF word stream against the docx body word stream.
+
+    1.0 is identical order; a fully reversed stream tends toward 0; a benign
+    local transposition stays near 1. Lists are capped at `cap` words so the
+    O(n^2) matcher stays cheap on book-length documents. Empty on either side
+    means there is nothing to order, which is not a defect -> 1.0."""
+    a = _seq_words(pdf_text, cap)
+    b = _seq_words(body_text, cap)
+    if not a or not b:
+        return 1.0
+    return round(difflib.SequenceMatcher(None, a, b, autojunk=False).ratio(), 4)
+
+
+def formatting_collapse(height_classes: int, sz_values: int) -> bool:
+    """A coarse formatting-survival proxy over two already-extracted counts:
+    the number of distinct rounded word-height classes in the PDF and the
+    number of distinct `w:sz` values in the docx body. Three or more visual
+    text sizes flattened to a single size in the package is a collapse. Kept
+    conservative (>=3 vs <=1) so a document that merely lacks run-level sizing
+    for a legitimate reason does not trip it."""
+    return height_classes >= 3 and sz_values <= 1
+
+
 # ---------------------------------------------------------------------------
 # Canaries: (name, detector, args, should_fire)
 # ---------------------------------------------------------------------------
@@ -260,6 +384,53 @@ _RID_OK = {
     "ppt/slides/_rels/slide1.xml.rels": b'<Relationship Id="rId2" Target="../media/i.png"/>',
 }
 _RID_DEAD = {"ppt/slides/slide1.xml": b'<a:blip r:embed="rId2"/>'}
+
+# Duplicate ids. The dup must be scoped exactly: WITHIN a part for docPr/cNvPr,
+# ACROSS parts for bookmark names. The clean twins are the false-positive
+# shapes — the same id legitimately reused in a different part / slide.
+_DOCPR_DUP = {"word/footer1.xml": b'<wp:docPr id="7"/><wp:docPr id="7"/>'}
+_DOCPR_CROSSPART_OK = {
+    "word/document.xml": b'<wp:docPr id="7"/>',
+    "word/header1.xml": b'<wp:docPr id="7"/>',
+}
+_BOOKMARK_DUP = {
+    "word/document.xml": b'<w:bookmarkStart w:name="ref"/>',
+    "word/footnotes.xml": b'<w:bookmarkStart w:name="ref"/>',
+}
+_BOOKMARK_OK = {
+    "word/document.xml": b'<w:bookmarkStart w:name="a"/><w:bookmarkStart w:name="_GoBack"/>',
+    "word/footnotes.xml": b'<w:bookmarkStart w:name="b"/><w:bookmarkStart w:name="_GoBack"/>',
+}
+_CNVPR_DUP = {"ppt/slides/slide1.xml": b'<p:cNvPr id="3"/><p:cNvPr id="3"/>'}
+_CNVPR_CROSSSLIDE_OK = {
+    "ppt/slides/slide1.xml": b'<p:cNvPr id="3"/>',
+    "ppt/slides/slide2.xml": b'<p:cNvPr id="3"/>',
+}
+_SLDID_DUP = {"ppt/presentation.xml": b'<p:sldId id="256"/><p:sldId id="256"/>'}
+
+_LINK_REL_OK = {
+    "word/document.xml": b"<w:hyperlink r:id=\"rId5\"/>",
+    "word/_rels/document.xml.rels": (
+        b'<Relationship Id="rId5" Target="https://x.com/a" TargetMode="External"/>'
+    ),
+}
+_LINK_FIELD_OK = {
+    "word/document.xml": b'<w:instrText> HYPERLINK "https://y.com/b" </w:instrText>',
+}
+# A query-string dest whose rel Target is XML-escaped must still count as
+# survived (the &amp; false positive found on ilm in the 2026-07 shakeout).
+_LINK_ESCAPED_OK = {
+    "word/_rels/document.xml.rels": (
+        b'<Relationship Id="rId3" Target="https://w.com/p?a=1&amp;b=2"'
+        b' TargetMode="External"/>'
+    ),
+}
+_LINK_DEAD = {"word/document.xml": b"<w:p>no link here</w:p>"}
+
+# Reading-order fixtures.
+_SEQ_A = "alpha bravo charlie delta echo foxtrot golf hotel india juliet"
+_SEQ_SWAP = "alpha bravo charlie delta foxtrot echo golf hotel india juliet"
+_SEQ_REV = " ".join(reversed(_SEQ_A.split()))
 
 # The table is deliberately heterogeneous — each entry pairs a detector with
 # its own argument shape — so it is typed as fully dynamic.
@@ -324,6 +495,28 @@ CANARIES: list[tuple[str, Callable[..., Any], tuple[Any, ...], bool]] = [
         ("hapter", "chapter", ""),
         False,
     ),
+    # Duplicate ids: fire on an in-scope dup, clean on the reused-elsewhere twin.
+    ("dupids fires on docPr repeat in one part", duplicate_ids, (_DOCPR_DUP,), True),
+    ("dupids clean on docPr reused across parts", duplicate_ids, (_DOCPR_CROSSPART_OK,), False),
+    ("dupids fires on bookmark name across parts", duplicate_ids, (_BOOKMARK_DUP,), True),
+    ("dupids clean on unique names + shared _GoBack", duplicate_ids, (_BOOKMARK_OK,), False),
+    ("dupids fires on cNvPr repeat in one slide", duplicate_ids, (_CNVPR_DUP,), True),
+    ("dupids clean on cNvPr reused across slides", duplicate_ids, (_CNVPR_CROSSSLIDE_OK,), False),
+    ("dupids fires on sldId repeat", duplicate_ids, (_SLDID_DUP,), True),
+    # External-link survival: clean when the dest reaches a rel or a field.
+    ("links clean when dest in external rel", external_link_survival, (["https://x.com/a"], _LINK_REL_OK), False),
+    ("links clean when dest in HYPERLINK field", external_link_survival, (["https://y.com/b"], _LINK_FIELD_OK), False),
+    ("links clean when rel Target is XML-escaped", external_link_survival, (["https://w.com/p?a=1&b=2"], _LINK_ESCAPED_OK), False),
+    ("links fires on a stranded dest", external_link_survival, (["https://z.com/gone"], _LINK_DEAD), True),
+    # Reading order: reversed fires, identical/local-swap clean.
+    ("sequence fires on reversed stream", sequence_similarity, (_SEQ_A, _SEQ_REV), True),
+    ("sequence clean on identical stream", sequence_similarity, (_SEQ_A, _SEQ_A), False),
+    ("sequence clean on a benign adjacent swap", sequence_similarity, (_SEQ_A, _SEQ_SWAP), False),
+    # Formatting survival over two extracted counts.
+    ("formatting fires when 3+ heights collapse to one sz", formatting_collapse, (3, 1), True),
+    ("formatting fires when many heights and no sz", formatting_collapse, (5, 0), True),
+    ("formatting clean when two sizes survive", formatting_collapse, (3, 2), False),
+    ("formatting clean when few heights to begin with", formatting_collapse, (2, 1), False),
 ]
 
 
@@ -331,13 +524,24 @@ def text_fired(result: dict) -> bool:
     return bool(result["missing"] or result["deficit"] or result["cjk_pair_loss"])
 
 
+def _fired(fn: Callable[..., Any], result: Any) -> bool:
+    """Did this detector fire? Each result shape has its own truthiness: the
+    text bag is fired iff any of its three lists is nonempty; a similarity
+    ratio is fired iff it falls under the flag; everything else is a list or a
+    bool whose ordinary truthiness is the answer."""
+    if fn is text_loss:
+        return text_fired(result)
+    if fn is sequence_similarity:
+        return result < SEQ_FLAG
+    return bool(result)
+
+
 def run_canaries() -> list[str]:
     """Every canary, returning failure descriptions (empty = all proven)."""
     failures = []
     for name, fn, args, should_fire in CANARIES:
         result = fn(*args)
-        fired = text_fired(result) if fn is text_loss else bool(result)
-        if fired != should_fire:
+        if _fired(fn, result) != should_fire:
             failures.append(
                 f"{name}: expected {'FIRE' if should_fire else 'clean'},"
                 f" got {result!r}"

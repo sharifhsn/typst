@@ -27,13 +27,29 @@ canaries** (`detectors.py`), and one CLI (`audit.py`).
 
 ## Division of labor
 
+Two kinds of check live here, and the distinction matters:
+
+- The **canary suite** (`selftest`) is *regression armor for known failure
+  classes*. Each canary is a planted defect from a specific past bug plus its
+  clean twins; it proves a detector still fires on that exact shape and stays
+  quiet on the look-alikes. It is indexed on failures we have already seen.
+- The **general layers** reason from the defect space of "lower a laid-out
+  document into OOXML," not from any bug list: *referential integrity*
+  invariants (every id/anchor/rel resolves, and every id is unique where the
+  format demands), *reading-order / formatting / colour* signals that a
+  bag-of-words comparison is blind to, a *generative cross-product* that
+  manufactures construct × context combinations no author enumerates, and a
+  *consumer re-save* that runs the output back through a real reader.
+
 | Layer | Where | Catches | Cost |
 |---|---|---|---|
 | Structural fixture tests | `tests/src/{docx,pptx,pandoc}.rs` | authored cases, invariants on fixtures, byte determinism | seconds, every CI run |
 | Fixture release gate | `tools/docx-validate` | package validity, editability, fixture visuals | minutes, CI |
-| **Corpus invariants** | `audit.py invariants` | dead anchors, dangling rels, unresolved numIds/r:ids, `w:` in slides, nondeterminism — at scale | ~1 s/doc |
-| **Corpus text fidelity** | `audit.py text` | content that vanishes or mangles between the PDF and the package | ~2 s/doc |
-| **Corpus visuals, ranked** | `audit.py visual` → `rank` → `sheet` | gross layout breakage vs the PDF; a *ranker*, not a detector | ~15 s/doc; vision only on the ranked worst |
+| **Corpus invariants** | `audit.py invariants` | dead anchors, dangling rels, unresolved numIds/r:ids, `w:` in slides, **duplicate docPr / bookmark / cNvPr / sldId ids**, nondeterminism — at scale | ~1 s/doc |
+| **Corpus text fidelity** | `audit.py text` | content that vanishes or mangles; **scrambled reading order** (`--links` also flags external-link loss) | ~2 s/doc |
+| **Corpus visuals, ranked** | `audit.py visual` → `rank` → `sheet` | gross layout breakage vs the PDF, plus **colour that vanished** (`desaturated`); a *ranker*, not a detector | ~15 s/doc; vision only on the ranked worst |
+| **Generative cross-product** | `audit.py generate` | export failure, invariant breaks, and silent sentinel loss over construct × context pairs | ~2 s/pair, one shot |
+| **Consumer re-save** | `audit.py resave` | content a real consumer (LibreOffice) silently drops from our output | ~10 s/doc, on ~15 |
 | **Same-renderer A/B** | `audit.py abdiff` | any real output change between two binaries, page-localized | ~30 s/doc, run on suspects |
 
 ### Why two visual instruments (measured, not assumed)
@@ -64,15 +80,24 @@ cargo build --release -p typst-cli   # never drive a debug binary at scale
 cd tools/export-audit
 
 uv run audit.py selftest
+uv run audit.py generate --binary ../../target/release/typst   # construct x context matrix
 uv run audit.py invariants --binary ../../target/release/typst -n 150
 uv run audit.py invariants --binary ../../target/release/typst --kind presentation -n 60
-uv run audit.py text --binary ../../target/release/typst -n 150
+uv run audit.py text --binary ../../target/release/typst -n 150 --links
 
 uv run audit.py visual --binary ../../target/release/typst -n 60
-uv run audit.py rank --scores /tmp/export-audit/scores.json -k 15
+uv run audit.py rank --scores /tmp/export-audit/scores.json -k 15   # DESAT column marks vanished colour
 uv run audit.py sheet --scores /tmp/export-audit/scores.json \
     --binary ../../target/release/typst -k 8
+
+uv run audit.py resave --binary ../../target/release/typst -n 15   # LibreOffice re-save round-trip
 ```
+
+`generate` needs no corpus — it manufactures its own inputs and is the one
+layer that runs in a single shot. `text --links` adds a `typst query` per
+document (drop the flag for the fast path). The `resave` and `visual` layers
+each spawn LibreOffice per document and are the slow tail; run them last on a
+reduced `-n`.
 
 Then *look at the sheets* (typst render left, office render right). The
 cheap metric only decides where looking is worth it; the looking is the

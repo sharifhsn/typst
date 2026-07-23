@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import statistics
 import subprocess
 import sys
 from pathlib import Path
@@ -40,14 +42,59 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import detectors
-from corpuslib import check_binary, docs, docx_text, export, read_parts
+from corpuslib import check_binary, docs, docx_text, export, read_parts, root_for
 
 SOFFICE = "/opt/homebrew/bin/soffice"
 
+_WORDBOX = re.compile(
+    rb'<word xMin="[0-9.]+" yMin="([0-9.]+)" xMax="[0-9.]+" yMax="([0-9.]+)"'
+)
+_SZ = re.compile(rb'<w:sz w:val="([0-9]+)"')
+
+
+def _pdf_height_classes(pdf: Path) -> int:
+    """Distinct rounded word-height classes in the PDF, from pdftotext -bbox."""
+    r = subprocess.run(
+        ["pdftotext", "-bbox", str(pdf), "-"], capture_output=True, timeout=120
+    )
+    heights = {
+        round(float(m.group(2)) - float(m.group(1)))
+        for m in _WORDBOX.finditer(r.stdout)
+    }
+    return len({h for h in heights if h > 0})
+
+
+def _body_sz_count(parts: dict[str, bytes]) -> int:
+    """Distinct `w:sz` values in the docx body flow. styles.xml is excluded:
+    a style-defined size is not run-level survival, and counting it would mask
+    a body whose every run collapsed to the default size."""
+    vals: set[bytes] = set()
+    for n, d in parts.items():
+        if n.startswith("word/") and n.endswith(".xml") and n != "word/styles.xml":
+            vals.update(_SZ.findall(d))
+    return len(vals)
+
+
+def _source_link_dests(binary: str, src: Path) -> list[str] | None:
+    """http(s) link destinations declared in the source, or None if the query
+    could not be run (so the caller can tell 'no links' from 'no answer')."""
+    r = subprocess.run(
+        [binary, "query", "--root", str(root_for(src)), str(src),
+         "link", "--field", "dest", "--format", "json"],
+        capture_output=True, cwd=str(Path.home() / "Code/typst-corpus"), timeout=120,
+    )
+    try:
+        dests = json.loads(r.stdout.decode("utf-8", "replace") or "[]")
+    except json.JSONDecodeError:
+        return None
+    return [d for d in dests if isinstance(d, str) and d.startswith(("http://", "https://"))]
+
 
 def _pages(pdf: Path, out_prefix: Path, max_pages: int) -> list[Path]:
+    # Rendered in colour (not -gray): the thumb greyscales itself, but the
+    # saturation signal needs the colour to survive to this point.
     subprocess.run(
-        ["pdftoppm", "-png", "-gray", "-r", "60", "-f", "1", "-l", str(max_pages),
+        ["pdftoppm", "-png", "-r", "60", "-f", "1", "-l", str(max_pages),
          str(pdf), str(out_prefix)],
         capture_output=True, timeout=300,
     )
@@ -59,6 +106,19 @@ def _thumb(png: Path):
 
     with Image.open(png) as im:
         return list(im.convert("L").resize((96, 128)).tobytes())
+
+
+def _saturation(png: Path) -> float:
+    """Mean HSV saturation of a page, 0..1, at low res. Grayscale text on a
+    white ground sits near 0; a filled colour panel or gradient lifts it. The
+    metric is magnitude-only, so LibreOffice's hue shifts do not move it —
+    only colour genuinely vanishing does."""
+    from PIL import Image
+
+    with Image.open(png) as im:
+        s = im.convert("HSV").resize((48, 64)).getchannel("S")
+        px = s.tobytes()
+    return sum(px) / (255.0 * len(px)) if px else 0.0
 
 
 def _agreement(a: list[int], b: list[int]) -> float:
@@ -110,6 +170,8 @@ def cmd_invariants(args) -> int:
         found = {}
         if moved := detectors.nondeterminism(pa, pb):
             found["nondeterministic_parts"] = moved
+        if dup := detectors.duplicate_ids(pa):
+            found["duplicate_ids"] = dup
         if is_deck:
             if w := detectors.wordprocessing_in_slides(pa):
                 found["wordprocessing_in_slides"] = w
@@ -133,6 +195,8 @@ def cmd_text(args) -> int:
     binary = check_binary(args.binary)
     work = Path(args.out); work.mkdir(parents=True, exist_ok=True)
     failures, findings = [], {}
+    ratios: list[float] = []
+    link_docs = link_lost = 0
 
     for src in docs(args.n, "document", args.filter):
         pdf, docx = work / "t.pdf", work / "t.docx"
@@ -143,16 +207,47 @@ def cmd_text(args) -> int:
         if t.returncode != 0:
             failures.append(f"{src} (pdftotext)")
             continue
-        body, furniture = docx_text(read_parts(docx))
-        loss = detectors.text_loss(t.stdout.decode("utf-8", "replace"), body, furniture)
+        pdf_text = t.stdout.decode("utf-8", "replace")
+        parts = read_parts(docx)
+        body, furniture = docx_text(parts)
+        loss = detectors.text_loss(pdf_text, body, furniture)
+        seq = detectors.sequence_similarity(pdf_text, body)
+        ratios.append(seq)
+        collapsed = detectors.formatting_collapse(
+            _pdf_height_classes(pdf), _body_sz_count(parts)
+        )
+        found: dict = {}
         if detectors.text_fired(loss):
-            findings[str(src)] = {
-                "missing": loss["missing"][:8],
-                "deficit_tokens": sum(loss["deficit"].values()),
-                "cjk_pairs_lost": len(loss["cjk_pair_loss"]),
-            }
+            found["missing"] = loss["missing"][:8]
+            found["deficit_tokens"] = sum(loss["deficit"].values())
+            found["cjk_pairs_lost"] = len(loss["cjk_pair_loss"])
+        if seq < detectors.SEQ_FLAG:
+            found["reading_order"] = seq
+        if collapsed:
+            found["formatting_collapsed"] = True
+        if args.links:
+            dests = _source_link_dests(binary, src)
+            if dests:
+                link_docs += 1
+                lost = detectors.external_link_survival(dests, parts)
+                if lost:
+                    link_lost += 1
+                    found["links_lost"] = lost[:6]
+        if found:
+            findings[str(src)] = found
 
-    _report_run(failures, findings, "text-loss findings")
+    _report_run(failures, findings, "text/order/formatting findings")
+    if ratios:
+        qs = statistics.quantiles(ratios, n=20) if len(ratios) >= 2 else [ratios[0]]
+        print(
+            f"sequence ratio over {len(ratios)} docs: "
+            f"min={min(ratios):.3f} p5={qs[0]:.3f} "
+            f"median={statistics.median(ratios):.3f} max={max(ratios):.3f} "
+            f"(flag < {detectors.SEQ_FLAG})"
+        )
+    if args.links:
+        print(f"external links: {link_docs} docs had http(s) links,"
+              f" {link_lost} lost at least one (advisory)")
     return 0
 
 
@@ -180,12 +275,16 @@ def cmd_visual(args) -> int:
         if not conv.exists():
             failures.append(f"{src} (soffice)")
             continue
-        gold = [_thumb(p) for p in _pages(gold_pdf, work / "gold", args.pages)]
-        got = [_thumb(p) for p in _pages(conv, work / "got", args.pages)]
+        gold_pngs = _pages(gold_pdf, work / "gold", args.pages)
+        got_pngs = _pages(conv, work / "got", args.pages)
+        gold = [_thumb(p) for p in gold_pngs]
+        got = [_thumb(p) for p in got_pngs]
         if not gold or not got:
             failures.append(f"{src} (raster)")
             continue
-        per_page, per_tile = [], []
+        gold_sat = [_saturation(p) for p in gold_pngs]
+        got_sat = [_saturation(p) for p in got_pngs]
+        per_page, per_tile, desat = [], [], False
         for i, page in enumerate(got):
             lo, hi = max(0, i - window), min(len(gold), i + window + 1)
             best, best_j = 0.0, None
@@ -194,12 +293,19 @@ def cmd_visual(args) -> int:
                 if a > best:
                     best, best_j = a, j
             per_page.append(round(best, 4))
-            per_tile.append(
-                round(_worst_tile(page, gold[best_j]), 4) if best_j is not None else 0.0
-            )
+            if best_j is not None:
+                per_tile.append(round(_worst_tile(page, gold[best_j]), 4))
+                # Colour present in the typst render but gone from the office
+                # render: the exporter stripped it. A near-zero office mean is
+                # the vanishing case; LibreOffice's hue shifts keep the mean up.
+                if gold_sat[best_j] > 0.05 and got_sat[i] < 0.01:
+                    desat = True
+            else:
+                per_tile.append(0.0)
         scores[str(src)] = {
             "score": round(sum(per_page) / len(per_page), 4),
             "tile": min(per_tile) if per_tile else 0.0,
+            "desaturated": desat,
             "pages": [len(got), len(gold)],
             "per_page": per_page,
             "per_tile": per_tile,
@@ -210,6 +316,167 @@ def cmd_visual(args) -> int:
     _report_run(failures, {}, "")
     print(f"{len(scores)} documents scored -> {out}")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Generative cross-product: construct x styling-context x realization-path.
+# The bugs a corpus finds only accidentally live in these combinations. Both
+# lists are data: a new construct or context is one line, and its sentinel
+# (zqxjkw<i>) is derived from its row index so the read-back stays automatic.
+# ---------------------------------------------------------------------------
+
+# Each src embeds %%S%%, replaced at generation with the construct's sentinel.
+CONSTRUCTS: list[dict] = [
+    {"name": "table_spans_fills", "src":
+        "#table(columns: 3, fill: (x, y) => if y == 0 { luma(220) } else { none },\n"
+        "  table.cell(colspan: 2)[%%S%% wide], [top],\n  [a], [b], [c])"},
+    {"name": "nested_list", "src":
+        "- %%S%% one\n  - two\n    - three\n- four"},
+    {"name": "math_block_inline", "src":
+        "%%S%% mixes inline $a^2 + b^2 = c^2$ with a block:\n"
+        "$ sum_(i=1)^n i = frac(n (n + 1), 2) $"},
+    {"name": "figure_caption_ref", "src":
+        "#figure(rect(width: 3cm, height: 1cm)[box], caption: [%%S%% caption]) <genfig>\n"
+        "Referenced in @genfig."},
+    {"name": "footnote", "src":
+        "Body text %%S%% with a footnote.#footnote[The footnote body.]"},
+    {"name": "link_and_ref", "src":
+        "#set heading(numbering: \"1.\")\n"
+        "An #link(\"https://example.com/%%S%%\")[%%S%% external link].\n"
+        "= Target section <gensec>\nJump to @gensec."},
+    {"name": "heading_numbering", "src":
+        "#set heading(numbering: \"1.1\")\n= %%S%% first\n== nested"},
+    {"name": "columns", "src":
+        "#columns(2)[\n  %%S%% column text long enough to flow across both balanced"
+        " columns and keep going for a while so the break is real.\n]"},
+    {"name": "place_rotate_scale", "src":
+        "#place(top + right)[%%S%% placed]\n#rotate(18deg)[rotated %%S%%]\n"
+        "#scale(130%)[scaled body]"},
+    {"name": "grid_frac_sized", "src":
+        "#grid(columns: (2cm, 1fr, 1fr),\n  [%%S%%], [b], [c],\n  [d], [e], [f])"},
+    {"name": "bib_cite", "src":
+        "Background claim %%S%% @genkey.\n#bibliography(\"refs.bib\")"},
+    {"name": "raw_block", "src":
+        "```rust\nfn %%S%%() -> u32 { 42 }\n```"},
+    {"name": "smallcaps_styled", "src":
+        "#smallcaps[%%S%% small caps] then #text(fill: red, weight: \"bold\")[bold red]"
+        " and #underline[underlined]."},
+]
+
+# A context wraps the construct body in a styling context / realization path.
+# `lang_de` sets the German locale; the constructs are deliberately CJK-free,
+# which is the "CJK-font-free guard" — no glyph here needs a font we lack.
+CONTEXTS: list[tuple[str, Any]] = [
+    ("default", lambda b: b),
+    ("text30", lambda b: "#set text(size: 30pt)\n" + b),
+    ("lang_de", lambda b: "#set text(lang: \"de\")\n" + b),
+    ("context", lambda b: "#context [\n" + b + "\n]"),
+    ("show_block", lambda b: "#show: it => block(fill: luma(240), inset: 6pt, it)\n" + b),
+    ("twocol", lambda b: "#set page(columns: 2)\n" + b),
+    ("smallpage", lambda b: "#set page(width: 9cm, height: 12cm, margin: 0.8cm)\n" + b),
+]
+
+_REFS_BIB = (
+    "@article{genkey, title={A Study of Testing}, author={Ada Author},"
+    " year={2020}, journal={Journal of Testing}}\n"
+)
+
+
+def _gen_export(binary: str, typ: Path, fmt: str, out: Path, root: Path) -> bool:
+    out.unlink(missing_ok=True)
+    subprocess.run(
+        [binary, "compile", "--root", str(root), "--format", fmt, str(typ), str(out)],
+        capture_output=True, timeout=120,
+    )
+    return out.exists()
+
+
+def _docx_findings(parts: dict[str, bytes]) -> list[str]:
+    out = []
+    if detectors.dead_anchors(parts):
+        out.append("dead_anchors")
+    if detectors.dangling_rels(parts):
+        out.append("dangling_rels")
+    if detectors.unresolved_numids(parts):
+        out.append("numids")
+    if detectors.duplicate_ids(parts):
+        out.append("dup_ids")
+    return out
+
+
+def _pptx_findings(parts: dict[str, bytes]) -> list[str]:
+    out = []
+    if detectors.wordprocessing_in_slides(parts):
+        out.append("w_in_slide")
+    if detectors.unresolved_rids(parts):
+        out.append("unresolved_rids")
+    if detectors.duplicate_ids(parts):
+        out.append("dup_ids")
+    return out
+
+
+def cmd_generate(args) -> int:
+    binary = check_binary(args.binary)
+    work = Path(args.out) / "generate"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "refs.bib").write_text(_REFS_BIB)
+
+    matrix: dict[tuple[str, str], list[str]] = {}
+    for i, construct in enumerate(CONSTRUCTS):
+        sentinel = f"zqxjkw{i}"
+        body = construct["src"].replace("%%S%%", sentinel)
+        for ctx_name, wrap in CONTEXTS:
+            if ctx_name in construct.get("skip", set()):
+                matrix[(construct["name"], ctx_name)] = ["skipped"]
+                continue
+            typ = work / "gen.typ"
+            typ.write_text(wrap(body) + "\n")
+            found: list[str] = []
+            docx, pptx = work / "gen.docx", work / "gen.pptx"
+            if _gen_export(binary, typ, "docx", docx, work):
+                parts = read_parts(docx)
+                found += _docx_findings(parts)
+                bodytext, furn = docx_text(parts)
+                # Scoped to word/ deliberately: a sentinel surviving only in
+                # the customXml/docProps fidelity sidecars is not delivered to
+                # a reader, so that must NOT count as survival.
+                word_bytes = b"".join(
+                    d for pn, d in parts.items() if pn.startswith("word/")
+                )
+                if sentinel not in (bodytext + furn) and sentinel.encode() not in word_bytes:
+                    found.append("sentinel_missing")
+            else:
+                found.append("docx_fail")
+            if _gen_export(binary, typ, "pptx", pptx, work):
+                found += _pptx_findings(read_parts(pptx))
+            else:
+                found.append("pptx_fail")
+            matrix[(construct["name"], ctx_name)] = found
+
+    # Grid: rows = constructs, cols = contexts, cell '.' ok / 'F' finding.
+    col_abbr = [c[0][:6] for c in CONTEXTS]
+    name_w = max(len(c["name"]) for c in CONSTRUCTS)
+    print(" " * (name_w + 2) + " ".join(f"{a:>6}" for a in col_abbr))
+    total_findings = 0
+    detail: list[str] = []
+    for construct in CONSTRUCTS:
+        cells = []
+        for ctx_name, _ in CONTEXTS:
+            f = matrix[(construct["name"], ctx_name)]
+            if not f:
+                cells.append(f"{'.':>6}")
+            elif f == ["skipped"]:
+                cells.append(f"{'-':>6}")
+            else:
+                cells.append(f"{'F':>6}")
+                total_findings += 1
+                detail.append(f"{construct['name']} x {ctx_name}: {f}")
+        print(f"{construct['name']:<{name_w}}  " + " ".join(cells))
+    print(f"\n{len(CONSTRUCTS)}x{len(CONTEXTS)} = "
+          f"{len(CONSTRUCTS) * len(CONTEXTS)} cells, {total_findings} with findings")
+    for line in detail:
+        print(f"  {line}")
+    return 1 if total_findings else 0
 
 
 def cmd_abdiff(args) -> int:
@@ -285,11 +552,12 @@ def cmd_rank(args) -> int:
         worst = min(range(len(s["per_page"])), key=lambda i: s["per_page"][i])
         rows.append((drop if drop is not None else -s["score"], doc, s, drop, worst))
     rows.sort(reverse=True)
-    print(f"{'score':>6} {'drop':>6} {'pages':>7}  worst-page  document")
+    print(f"{'score':>6} {'drop':>6} {'pages':>7} {'col':>5}  worst-page  document")
     for _, doc, s, drop, worst in rows[: args.k]:
         d = f"{drop:+.3f}" if drop is not None else "     -"
+        col = "DESAT" if s.get("desaturated") else ""
         print(f"{s['score']:6.3f} {d:>6} {s['pages'][0]:3}/{s['pages'][1]:<3} "
-              f"p{worst + 1}={s['per_page'][worst]:.3f}  {doc}")
+              f"{col:>5}  p{worst + 1}={s['per_page'][worst]:.3f}  {doc}")
     return 0
 
 
@@ -324,6 +592,49 @@ def cmd_sheet(args) -> int:
     return 0
 
 
+def cmd_resave(args) -> int:
+    """Re-save OUR docx through LibreOffice, a real consumer, and compare word
+    counts. A large drop means we emitted something the consumer silently
+    dropped -- the nearest proxy to "Word repairs it" available without Word.
+    Advisory: LibreOffice reflows and may itself gain or lose a few words."""
+    from corpuslib import word_counts
+
+    binary = check_binary(args.binary)
+    work = Path(args.out); work.mkdir(parents=True, exist_ok=True)
+    redir = work / "resaved"; redir.mkdir(exist_ok=True)
+    failures, findings = [], {}
+
+    for src in docs(args.n, "document", args.filter):
+        ours = work / "orig.docx"
+        if not export(binary, src, "docx", ours):
+            failures.append(str(src)); continue
+        for stale in redir.glob("*.docx"):
+            stale.unlink()
+        subprocess.run(
+            [SOFFICE, "--headless", "--convert-to", "docx:MS Word 2007 XML",
+             "--outdir", str(redir), str(ours)],
+            capture_output=True, timeout=600,
+        )
+        redone = redir / "orig.docx"
+        if not redone.exists():
+            failures.append(f"{src} (soffice)"); continue
+        ob, of = docx_text(read_parts(ours))
+        rb, rf = docx_text(read_parts(redone))
+        ours_wc = sum(word_counts(ob + " " + of).values())
+        redo_wc = sum(word_counts(rb + " " + rf).values())
+        if ours_wc == 0:
+            continue
+        loss = (ours_wc - redo_wc) / ours_wc
+        if loss > args.loss:
+            findings[str(src)] = {
+                "our_words": ours_wc, "resaved_words": redo_wc,
+                "loss_pct": round(loss * 100, 1),
+            }
+
+    _report_run(failures, findings, "resave word-loss findings")
+    return 0
+
+
 def _report_run(failures: list[str], findings: dict, label: str) -> None:
     if failures:
         print(f"EXPORT FAILURES ({len(failures)}):")
@@ -350,7 +661,15 @@ def main() -> int:
     common.add_argument("--out", default="/tmp/export-audit")
     sub.add_parser("selftest", parents=[common]).set_defaults(fn=cmd_selftest)
     sub.add_parser("invariants", parents=[common]).set_defaults(fn=cmd_invariants)
-    sub.add_parser("text", parents=[common]).set_defaults(fn=cmd_text)
+    txt = sub.add_parser("text", parents=[common])
+    txt.add_argument("--links", action="store_true",
+                     help="also check external-link survival (a typst query per doc)")
+    txt.set_defaults(fn=cmd_text)
+    sub.add_parser("generate", parents=[common]).set_defaults(fn=cmd_generate)
+    res = sub.add_parser("resave", parents=[common])
+    res.add_argument("--loss", type=float, default=0.10,
+                     help="flag when >loss fraction of words drop on re-save")
+    res.set_defaults(fn=cmd_resave)
     vis = sub.add_parser("visual", parents=[common])
     vis.add_argument("--pages", type=int, default=10)
     vis.set_defaults(fn=cmd_visual)
