@@ -1,6 +1,6 @@
 //! Serializes the typed DOCX IR into an OPC zip package.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ecow::EcoString;
 use typst_library::diag::{SourceResult, bail};
@@ -480,7 +480,149 @@ fn build_document(
 
     w.close(); // w:body
     w.close(); // w:document
-    w.finish()
+    normalize_part_identities(w.finish())
+}
+
+/// Enforces, on a finished wordprocessing part, the two OOXML identity
+/// invariants that re-emitting a subtree can break:
+///
+///   * `wp:docPr/@id` must be unique *within* a part, and
+///   * `w:bookmarkStart/@w:name` must be unique across the package (and so,
+///     first of all, within each part).
+///
+/// A text box is serialized twice — the modern `wps:txbx` in the `mc:Choice`
+/// and the legacy VML `v:textbox` in the `mc:Fallback` (see
+/// [`write_vml_textbox`]) — so every drawing id and every bookmark that lives
+/// inside a text box's content is written out twice, and nested text boxes
+/// multiply it. A markup-compatibility (MCE) preprocessor keeps only one
+/// branch, but a byte-level validator — and Word's own repair check — sees both.
+///
+/// Because the two branches are alternatives, the first (`mc:Choice`) emission
+/// is authoritative: it keeps its id and name, so the fidelity manifest's
+/// `docPrId` and the Selection-Pane name stay consistent with what a modern
+/// consumer renders. Every later duplicate is then made unique — a repeated
+/// `wp:docPr` id is renumbered past the part's maximum (its `name` suffix kept
+/// in step); a repeated bookmark is dropped together with its matching
+/// `w:bookmarkEnd`. Nothing in the format references a `wp:docPr` id, so
+/// renumbering it is free; a dropped duplicate bookmark was exactly redundant
+/// with the one that stays.
+///
+/// This runs at emit time, per part, so no reuse path — this one, a future one,
+/// or a construct that legitimately reuses a converted drawing — can leak a
+/// duplicate identity into a part.
+fn normalize_part_identities(xml: String) -> String {
+    const DOCPR: &str = "<wp:docPr ";
+    const BOOKMARK_START: &str = "<w:bookmarkStart ";
+    const BOOKMARK_END: &str = "<w:bookmarkEnd ";
+
+    // The overwhelming majority of parts carry neither a drawing nor a bookmark.
+    if !xml.contains(DOCPR) && !xml.contains(BOOKMARK_START) {
+        return xml;
+    }
+
+    enum Ev {
+        DocPr,
+        BookmarkStart,
+        BookmarkEnd,
+    }
+
+    // Collect the identity-bearing start tags in document order, and the largest
+    // `wp:docPr` id already present so renumbered duplicates start strictly above
+    // every original (and so cannot collide with one that appears only later).
+    let mut events: Vec<(usize, Ev)> = Vec::new();
+    let mut max_docpr = 0u32;
+    for (pos, _) in xml.match_indices(DOCPR) {
+        if let Some(id) = attr_u32(&xml[pos..], " id=\"") {
+            max_docpr = max_docpr.max(id);
+        }
+        events.push((pos, Ev::DocPr));
+    }
+    for (pos, _) in xml.match_indices(BOOKMARK_START) {
+        events.push((pos, Ev::BookmarkStart));
+    }
+    for (pos, _) in xml.match_indices(BOOKMARK_END) {
+        events.push((pos, Ev::BookmarkEnd));
+    }
+    events.sort_by_key(|(pos, _)| *pos);
+
+    let mut out = String::with_capacity(xml.len());
+    let mut cursor = 0;
+    let mut seen_docpr: HashSet<u32> = HashSet::new();
+    let mut next_docpr = max_docpr.saturating_add(1);
+    let mut seen_names: HashSet<&str> = HashSet::new();
+    // `w:bookmarkEnd`s still owed to a dropped start, keyed by that start's
+    // `w:id`. A dropped start always precedes its own end, and any *kept* end
+    // for the same id was emitted before this start appeared, so a plain count
+    // pairs each end with the right start even when ids nest or repeat.
+    let mut owed_ends: HashMap<u32, u32> = HashMap::new();
+    for (pos, ev) in events {
+        out.push_str(&xml[cursor..pos]);
+        let gt = pos + xml[pos..].find('>').expect("a start tag must be closed");
+        let tag = &xml[pos..=gt];
+        match ev {
+            Ev::DocPr => {
+                let id = attr_u32(tag, " id=\"").expect("wp:docPr carries an id");
+                if seen_docpr.insert(id) {
+                    out.push_str(tag);
+                } else {
+                    let new_id = next_docpr;
+                    next_docpr = next_docpr.saturating_add(1);
+                    seen_docpr.insert(new_id);
+                    out.push_str(&renumber_docpr(tag, id, new_id));
+                }
+            }
+            Ev::BookmarkStart => {
+                let name =
+                    attr_str(tag, " w:name=\"").expect("bookmarkStart carries a name");
+                if seen_names.insert(name) {
+                    out.push_str(tag);
+                } else {
+                    let id =
+                        attr_u32(tag, " w:id=\"").expect("bookmarkStart carries an id");
+                    *owed_ends.entry(id).or_default() += 1;
+                }
+            }
+            Ev::BookmarkEnd => {
+                let id = attr_u32(tag, " w:id=\"").expect("bookmarkEnd carries an id");
+                match owed_ends.get_mut(&id) {
+                    Some(owed) if *owed > 0 => *owed -= 1,
+                    _ => out.push_str(tag),
+                }
+            }
+        }
+        cursor = gt + 1;
+    }
+    out.push_str(&xml[cursor..]);
+    out
+}
+
+/// The value of attribute `key` (given with its `="` suffix, e.g. `" id=\""`)
+/// inside a start tag, up to the closing quote. `None` if the tag lacks it.
+fn attr_str<'a>(tag: &'a str, key: &str) -> Option<&'a str> {
+    let start = tag.find(key)? + key.len();
+    let len = tag[start..].find('"')?;
+    Some(&tag[start..start + len])
+}
+
+fn attr_u32(tag: &str, key: &str) -> Option<u32> {
+    attr_str(tag, key)?.parse().ok()
+}
+
+/// Rewrites a `<wp:docPr>` start tag's id from `old` to `new`, keeping the
+/// auto-generated `name` suffix (`"Picture N"`, `"Placed Text Box N"`, …) in
+/// step when it ends in the old id — every name this exporter mints does.
+fn renumber_docpr(tag: &str, old: u32, new: u32) -> String {
+    let renumbered =
+        tag.replacen(&format!(" id=\"{old}\""), &format!(" id=\"{new}\""), 1);
+    let Some(name) = attr_str(tag, " name=\"") else { return renumbered };
+    match name.strip_suffix(&format!(" {old}")) {
+        Some(prefix) => renumbered.replacen(
+            &format!(" name=\"{name}\""),
+            &format!(" name=\"{prefix} {new}\""),
+            1,
+        ),
+        None => renumbered,
+    }
 }
 
 /// Writes a block; returns whether it ended with a paragraph.
@@ -1822,7 +1964,7 @@ fn build_hdrftr(
         w.leaf(xml::W_P);
     }
     w.close();
-    w.finish()
+    normalize_part_identities(w.finish())
 }
 
 // ---------------------------------------------------------------------------
@@ -2069,7 +2211,7 @@ fn build_footnotes(
     }
 
     w.close();
-    w.finish()
+    normalize_part_identities(w.finish())
 }
 
 /// Builds `word/endnotes.xml`. Typst has no endnotes, so this is always the stub
@@ -2083,7 +2225,7 @@ fn build_endnotes(pretty: bool) -> String {
     write_separator(&mut w, "w:endnote", -1, "separator");
     write_separator(&mut w, "w:endnote", 0, "continuationSeparator");
     w.close();
-    w.finish()
+    normalize_part_identities(w.finish())
 }
 
 fn write_separator(w: &mut XmlWriter, elem: &'static str, id: i32, kind: &'static str) {
@@ -2138,7 +2280,7 @@ fn build_comments(
         write_comment(&mut w, comment, review_tags);
     }
     w.close();
-    w.finish()
+    normalize_part_identities(w.finish())
 }
 
 fn write_comment(

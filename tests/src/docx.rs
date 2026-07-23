@@ -282,10 +282,74 @@ fn assert_all_wellformed(parts: &HashMap<String, String>) {
         }
     }
     assert_no_dangling_anchors(parts);
+    assert_unique_drawing_and_bookmark_ids(parts);
 }
 
 const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+const WP_NS: &str =
+    "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+
+/// Fails when a drawing id repeats inside one part, or a bookmark name repeats
+/// anywhere in the package.
+///
+/// `wp:docPr/@id` must be unique *within* a wordprocessing part — Word's repair
+/// dialog greets a file that reuses one (a picture emitted twice keeping its
+/// id) — but it may legitimately repeat *across* parts, so this is scoped per
+/// part. A `w:bookmarkStart/@w:name` names a document-global cross-reference
+/// target, so a second one anywhere makes every REF/PAGEREF to it ambiguous;
+/// that is checked across every `word/` part at once. Reserved names
+/// (`_GoBack`, `_Toc…`) are Word's own and excluded, mirroring the corpus
+/// detector `tools/export-audit/detectors.py::duplicate_ids`.
+///
+/// Shaped as an invariant over every construct — like [`assert_no_dangling_anchors`]
+/// — because the duplication originates at emit time: a text box's content is
+/// serialized twice, once as the modern `wps:txbx` and once as the legacy VML
+/// fallback, so any construct that lands a drawing or bookmark inside a text
+/// box (nested text boxes multiply it) could otherwise regress it unnoticed.
+fn assert_unique_drawing_and_bookmark_ids(parts: &HashMap<String, String>) {
+    let mut part_names: Vec<&String> = parts
+        .keys()
+        .filter(|name| name.starts_with("word/") && name.ends_with(".xml"))
+        .collect();
+    part_names.sort();
+
+    let mut docpr_dups = Vec::new();
+    let mut bookmark_seen: BTreeMap<String, usize> = BTreeMap::new();
+    for part in part_names {
+        let Ok(doc) = roxmltree::Document::parse(&parts[part]) else { continue };
+        let mut seen_docpr: BTreeSet<&str> = BTreeSet::new();
+        for node in doc.descendants() {
+            let tag = node.tag_name();
+            if tag.namespace() == Some(WP_NS) && tag.name() == "docPr" {
+                if let Some(id) = node.attribute("id")
+                    && !seen_docpr.insert(id)
+                {
+                    docpr_dups.push(format!("{part}: docPr id {id}"));
+                }
+            } else if tag.namespace() == Some(W_NS)
+                && tag.name() == "bookmarkStart"
+                && let Some(name) = node.attribute((W_NS, "name"))
+                && !name.starts_with("_GoBack")
+                && !name.starts_with("_Toc")
+            {
+                *bookmark_seen.entry(name.to_string()).or_default() += 1;
+            }
+        }
+    }
+
+    let bookmark_dups: Vec<String> = bookmark_seen
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(name, count)| format!("bookmark name {name} x{count}"))
+        .collect();
+
+    assert!(docpr_dups.is_empty(), "wp:docPr ids repeat within a part: {docpr_dups:#?}");
+    assert!(
+        bookmark_dups.is_empty(),
+        "bookmark names repeat across the package: {bookmark_dups:#?}"
+    );
+}
 
 /// Fails when an internal link has no bookmark to land on.
 ///
@@ -2417,6 +2481,72 @@ fn placed_text_is_an_editable_anchored_text_box() {
         decision.reason == DecisionReason::PositionedTextBox
             && decision.representation == Representation::Native
     }));
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn text_box_with_a_nested_picture_keeps_drawing_ids_unique() {
+    // A placed body realized inside a `layout(..)` closure hides its image from
+    // the text-box-safety pre-check, so the image lands in the box's editable
+    // content. The box is then serialized twice — the modern `wps:txbx` Choice
+    // and the legacy VML `v:textbox` Fallback — and both carry the same inner
+    // picture, so its conversion-time `wp:docPr` id was emitted twice within one
+    // part (Word's repair-dialog trigger). Emission-time renumbering makes the
+    // fallback copy unique.
+    let png = tall_png();
+    let src = "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+               #place(top + left, dx: 10pt, dy: 10pt,\n\
+                 layout(sz => [Cap #image(\"p.png\", width: 12pt)]))";
+    let p = parts_with_files(src, &[("p.png", &png)]);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("<wps:txbx>"), "the box stays an editable text box");
+    assert!(document.contains("<v:textbox"), "with a legacy VML fallback");
+    assert!(
+        document.matches("<a:blip").count() >= 2,
+        "the inner picture is serialized in both the Choice and the fallback"
+    );
+
+    let doc = roxmltree::Document::parse(document).unwrap();
+    let ids: Vec<&str> = doc
+        .descendants()
+        .filter(|n| n.tag_name().namespace() == Some(WP_NS))
+        .filter(|n| n.tag_name().name() == "docPr")
+        .filter_map(|n| n.attribute("id"))
+        .collect();
+    let unique: BTreeSet<&&str> = ids.iter().collect();
+    assert_eq!(ids.len(), unique.len(), "every wp:docPr id in the part is unique: {ids:?}");
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn text_box_with_a_heading_keeps_bookmark_names_unique() {
+    // A numbered, cross-referenced heading placed into a text box carries a
+    // bookmark. The text box's VML compatibility fallback re-emits the heading —
+    // bookmarks and all — so the same `w:bookmarkStart w:name` appeared twice in
+    // one part, making every REF to it ambiguous. The duplicate is dropped, with
+    // its matching `w:bookmarkEnd`, at emission time.
+    let src = "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
+               #set heading(numbering: \"1.\")\n\
+               See @h.\n\
+               #place(top + left, dx: 10pt, dy: 10pt)[= Section <h>]";
+    let p = parts(src);
+    let document = &p["word/document.xml"];
+    assert!(document.contains("<wps:txbx>"), "the heading is in an editable text box");
+    assert!(document.contains("<v:textbox"), "with a legacy VML fallback");
+
+    let doc = roxmltree::Document::parse(document).unwrap();
+    let names: Vec<&str> = doc
+        .descendants()
+        .filter(|n| n.tag_name().namespace() == Some(W_NS))
+        .filter(|n| n.tag_name().name() == "bookmarkStart")
+        .filter_map(|n| n.attribute((W_NS, "name")))
+        .collect();
+    assert!(
+        names.iter().any(|name| name.starts_with("_Ref")),
+        "the placed heading is a cross-reference target: {names:?}"
+    );
+    let unique: BTreeSet<&&str> = names.iter().collect();
+    assert_eq!(names.len(), unique.len(), "every bookmark name is unique: {names:?}");
     assert_all_wellformed(&p);
 }
 
