@@ -124,7 +124,13 @@ def _soffice_pdf(office: Path, work: Path, timeout: int = 300) -> Path | None:
         # survives, still chewing the pathological document and holding the
         # profile lock — which then hangs every conversion after it. Reaping it
         # is what turns one bad document into one skip instead of a dead sweep.
-        subprocess.run(["pkill", "-9", "-f", "soffice.bin"], capture_output=True)
+        #
+        # Both names are needed. Matching only `soffice.bin` leaves the
+        # `MacOS/soffice` launcher orphaned, and a corpus sweep with a handful
+        # of pathological documents ends having quietly littered the machine
+        # with one stuck LibreOffice per timeout.
+        for pattern in ("soffice.bin", "LibreOffice.app/Contents/MacOS/soffice"):
+            subprocess.run(["pkill", "-9", "-f", pattern], capture_output=True)
         return None
     return out if out.exists() else None
 
