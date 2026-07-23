@@ -45,12 +45,45 @@ Two kinds of check live here, and the distinction matters:
 |---|---|---|---|
 | Structural fixture tests | `tests/src/{docx,pptx,pandoc}.rs` | authored cases, invariants on fixtures, byte determinism | seconds, every CI run |
 | Fixture release gate | `tools/docx-validate` | package validity, editability, fixture visuals | minutes, CI |
-| **Corpus invariants** | `audit.py invariants` | dead anchors, dangling rels, unresolved numIds/r:ids, `w:` in slides, **duplicate docPr / bookmark / cNvPr / sldId ids**, nondeterminism — at scale | ~1 s/doc |
+| **Corpus invariants** | `audit.py invariants` | dead anchors, dangling rels, unresolved numIds/r:ids, `w:` in slides, **duplicate docPr / bookmark / cNvPr / sldId ids**, **drawings in text boxes/notes (Word refuses to open these)**, nondeterminism — at scale | ~1 s/doc |
 | **Corpus text fidelity** | `audit.py text` | content that vanishes or mangles; **scrambled reading order** (`--links` also flags external-link loss) | ~2 s/doc |
 | **Corpus visuals, ranked** | `audit.py visual` → `rank` → `sheet` | gross layout breakage vs the PDF, plus **colour that vanished** (`desaturated`); a *ranker*, not a detector | ~15 s/doc; vision only on the ranked worst |
 | **Generative cross-product** | `audit.py generate` | export failure, invariant breaks, and silent sentinel loss over construct × context pairs | ~2 s/pair, one shot |
 | **Consumer re-save** | `audit.py resave` | content a real consumer (LibreOffice) silently drops from our output | ~10 s/doc, on ~15 |
 | **Same-renderer A/B** | `audit.py abdiff` | any real output change between two binaries, page-localized | ~30 s/doc, run on suspects |
+
+### Which consumer renders our output (`--consumer`)
+
+`visual` and `sheet` take `--consumer soffice` (the default) or `--consumer
+word`. LibreOffice is fast and scriptable, but it is a **proxy**: it is not the
+consumer this format exists for, and it is markedly more forgiving than Word.
+
+That difference is not academic. The very first real-Word run raised *"You
+can't put drawing objects into a text box, callout, comment, footnote, or
+endnote"* — Word declining to **open** the document at all — on output
+LibreOffice had rendered without complaint for over a thousand documents. Four
+of 150 corpus documents were affected. The lesson is worth stating plainly: a
+clean LibreOffice sweep is evidence about LibreOffice, and a claim about Word
+is a hypothesis until Word has actually run. (The same run also *refuted* a
+spec-derived belief that Word needs `<w:displayBackgroundShape/>` to show a
+page colour. It does not.)
+
+Where a rule can be checked statically, prefer that — `drawings_in_text_boxes`
+now runs in the `invariants` layer, needing neither Word nor a render, so the
+expensive consumer is for discovery rather than routine gating.
+
+Word is driven through AppleScript (`osascript`), not a headless binary, with
+two consequences worth knowing:
+
+- It is a GUI app. `_word_ready` launches it with `open -g` so it stays
+  backgrounded, then waits until it answers; a **cold** launch does not respond
+  for minutes, so the warm instance is reused across a sweep.
+- A document Word objects to raises a **modal dialog**, which wedges every
+  later conversion. A conversion that times out therefore closes all open
+  documents before giving up — and a timeout is itself a signal that Word may
+  be rejecting that document, worth reading as more than slowness.
+
+It is the slower instrument by some margin: run it on a reduced `-n`.
 
 ### Why two visual instruments (measured, not assumed)
 
@@ -91,6 +124,10 @@ uv run audit.py sheet --scores /tmp/export-audit/scores.json \
     --binary ../../target/release/typst -k 8
 
 uv run audit.py resave --binary ../../target/release/typst -n 15   # LibreOffice re-save round-trip
+
+# Ground truth: the same scoring, rendered by real Word. Slower (a GUI app
+# driven over AppleScript), so keep -n small and treat it as discovery.
+uv run audit.py visual --binary ../../target/release/typst --consumer word -n 20
 ```
 
 `generate` needs no corpus — it manufactures its own inputs and is the one
