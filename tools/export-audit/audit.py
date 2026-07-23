@@ -645,7 +645,9 @@ def _report_run(failures: list[str], findings: dict, label: str) -> None:
         for doc, found in findings.items():
             print(f"  {doc}")
             for kind, items in found.items():
-                shown = items if isinstance(items, int) else items[:4]
+                # A finding value is a scalar (count, ratio, bool) or a list
+                # of names; only the latter is sliced.
+                shown = items[:4] if isinstance(items, list) else items
                 print(f"      {kind}: {shown}")
 
 

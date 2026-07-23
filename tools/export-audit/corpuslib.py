@@ -36,11 +36,18 @@ CORPUS = Path.home() / "Code/typst-corpus"
 MANIFEST = CORPUS / "_meta/manifest.tsv"
 
 # Text runs interleaved with the structural boundaries that are real word
-# separators. Everything else between two `<w:t>` runs joins with no gap.
+# separators. Everything else between two runs joins with no gap.
+#
+# Three text elements are read, not one: `w:t` (prose), `m:t` (OMML math), and
+# `a:t` (DrawingML text in a shape/text box). Reading only `w:t` made every word
+# that appears solely inside an exported equation — `integer`, `where`, half a
+# maths paper's vocabulary — look lost; group 1 is the tag, group 2 the text,
+# tied by a backreference so an open tag matches only its own close.
 FLOW = re.compile(
-    rb"<w:t[^>]*>([^<]*)</w:t>"
+    rb"<(w:t|m:t|a:t)[^>]*>([^<]*)</\1>"
     rb"|<w:(?:br|cr|tab)\b[^>]*/?>"
     rb"|</w:(?:p|tc|tr|tbl|sdt|hyperlink|drawing)>"
+    rb"|</m:oMath>"
 )
 ALT = re.compile(rb'descr="([^"]*)"')
 WORD = re.compile(r"[^\W\d_]{5,}", re.UNICODE)
@@ -112,7 +119,9 @@ def part_text(data: bytes) -> str:
     """One part's text, joined the way a reader sees it."""
     out = []
     for m in FLOW.finditer(data):
-        run = m.group(1)
+        # Group 1 is the matched text tag (w:t/m:t/a:t); group 2 is its text.
+        # A boundary token captures neither, so it ends the current word.
+        run = m.group(2)
         out.append(html.unescape(run.decode("utf-8", "replace")) if run else " ")
     # Alt text is a documented fallback, not a loss; an attribute never
     # continues a run.

@@ -296,6 +296,20 @@ def text_loss(pdf_text: str, body_text: str, furniture_text: str) -> dict:
     return {"missing": missing, "deficit": deficit, "cjk_pair_loss": cjk_loss}
 
 
+def text_loss_from_parts(parts: dict[str, bytes], pdf_text: str) -> dict:
+    """`text_loss`, but extracting the docx text the way a real run does.
+
+    A canary here exercises the whole extraction path (`docx_text`'s
+    `w:t`/`m:t`/`a:t` reading), not just the comparison, so the class of miss
+    that inflated a full-corpus sweep — a word present only inside exported
+    maths reading as lost — cannot silently return.
+    """
+    from corpuslib import docx_text
+
+    body, furniture = docx_text(parts)
+    return text_loss(pdf_text, body, furniture)
+
+
 # Reading-order signal. The bags above (word sets, occurrence counts) are
 # order-blind: a perfectly scrambled paragraph passes every one of them. This
 # compares the two word STREAMS in order.
@@ -495,6 +509,19 @@ CANARIES: list[tuple[str, Callable[..., Any], tuple[Any, ...], bool]] = [
         ("hapter", "chapter", ""),
         False,
     ),
+    (
+        "text: a word only in exported math is not 'missing'",
+        text_loss_from_parts,
+        ({"word/document.xml": b"<m:oMath><m:r><m:t>integer</m:t></m:r></m:oMath>"},
+         "integer"),
+        False,
+    ),
+    (
+        "text: a word only in drawing text is not 'missing'",
+        text_loss_from_parts,
+        ({"word/document.xml": b"<a:t>diagram</a:t>"}, "diagram"),
+        False,
+    ),
     # Duplicate ids: fire on an in-scope dup, clean on the reused-elsewhere twin.
     ("dupids fires on docPr repeat in one part", duplicate_ids, (_DOCPR_DUP,), True),
     ("dupids clean on docPr reused across parts", duplicate_ids, (_DOCPR_CROSSPART_OK,), False),
@@ -529,7 +556,7 @@ def _fired(fn: Callable[..., Any], result: Any) -> bool:
     text bag is fired iff any of its three lists is nonempty; a similarity
     ratio is fired iff it falls under the flag; everything else is a list or a
     bool whose ordinary truthiness is the answer."""
-    if fn is text_loss:
+    if fn is text_loss or fn is text_loss_from_parts:
         return text_fired(result)
     if fn is sequence_similarity:
         return result < SEQ_FLAG
