@@ -19,11 +19,23 @@ use crate::dom::{
 
 /// Whether this columns element can be represented as one physical table row.
 ///
-/// A break after the final physical column advances beyond this region and is
-/// intentionally left to native section flow instead.
+/// Only a region the author *fully partitioned* — exactly one `#colbreak()` per
+/// column boundary, so every column's contents are explicitly delimited — is a
+/// faithful table. A row of cells is a fixed set of boxes: content placed in one
+/// cell can never continue into the next, which is precisely what a column whose
+/// boundary was left automatic must be able to do.
+///
+/// With fewer breaks than boundaries, at least one column ends by overflowing.
+/// Rendering that as a table traps the whole remainder in a single narrow cell
+/// which then grows downward instead of flowing: a three-column menu written as
+/// `columns(3)[#cover #colbreak() #body]` put its entire body in cell two and
+/// doubled the page count. Those regions belong to Word's native section
+/// columns, which model automatic flow (and turn the authored break into a real
+/// `<w:br w:type="column"/>`). A break count at or beyond the column count also
+/// advances past this region and is likewise left to native flow.
 pub(crate) fn uses_table(elem: &Packed<ColumnsElem>, styles: StyleChain) -> bool {
     let breaks = column_break_count(&elem.body);
-    breaks > 0 && breaks < elem.count.get(styles).get()
+    breaks > 0 && breaks == elem.count.get(styles).get().saturating_sub(1)
 }
 
 pub(crate) fn columns(
