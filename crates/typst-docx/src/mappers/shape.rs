@@ -183,6 +183,23 @@ pub fn text_box(
 /// Maps plain, text-box-safe placed content to an unframed Word text box. This
 /// is separate from [`text_box`]: `#place[..]` contributes position but no
 /// visible frame, so the shape deliberately has neither fill nor stroke.
+/// Whether any lowered block carries a drawing, at any nesting depth.
+///
+/// The nesting matters: a drawing inside a cell of a table inside the text box
+/// is just as illegal to Word as one in a top-level paragraph.
+fn blocks_contain_drawing(blocks: &[Block]) -> bool {
+    blocks.iter().any(|block| match block {
+        Block::Para(para) => para
+            .content
+            .iter()
+            .any(|child| matches!(child, ParaChild::Run(Run::Drawing(_)))),
+        Block::Table(table) => table.rows.iter().any(|row| {
+            row.cells.iter().any(|cell| blocks_contain_drawing(&cell.blocks))
+        }),
+        _ => false,
+    })
+}
+
 pub fn unframed_text_box(
     body: &Content,
     styles: StyleChain,
@@ -223,6 +240,20 @@ pub fn unframed_text_box(
             content: runs.into_iter().map(ParaChild::Run).collect(),
         }));
     }
+
+    // Word refuses to OPEN a document whose text box holds a drawing — "You
+    // can't put drawing objects into a text box, callout, comment, footnote, or
+    // endnote" — while LibreOffice renders one without complaint, which is why
+    // only a real-Word run surfaced this. `body_textbox_safe` already rejects
+    // images and shapes, but it inspects the *unrealized* body, so a drawing
+    // that only comes into being during realization (a show rule, a `context`,
+    // a package helper) walks straight past it. The lowered blocks are the
+    // first place the truth is visible, so the decision belongs here: such a
+    // body gives up the text box and takes the caller's legal fallback.
+    if blocks_contain_drawing(&blocks) {
+        return Ok(None);
+    }
+
     crate::mappers::table::collapse_par_spacing(&mut blocks);
     crate::document::collect_tags(&blocks, &mut ctx.deferred_tags);
 

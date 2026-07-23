@@ -2572,23 +2572,35 @@ fn placed_text_is_an_editable_anchored_text_box() {
 #[test]
 fn text_box_with_a_nested_picture_keeps_drawing_ids_unique() {
     // A placed body realized inside a `layout(..)` closure hides its image from
-    // the text-box-safety pre-check, so the image lands in the box's editable
-    // content. The box is then serialized twice — the modern `wps:txbx` Choice
-    // and the legacy VML `v:textbox` Fallback — and both carry the same inner
-    // picture, so its conversion-time `wp:docPr` id was emitted twice within one
-    // part (Word's repair-dialog trigger). Emission-time renumbering makes the
-    // fallback copy unique.
+    // the text-box-safety pre-check, which inspects the *unrealized* body. This
+    // test used to assert that the image therefore landed in the box's editable
+    // content, serialized twice (the modern `wps:txbx` Choice and the legacy VML
+    // `v:textbox` Fallback), and that emission-time renumbering kept the two
+    // copies' `wp:docPr` ids distinct.
+    //
+    // The renumbering was right, but it treated a symptom. Word refuses to OPEN
+    // a document whose text box holds a drawing at all — "You can't put drawing
+    // objects into a text box, callout, comment, footnote, or endnote" — so the
+    // ids were being deduplicated inside a construct no Word user could load.
+    // LibreOffice renders it happily, which is why the earlier pass could not
+    // see it. `unframed_text_box` now inspects its own lowered blocks, where a
+    // realization-produced drawing is finally visible, and declines the text box.
     let png = tall_png();
     let src = "#set page(width: 120mm, height: 100mm, margin: 10mm)\n\
                #place(top + left, dx: 10pt, dy: 10pt,\n\
                  layout(sz => [Cap #image(\"p.png\", width: 12pt)]))";
     let p = parts_with_files(src, &[("p.png", &png)]);
     let document = &p["word/document.xml"];
-    assert!(document.contains("<wps:txbx>"), "the box stays an editable text box");
-    assert!(document.contains("<v:textbox"), "with a legacy VML fallback");
+    for inner in document.split("<w:txbxContent>").skip(1) {
+        let body = inner.split("</w:txbxContent>").next().unwrap_or("");
+        assert!(
+            !body.contains("<w:drawing>") && !body.contains("<w:pict>"),
+            "a drawing inside a text box makes Word refuse the whole document"
+        );
+    }
     assert!(
-        document.matches("<a:blip").count() >= 2,
-        "the inner picture is serialized in both the Choice and the fallback"
+        document.contains("<a:blip"),
+        "and the picture itself still survives, outside the box"
     );
 
     let doc = roxmltree::Document::parse(document).unwrap();
@@ -3680,6 +3692,44 @@ fn block_columns_emit_continuous_sections() {
         "the post-column section restores single-column layout"
     );
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn a_text_box_never_carries_a_drawing_word_would_refuse() {
+    // Word does not merely mis-render a drawing inside a text box, it refuses
+    // to OPEN the document: "You can't put drawing objects into a text box,
+    // callout, comment, footnote, or endnote." LibreOffice shows it happily,
+    // so only a real-Word run finds this — hence the test.
+    //
+    // The pre-flight guard inspects the *unrealized* body, so a drawing that
+    // only exists after realization walks past it. `context` is the cheapest
+    // way to express exactly that: nothing here is an image until it runs.
+    let p = parts(
+        "#set page(width: 300pt, height: 200pt, margin: 10pt)\n\
+         #place(top + left, context [Label #box(width: 8pt, height: 8pt, \
+         fill: black)])",
+    );
+    let doc = &p["word/document.xml"];
+    for inner in doc.split("<w:txbxContent>").skip(1) {
+        let body = inner.split("</w:txbxContent>").next().unwrap_or("");
+        assert!(
+            !body.contains("<w:drawing>") && !body.contains("<w:pict>"),
+            "a text box carrying a drawing makes Word refuse the whole file"
+        );
+    }
+    assert_all_wellformed(&p);
+
+    // Plain positioned text is still worth a real text box — the fallback must
+    // not swallow the cases that made text boxes worth emitting.
+    let text_only = parts(
+        "#set page(width: 300pt, height: 200pt, margin: 10pt)\n\
+         #place(top + left)[Just a positioned label]",
+    );
+    assert!(
+        text_only["word/document.xml"].contains("<w:txbxContent>"),
+        "positioned plain text keeps its editable text box"
+    );
+    assert_all_wellformed(&text_only);
 }
 
 #[test]

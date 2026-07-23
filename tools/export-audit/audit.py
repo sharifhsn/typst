@@ -46,6 +46,7 @@ import detectors
 from corpuslib import check_binary, docs, docx_text, export, read_parts, root_for
 
 SOFFICE = "/opt/homebrew/bin/soffice"
+WORD_APP = "Microsoft Word"
 
 _WORDBOX = re.compile(
     rb'<word xMin="[0-9.]+" yMin="([0-9.]+)" xMax="[0-9.]+" yMax="([0-9.]+)"'
@@ -126,6 +127,72 @@ def _soffice_pdf(office: Path, work: Path, timeout: int = 300) -> Path | None:
         subprocess.run(["pkill", "-9", "-f", "soffice.bin"], capture_output=True)
         return None
     return out if out.exists() else None
+
+
+def _word_ready(timeout: int = 40) -> bool:
+    """Brings Word up in the background and waits until it answers.
+
+    A *cold* launch does not answer AppleScript for a long time — an unguarded
+    conversion against a cold Word sat for over two minutes and produced
+    nothing. Launch detached with `-g` (so it never steals focus), then poll a
+    cheap query until it responds; every later conversion reuses that warm
+    instance.
+    """
+    subprocess.run(["open", "-g", "-a", WORD_APP], capture_output=True)
+    deadline = timeout
+    while deadline > 0:
+        r = subprocess.run(
+            ["osascript", "-e", f'tell application "{WORD_APP}" to return name of it'],
+            capture_output=True, timeout=30,
+        )
+        if r.returncode == 0 and b"Word" in r.stdout:
+            return True
+        deadline -= 2
+        subprocess.run(["sleep", "2"], capture_output=True)
+    return False
+
+
+def _word_pdf(office: Path, work: Path, timeout: int = 180) -> Path | None:
+    """Convert one document to PDF through *real* Microsoft Word.
+
+    The same contract as [`_soffice_pdf`]: a hang, a refusal, or a missing
+    output is a per-document failure the caller records and steps past. Word is
+    the format's actual consumer, so this is ground truth where LibreOffice is
+    only a proxy — but it is also a GUI app being driven, so it is the slower
+    of the two and belongs on a reduced document set.
+
+    `open` does not bind a usable document reference in Word for Mac (it fails
+    with `-2753`), hence the separate `active document`.
+    """
+    out = work / (office.stem + "_word.pdf")
+    out.unlink(missing_ok=True)
+    script = (
+        f'tell application "{WORD_APP}"\n'
+        f'  open POSIX file "{office}"\n'
+        f"  set theDoc to active document\n"
+        f'  save as theDoc file name "{out}" file format format PDF\n'
+        f"  close theDoc saving no\n"
+        f"end tell\n"
+    )
+    try:
+        subprocess.run(
+            ["osascript", "-"], input=script.encode(), capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        # Leave no modal document behind to wedge the next conversion.
+        subprocess.run(
+            ["osascript", "-e",
+             f'tell application "{WORD_APP}" to close every document saving no'],
+            capture_output=True, timeout=60,
+        )
+        return None
+    return out if out.exists() else None
+
+
+def _consumer_pdf(office: Path, work: Path, consumer: str) -> Path | None:
+    """Render one Office file through the requested consumer."""
+    return _word_pdf(office, work) if consumer == "word" else _soffice_pdf(office, work)
 
 
 def _thumb(png: Path):
@@ -211,6 +278,8 @@ def cmd_invariants(args) -> int:
                 found["dangling_rels"] = r
             if n := detectors.unresolved_numids(pa):
                 found["unresolved_numids"] = n
+            if t := detectors.drawings_in_text_boxes(pa):
+                found["drawings_in_text_boxes"] = t
         if found:
             findings[str(src)] = found
 
@@ -286,6 +355,9 @@ def cmd_visual(args) -> int:
     window = 0 if is_deck else 2  # decks are one page per slide by design
     scores, failures = {}, []
     out = Path(args.out) / "scores.json"
+    if args.consumer == "word" and not _word_ready():
+        print("Word did not become scriptable; aborting", file=sys.stderr)
+        return 1
 
     for src in docs(args.n, args.kind, args.filter):
         gold_pdf, office = work / "g.pdf", work / f"o.{fmt}"
@@ -294,9 +366,9 @@ def cmd_visual(args) -> int:
             continue
         for stale in work.glob("*.png"):
             stale.unlink()
-        conv = _soffice_pdf(office, work)
+        conv = _consumer_pdf(office, work, args.consumer)
         if conv is None:
-            failures.append(f"{src} (soffice)")
+            failures.append(f"{src} ({args.consumer})")
             continue
         gold_pngs = _pages(gold_pdf, work / "gold", args.pages)
         got_pngs = _pages(conv, work / "got", args.pages)
@@ -589,6 +661,9 @@ def cmd_sheet(args) -> int:
     work = Path(args.out); work.mkdir(parents=True, exist_ok=True)
     worst_docs = sorted(scores, key=lambda d: scores[d]["score"])[: args.k]
     fmt = "pptx" if args.kind == "presentation" else "docx"
+    if args.consumer == "word" and not _word_ready():
+        print("Word did not become scriptable; aborting", file=sys.stderr)
+        return 1
 
     for idx, doc in enumerate(worst_docs):
         src = Path(doc)
@@ -597,9 +672,10 @@ def cmd_sheet(args) -> int:
         gold_pdf, office = work / "g.pdf", work / f"o.{fmt}"
         if not (export(binary, src, "pdf", gold_pdf) and export(binary, src, fmt, office)):
             continue
-        if _soffice_pdf(office, work) is None:
+        rendered = _consumer_pdf(office, work, args.consumer)
+        if rendered is None:
             continue
-        for side, pdf in (("L", gold_pdf), ("R", work / "o.pdf")):
+        for side, pdf in (("L", gold_pdf), ("R", rendered)):
             subprocess.run(["pdftoppm", "-png", "-r", "90", "-f", str(page),
                             "-l", str(page), str(pdf), str(work / side)],
                            capture_output=True, timeout=300)
@@ -685,6 +761,11 @@ def main() -> int:
                         choices=["document", "presentation"])
     common.add_argument("--filter", default="")
     common.add_argument("--out", default="/tmp/export-audit")
+    common.add_argument(
+        "--consumer", default="soffice", choices=["soffice", "word"],
+        help="which reader renders our output: LibreOffice (fast, a proxy) or"
+             " real Microsoft Word (ground truth, slower — use a reduced -n)",
+    )
     sub.add_parser("selftest", parents=[common]).set_defaults(fn=cmd_selftest)
     sub.add_parser("invariants", parents=[common]).set_defaults(fn=cmd_invariants)
     txt = sub.add_parser("text", parents=[common])

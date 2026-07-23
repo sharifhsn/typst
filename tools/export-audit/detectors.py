@@ -112,6 +112,31 @@ def unresolved_numids(parts: dict[str, bytes]) -> list[str]:
     )
 
 
+_TXBX = re.compile(rb"<w:txbxContent>(.*?)</w:txbxContent>", re.S)
+_DRAWING = re.compile(rb"<w:drawing>|<w:pict>")
+_NOTE_PARTS = ("footnotes.xml", "endnotes.xml", "comments.xml")
+
+
+def drawings_in_text_boxes(parts: dict[str, bytes]) -> list[str]:
+    """A drawing inside a text box, footnote, endnote or comment.
+
+    Word REFUSES TO OPEN such a document — "You can't put drawing objects into
+    a text box, callout, comment, footnote, or endnote" — so this is not a
+    fidelity nit but a total loss of the file for the format's own consumer.
+    LibreOffice renders it without a murmur, which is exactly why corpus-scale
+    LibreOffice sweeps never surfaced it and a single real-Word run did.
+    """
+    bad = []
+    for n, d in parts.items():
+        if not (n.startswith("word/") and n.endswith(".xml")):
+            continue
+        if any(_DRAWING.search(inner) for inner in _TXBX.findall(d)):
+            bad.append(f"{n} (text box)")
+        if n.rpartition("/")[2] in _NOTE_PARTS and _DRAWING.search(d):
+            bad.append(f"{n} (note/comment)")
+    return sorted(bad)
+
+
 # ---------------------------------------------------------------------------
 # PPTX invariants
 # ---------------------------------------------------------------------------
@@ -453,7 +478,33 @@ _SEQ_REV = " ".join(reversed(_SEQ_A.split()))
 
 # The table is deliberately heterogeneous — each entry pairs a detector with
 # its own argument shape — so it is typed as fully dynamic.
+_TXBX_DRAWING = {
+    "word/document.xml": b"<w:p><w:r><mc:AlternateContent><mc:Choice><w:drawing>"
+    b"<wps:txbx><w:txbxContent><w:p><w:r><w:drawing><wp:inline/></w:drawing>"
+    b"</w:r></w:p></w:txbxContent></wps:txbx></w:drawing></mc:Choice>"
+    b"</mc:AlternateContent></w:r></w:p>",
+}
+# The same shape with only text inside the box, plus a drawing OUTSIDE any box
+# in the ordinary flow — both entirely legal, and the second is the case a
+# careless "does the part contain a drawing at all" check would misreport.
+_TXBX_CLEAN = {
+    "word/document.xml": b"<w:p><w:r><mc:AlternateContent><mc:Choice><w:drawing>"
+    b"<wps:txbx><w:txbxContent><w:p><w:r><w:t>Caption</w:t></w:r></w:p>"
+    b"</w:txbxContent></wps:txbx></w:drawing></mc:Choice></mc:AlternateContent>"
+    b"</w:r></w:p><w:p><w:r><w:drawing><wp:inline/></w:drawing></w:r></w:p>",
+}
+_NOTE_DRAWING = {
+    "word/footnotes.xml": b"<w:footnote><w:p><w:r><w:drawing><wp:inline/>"
+    b"</w:drawing></w:r></w:p></w:footnote>",
+}
+
 CANARIES: list[tuple[str, Callable[..., Any], tuple[Any, ...], bool]] = [
+    ("drawing-in-textbox fires (Word refuses to open)",
+     drawings_in_text_boxes, (_TXBX_DRAWING,), True),
+    ("drawing-in-textbox clean on text box + flow drawing",
+     drawings_in_text_boxes, (_TXBX_CLEAN,), False),
+    ("drawing-in-textbox fires on a footnote drawing",
+     drawings_in_text_boxes, (_NOTE_DRAWING,), True),
     ("dead_anchors fires on planted dead link", dead_anchors, (_DOC_DEAD,), True),
     ("dead_anchors clean on resolved link+field", dead_anchors, (_DOC_OK,), False),
     ("dead_anchors ignores external fragment", dead_anchors, (_DOC_EXTERNAL_FRAGMENT,), False),
