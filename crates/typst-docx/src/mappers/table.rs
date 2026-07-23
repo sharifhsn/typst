@@ -269,7 +269,8 @@ fn cellgrid(
         || resolve_column_widths(grid, ctx.available_width_dxa(), has_column_gutter),
         |geometry| geometry.columns_dxa.clone(),
     );
-    let col_dxa = clamp_implausible_columns(col_dxa, ctx.available_width_dxa());
+    let col_dxa =
+        clamp_implausible_columns(col_dxa, ctx.available_width_dxa(), has_column_gutter);
     let width_dxa: i32 = col_dxa.iter().copied().sum();
 
     // -- Header rows (mark `table.header` rows for `w:tblHeader`) -----------
@@ -1464,15 +1465,22 @@ fn pt_to_positive_dxa(points: f64) -> Option<i32> {
 /// share, which drives the sibling content column to a single-glyph width whose
 /// text stacks one character per line.
 ///
-/// When the totals are grossly implausible — any single track wider than the
-/// whole available width, or the sum half-again past it — each track is capped
-/// at the available width (a lone track can never legitimately exceed the page)
-/// and the set is scaled to fit. That removes the dominating track without
-/// flattening the surviving proportions, so small gutter tracks stay small and
-/// the content column keeps a legible share. Ordinary tables — CV sidebars,
-/// layout grids — sum to about the available width, trip neither test, and are
-/// returned byte-for-byte unchanged.
-fn clamp_implausible_columns(mut cols: Vec<i32>, available: i32) -> Vec<i32> {
+/// Two different pathologies need two different repairs. A set that is merely
+/// oversized — the sum runs half-again past the available width, but no single
+/// track claims more than the whole table — still carries meaningful relative
+/// widths, so it is scaled down proportionally. A track wider than the entire
+/// table is a corrupt *ratio*, not just a corrupt scale: that track consumed
+/// the region and left its siblings at or near zero, which no rescaling can
+/// undo, so the content widths are re-derived as an even division instead.
+/// Gutter tracks keep their authored spacing in both cases.
+///
+/// Ordinary tables — CV sidebars, layout grids — sum to about the available
+/// width, trip neither test, and are returned byte-for-byte unchanged.
+fn clamp_implausible_columns(
+    mut cols: Vec<i32>,
+    available: i32,
+    has_column_gutter: bool,
+) -> Vec<i32> {
     if available <= 0 || cols.len() < 2 {
         return cols;
     }
@@ -1482,14 +1490,43 @@ fn clamp_implausible_columns(mut cols: Vec<i32>, available: i32) -> Vec<i32> {
     if !(any_over || grossly_over) {
         return cols;
     }
-    for c in cols.iter_mut() {
-        *c = (*c).clamp(1, available);
-    }
-    let capped: i64 = cols.iter().map(|&c| i64::from(c)).sum();
-    if capped > i64::from(available) {
+
+    // Merely oversized, but with sane relative widths — no single track claims
+    // more than the whole table. The proportions are still meaningful, so keep
+    // them and scale the set down to fit.
+    if !any_over {
         for c in cols.iter_mut() {
-            *c = ((i64::from(*c) * i64::from(available) / capped) as i32).max(1);
+            *c = ((i64::from(*c) * i64::from(available) / sum) as i32).max(1);
         }
+        return cols;
+    }
+
+    // A track wider than the entire table means the resolved *ratios* are the
+    // pathology, not just the scale: the oversized track consumed the region
+    // and left its siblings at or near zero, so scaling anything preserves the
+    // starvation (`(100000pt, 1fr)` resolves to `[2000000, 1]`, and 1 twip
+    // stays 1 twip however it is rescaled). The content widths carry no
+    // recoverable intent, so re-derive them as an even division.
+    //
+    // Gutter tracks are exempt: a gutter-doubled grid alternates content and
+    // gutter starting with content, so the odd indices hold authored spacing
+    // that is still meaningful and must stay narrow rather than swell to a
+    // content-sized share.
+    let is_gutter = |i: usize| has_column_gutter && i % 2 == 1;
+    let gutter_total: i64 = cols
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| is_gutter(*i))
+        .map(|(_, &c)| i64::from(c.clamp(0, available)))
+        .sum();
+    let content = cols.len() - cols.iter().enumerate().filter(|(i, _)| is_gutter(*i)).count();
+    if content == 0 {
+        return cols;
+    }
+    let budget = (i64::from(available) - gutter_total).max(content as i64);
+    let each = (budget / content as i64).max(1) as i32;
+    for (i, c) in cols.iter_mut().enumerate() {
+        *c = if is_gutter(i) { (*c).clamp(1, available) } else { each };
     }
     cols
 }

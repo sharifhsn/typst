@@ -1395,6 +1395,58 @@ fn each_section_installs_its_own_table_width_budget() {
 }
 
 #[test]
+fn an_implausible_column_track_is_clamped_instead_of_starving_its_siblings() {
+    // The margin-positioning idiom — a hugely oversized first track cancelled
+    // by an equally negative inset — resolves that track to ~1400 inches. Word
+    // cannot position a table off the page, so it caps the table at the page
+    // and gives every track its *proportional* share: verbatim, the content
+    // column collapses to a couple of twips and wraps one glyph per line.
+    let p = parts(
+        "#set page(width: 240pt, height: 200pt, margin: 10pt)\n\
+         #grid(columns: (100000pt, 1fr), [T], [Content that must stay legible])",
+    );
+    let tables = element_fragments(&p["word/document.xml"], "tbl");
+    assert_eq!(tables.len(), 1);
+    let widths = grid_widths(tables[0]);
+    // 240pt page - 2x10pt margin = 220pt = 4400 twips.
+    let available = 4400;
+    assert!(
+        widths.iter().all(|w| *w <= available),
+        "no track may exceed the table's own width: {widths:?}"
+    );
+    assert!(
+        widths.iter().all(|w| *w > 1),
+        "no sibling is starved to a single twip: {widths:?}"
+    );
+    assert!(
+        !p["word/document.xml"].contains("<w:gridCol w:w=\"2000000\"/>"),
+        "the resolved 100000pt track never reaches Word verbatim"
+    );
+    assert_all_wellformed(&p);
+
+    // The guard is deliberately blind to ordinary tables: these sum to about
+    // the available width, trip neither test, and must be byte-untouched.
+    let ordinary = parts(
+        "#set page(width: 240pt, height: 200pt, margin: 10pt)\n\
+         #table(columns: (1fr, 2fr), [A], [B])",
+    );
+    let ordinary_widths = grid_widths(element_fragments(
+        &ordinary["word/document.xml"],
+        "tbl",
+    )[0]);
+    assert_eq!(ordinary_widths.len(), 2);
+    assert!(
+        (ordinary_widths.iter().sum::<i32>() - available).abs() <= 2,
+        "an ordinary table still fills its width exactly: {ordinary_widths:?}"
+    );
+    assert!(
+        ordinary_widths[1] > ordinary_widths[0] * 3 / 2,
+        "and keeps its authored 1fr:2fr proportions: {ordinary_widths:?}"
+    );
+    assert_all_wellformed(&ordinary);
+}
+
+#[test]
 fn grid_column_and_row_gutters_become_real_spacer_tracks() {
     let p = parts(
         "#grid(\n\
@@ -1517,6 +1569,39 @@ fn measured_table_row_height_does_not_double_count_cell_insets() {
         "the 345-twip physical row already includes 100-twip top and bottom insets"
     );
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn a_clipping_fixed_height_block_gets_an_exact_row_height() {
+    // `atLeast` is the right default — a font substitution must never silently
+    // truncate text the author expected to be visible — but `clip: true` is the
+    // opposite instruction, and Typst's own layout does cut the overflow off.
+    // Left at `atLeast`, a bounded pane (a terminal showing its last lines)
+    // silently becomes unbounded in Word and can push its own page.
+    let body = "#lorem(80)";
+    let clipped = parts(&format!(
+        "#set page(width: 240pt, height: 300pt, margin: 10pt)\n\
+         #block(fill: luma(230), clip: true, height: 60pt)[{body}]"
+    ));
+    assert!(
+        clipped["word/document.xml"].contains("w:hRule=\"exact\""),
+        "an explicitly clipped pane keeps its authored height"
+    );
+    assert_all_wellformed(&clipped);
+
+    let grown = parts(&format!(
+        "#set page(width: 240pt, height: 300pt, margin: 10pt)\n\
+         #block(fill: luma(230), height: 60pt)[{body}]"
+    ));
+    assert!(
+        grown["word/document.xml"].contains("w:hRule=\"atLeast\""),
+        "without clip the safe grow-rather-than-truncate default stands"
+    );
+    assert!(
+        !grown["word/document.xml"].contains("w:hRule=\"exact\""),
+        "and nothing else in that document clips"
+    );
+    assert_all_wellformed(&grown);
 }
 
 #[test]
@@ -3595,6 +3680,40 @@ fn block_columns_emit_continuous_sections() {
         "the post-column section restores single-column layout"
     );
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn only_a_fully_partitioned_columns_region_becomes_a_table() {
+    // One break cannot delimit three columns: the second boundary is left to
+    // automatic flow, which a row of cells cannot express — content placed in
+    // one cell can never continue into the next. Rendered as a table, the whole
+    // remainder is trapped in cell two and can only grow downward.
+    let under = parts(
+        "#columns(3)[First. #colbreak() Rest of the content that must flow on.]",
+    );
+    let doc = &under["word/document.xml"];
+    assert!(
+        !doc.contains("<w:tbl>"),
+        "an under-partitioned region must not be trapped in cells"
+    );
+    assert!(
+        sect_pr_chunks(doc).iter().any(|sect| sect.contains("<w:cols w:num=\"3\"")),
+        "it becomes a native three-column section instead"
+    );
+    assert!(
+        doc.contains("<w:br w:type=\"column\"/>"),
+        "and the authored break survives as a real column break"
+    );
+    assert_all_wellformed(&under);
+
+    // Fully partitioned — one break for the one boundary — stays a physical
+    // table, which is the representation that preserves those exact columns.
+    let full = parts("#columns(2)[Left side #colbreak() Right side]");
+    assert!(
+        full["word/document.xml"].contains("<w:tbl>"),
+        "a fully partitioned region keeps its physical cells"
+    );
+    assert_all_wellformed(&full);
 }
 
 #[test]
