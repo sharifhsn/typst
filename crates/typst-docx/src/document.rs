@@ -1876,20 +1876,23 @@ fn resolve_sections(
 /// count in `leading_pagebreaks`) and every content-bearing section are left
 /// untouched.
 fn drop_trailing_empty_columns_section(sections: &mut Vec<SectionRun>) {
-    while sections.len() >= 2 {
-        let last = sections.len() - 1;
-        // An empty-range final section carries no content, so it can only paint
-        // a blank page. It exists solely as the restore-to-base target a
-        // `#columns` run pushes for a *following* break to land in; with no such
-        // break it is pure spurious page. `leading_pagebreaks == 0` spares an
-        // authored trailing `#pagebreak()` (which parks its blanks there).
-        if sections[last].range.is_empty() && sections[last].leading_pagebreaks == 0 {
-            sections.pop();
-            let new_last = sections.len() - 1;
-            sections[new_last].break_after = None;
-        } else {
-            break;
-        }
+    // Only collapse the empty restore section of a document that is a *single*
+    // whole-document `#columns` run — exactly two sections, the column run plus
+    // its empty restore (content-empty tag sections have already merged away by
+    // this point). There the restore section is provably spurious: it carries
+    // no content and there is nothing before it that needs its own section, so
+    // its only effect is a blank trailing page (a one-page cheatsheet exported
+    // with a spurious extra page). In a multi-section document a trailing empty
+    // section can coincide with a real final page the layout genuinely produced
+    // (mythographer-5e: 14 sections, dropping it lost a page), so those are left
+    // untouched. `leading_pagebreaks == 0` also spares an authored trailing
+    // `#pagebreak()`.
+    if sections.len() == 2
+        && sections[1].range.is_empty()
+        && sections[1].leading_pagebreaks == 0
+    {
+        sections.pop();
+        sections[0].break_after = None;
     }
 }
 
