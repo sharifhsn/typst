@@ -423,6 +423,7 @@ pub fn convert_children(
     // the next default tab stop.
     let content_twips = ctx.available_width_dxa();
     fold_right_aligned_heading_overlays(&mut blocks, content_twips);
+    fold_line_end_overlays(&mut blocks);
     if content_twips > 0 {
         use crate::dom::{TabAlign, TabStop};
         for block in &mut blocks {
@@ -1312,11 +1313,30 @@ fn handle_block_inner(
             space: 4,
             color,
         };
+        // A Typst rule's intrinsic height is its stroke thickness — a fraction
+        // of a point — while an empty Word paragraph is a full text line. Left
+        // at the default, every divider cost ~12pt of phantom height, and a
+        // section-ruled CV (six dividers) gained half an inch of nothing.
+        // Word draws the bottom border regardless of the line box's height, so
+        // clamp the carrier line to the stroke's own extent, exactly like the
+        // minimized break carriers.
+        let line_twip =
+            crate::props::abs_to_twip(typst_library::layout::Abs::pt(
+                fx.thickness.to_pt(),
+            ))
+            .max(20);
         out.push(Block::Para(Para {
             props: crate::dom::ParaProps {
                 pbdr: Some(crate::dom::ParaBorders {
                     bottom: Some(border),
                     ..Default::default()
+                }),
+                spacing: Some(crate::dom::Spacing {
+                    before: None,
+                    after: None,
+                    line: Some(line_twip),
+                    line_rule_auto: false,
+                    line_rule_at_least: false,
                 }),
                 ..Default::default()
             },
@@ -1839,6 +1859,54 @@ fn handle_block_box(
 
     out.extend(inner);
     Ok(())
+}
+
+/// Folds a same-line right label — `place(end, ..)` at the flow position,
+/// marked `line_end_overlay` by `mappers::image::place` — into the FOLLOWING
+/// paragraph's first line as `<line><tab><label>` (the trailing generic
+/// fill-tab pass then adds the right tab stop at the content width).
+///
+/// *Following*, not preceding: a flow-anchored placement paints at the current
+/// position, which is the line the next paragraph starts on; after a paragraph
+/// the flow has already advanced past its last line. And the label lands
+/// before the target's first explicit line break, because that is the line the
+/// placement shares. A `pageBreakBefore` hoisted onto the overlay by the
+/// break-moving pass above transfers to the target so the break survives the
+/// fold. With no paragraph to fold into (end of scope, or a table next), the
+/// overlay stays as the plain flow paragraph it already is.
+fn fold_line_end_overlays(blocks: &mut Vec<Block>) {
+    let mut index = 0;
+    while index < blocks.len() {
+        let is_overlay =
+            matches!(&blocks[index], Block::Para(para) if para.props.line_end_overlay);
+        if !is_overlay {
+            index += 1;
+            continue;
+        }
+        let target = (index + 1..blocks.len())
+            .find(|candidate| !matches!(blocks[*candidate], Block::Tag(_)));
+        let target = match target {
+            Some(candidate) if matches!(blocks[candidate], Block::Para(_)) => candidate,
+            _ => {
+                let Block::Para(para) = &mut blocks[index] else { unreachable!() };
+                para.props.line_end_overlay = false;
+                index += 1;
+                continue;
+            }
+        };
+        let Block::Para(overlay) = blocks.remove(index) else { unreachable!() };
+        let Block::Para(target) = &mut blocks[target - 1] else { unreachable!() };
+        target.props.page_break_before |= overlay.props.page_break_before;
+        let insert_at = target
+            .content
+            .iter()
+            .position(|child| matches!(child, ParaChild::Run(Run::Break { .. })))
+            .unwrap_or(target.content.len());
+        let mut payload = Vec::with_capacity(overlay.content.len() + 1);
+        payload.push(ParaChild::Run(Run::FillTab));
+        payload.extend(overlay.content);
+        target.content.splice(insert_at..insert_at, payload);
+    }
 }
 
 /// Folds a paragraph followed by `place(bottom + right)[heading]` into one line

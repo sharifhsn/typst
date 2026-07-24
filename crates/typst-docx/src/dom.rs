@@ -571,6 +571,11 @@ pub struct ParaProps {
     /// (notably lists) without confusing them with explicit `#v()` space.
     pub(crate) typst_par_spacing_before: Option<i32>,
     pub(crate) typst_par_spacing_after: Option<i32>,
+    /// Non-serialized: this paragraph is a same-line right overlay — a
+    /// `place(end, ..)` at the flow position — awaiting the fold into the
+    /// following paragraph's first line as a right tab stop
+    /// (`fold_line_end_overlays`). Never reaches encoding.
+    pub(crate) line_end_overlay: bool,
     pub style: Option<EcoString>,
     pub keep_next: bool,
     /// `<w:pageBreakBefore/>`: ensure this paragraph starts on a new page.

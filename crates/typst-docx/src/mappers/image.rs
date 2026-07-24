@@ -515,6 +515,32 @@ pub fn place(
     }
     let plan = preflight_place(body, styles);
 
+    // A placement with a horizontal-only `end`/`right` alignment and no
+    // offsets is, by construction, a SAME-LINE label: with no vertical
+    // component it paints at the current flow position's own line, right at
+    // the margin — the ubiquitous CV "title … date" row. Page furniture, by
+    // contrast, always says where it goes vertically (`top + right`,
+    // `bottom + right`) or carries dx/dy. This positional signal is exact
+    // where content-based ones (like "the overlay holds a heading") are
+    // proxies. Word's native idiom for the same-line label is a right tab
+    // stop, so a qualifying body is folded into its line by
+    // `fold_line_end_overlays` instead of becoming an anchored box (whose
+    // holder paragraph costs the line that made two-line CV entries) or flow
+    // text (which loses the right edge entirely).
+    let same_line_right = {
+        use typst_library::layout::{HAlignment, PlacementScope};
+        let align = elem.alignment.get(styles);
+        matches!(
+            align,
+            Smart::Custom(a)
+                if matches!(a.x(), Some(HAlignment::Right | HAlignment::End))
+                    && a.y().is_none()
+        ) && elem.dx.get(styles).is_zero()
+            && elem.dy.get(styles).is_zero()
+            && !elem.float.get(styles)
+            && matches!(elem.scope.get(styles), PlacementScope::Column)
+    };
+
     // A `place(box(layout(..)))` body is already atomically owned by this
     // placement, even though the callback-generated polygons do not exist in
     // the source tree. Recover the converged finite frame as one grouped
@@ -598,7 +624,10 @@ pub fn place(
     // editable/searchable while preserving the source alignment and offsets;
     // footnotes, tables, figures, math, and nested drawings are deliberately
     // excluded because Word either forbids or destabilizes them in `wps:txbx`.
+    // A same-line right label skips the box: the tab fold below is the better
+    // representation for it, and the box's holder paragraph would cost a line.
     if let PlacePlan::NativeTextBox(wrap) = plan
+        && !(same_line_right && matches!(wrap, TextBoxWrap::None))
         && let Some(Run::Drawing(mut drawing)) =
             crate::mappers::shape::unframed_text_box(body, styles, wrap, ctx)?
     {
@@ -665,6 +694,47 @@ pub fn place(
             0,
         );
         return Ok(blocks);
+    }
+
+    // A same-line right label whose body lowered to ONE paragraph of plain
+    // inline content — text, styled runs, fields, even inline OMML (the
+    // en-dash of a date range often lowers as math, which is what bars these
+    // bodies from the text-box path) — is marked for the tab fold: it becomes
+    // `<owner line><tab><label>` with a right tab stop, Word's own idiom for
+    // the row. Drawings and explicit breaks disqualify the body: a drawing
+    // cannot honestly ride a tab fold, and a multi-line label folded onto one
+    // line would put its continuation at the left margin.
+    if same_line_right {
+        let mut paras = blocks.iter().filter(|block| !matches!(block, Block::Tag(_)));
+        let single_inline_para = match (paras.next(), paras.next()) {
+            (Some(Block::Para(para)), None) => para.content.iter().all(|child| {
+                !matches!(
+                    child,
+                    ParaChild::Run(
+                        Run::Drawing(_)
+                            | Run::Break { .. }
+                            | Run::PageBreak
+                            | Run::ColumnBreak
+                    )
+                )
+            }),
+            _ => false,
+        };
+        if single_inline_para {
+            for block in &mut blocks {
+                if let Block::Para(para) = block {
+                    para.props.line_end_overlay = true;
+                }
+            }
+            ctx.record_content_decision(
+                &placed,
+                Representation::Native,
+                DecisionReason::PositionedLineTab,
+                LossSet::default(),
+                0,
+            );
+            return Ok(blocks);
+        }
     }
 
     // Real block content (figure body + caption, table, text) → flow it in

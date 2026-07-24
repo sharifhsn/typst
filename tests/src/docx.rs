@@ -3695,6 +3695,79 @@ fn block_columns_emit_continuous_sections() {
 }
 
 #[test]
+fn a_same_line_right_label_folds_into_its_line_as_a_right_tab() {
+    // `place(end, ..)` with no vertical component and no offsets paints at the
+    // current flow position's own line — the ubiquitous CV "title … date" row.
+    // Word's native idiom for that row is a right tab stop, not an anchored
+    // box (whose holder paragraph costs the line that made two-line entries)
+    // and not flow text (which loses the right edge entirely). The label folds
+    // into the FOLLOWING paragraph — a flow-anchored placement shares its line
+    // with what comes next — and lands before the first explicit line break,
+    // because that is the line it shares.
+    let p = parts(
+        "#place(end)[2021 -- 2024]\n\
+         University | Degree\n\
+         #linebreak()\n\
+         Second line of the entry.",
+    );
+    let doc = &p["word/document.xml"];
+    let para = doc
+        .split("<w:p ")
+        .find(|p| p.contains("University"))
+        .expect("the entry paragraph exists");
+    let entry = para.find("| Degree").expect("title present");
+    let tab = para.find("<w:tab/>").expect("the label folded in as a tab");
+    let date = para.find("2021").expect("the date is in the same paragraph");
+    let brk = para.find("<w:br/>").expect("the explicit line break survives");
+    assert!(
+        entry < tab && tab < date && date < brk,
+        "order is title, tab, date, break: {entry} {tab} {date} {brk}"
+    );
+    assert!(
+        para.contains("<w:tab w:val=\"right\"") || para.contains("<w:tab w:val=\"end\""),
+        "the paragraph carries a right tab stop"
+    );
+    assert!(!doc.contains("<wp:anchor"), "no anchored box remains");
+    assert_all_wellformed(&p);
+
+    // Vertically-aligned placements are page furniture, not line labels: the
+    // positional signal must not claim them.
+    let furniture = parts(
+        "#place(top + right)[Furniture]\nBody text that keeps its own line.",
+    );
+    assert!(
+        furniture["word/document.xml"].contains("<wp:anchor"),
+        "top+right stays an anchored drawing"
+    );
+    // And an offset label was deliberately displaced off its line.
+    let offset = parts("#place(end, dy: 12pt)[Offset]\nBody text.");
+    assert!(
+        !offset["word/document.xml"].contains("<w:tab/>"),
+        "a dy-offset placement is not folded"
+    );
+    assert_all_wellformed(&furniture);
+    assert_all_wellformed(&offset);
+}
+
+#[test]
+fn a_horizontal_rule_costs_its_stroke_height_not_a_text_line() {
+    // A Typst rule's intrinsic height is its stroke thickness; an empty Word
+    // paragraph is a full text line. Six section dividers at a phantom ~12pt
+    // each pushed one-page CVs onto a second page.
+    let p = parts("Above the rule.\n#line(length: 100%)\nBelow the rule.");
+    let doc = &p["word/document.xml"];
+    let rule = doc
+        .split("<w:p ")
+        .find(|p| p.contains("<w:pBdr>"))
+        .expect("the rule paragraph exists");
+    assert!(
+        rule.contains("w:line=\"20\" w:lineRule=\"exact\""),
+        "the rule's carrier line is clamped to its 1pt stroke"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn an_unsized_image_contains_to_its_sized_block_not_the_page() {
     // `display_extents`' no-explicit-size branch contains an image against the
     // ambient available width, so a block that narrows it must scope the
@@ -8618,9 +8691,10 @@ fn negative_v_cancels_a_following_paragraph_s_natural_boundary_gap() {
     );
     let doc = &p["word/document.xml"];
     assert!(
-        doc.contains("<w:spacing w:before=\"0\"/>"),
+        doc.contains("<w:spacing w:before=\"0\" w:line=\"20\" w:lineRule=\"exact\"/>"),
         "the negative #v(-0.8em) must fully cancel the natural paragraph-\
-         boundary gap before the line(), not leave it uncancelled"
+         boundary gap before the line() — whose carrier paragraph is also \
+         clamped to its 1pt stroke height rather than costing a full text line"
     );
     assert_all_wellformed(&p);
 }

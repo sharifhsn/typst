@@ -103,6 +103,10 @@ pub enum DecisionReason {
     PositionedTextBox,
     /// Placed visual content was preserved as a native anchored drawing.
     PositionedDrawing,
+    /// A same-line right label (`place(end, ..)` at the flow position) was
+    /// folded into its line as a right tab stop — Word's own idiom for the
+    /// "title … date" row.
+    PositionedLineTab,
     /// Rich placed content stayed editable in the main story because it was
     /// unsafe or illegal inside a Word text box, losing exact placement.
     PositionedContentFlowFallback,
