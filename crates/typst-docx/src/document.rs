@@ -698,6 +698,8 @@ fn docx_document_impl(
         &footnotes,
     );
 
+    make_room_for_terminal_paragraph(&mut body, &sect);
+
     Ok(DocxDocument {
         info,
         body,
@@ -1860,6 +1862,67 @@ fn resolve_sections(
     merge_content_empty_sections(pairs, &mut sections);
     drop_trailing_empty_columns_section(&mut sections);
     sections
+}
+
+/// Word requires a paragraph after the final table and inserts an empty one
+/// (`encode`). When that table's rows fill the page content box to an EXACT
+/// page multiple — the signature of a `height: 100%` layout grid whose measured
+/// height is the page itself while its ink sits well above the bottom — the
+/// mandatory paragraph has nowhere to land and Word paints a blank trailing page
+/// (metronic, porygon, typographic-resume: a one-page CV exported as two). Shave
+/// a line off the last `atLeast` row so the paragraph fits. This is loss-free by
+/// construction: an `atLeast` row grows back to its content, so only an
+/// OVER-reserved full-page grid row actually shrinks — a genuinely content-full
+/// row (or an `exact` row) is left at its content and nothing is clipped. Scoped
+/// to a table that ends within a paragraph's height of a page boundary, so a
+/// table with real overflow on its last page (whose ink, not just its
+/// reservation, needs the space) is untouched.
+fn make_room_for_terminal_paragraph(body: &mut [Block], sect: &SectPr) {
+    let content_h = (sect.page_h - sect.margin_top - sect.margin_bottom) as i64;
+    if content_h <= 0 {
+        return;
+    }
+    // The terminal paragraph is inserted after the last *visible* block; trailing
+    // introspection `Tag`s emit nothing, so look past them for the final table.
+    let Some(last) = body
+        .iter_mut()
+        .rev()
+        .find(|b| !matches!(b, Block::Tag(_)))
+    else {
+        return;
+    };
+    let Block::Table(tbl) = last else {
+        return;
+    };
+    let total: i64 =
+        tbl.rows.iter().filter_map(|r| r.height.map(|h| h.val as i64)).sum();
+    if total <= 0 {
+        return;
+    }
+    // Room left on the table's LAST page. `atLeast` reservations can push the
+    // last page's fill right up to the boundary even when the ink is far above;
+    // a table shorter than one page just occupies (part of) page one.
+    let pages = ((total + content_h - 1) / content_h).max(1);
+    let last_page_fill = total - (pages - 1) * content_h;
+    let room = content_h - last_page_fill;
+    // A full default paragraph line is ~1.15em; 360 twips (18pt) clears it for
+    // every plausible body font while staying inside the empty tail of a
+    // full-page grid.
+    const PARA: i64 = 360;
+    if room >= PARA {
+        return; // the terminal paragraph already fits on the last page
+    }
+    let need = PARA - room;
+    // Shrink the last at-least row large enough to absorb the shave.
+    if let Some(row) = tbl
+        .rows
+        .iter_mut()
+        .rev()
+        .find(|r| r.height.is_some_and(|h| !h.exact && (h.val as i64) > need))
+        && let Some(h) = row.height.as_mut()
+    {
+        h.val -= need as i32;
+    }
 }
 
 /// Drops a trailing empty "restore to one column" section left behind when a
@@ -4068,5 +4131,70 @@ fn synthetic_position(page: usize, y: usize) -> PagedPosition {
     PagedPosition {
         page: NonZeroUsize::new(page.max(1)).unwrap(),
         point: Point::new(Abs::zero(), Abs::pt(y as f64 * BLOCK_STEP_PT)),
+    }
+}
+
+#[cfg(test)]
+mod terminal_paragraph_tests {
+    use super::make_room_for_terminal_paragraph;
+    use crate::dom::{Block, Row, RowHeight, SectPr, Tbl, TblProps};
+
+    fn final_table(val: i32, exact: bool) -> Block {
+        Block::Table(Tbl {
+            props: TblProps::default(),
+            grid: vec![val.max(1)],
+            rows: vec![Row {
+                header: false,
+                cant_split: false,
+                height: Some(RowHeight { val, exact }),
+                cells: vec![],
+            }],
+        })
+    }
+
+    fn zero_margin_page() -> SectPr {
+        // Content height == page height == 15840 twips.
+        SectPr { page_h: 15840, margin_top: 0, margin_bottom: 0, ..SectPr::default() }
+    }
+
+    fn row_val(b: &Block) -> i32 {
+        match b {
+            Block::Table(t) => t.rows[0].height.unwrap().val,
+            _ => panic!("not a table"),
+        }
+    }
+
+    #[test]
+    fn a_page_filling_final_table_is_shaved_for_the_terminal_paragraph() {
+        // A `height: 100%` grid measured at exactly the page fills the last page
+        // to the boundary; the mandatory trailing paragraph would spill to a
+        // blank page. Shave a line off the at-least row so it fits.
+        let sect = zero_margin_page();
+        let mut body = vec![final_table(15840, false)];
+        make_room_for_terminal_paragraph(&mut body, &sect);
+        assert!(row_val(&body[0]) < 15840, "the at-least row is shaved");
+        assert!(row_val(&body[0]) >= 15840 - 500, "only ~one line is shaved");
+
+        // Trailing invisible content-less blocks must not hide the final table.
+        let mut with_flow = vec![final_table(15840, false), Block::FlowSpace { dxa: 1 }];
+        make_room_for_terminal_paragraph(&mut with_flow, &sect);
+        // FlowSpace is a *visible* terminator (an empty para), so the table is
+        // no longer last — it must be left alone.
+        assert_eq!(row_val(&with_flow[0]), 15840, "a non-tag terminator keeps the table last");
+    }
+
+    #[test]
+    fn a_short_or_exact_final_table_is_not_shaved() {
+        let sect = zero_margin_page();
+        // NEGATIVE CONTROL 1: a short table leaves ample room for the paragraph.
+        let mut short = vec![final_table(3000, false)];
+        make_room_for_terminal_paragraph(&mut short, &sect);
+        assert_eq!(row_val(&short[0]), 3000, "a short final table is untouched");
+
+        // NEGATIVE CONTROL 2: an EXACT-height row is authored intent; shaving it
+        // would clip, so it is preserved even when it fills the page.
+        let mut exact = vec![final_table(15840, true)];
+        make_room_for_terminal_paragraph(&mut exact, &sect);
+        assert_eq!(row_val(&exact[0]), 15840, "an exact-height row is preserved");
     }
 }
