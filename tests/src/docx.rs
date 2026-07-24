@@ -3695,6 +3695,36 @@ fn block_columns_emit_continuous_sections() {
 }
 
 #[test]
+fn furniture_taller_than_its_band_floats_instead_of_displacing_the_body() {
+    // Typst furniture can never displace the body: the band is fixed and
+    // overflow paints over the page. Word furniture always reserves its real
+    // height. A slide theme's page-scale decoration in a zero-margin header
+    // therefore consumed the whole body area and split every bullet onto its
+    // own page. Any furniture drawing taller than its band is re-anchored at
+    // its own position instead of being inline.
+    let p = parts(
+        "#set page(width: 400pt, height: 300pt, margin: 0pt, header: \
+         box(width: 100%, height: 100%, clip: true, {\
+           place(top + right, circle(radius: 120pt, fill: teal))\
+         }))\n\
+         First line.\n\nSecond paragraph of the body.",
+    );
+    let header = p
+        .iter()
+        .find(|(k, xml)| {
+            k.starts_with("word/header") && k.ends_with(".xml") && xml.contains("wp:")
+        })
+        .map(|(_, xml)| xml)
+        .expect("the decoration header exists");
+    assert!(
+        !header.contains("<wp:inline"),
+        "an over-band drawing must not reserve body height"
+    );
+    assert!(header.contains("<wp:anchor"), "it floats at its own position instead");
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn a_same_line_right_label_folds_into_its_line_as_a_right_tab() {
     // `place(end, ..)` with no vertical component and no offsets paints at the
     // current flow position's own line — the ubiquitous CV "title … date" row.

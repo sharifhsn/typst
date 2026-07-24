@@ -1397,14 +1397,63 @@ fn handle_block_inner(
         // Keep the nearest owning canvas atomic, but prefer a native grouped
         // DrawingML composition with editable positioned labels. Unsupported
         // clips/images/transforms retain the consumer-safe raster fallback.
-        if let Some(run) = mappers::shape::mixed_canvas(ctx, &frame, child.span())? {
+        //
+        // The classifier admits only containers whose every material leaf
+        // belongs to a `#place` — content that is out-of-flow in Typst, where
+        // an auto-height container of placements has a flow footprint of
+        // (nearly) nothing. An INLINE drawing, though, reserves its full
+        // height: a slide theme's decorative circles, rasterized as one
+        // page-scale canvas in the page header, consumed the entire body area
+        // and squeezed every bullet onto its own page — five slides became
+        // fifteen. So unless the container itself declares a height (a real,
+        // authored reservation), the canvas drawing is anchored at its own
+        // flow position — column/paragraph-relative at offset zero, wrap
+        // none — which preserves exactly where it painted while consuming
+        // exactly the nothing Typst charged for it. Whether it then sits
+        // behind later text is `resolve_leading_background_layers`' call,
+        // as for every other leading drawing.
+        let reserves_height = container_declares_height(child, styles);
+        let anchor_canvas = |ctx: &mut DocxCtx, run: &mut Run| {
+            if reserves_height {
+                return;
+            }
+            if let Run::Drawing(drawing) = run
+                && drawing.anchor.is_none()
+            {
+                drawing.anchor = Some(crate::dom::Anchor {
+                    z: ctx.next_z(),
+                    pos_h: crate::dom::AnchorPos {
+                        rel_from: "column",
+                        align: None,
+                        offset: Some(drawing.source_offset_emu[0]),
+                    },
+                    pos_v: crate::dom::AnchorPos {
+                        rel_from: "paragraph",
+                        align: None,
+                        offset: Some(drawing.source_offset_emu[1]),
+                    },
+                    wrap: crate::dom::AnchorWrap::None,
+                    dist: [0, 0, 0, 0],
+                    behind: false,
+                });
+            }
+        };
+        if let Some(mut run) = mappers::shape::mixed_canvas(ctx, &frame, child.span())? {
+            anchor_canvas(ctx, &mut run);
             out.push(Block::Para(Para {
                 props: ParaProps::default(),
                 content: vec![ParaChild::Run(run)],
             }));
-        } else if let Some(para) = fallback_para(
+        } else if let Some(mut para) = fallback_para(
             mappers::image::coherent_placed_canvas_fallback(child, frame, ctx)?,
         ) {
+            if let Block::Para(para) = &mut para {
+                for para_child in &mut para.content {
+                    if let ParaChild::Run(run) = para_child {
+                        anchor_canvas(ctx, run);
+                    }
+                }
+            }
             out.push(para);
         } else {
             ctx.warn_ignored(child.elem().name(), child.span());
@@ -1611,6 +1660,33 @@ fn handle_layout(
 /// Wraps rasterization-fallback runs — a drawing plus the hidden, searchable
 /// text recovered from its laid-out frame — in a single paragraph, so the
 /// hidden text sits beside the image. Returns `None` when nothing was produced.
+/// Whether a canvas container declares its own height — an authored flow
+/// reservation that Typst honours, making an inline (height-consuming)
+/// drawing the faithful representation. An auto-height container of pure
+/// placements has a flow footprint of (nearly) nothing, so its canvas must
+/// not consume height in Word either.
+fn container_declares_height(
+    child: &Content,
+    styles: typst_library::foundations::StyleChain,
+) -> bool {
+    use typst_library::foundations::Smart;
+    use typst_library::layout::{BlockElem, BoxElem, Sizing};
+    use typst_library::visualize::{RectElem, SquareElem};
+    if let Some(elem) = child.to_packed::<BlockElem>() {
+        return matches!(elem.height.get(styles), Sizing::Rel(_));
+    }
+    if let Some(elem) = child.to_packed::<BoxElem>() {
+        return matches!(elem.height.get(styles), Smart::Custom(_));
+    }
+    if let Some(elem) = child.to_packed::<RectElem>() {
+        return matches!(elem.height.get(styles), Sizing::Rel(_));
+    }
+    if let Some(elem) = child.to_packed::<SquareElem>() {
+        return matches!(elem.height.get(styles), Sizing::Rel(_));
+    }
+    false
+}
+
 fn fallback_para(runs: Vec<Run>) -> Option<Block> {
     if runs.is_empty() {
         return None;

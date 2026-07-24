@@ -102,6 +102,10 @@ fn resolve_block_backgrounds(blocks: &mut [Block]) {
         }
     }
 
+    // A container with no flow content is left alone deliberately: with no
+    // later text in the SAME container there is no paint-order evidence to
+    // flip anything behind, and a `page(foreground:)` part — whose lone
+    // drawing must stay in FRONT of the body — is exactly such a container.
     let Some(first_flow) = blocks.iter().position(block_has_flow_content) else {
         return;
     };

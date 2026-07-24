@@ -3015,17 +3015,74 @@ fn furniture_horizontal_alignment(
     })
 }
 
+/// Anchors any furniture drawing taller than its declared band.
+///
+/// Typst furniture can NEVER displace the body: the band is fixed and
+/// overflowing content simply paints over the page. Word furniture ALWAYS
+/// displaces the body — it reserves the header content's real height. An
+/// inline drawing taller than the band therefore breaks the one guarantee
+/// Typst's model makes: a slide theme's decoration box (`box(height: 100%,
+/// clip: true, ..)` in the page header, native shapes six inches tall on a
+/// zero-margin slide) consumed the entire body area and squeezed every bullet
+/// onto its own page — five slides became fifteen. Re-anchoring it at its own
+/// flow position (column/paragraph-relative, wrap none) preserves exactly
+/// where it painted while reserving exactly the nothing Typst charged. The
+/// leading-background resolver then decides behind-ness as for any other
+/// leading drawing. Band-sized furniture — logos, page-number lines — fits
+/// its reservation and stays untouched.
+fn anchor_oversized_furniture_drawings(
+    ctx: &mut DocxCtx,
+    blocks: &mut [Block],
+    band_twips: i32,
+) {
+    use crate::dom::{Anchor, AnchorPos, AnchorWrap};
+    const EMU_PER_TWIP: i64 = 635;
+    let band_emu = i64::from(band_twips.max(0)) * EMU_PER_TWIP;
+    for block in blocks {
+        let Block::Para(para) = block else { continue };
+        for child in &mut para.content {
+            let ParaChild::Run(Run::Drawing(drawing)) = child else { continue };
+            if drawing.anchor.is_some() || drawing.h_emu <= band_emu {
+                continue;
+            }
+            drawing.anchor = Some(Anchor {
+                z: ctx.next_z(),
+                pos_h: AnchorPos {
+                    rel_from: "column",
+                    align: None,
+                    offset: Some(drawing.source_offset_emu[0]),
+                },
+                pos_v: AnchorPos {
+                    rel_from: "paragraph",
+                    align: None,
+                    offset: Some(drawing.source_offset_emu[1]),
+                },
+                wrap: AnchorWrap::None,
+                dist: [0, 0, 0, 0],
+                behind: false,
+            });
+        }
+    }
+}
+
 fn emit_furniture(
     ctx: &mut DocxCtx,
     sect: &mut SectPr,
     parts: &mut Vec<HdrFtrPart>,
     slot: FurnitureSlot,
     kind: &'static str,
-    lowered: LoweredFurniture,
+    mut lowered: LoweredFurniture,
 ) {
     if !lowered.emit_empty && lowered.blocks.is_empty() {
         return;
     }
+
+    let band = if slot.is_header() {
+        sect.margin_top.saturating_sub(sect.header)
+    } else {
+        sect.margin_bottom.saturating_sub(sect.footer)
+    };
+    anchor_oversized_furniture_drawings(ctx, &mut lowered.blocks, band);
 
     // Header/footer content lives outside the body IR, so its introspection
     // tags would never reach the introspector unless harvested here.
