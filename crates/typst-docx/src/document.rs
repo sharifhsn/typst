@@ -1905,10 +1905,19 @@ fn make_room_for_terminal_paragraph(body: &mut [Block], sect: &SectPr) {
     let pages = ((total + content_h - 1) / content_h).max(1);
     let last_page_fill = total - (pages - 1) * content_h;
     let room = content_h - last_page_fill;
-    // A full default paragraph line is ~1.15em; 360 twips (18pt) clears it for
-    // every plausible body font while staying inside the empty tail of a
-    // full-page grid.
-    const PARA: i64 = 360;
+    // How much room the mandatory terminal paragraph actually needs. This is NOT
+    // the font's line height: metronic sets a 12pt body (a ~288 twip line) and
+    // still spills at 360 twips of room, needing between 480 and 600 to fit
+    // (measured by shaving its row in the emitted XML and re-rendering). The
+    // consumer adds table borders, its own paragraph slack, and rounds to its
+    // layout grid, none of which the exporter can model — so reserve a whole
+    // 36pt slot rather than pretend to predict the line box.
+    //
+    // Over-reserving is safe BY CONSTRUCTION, and that is what carries this
+    // number rather than its precision: the shave below only ever touches an
+    // `atLeast` row, which grows back to its content. A row that genuinely needs
+    // its height keeps it; only an over-reserved one actually shrinks.
+    const PARA: i64 = 720;
     if room >= PARA {
         return; // the terminal paragraph already fits on the last page
     }
@@ -4173,7 +4182,11 @@ mod terminal_paragraph_tests {
         let mut body = vec![final_table(15840, false)];
         make_room_for_terminal_paragraph(&mut body, &sect);
         assert!(row_val(&body[0]) < 15840, "the at-least row is shaved");
-        assert!(row_val(&body[0]) >= 15840 - 500, "only ~one line is shaved");
+        // The shave is bounded by the terminal paragraph's reserve (720 twips /
+        // 36pt) and never more: this row is `atLeast`, so if the reservation was
+        // not actually spare the consumer grows it straight back, but a shave
+        // larger than the reserve would be reaching for room nothing asked for.
+        assert!(row_val(&body[0]) >= 15840 - 720, "at most one reserve slot is shaved");
 
         // Trailing invisible content-less blocks must not hide the final table.
         let mut with_flow = vec![final_table(15840, false), Block::FlowSpace { dxa: 1 }];
