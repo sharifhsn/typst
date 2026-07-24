@@ -468,10 +468,25 @@ fn build_document(
 
     let mut ends_with_para = false;
     for block in &document.body {
-        ends_with_para = write_block(&mut w, block, Some(review_tags));
+        let wrote_para = write_block(&mut w, block, Some(review_tags));
+        // A block that writes nothing cannot change whether the body ends in a
+        // paragraph. `Block::Tag` is exactly that — invisible introspection
+        // metadata (a label, a state update, a query anchor) — and it reports
+        // "not a paragraph" only because it is not one. Letting it overwrite the
+        // flag made a body that genuinely ended in `</w:p>` look unterminated, so
+        // the guard below appended a SECOND, empty paragraph. That paragraph is
+        // not free: Word and LibreOffice reserve a full line for it regardless of
+        // any zero-height `w:spacing` (measured — `line="1" lineRule="exact"` does
+        // not shrink it), and on a page that is otherwise full that line spills a
+        // blank final page. Documents ending on a tag are the common case for
+        // single-page CVs, which is where the 1 -> 2 page-parity leak showed up.
+        if !matches!(block, Block::Tag(_)) {
+            ends_with_para = wrote_para;
+        }
     }
 
-    // The body must end in a paragraph before the sectPr.
+    // The body must end in a paragraph before the sectPr — Word requires one
+    // after a final table and repairs the file without it.
     if !ends_with_para {
         w.leaf(xml::W_P);
     }

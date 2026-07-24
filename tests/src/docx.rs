@@ -6771,8 +6771,15 @@ fn empty_unshapeable_figure_body_does_not_orphan_its_caption() {
         .collect();
     assert_eq!(
         paragraphs.len(),
-        2,
+        1,
         "an absent figure body must not leave a phantom paragraph before its caption: {paragraphs:?}"
+    );
+    assert!(
+        p["word/document.xml"]
+            .rfind("</w:p>")
+            .zip(p["word/document.xml"].rfind("<w:sectPr"))
+            .is_some_and(|(para, sect)| para < sect),
+        "the body still ends in a paragraph before the sectPr"
     );
     assert!(
         paragraphs[0]
@@ -6809,8 +6816,9 @@ fn authored_empty_figure_body_linebreak_is_preserved() {
         .collect();
     assert_eq!(
         paragraphs.len(),
-        3,
-        "the authored body, caption, and mandatory terminal paragraph remain distinct"
+        2,
+        "the authored body and caption remain distinct; the body already ends in a \
+         paragraph, so no redundant terminal one is appended"
     );
     assert_eq!(
         paragraphs[0]
@@ -6827,6 +6835,44 @@ fn authored_empty_figure_body_linebreak_is_preserved() {
             .any(|text| text.contains("Intentional empty line"))
     );
     assert_all_wellformed(&p);
+}
+
+#[test]
+fn a_tag_terminated_body_does_not_gain_a_redundant_trailing_paragraph() {
+    // `Block::Tag` writes nothing — it is invisible introspection metadata — so
+    // it cannot change whether the body ends in a paragraph. It used to reset the
+    // terminator flag anyway, appending an empty paragraph after a body that
+    // already ended in one. Word and LibreOffice both reserve a full line for that
+    // paragraph (a zero-height `w:spacing` does NOT shrink it, measured), so on an
+    // otherwise-full page it spilled a blank final page: the 1 -> 2 page-parity
+    // leak on single-page CVs whose document ends on a label (`resumania`).
+    let p = parts("A single paragraph of body text. #label(\"end\")");
+    let doc = &p["word/document.xml"];
+    let paragraphs = doc.matches("<w:p ").count() + doc.matches("<w:p/>").count();
+    assert_eq!(paragraphs, 1, "the sole authored paragraph terminates the body: {doc}");
+    assert!(!doc.contains("<w:p/>"), "no empty terminator paragraph is appended: {doc}");
+    assert!(
+        doc.rfind("</w:p>").zip(doc.rfind("<w:sectPr")).is_some_and(|(a, b)| a < b),
+        "the body still ends in a paragraph before the sectPr: {doc}"
+    );
+    assert_all_wellformed(&p);
+
+    // Negative control: a body ending in a TABLE genuinely does not end in a
+    // paragraph, and Word repairs a file that lacks one there — so the terminator
+    // must still be appended, tag or no tag.
+    let p2 = parts(
+        "#table(columns: (40pt, 60pt), [left], [right])\n#label(\"after-table\")",
+    );
+    let doc2 = &p2["word/document.xml"];
+    assert!(
+        doc2.contains("<w:p/>"),
+        "a table-terminated body still gets its mandatory paragraph: {doc2}"
+    );
+    assert!(
+        doc2.rfind("</w:tbl>").zip(doc2.rfind("<w:p/>")).is_some_and(|(a, b)| a < b),
+        "the mandatory paragraph follows the table: {doc2}"
+    );
+    assert_all_wellformed(&p2);
 }
 
 #[test]
