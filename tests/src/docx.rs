@@ -6846,10 +6846,13 @@ fn a_tag_terminated_body_does_not_gain_a_redundant_trailing_paragraph() {
     // paragraph (a zero-height `w:spacing` does NOT shrink it, measured), so on an
     // otherwise-full page it spilled a blank final page: the 1 -> 2 page-parity
     // leak on single-page CVs whose document ends on a label (`resumania`).
-    let p = parts("A single paragraph of body text. #label(\"end\")");
+    // A figure leaves its introspection tags after the caption paragraph, which is
+    // the reachable shape of this bug (a bare trailing `#label` attaches INTO the
+    // paragraph instead, and does not reproduce it).
+    let p = parts("#figure(rect(width: 20pt, height: 8pt), caption: [Cap])");
     let doc = &p["word/document.xml"];
     let paragraphs = doc.matches("<w:p ").count() + doc.matches("<w:p/>").count();
-    assert_eq!(paragraphs, 1, "the sole authored paragraph terminates the body: {doc}");
+    assert_eq!(paragraphs, 2, "the figure body and caption, and nothing else: {doc}");
     assert!(!doc.contains("<w:p/>"), "no empty terminator paragraph is appended: {doc}");
     assert!(
         doc.rfind("</w:p>").zip(doc.rfind("<w:sectPr")).is_some_and(|(a, b)| a < b),

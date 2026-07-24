@@ -466,30 +466,7 @@ fn build_document(
 
     w.open(xml::W_BODY).start_children();
 
-    let mut ends_with_para = false;
-    for block in &document.body {
-        let wrote_para = write_block(&mut w, block, Some(review_tags));
-        // A block that writes nothing cannot change whether the body ends in a
-        // paragraph. `Block::Tag` is exactly that — invisible introspection
-        // metadata (a label, a state update, a query anchor) — and it reports
-        // "not a paragraph" only because it is not one. Letting it overwrite the
-        // flag made a body that genuinely ended in `</w:p>` look unterminated, so
-        // the guard below appended a SECOND, empty paragraph. That paragraph is
-        // not free: Word and LibreOffice reserve a full line for it regardless of
-        // any zero-height `w:spacing` (measured — `line="1" lineRule="exact"` does
-        // not shrink it), and on a page that is otherwise full that line spills a
-        // blank final page. Documents ending on a tag are the common case for
-        // single-page CVs, which is where the 1 -> 2 page-parity leak showed up.
-        if !matches!(block, Block::Tag(_)) {
-            ends_with_para = wrote_para;
-        }
-    }
-
-    // The body must end in a paragraph before the sectPr — Word requires one
-    // after a final table and repairs the file without it.
-    if !ends_with_para {
-        w.leaf(xml::W_P);
-    }
+    write_blocks_terminated(&mut w, &document.body, Some(review_tags));
 
     write_sectpr(&mut w, &document.sect);
 
@@ -641,6 +618,41 @@ fn renumber_docpr(tag: &str, old: u32, new: u32) -> String {
 }
 
 /// Writes a block; returns whether it ended with a paragraph.
+/// Writes `blocks` into the currently open container, then appends the paragraph
+/// OOXML requires at the end of one (`w:body`, `w:txbxContent`, `w:hdr`/`w:ftr`)
+/// if the content does not already end in a paragraph. Word requires it after a
+/// final table and repairs a file that lacks it, and a bare `w:hdr`/`w:ftr` is
+/// non-conformant in some Word builds.
+///
+/// A block that writes NOTHING cannot change whether the container ends in a
+/// paragraph. `Block::Tag` is exactly that — invisible introspection metadata (a
+/// label, a state update, a query anchor) — and it reports "not a paragraph" only
+/// because it is not one. Letting it overwrite the flag made a container that
+/// genuinely ended in `</w:p>` look unterminated, so a SECOND, empty paragraph was
+/// appended. That paragraph is not free: Word and LibreOffice reserve a full line
+/// for it regardless of any zero-height `w:spacing` (measured — `w:line="1"
+/// w:lineRule="exact"` does not shrink it). In the body, on a page that is
+/// otherwise full, that line spills a blank final page — the 1 -> 2 page-parity
+/// leak on single-page CVs, whose documents commonly end on a tag. In a header it
+/// is worse than cosmetic: header height is reserved out of the body area, so a
+/// phantom line there pushes body content down and can add pages.
+fn write_blocks_terminated(
+    w: &mut XmlWriter,
+    blocks: &[Block],
+    review_tags: Option<&BTreeMap<ReviewJoinId, ReviewTag>>,
+) {
+    let mut ends_with_para = false;
+    for block in blocks {
+        let wrote_para = write_block(w, block, review_tags);
+        if !matches!(block, Block::Tag(_)) {
+            ends_with_para = wrote_para;
+        }
+    }
+    if !ends_with_para {
+        w.leaf(xml::W_P);
+    }
+}
+
 fn write_block(
     w: &mut XmlWriter,
     block: &Block,
@@ -1237,13 +1249,7 @@ fn write_vml_textbox(
     );
     w.open("v:textbox").attr("inset", &inset).start_children();
     w.open("w:txbxContent").start_children();
-    let mut ends_with_para = false;
-    for block in &tb.blocks {
-        ends_with_para = write_block(w, block, None);
-    }
-    if !ends_with_para {
-        w.leaf(xml::W_P);
-    }
+    write_blocks_terminated(w, &tb.blocks, None);
     w.close(); // w:txbxContent
     w.close(); // v:textbox
     w.close(); // v:rect
@@ -1535,15 +1541,9 @@ fn write_wsp(
         Some(tb) => {
             w.open("wps:txbx").start_children();
             w.open("w:txbxContent").start_children();
-            let mut ends_with_para = false;
-            for block in &tb.blocks {
-                ends_with_para = write_block(w, block, None);
-            }
             // `w:txbxContent` (like the document body) must end with a paragraph;
             // this also gives an empty text box its one required paragraph.
-            if !ends_with_para {
-                w.leaf(xml::W_P);
-            }
+            write_blocks_terminated(w, &tb.blocks, None);
             w.close(); // w:txbxContent
             w.close(); // wps:txbx
             // Reproduce the box inset as the text-frame insets, and auto-fit the
@@ -1971,13 +1971,7 @@ fn build_hdrftr(
     // on this part's own root, exactly as Word writes it.
     w.attr("mc:Ignorable", "w14 wp14");
     w.start_children();
-    let mut ends_with_para = false;
-    for block in &part.blocks {
-        ends_with_para = write_block(&mut w, block, Some(review_tags));
-    }
-    if !ends_with_para {
-        w.leaf(xml::W_P);
-    }
+    write_blocks_terminated(&mut w, &part.blocks, Some(review_tags));
     w.close();
     normalize_part_identities(w.finish())
 }
