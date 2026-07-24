@@ -3695,6 +3695,36 @@ fn block_columns_emit_continuous_sections() {
 }
 
 #[test]
+fn an_unsized_image_contains_to_its_sized_block_not_the_page() {
+    // `display_extents`' no-explicit-size branch contains an image against the
+    // ambient available width, so a block that narrows it must scope the
+    // recursion — otherwise a 0.7cm icon resolves against the page and exports
+    // at several inches. This became load-bearing once `unframed_text_box`
+    // began declining bodies that hold a drawing: those bodies used to reach
+    // Word through the text box, carrying the block's own measurements, and
+    // now take the block path instead.
+    let png = tall_png();
+    let p = parts_with_files(
+        "#set page(width: 300pt, height: 200pt, margin: 10pt)\n\
+         #block(width: 20pt, height: 12pt, image(\"p.png\"))",
+        &[("p.png", &png)],
+    );
+    let doc = &p["word/document.xml"];
+    let extent = doc
+        .split("<wp:extent cx=\"")
+        .nth(1)
+        .and_then(|tail| tail.split('"').next())
+        .and_then(|v| v.parse::<i64>().ok())
+        .expect("the image has an extent");
+    // 20pt = 254000 EMU. Page width would be an order of magnitude larger.
+    assert!(
+        extent <= 260000,
+        "the image contains to its 20pt block, not the page: {extent} EMU"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn a_text_box_never_carries_a_drawing_word_would_refuse() {
     // Word does not merely mis-render a drawing inside a text box, it refuses
     // to OPEN the document: "You can't put drawing objects into a text box,

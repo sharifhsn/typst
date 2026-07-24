@@ -1944,7 +1944,12 @@ fn display_extents(
                 1.0
             };
             let height_scale = if intrinsic_h_pt > 0.0 {
-                ctx.available_height.to_pt() / intrinsic_h_pt
+                // Contain against the enclosing box's measured height where
+                // there is one (a sized block, a table cell), matching the
+                // explicit-height branch above; else the page. Without this an
+                // unsized image inside `block(height: ..)` ignores that bound.
+                ctx.shape_height_base.unwrap_or(ctx.available_height).to_pt()
+                    / intrinsic_h_pt
             } else {
                 1.0
             };

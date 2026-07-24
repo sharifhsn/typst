@@ -1677,8 +1677,48 @@ fn handle_block_box(
         }
     };
 
-    // Recurse into the body to obtain its paragraphs.
-    let mut inner = ctx.blocks(content, styles)?;
+    // A sized block scopes its body's relative dimensions to its OWN box, not
+    // the ambient page. An unsized image inside `block(width: 0.7cm, height:
+    // 0.4cm, ..)` must contain to that box; otherwise the image's `(None, None)`
+    // branch in `display_extents` resolves against the page and a 0.7 cm icon
+    // exports at five inches.
+    //
+    // This became load-bearing when `unframed_text_box` learned to decline a
+    // body containing a drawing (Word refuses to open such a file). Those
+    // bodies previously reached Word through the text box, which carried the
+    // block's own measurements; they now take this path instead, and without
+    // the scoping they arrive page-sized. Mirrors the inline-box path in
+    // `ctx.rs` and the per-cell scoping in `mappers::table`. The width base
+    // applies only where it strictly narrows the current one, so a `width: 100%`
+    // block stays a no-op and perturbs no golden reference through the twip
+    // round-trip.
+    let scoped_width = match elem.width.get(styles) {
+        typst_library::foundations::Smart::Custom(rel) => {
+            Some(rel.resolve(styles).relative_to(ctx.available_width))
+        }
+        _ => None,
+    };
+    let scoped_height = match elem.height.get(styles) {
+        typst_library::layout::Sizing::Rel(rel) => Some(
+            rel.resolve(styles)
+                .relative_to(ctx.shape_height_base.unwrap_or(ctx.available_height)),
+        ),
+        _ => None,
+    };
+    let avail_dxa = ctx.available_width_dxa();
+    let scoped_width_dxa = scoped_width
+        .map(crate::props::abs_to_twip)
+        .filter(|w| *w >= 1 && *w < avail_dxa);
+
+    // Recurse into the body to obtain its paragraphs, scoping relative child
+    // dimensions to this block's box.
+    let mut inner = ctx.with_shape_height_base(
+        scoped_height.or(ctx.shape_height_base),
+        |ctx| match scoped_width_dxa {
+            Some(w) => ctx.with_available_width(w, |ctx| ctx.blocks(content, styles)),
+            None => ctx.blocks(content, styles),
+        },
+    )?;
 
     // A fixed-height filled block is a bounded visual region (terminal panes,
     // cards, dashboards), not merely a sequence of shaded paragraphs. Word
@@ -1697,13 +1737,8 @@ fn handle_block_box(
     // extra page of solid fill. `available_width` just below already receives
     // this same per-cell scoping (via `with_available_width`); only the height
     // axis lacked its equivalent.
-    let fixed_height = match elem.height.get(styles) {
-        typst_library::layout::Sizing::Rel(rel) => Some(
-            rel.resolve(styles)
-                .relative_to(ctx.shape_height_base.unwrap_or(ctx.available_height)),
-        ),
-        _ => None,
-    };
+    // Same resolution as the recursion's height base above.
+    let fixed_height = scoped_height;
     let clips = elem.clip.get(styles);
     if let (Some(Paint::Solid(color)), Some(height)) = (&fill, fixed_height)
         && height.to_pt().is_finite()
