@@ -1978,7 +1978,31 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             // honest loss: exact overlay position. Bounded shape/text canvases
             // are claimed atomically by the mixed-canvas paths before their
             // children reach this routine.
-            let runs = self.inline_runs(&elem.body, styles, props.clone())?;
+            //
+            // Scope the width/height base to the place body's own sized
+            // container first. A `place(center + horizon, block(0.7cm, image))`
+            // (the `tiaoma` linkedin QR idiom) otherwise lowers its auto-sized
+            // image against the full column width, so `display_extents`
+            // contains a centimetre icon to many inches and it consumes half a
+            // page — min-resume's link icon came out 6.7in. Mirrors the sized
+            // scoping `handle_block_box`/`mappers::table` already apply; the
+            // base only ever narrows (a `width: 100%` body stays a no-op).
+            let (sized_w, sized_h) = inline_place_body_dims(&elem.body, styles, self);
+            let avail_dxa = self.available_width_dxa();
+            let scoped_w_dxa = sized_w
+                .map(crate::props::abs_to_twip)
+                .filter(|w| *w >= 1 && *w < avail_dxa);
+            let scoped_h = sized_h.or(self.shape_height_base);
+            let runs = {
+                let body = &elem.body;
+                let inner = props.clone();
+                self.with_shape_height_base(scoped_h, |ctx| match scoped_w_dxa {
+                    Some(w) => ctx.with_available_width(w, |ctx| {
+                        ctx.inline_runs(body, styles, inner.clone())
+                    }),
+                    None => ctx.inline_runs(body, styles, inner),
+                })?
+            };
             if !runs.is_empty() {
                 let source = elem.clone().pack();
                 self.record_content_decision(
@@ -2787,6 +2811,48 @@ pub(crate) fn block_is_plain(
         && stroke.bottom.is_none()
         && stroke.left.is_none()
         && stroke.right.is_none()
+}
+
+/// The resolved (width, height) a `#place`-body's own sized `#box`/`#block`
+/// container declares, so an auto-sized image inside it is bounded by the
+/// container instead of the full column. `None` on an axis leaves the current
+/// base. Resolved against the current width/height base, mirroring
+/// `convert::handle_block_box`. Only the two common place-body containers are
+/// inspected; anything else leaves both bases untouched.
+fn inline_place_body_dims(
+    body: &Content,
+    styles: StyleChain,
+    ctx: &DocxCtx,
+) -> (Option<Abs>, Option<Abs>) {
+    use typst_library::foundations::{Resolve, Smart};
+    use typst_library::layout::{BlockElem, BoxElem, Sizing};
+    let width_base = ctx.available_width;
+    let height_base = ctx.shape_height_base.unwrap_or(ctx.available_height);
+    if let Some(e) = body.to_packed::<BoxElem>() {
+        // BoxElem: `width: Sizing`, `height: Smart<Rel<Length>>`.
+        let w = match e.width.get(styles) {
+            Sizing::Rel(rel) => Some(rel.resolve(styles).relative_to(width_base)),
+            _ => None,
+        };
+        let h = match e.height.get(styles) {
+            Smart::Custom(rel) => Some(rel.resolve(styles).relative_to(height_base)),
+            _ => None,
+        };
+        return (w, h);
+    }
+    if let Some(e) = body.to_packed::<BlockElem>() {
+        // BlockElem: `width: Smart<Rel<Length>>`, `height: Sizing`.
+        let w = match e.width.get(styles) {
+            Smart::Custom(rel) => Some(rel.resolve(styles).relative_to(width_base)),
+            _ => None,
+        };
+        let h = match e.height.get(styles) {
+            Sizing::Rel(rel) => Some(rel.resolve(styles).relative_to(height_base)),
+            _ => None,
+        };
+        return (w, h);
+    }
+    (None, None)
 }
 
 /// Derives a Word underline style + colour from a resolved line stroke.

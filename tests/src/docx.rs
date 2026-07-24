@@ -2354,6 +2354,41 @@ fn intrinsic_raster_image_size_is_bounded_by_the_page_region() {
     );
 }
 
+#[test]
+fn a_placed_icon_contains_to_its_sized_block_not_the_column() {
+    let png = tall_png();
+    // The `tiaoma` linkedin idiom: an auto-sized image inside a
+    // `place(center + horizon, block(0.7cm, ..))` reached through a link's
+    // inline flow. It must contain to the 0.7cm block, not the full column —
+    // min-resume's icon otherwise rasterized 6.7in wide and pushed the résumé
+    // onto a spurious extra page.
+    let scoped = package_bytes_with_files(
+        "#set page(width: 200pt, height: 200pt, margin: 0pt)\n\
+         #link(\"https://e.com\", \
+         place(center + horizon, block(width: 0.7cm, height: 0.7cm, image(\"i.png\"))))",
+        &[("i.png", &png)],
+    );
+    let doc = String::from_utf8(scoped["word/document.xml"].clone()).unwrap();
+    assert!(
+        doc.contains("<wp:extent cx=\"63000\" cy=\"252000\"/>"),
+        "placed icon must fit its 0.7cm block, not the column: {doc}"
+    );
+
+    // Negative control: a `width: 100%` place body does not narrow the base, so
+    // the image still contains to the page region exactly as before the fix.
+    let full = package_bytes_with_files(
+        "#set page(width: 200pt, height: 200pt, margin: 0pt)\n\
+         #link(\"https://e.com\", \
+         place(center + horizon, block(width: 100%, image(\"i.png\"))))",
+        &[("i.png", &png)],
+    );
+    let doc = String::from_utf8(full["word/document.xml"].clone()).unwrap();
+    assert!(
+        doc.contains("<wp:extent cx=\"635000\" cy=\"2540000\"/>"),
+        "a full-width place body stays page-bounded: {doc}"
+    );
+}
+
 /// A 100x400 red PNG, used by the clipped-picture tests below.
 fn tall_png() -> Vec<u8> {
     use base64::Engine as _;
