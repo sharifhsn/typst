@@ -643,6 +643,80 @@ def cmd_abdiff(args) -> int:
     return 1 if flagged else 0
 
 
+def _pdf_pages(pdf: Path) -> int:
+    r = subprocess.run(["pdfinfo", str(pdf)], capture_output=True, timeout=60)
+    for line in r.stdout.decode("utf-8", "replace").splitlines():
+        if line.startswith("Pages:"):
+            return int(line.split()[1])
+    return 0
+
+
+def cmd_leak(args) -> int:
+    """The `typ_leak` scoreboard: documents whose export LEAKS fidelity.
+
+    A document leaks when its DOCX export fails outright, its rendered page
+    count diverges from Typst's own, or the consumer cannot render it at all.
+    Page parity is the hard, defensible core of the metric — it is exact,
+    cheap, and every divergence has a findable cause — where visual scores
+    carry cross-renderer noise that would invite gaming. The goal state is 0,
+    with any genuinely irreducible divergence (a consumer's own reflow rules)
+    documented per document rather than waved at.
+
+    Writes leak.json incrementally (a crash never discards earned results)
+    and prints the leaking documents by name: at corpus scale the changed
+    *set* is the regression signal, not the count.
+    """
+    binary = check_binary(args.binary)
+    work = Path(args.out); work.mkdir(parents=True, exist_ok=True)
+    out = work / "leak.json"
+    baseline = json.loads(Path(args.baseline).read_text()) if args.baseline else {}
+    results: dict = {}
+    if args.consumer == "word" and not _word_ready():
+        print("Word did not become scriptable; aborting", file=sys.stderr)
+        return 1
+
+    for src in docs(args.n, "document", args.filter):
+        tpdf, office = work / "t.pdf", work / "o.docx"
+        entry: dict
+        if not (export(binary, src, "pdf", tpdf) and export(binary, src, "docx", office)):
+            entry = {"leak": "export_failed"}
+        else:
+            rendered = _consumer_pdf(office, work, args.consumer)
+            if rendered is None:
+                entry = {"leak": "consumer_failed"}
+            else:
+                tp, op = _pdf_pages(tpdf), _pdf_pages(rendered)
+                entry = {"typst": tp, "office": op}
+                if tp != op:
+                    entry["leak"] = "page_mismatch"
+        results[str(src)] = entry
+        out.write_text(json.dumps(results, indent=1))
+
+    leaks = {d: e for d, e in results.items() if "leak" in e}
+    print(f"typ_leak = {len(leaks)} / {len(results)}")
+    for doc, entry in sorted(leaks.items()):
+        pages = (
+            f" {entry['typst']}/{entry['office']}"
+            if "typst" in entry
+            else ""
+        )
+        marker = ""
+        if baseline:
+            was = baseline.get(doc, {})
+            if "leak" not in was:
+                marker = "  <-- NEW"
+            elif was.get("office") != entry.get("office"):
+                marker = f"  (was {was.get('typst')}/{was.get('office')})"
+        print(f"  {entry['leak']}{pages}  {doc}{marker}")
+    if baseline:
+        fixed = [d for d in baseline if "leak" in baseline[d]
+                 and d in results and "leak" not in results[d]]
+        print(f"fixed since baseline: {len(fixed)}")
+        for doc in fixed[:20]:
+            print(f"  FIXED {doc}")
+    return 1 if leaks else 0
+
+
 def cmd_rank(args) -> int:
     scores = json.loads(Path(args.scores).read_text())
     baseline = json.loads(Path(args.baseline).read_text()) if args.baseline else {}
@@ -792,6 +866,9 @@ def main() -> int:
     ab.add_argument("--pages", type=int, default=12)
     ab.add_argument("--threshold", type=float, default=0.985)
     ab.set_defaults(fn=cmd_abdiff)
+    leak = sub.add_parser("leak", parents=[common])
+    leak.add_argument("--baseline", help="a prior leak.json to diff against")
+    leak.set_defaults(fn=cmd_leak)
     rank = sub.add_parser("rank", parents=[common])
     rank.add_argument("--scores", required=True)
     rank.add_argument("--baseline")
