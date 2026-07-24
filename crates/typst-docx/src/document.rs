@@ -1858,7 +1858,39 @@ fn resolve_sections(
         }
     }
     merge_content_empty_sections(pairs, &mut sections);
+    drop_trailing_empty_columns_section(&mut sections);
     sections
+}
+
+/// Drops a trailing empty "restore to one column" section left behind when a
+/// `#columns(..)` runs to the end of the document. `push_column_sections`
+/// always pushes that restore section so a *following* `#pagebreak` has a
+/// section to land in; when nothing follows, it carries no content and is the
+/// document's body `sectPr`, which Word renders as a blank trailing page (a
+/// whole-page cheatsheet then exports as two pages, one of them empty). With it
+/// gone the column section itself becomes the final section, so its
+/// multi-column geometry moves into the body `sectPr` — exactly where Word
+/// expects a document-wide column layout. Guarded tightly: only an empty-range
+/// section with no intended blank pages, following a `Continuous` (column)
+/// break, is dropped, so an authored trailing `#pagebreak` (which parks its
+/// count in `leading_pagebreaks`) and every content-bearing section are left
+/// untouched.
+fn drop_trailing_empty_columns_section(sections: &mut Vec<SectionRun>) {
+    while sections.len() >= 2 {
+        let last = sections.len() - 1;
+        // An empty-range final section carries no content, so it can only paint
+        // a blank page. It exists solely as the restore-to-base target a
+        // `#columns` run pushes for a *following* break to land in; with no such
+        // break it is pure spurious page. `leading_pagebreaks == 0` spares an
+        // authored trailing `#pagebreak()` (which parks its blanks there).
+        if sections[last].range.is_empty() && sections[last].leading_pagebreaks == 0 {
+            sections.pop();
+            let new_last = sections.len() - 1;
+            sections[new_last].break_after = None;
+        } else {
+            break;
+        }
+    }
 }
 
 /// Drops section boundaries that wrap nothing but invisible marker content

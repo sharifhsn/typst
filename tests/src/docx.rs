@@ -3730,6 +3730,44 @@ fn block_columns_emit_continuous_sections() {
 }
 
 #[test]
+fn a_whole_document_columns_run_does_not_leave_a_blank_trailing_section() {
+    // `#columns(..)` that runs to the end of the document used to push an empty
+    // "restore to one column" section behind it; with nothing following, that
+    // empty section became the body `sectPr` and Word painted it as a blank
+    // trailing page (cram-snap: a one-page cheatsheet exported with a spurious
+    // extra page). The column section itself should be the body section.
+    let p = parts(
+        "#columns(2, gutter: 12pt)[Column content starts here. \
+         Column content continues here.]",
+    );
+    let doc = &p["word/document.xml"];
+    assert_eq!(
+        sect_pr_chunks(doc).len(),
+        1,
+        "a whole-document columns run is a single body section: {doc}"
+    );
+    assert!(
+        doc.contains("<w:cols w:num=\"2\""),
+        "the body sectPr carries the two-column layout: {doc}"
+    );
+    assert_all_wellformed(&p);
+
+    // Negative control: ordinary content after the columns lands in the restore
+    // section, which is therefore non-empty and must be kept — two sections.
+    let p2 = parts(
+        "#columns(2, gutter: 12pt)[Column content starts here. \
+         Column content continues here.]\n\nTrailing paragraph.",
+    );
+    let doc2 = &p2["word/document.xml"];
+    assert_eq!(
+        sect_pr_chunks(doc2).len(),
+        2,
+        "columns followed by content keep the restore section: {doc2}"
+    );
+    assert!(doc2.contains("Trailing paragraph"), "trailing content is kept");
+}
+
+#[test]
 fn furniture_taller_than_its_band_floats_instead_of_displacing_the_body() {
     // Typst furniture can never displace the body: the band is fixed and
     // overflow paints over the page. Word furniture always reserves its real
