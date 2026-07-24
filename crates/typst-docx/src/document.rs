@@ -1852,6 +1852,7 @@ fn resolve_sections(
             // A page-style transition contributes one synthetic pagebreak, and
             // the new Word section itself replaces the first actual break. Any
             // further consecutive breaks are real blank pages in the new run.
+            //
             sections[previous_sections].leading_pagebreaks =
                 skipped_breaks.saturating_sub(2).min(hard_breaks);
         }
@@ -2029,6 +2030,16 @@ fn columns_section_geometry(
 /// compared. They are represented when another property already creates a
 /// genuine Word section; making every Typst page (especially every slide) a
 /// section can amplify ordinary reflow into dozens of extra pages.
+///
+/// The cost of excluding `background_color` is real and known: a page whose
+/// only distinction IS its colour — a coloured cover or part-divider — merges
+/// into its uncoloured neighbour and the fill is lost, because only a section
+/// of its own can carry one. Comparing it does restore the colour, but every
+/// attempt so far also disturbed the section-break page accounting (a blank
+/// page appears on each side of a divider) and collided with the empty-header
+/// reset that `section_backgrounds_vary` performs. Restoring per-page fills
+/// therefore needs those two mechanisms reworked together, not this predicate
+/// widened on its own.
 fn same_section(a: &SectGeom, b: &SectGeom) -> bool {
     use typst_utils::hash128;
     a.page_w == b.page_w
