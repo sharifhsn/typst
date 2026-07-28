@@ -99,6 +99,11 @@ def check_binary(binary: str) -> str:
 
 def export(binary: str, src: Path, fmt: str, out: Path, timeout: int = 180) -> bool:
     """One serial export. Success is the output file existing, nothing else."""
+    # Export commands run from the corpus checkout so their relative source
+    # paths resolve. Anchor the destination before changing cwd; otherwise a
+    # caller-provided relative --out is interpreted inside the corpus while
+    # the existence check below still looks in the caller's working directory.
+    out = out.absolute()
     out.unlink(missing_ok=True)
     cmd = [binary, "compile", "--root", str(root_for(src))]
     if fmt != "pdf":

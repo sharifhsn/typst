@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import corpuslib
@@ -24,6 +25,27 @@ class PptxTextTests(unittest.TestCase):
         }
 
         self.assertEqual(corpuslib.pptx_text(parts), "first second ")
+
+
+class ExportPathTests(unittest.TestCase):
+    def test_relative_output_is_anchored_before_corpus_cwd(self) -> None:
+        relative = Path("target/export-audit-test/relative.docx")
+        absolute = relative.absolute()
+        absolute.parent.mkdir(parents=True, exist_ok=True)
+        absolute.unlink(missing_ok=True)
+
+        def fake_run(command, **kwargs):
+            self.assertEqual(kwargs["cwd"], corpuslib.CORPUS)
+            self.assertEqual(Path(command[-1]), absolute)
+            absolute.touch()
+
+        try:
+            with patch.object(corpuslib.subprocess, "run", side_effect=fake_run):
+                self.assertTrue(
+                    corpuslib.export("/bin/typst", Path("sample.typ"), "docx", relative)
+                )
+        finally:
+            absolute.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
