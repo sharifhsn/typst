@@ -8,8 +8,9 @@ use typst_library::introspection::{
     SplitLocator, Tag, TagFlags,
 };
 use typst_library::layout::{
-    Abs, Axes, ColumnRegion, Dir, FixedAlignment, Fragment, Frame, FrameItem, FrameParent, Inherit,
-    OuterHAlignment, PlacementScope, Point, Region, Regions, Rel, Size,
+    Abs, Axes, ColumnRegion, Dir, FixedAlignment, Fragment, Frame, FrameItem,
+    FrameParent, Inherit, OuterHAlignment, PlacementScope, Point, Region, Regions, Rel,
+    Size,
 };
 use typst_library::model::{
     FootnoteElem, FootnoteEntry, LineNumberingScope, Numbering, ParLineMarker,
@@ -54,10 +55,24 @@ pub fn compose(
     .page(locator, regions)
 }
 
-fn tag_column_region(mut frame: Frame, count: usize, gutter: Abs, manual_break: bool,
-    span: Span, locator: Locator, engine: &mut Engine) -> Frame {
+fn tag_column_region(
+    mut frame: Frame,
+    count: usize,
+    gutter: Abs,
+    manual_break: bool,
+    span: Span,
+    locator: Locator,
+    engine: &mut Engine,
+) -> Frame {
     let Some(count) = NonZeroUsize::new(count) else { return frame };
-    let mut region = Packed::new(ColumnRegion::new(count, gutter, frame.width(), frame.height(), manual_break)).spanned(span);
+    let mut region = Packed::new(ColumnRegion::new(
+        count,
+        gutter,
+        frame.width(),
+        frame.height(),
+        manual_break,
+    ))
+    .spanned(span);
     let key = typst_utils::hash128(&region);
     let loc = locator.split().next_location(engine, key, span);
     region.set_location(loc);
@@ -196,8 +211,15 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         }
 
         if let Some(span) = self.config.column_region_span {
-            output = tag_column_region(output, self.config.columns.count, self.config.columns.gutter,
-                manual_break, span, region_locator, self.engine);
+            output = tag_column_region(
+                output,
+                self.config.columns.count,
+                self.config.columns.gutter,
+                manual_break,
+                span,
+                region_locator,
+                self.engine,
+            );
         }
 
         Ok(output)

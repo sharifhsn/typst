@@ -102,7 +102,8 @@ fn hoist_metrics(doc: &mut TypstDoc) {
         entry.0 += 1;
     }
 
-    let Some((count, winner)) = votes.into_values().max_by_key(|(count, _)| *count) else {
+    let Some((count, winner)) = votes.into_values().max_by_key(|(count, _)| *count)
+    else {
         return;
     };
     if winner.is_empty() || (count as f64) / (total as f64) < MAJORITY_THRESHOLD {
@@ -130,7 +131,9 @@ fn collect_styles<'a>(blocks: &'a [Block], out: &mut Vec<&'a ParStyle>) {
 fn clear_metrics(blocks: &mut [Block], hoisted: &Metrics) {
     for block in blocks {
         match block {
-            Block::Paragraph { style, .. } if Metrics::of(style).key() == hoisted.key() => {
+            Block::Paragraph { style, .. }
+                if Metrics::of(style).key() == hoisted.key() =>
+            {
                 style.spacing_before_pt = None;
                 style.spacing_after_pt = None;
                 style.leading_pt = None;
@@ -213,7 +216,10 @@ fn set_preamble_justify(preamble: &mut Vec<Stmt>) {
             return;
         }
     }
-    preamble.push(Stmt::SetPar(ParStyle { align: Some(Align::Justify), ..Default::default() }));
+    preamble.push(Stmt::SetPar(ParStyle {
+        align: Some(Align::Justify),
+        ..Default::default()
+    }));
 }
 
 #[cfg(test)]
@@ -229,14 +235,22 @@ mod tests {
     }
 
     fn plain_para(text: &str) -> Block {
-        Block::Paragraph { style: ParStyle::default(), body: vec![Inline::Text(text.into())] }
+        Block::Paragraph {
+            style: ParStyle::default(),
+            body: vec![Inline::Text(text.into())],
+        }
     }
 
     #[test]
     fn majority_justify_is_hoisted_into_preamble() {
         let mut doc = TypstDoc {
             preamble: vec![],
-            body: vec![justified_para("a"), justified_para("b"), justified_para("c"), plain_para("d")],
+            body: vec![
+                justified_para("a"),
+                justified_para("b"),
+                justified_para("c"),
+                plain_para("d"),
+            ],
         };
         run(&mut doc);
 
@@ -261,7 +275,9 @@ mod tests {
 
         assert!(doc.preamble.is_empty());
         match &doc.body[0] {
-            Block::Paragraph { style, .. } => assert_eq!(style.align, Some(Align::Justify)),
+            Block::Paragraph { style, .. } => {
+                assert_eq!(style.align, Some(Align::Justify))
+            }
             _ => panic!("expected paragraph"),
         }
     }
@@ -283,7 +299,9 @@ mod tests {
 
         // 2/3 justify clears the majority bar; the Center paragraph is untouched.
         match &doc.body[0] {
-            Block::Paragraph { style, .. } => assert_eq!(style.align, Some(Align::Center)),
+            Block::Paragraph { style, .. } => {
+                assert_eq!(style.align, Some(Align::Center))
+            }
             _ => panic!("expected paragraph"),
         }
     }
@@ -379,8 +397,14 @@ mod tests {
         let mut doc = TypstDoc {
             preamble: vec![],
             body: vec![
-                Block::Paragraph { style: ParStyle::default(), body: vec![Inline::Text("a".into())] },
-                Block::Paragraph { style: ParStyle::default(), body: vec![Inline::Text("b".into())] },
+                Block::Paragraph {
+                    style: ParStyle::default(),
+                    body: vec![Inline::Text("a".into())],
+                },
+                Block::Paragraph {
+                    style: ParStyle::default(),
+                    body: vec![Inline::Text("b".into())],
+                },
             ],
         };
         run(&mut doc);

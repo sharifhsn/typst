@@ -10,7 +10,7 @@
 //! `rId1`, so an unqualified id is ambiguous the moment a second part is read
 //! — the bug that cost the Word importer a debugging session.
 
-use ecow::{eco_format, EcoString};
+use ecow::{EcoString, eco_format};
 use roxmltree::{Document, Node};
 use typst_ooxml_core::opc::{self, Reader, rels_part_name, resolve_target};
 
@@ -33,7 +33,11 @@ pub struct Target {
 
 impl<'a> Parser<'a> {
     pub fn new(reader: Reader<'a>) -> Self {
-        Self { reader, report: ImportReport::default(), rels: Vec::new() }
+        Self {
+            reader,
+            report: ImportReport::default(),
+            rels: Vec::new(),
+        }
     }
 
     /// Read the whole package.
@@ -147,11 +151,14 @@ impl<'a> Parser<'a> {
 
     /// Resolve a namespaced relationship id.
     pub fn target(&self, id: &str) -> Option<Target> {
-        self.rels.iter().find(|(rid, _, _)| rid == id).map(|(_, kind, target)| Target {
-            part: target.clone(),
-            kind: kind.clone(),
-            external: !target.starts_with("ppt/") && target.contains(':'),
-        })
+        self.rels
+            .iter()
+            .find(|(rid, _, _)| rid == id)
+            .map(|(_, kind, target)| Target {
+                part: target.clone(),
+                kind: kind.clone(),
+                external: !target.starts_with("ppt/") && target.contains(':'),
+            })
     }
 
     /// Slide parts in `p:sldIdLst` order.
@@ -162,7 +169,10 @@ impl<'a> Parser<'a> {
             .filter_map(|n| rel_attr(n))
             .filter_map(|id| {
                 let key = eco_format!("{part}!{id}");
-                self.rels.iter().find(|(rid, _, _)| *rid == key).map(|(_, _, t)| t.clone())
+                self.rels
+                    .iter()
+                    .find(|(rid, _, _)| *rid == key)
+                    .map(|(_, _, t)| t.clone())
             })
             .collect()
     }
@@ -316,10 +326,12 @@ impl<'a> Parser<'a> {
         {
             group.xfrm = Some(parse_xfrm(x));
             if let Some(off) = child(x, "chOff") {
-                group.child_off = Some((num(off, "x").unwrap_or(0), num(off, "y").unwrap_or(0)));
+                group.child_off =
+                    Some((num(off, "x").unwrap_or(0), num(off, "y").unwrap_or(0)));
             }
             if let Some(ext) = child(x, "chExt") {
-                group.child_ext = Some((num(ext, "cx").unwrap_or(0), num(ext, "cy").unwrap_or(0)));
+                group.child_ext =
+                    Some((num(ext, "cx").unwrap_or(0), num(ext, "cy").unwrap_or(0)));
             }
         }
         group.shapes = node
@@ -431,10 +443,7 @@ impl<'a> Parser<'a> {
         if uri.contains("/chart")
             && let Some(id) = descend(data, "chart").and_then(rel_attr)
         {
-            return Some(Shape::Chart {
-                rel_id: eco_format!("{part}!{id}"),
-                xfrm,
-            });
+            return Some(Shape::Chart { rel_id: eco_format!("{part}!{id}"), xfrm });
         }
         let kind: EcoString = if uri.contains("/chart") {
             "a chart".into()
@@ -463,12 +472,16 @@ impl<'a> Parser<'a> {
             }
         }
         for tr in node.children().filter(|n| is_el(*n, "tr")) {
-            let mut row = TableRow { height: num(tr, "h").unwrap_or(0), cells: Vec::new() };
+            let mut row = TableRow {
+                height: num(tr, "h").unwrap_or(0),
+                cells: Vec::new(),
+            };
             for tc in tr.children().filter(|n| is_el(*n, "tc")) {
                 let mut cell = TableCell {
                     grid_span: num(tc, "gridSpan").unwrap_or(1).max(1) as usize,
                     row_span: num(tc, "rowSpan").unwrap_or(1).max(1) as usize,
-                    merged: attr(tc, "hMerge") == Some("1") || attr(tc, "vMerge") == Some("1"),
+                    merged: attr(tc, "hMerge") == Some("1")
+                        || attr(tc, "vMerge") == Some("1"),
                     ..TableCell::default()
                 };
                 if let Some(body) = child(tc, "txBody") {
@@ -482,8 +495,7 @@ impl<'a> Parser<'a> {
                     // Order matters: left, top, right, bottom, matching the
                     // order the mapper reads them back in.
                     for (index, name) in ["lnL", "lnT", "lnR", "lnB"].iter().enumerate() {
-                        cell.borders[index] =
-                            child(pr, name).map(|l| self.parse_line(l));
+                        cell.borders[index] = child(pr, name).map(|l| self.parse_line(l));
                     }
                     cell.anchor = attr(pr, "anchor").map(Into::into);
                     cell.fill = self.parse_fill_container(pr);
@@ -571,10 +583,12 @@ impl<'a> Parser<'a> {
                 "blipFill" => {
                     return child(c, "blip")
                         .and_then(rel_attr)
-                        .map(|id| Fill::Picture { rel_id: id.into() })
+                        .map(|id| Fill::Picture { rel_id: id.into() });
                 }
                 "pattFill" => {
-                    return child(c, "fgClr").and_then(color_in).map(|fg| Fill::Pattern { fg })
+                    return child(c, "fgClr")
+                        .and_then(color_in)
+                        .map(|fg| Fill::Pattern { fg });
                 }
                 _ => {}
             }
@@ -729,7 +743,7 @@ fn color_in(node: Node) -> Option<Color> {
                 return Some(Color::Scheme {
                     slot: attr(c, "val")?.into(),
                     transforms: color_transforms(c),
-                })
+                });
             }
             "sysClr" => {
                 let rgb = attr(c, "lastClr").and_then(hex).unwrap_or([0, 0, 0]);
@@ -801,10 +815,8 @@ fn parse_para_props(pr: Node) -> ParaProps {
                     .and_then(|f| attr(f, "typeface"))
                     .filter(|t| !t.is_empty())
                     .map(EcoString::from);
-                props.bullet = attr(c, "char").map(|ch| Bullet::Char {
-                    glyph: EcoString::from(ch),
-                    font,
-                });
+                props.bullet = attr(c, "char")
+                    .map(|ch| Bullet::Char { glyph: EcoString::from(ch), font });
             }
             "buAutoNum" => {
                 props.bullet = Some(Bullet::AutoNum {
@@ -907,12 +919,21 @@ mod tests {
             resolve_target("ppt/presentation.xml", "slides/slide1.xml"),
             "ppt/slides/slide1.xml"
         );
-        assert_eq!(resolve_target("ppt/presentation.xml", "/docProps/app.xml"), "docProps/app.xml");
+        assert_eq!(
+            resolve_target("ppt/presentation.xml", "/docProps/app.xml"),
+            "docProps/app.xml"
+        );
     }
 
     #[test]
     fn rels_sidecar_name_is_derived_from_the_part() {
-        assert_eq!(rels_part_name("ppt/slides/slide1.xml"), "ppt/slides/_rels/slide1.xml.rels");
-        assert_eq!(rels_part_name("ppt/presentation.xml"), "ppt/_rels/presentation.xml.rels");
+        assert_eq!(
+            rels_part_name("ppt/slides/slide1.xml"),
+            "ppt/slides/_rels/slide1.xml.rels"
+        );
+        assert_eq!(
+            rels_part_name("ppt/presentation.xml"),
+            "ppt/_rels/presentation.xml.rels"
+        );
     }
 }

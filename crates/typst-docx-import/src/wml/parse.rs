@@ -11,20 +11,20 @@
 use ecow::{EcoString, eco_format};
 use roxmltree::{Document, Node, TextPos};
 use rustc_hash::{FxHashMap, FxHashSet};
+use typst_ooxml_core::ns;
 use typst_ooxml_core::opc::{self, Reader};
 use typst_ooxml_core::xmlread::{attr, attr_ns, is_el as is_element};
-use typst_ooxml_core::ns;
 
 use crate::ImportError;
 use crate::report::ImportReport;
 use crate::wml::model::{
-    BorderEdge, Borders, Body, BodyItem, BreakType, Cell, CellMargins, ChartData,
-    ChartKind, Comment, RevisionInfo, TableBorders, TableStyleProps, WordSource,
-    ChartSeries, DmlDash, DmlFill, DmlGeometry, DmlGradient, DmlGradientKind, DmlSeg, DmlShape,
-    DmlStroke, DocumentMeta, DrawingRef, Field,
-    FurnitureKind, FurnitureRef, LegendPos, LevelFormat, NumRef, Numbering, ParaProps, Paragraph,
-    PresetGeom, Relationship, Row, Run, RunContent, RunItem, RunProps, Section, SectPr,
-    SectionStart, SrcRect, Style, StyleKind, Styles, Table, VmlShape, VmlShapeKind, WmlPackage,
+    Body, BodyItem, BorderEdge, Borders, BreakType, Cell, CellMargins, ChartData,
+    ChartKind, ChartSeries, Comment, DmlDash, DmlFill, DmlGeometry, DmlGradient,
+    DmlGradientKind, DmlSeg, DmlShape, DmlStroke, DocumentMeta, DrawingRef, Field,
+    FurnitureKind, FurnitureRef, LegendPos, LevelFormat, NumRef, Numbering, ParaProps,
+    Paragraph, PresetGeom, Relationship, RevisionInfo, Row, Run, RunContent, RunItem,
+    RunProps, SectPr, Section, SectionStart, SrcRect, Style, StyleKind, Styles, Table,
+    TableBorders, TableStyleProps, VmlShape, VmlShapeKind, WmlPackage, WordSource,
 };
 
 // ===========================================================================
@@ -347,32 +347,56 @@ pub fn parse_package(
         }
     }
 
-    let styles = match read_optional_part(&mut reader, "word/styles.xml", "styles.xml", report) {
-        Some(xml) => parse_xml(&xml, "styles.xml", report, Styles::default(), parse_styles),
-        None => Styles::default(),
-    };
+    let styles =
+        match read_optional_part(&mut reader, "word/styles.xml", "styles.xml", report) {
+            Some(xml) => {
+                parse_xml(&xml, "styles.xml", report, Styles::default(), parse_styles)
+            }
+            None => Styles::default(),
+        };
 
-    let numbering = match read_optional_part(&mut reader, "word/numbering.xml", "numbering.xml", report)
-    {
-        Some(xml) => parse_xml(&xml, "numbering.xml", report, Numbering::default(), parse_numbering),
+    let numbering = match read_optional_part(
+        &mut reader,
+        "word/numbering.xml",
+        "numbering.xml",
+        report,
+    ) {
+        Some(xml) => parse_xml(
+            &xml,
+            "numbering.xml",
+            report,
+            Numbering::default(),
+            parse_numbering,
+        ),
         None => Numbering::default(),
     };
 
-    let meta = match read_optional_part(&mut reader, CORE_PROPS_PART, CORE_PROPS_PART, report) {
-        Some(xml) => {
-            parse_xml(&xml, CORE_PROPS_PART, report, DocumentMeta::default(), parse_core_properties)
-        }
-        None => DocumentMeta::default(),
-    };
+    let meta =
+        match read_optional_part(&mut reader, CORE_PROPS_PART, CORE_PROPS_PART, report) {
+            Some(xml) => parse_xml(
+                &xml,
+                CORE_PROPS_PART,
+                report,
+                DocumentMeta::default(),
+                parse_core_properties,
+            ),
+            None => DocumentMeta::default(),
+        };
 
     // Guaranteed present by the `has` check above.
     let doc_xml = reader.xml_part("word/document.xml")?.unwrap_or_default();
     let body = parse_document(&doc_xml, report)?;
 
     let furniture = parse_furniture_parts(&mut reader, &mut rels, report);
-    let footnotes =
-        parse_notes_part(&mut reader, &mut rels, "word/footnotes.xml", "footnote", report);
-    let endnotes = parse_notes_part(&mut reader, &mut rels, "word/endnotes.xml", "endnote", report);
+    let footnotes = parse_notes_part(
+        &mut reader,
+        &mut rels,
+        "word/footnotes.xml",
+        "footnote",
+        report,
+    );
+    let endnotes =
+        parse_notes_part(&mut reader, &mut rels, "word/endnotes.xml", "endnote", report);
     let comments = parse_comments_part(&mut reader, &mut rels, report);
     let sources = parse_bibliography(&mut reader, report);
     let charts = parse_chart_parts(&mut reader, report);
@@ -406,7 +430,13 @@ pub fn parse_package(
 fn sanitize_label(name: &str) -> EcoString {
     let label: EcoString = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':') { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':') {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     if label.is_empty() { "bookmark".into() } else { label }
 }
@@ -430,7 +460,11 @@ fn collect_bookmarks(body: &Body) -> FxHashMap<EcoString, EcoString> {
 type Labels = FxHashMap<EcoString, EcoString>;
 type UsedLabels = FxHashSet<EcoString>;
 
-fn collect_bookmarks_in_items(items: &[BodyItem], labels: &mut Labels, used: &mut UsedLabels) {
+fn collect_bookmarks_in_items(
+    items: &[BodyItem],
+    labels: &mut Labels,
+    used: &mut UsedLabels,
+) {
     for item in items {
         match item {
             BodyItem::Paragraph(p) => {
@@ -449,7 +483,11 @@ fn collect_bookmarks_in_items(items: &[BodyItem], labels: &mut Labels, used: &mu
     }
 }
 
-fn collect_bookmarks_in_run_item(item: &RunItem, labels: &mut Labels, used: &mut UsedLabels) {
+fn collect_bookmarks_in_run_item(
+    item: &RunItem,
+    labels: &mut Labels,
+    used: &mut UsedLabels,
+) {
     match item {
         RunItem::Bookmark(name) => register_bookmark(name, labels, used),
         // Comment anchors get their labels at lower time, from the comment's
@@ -505,7 +543,10 @@ mod bookmark_tests {
         let runs = names.iter().map(|n| RunItem::Bookmark((*n).into())).collect();
         Body {
             sections: vec![Section {
-                items: vec![BodyItem::Paragraph(Paragraph { props: Default::default(), runs })],
+                items: vec![BodyItem::Paragraph(Paragraph {
+                    props: Default::default(),
+                    runs,
+                })],
                 props: SectPr::default(),
             }],
         }
@@ -572,8 +613,13 @@ fn parse_core_properties(doc: Document) -> DocumentMeta {
 
 // --- Relationships -----------------------------------------------------------
 
-fn parse_rels(reader: &mut Reader, report: &mut ImportReport) -> FxHashMap<EcoString, Relationship> {
-    parse_rels_for(reader, "word/document.xml", report).into_iter().collect()
+fn parse_rels(
+    reader: &mut Reader,
+    report: &mut ImportReport,
+) -> FxHashMap<EcoString, Relationship> {
+    parse_rels_for(reader, "word/document.xml", report)
+        .into_iter()
+        .collect()
 }
 
 /// Reads `<dir>/_rels/<file>.rels` for `part_name` (`word/header1.xml` →
@@ -658,7 +704,10 @@ enum Flat<'a> {
     /// held aside rather than spliced into the run sequence: an accepted
     /// deletion is *not* part of the text, so its content must not flow into
     /// the paragraph — only into the revision record.
-    Deleted { info: RevisionInfo, nodes: Vec<Node<'a, 'a>> },
+    Deleted {
+        info: RevisionInfo,
+        nodes: Vec<Node<'a, 'a>>,
+    },
 }
 
 /// `w:author`/`w:date` off a revision wrapper, plus the `w:name` that ties the
@@ -824,7 +873,8 @@ fn splice_node<'a>(child: Node<'a, 'a>, depth: usize, out: &mut Vec<Node<'a, 'a>
         "del" | "moveFrom" => {}
         "sdt" => {
             if depth < MAX_WRAPPER_DEPTH
-                && let Some(content) = child.children().find(|n| is_element(*n, "sdtContent"))
+                && let Some(content) =
+                    child.children().find(|n| is_element(*n, "sdtContent"))
             {
                 splice_children(content, depth + 1, out);
             }
@@ -1234,7 +1284,11 @@ fn parse_notes_part(
     // `mappers::note::lower_note_ref`).
     let notes = parse_xml(&xml, part_name, report, FxHashMap::default(), |document| {
         let mut notes = FxHashMap::default();
-        for child in document.root_element().children().filter(|n| is_element(*n, element_name)) {
+        for child in document
+            .root_element()
+            .children()
+            .filter(|n| is_element(*n, element_name))
+        {
             if is_boilerplate_note(child) {
                 continue;
             }
@@ -1270,7 +1324,9 @@ pub(crate) struct Settings {
 }
 
 fn parse_settings(reader: &mut Reader, report: &mut ImportReport) -> Settings {
-    let Some(xml) = read_optional_part(reader, "word/settings.xml", "settings.xml", report) else {
+    let Some(xml) =
+        read_optional_part(reader, "word/settings.xml", "settings.xml", report)
+    else {
         return Settings::default();
     };
     parse_xml(&xml, "settings.xml", report, Settings::default(), |document| {
@@ -1296,7 +1352,8 @@ fn parse_paragraph(node: Node, tb_depth: usize) -> Paragraph {
         .descendants()
         .any(|n| n.is_element() && n.tag_name().name() == "rPrChange");
     let runs = fold_field_children(
-        node.children().filter(|n| n.is_element() && n.tag_name().name() != "pPr"),
+        node.children()
+            .filter(|n| n.is_element() && n.tag_name().name() != "pPr"),
         tb_depth,
     );
     Paragraph { props, runs }
@@ -1446,7 +1503,11 @@ fn fold_field_children<'a>(
                         // empty (a `begin` run carries no other content by
                         // Word's convention) but preserves anything it does
                         // carry rather than silently discarding it.
-                        push_item(&mut stack, &mut top, RunItem::Run(parse_run(child, tb_depth)));
+                        push_item(
+                            &mut stack,
+                            &mut top,
+                            RunItem::Run(parse_run(child, tb_depth)),
+                        );
                     }
                 }
                 RunKind::FieldSeparate => {
@@ -1456,8 +1517,10 @@ fn fold_field_children<'a>(
                 }
                 RunKind::FieldEnd => {
                     if let Some(frame) = stack.pop() {
-                        let field =
-                            RunItem::Field(Field { instr: frame.instr, result: frame.result });
+                        let field = RunItem::Field(Field {
+                            instr: frame.instr,
+                            result: frame.result,
+                        });
                         push_item(&mut stack, &mut top, field);
                     }
                     // A stray `end` with no open frame: nothing to close.
@@ -1473,10 +1536,16 @@ fn fold_field_children<'a>(
                         }
                     }
                 }
-                RunKind::Content(run) => push_item(&mut stack, &mut top, RunItem::Run(run)),
+                RunKind::Content(run) => {
+                    push_item(&mut stack, &mut top, RunItem::Run(run))
+                }
             },
-            "fldSimple" => push_item(&mut stack, &mut top, parse_fld_simple(child, tb_depth)),
-            "hyperlink" => push_item(&mut stack, &mut top, parse_hyperlink(child, tb_depth)),
+            "fldSimple" => {
+                push_item(&mut stack, &mut top, parse_fld_simple(child, tb_depth))
+            }
+            "hyperlink" => {
+                push_item(&mut stack, &mut top, parse_hyperlink(child, tb_depth))
+            }
             // A named anchor. Word writes bookmarks at the *start* of the
             // paragraph they mark, so position is meaningless here; the
             // paragraph mapper hoists the label to where Typst wants it.
@@ -1495,7 +1564,9 @@ fn fold_field_children<'a>(
                     push_item(&mut stack, &mut top, RunItem::CommentRange { id, end });
                 }
             }
-            "oMath" => push_item(&mut stack, &mut top, RunItem::Run(math_run(child, false))),
+            "oMath" => {
+                push_item(&mut stack, &mut top, RunItem::Run(math_run(child, false)))
+            }
             // An `m:oMathPara` is Word's *block* equation wrapper. Flattening
             // it to its `m:oMath` children keeps one fragment per equation,
             // and the flag preserves the block-ness the wrapper carried.
@@ -1530,7 +1601,8 @@ fn fold_field_children<'a>(
 /// itself nest further fields or hyperlinks.
 fn parse_fld_simple(node: Node, tb_depth: usize) -> RunItem {
     let instr = attr(node, "instr").unwrap_or_default().into();
-    let result = fold_field_children(node.children().filter(|n| n.is_element()), tb_depth);
+    let result =
+        fold_field_children(node.children().filter(|n| n.is_element()), tb_depth);
     RunItem::Field(Field { instr, result })
 }
 
@@ -1640,7 +1712,8 @@ fn parse_run(node: Node, tb_depth: usize) -> Run {
             // stay separate rather than merging into one walk.
             "pict" => {
                 for txbx in direct_txbx_contents(child) {
-                    run.content.push(RunContent::TextBox(parse_txbx_content(txbx, tb_depth)));
+                    run.content
+                        .push(RunContent::TextBox(parse_txbx_content(txbx, tb_depth)));
                 }
                 collect_vml_content(child, 0, &mut run.content);
             }
@@ -1651,9 +1724,9 @@ fn parse_run(node: Node, tb_depth: usize) -> Run {
             // through, so the preview — the only part of an embedded object
             // that *can* survive — was discarded with it.
             "object" => parse_object(child, tb_depth, &mut run.content),
-            "oMath" => {
-                run.content.push(RunContent::Math { xml: raw_xml(child), display: false })
-            }
+            "oMath" => run
+                .content
+                .push(RunContent::Math { xml: raw_xml(child), display: false }),
             "ruby" => run.content.push(parse_ruby(child, tb_depth)),
             // The marker in the body text; the note's own content lives in
             // `word/footnotes.xml`/`word/endnotes.xml`, resolved later by
@@ -1755,7 +1828,15 @@ fn parse_drawing(node: Node) -> Option<DrawingRef> {
         .map(parse_src_rect)
         .filter(|rect| !rect.is_empty());
 
-    Some(DrawingRef { rel_id, cx_emu, cy_emu, alt, align, prst_geom, src_rect })
+    Some(DrawingRef {
+        rel_id,
+        cx_emu,
+        cy_emu,
+        alt,
+        align,
+        prst_geom,
+        src_rect,
+    })
 }
 
 /// An `a:prstGeom` element: its preset name plus the first adjustment guide in
@@ -1780,7 +1861,12 @@ fn parse_preset_geom(node: Node) -> Option<PresetGeom> {
 /// is also what an absent attribute means.
 fn parse_src_rect(node: Node) -> SrcRect {
     let side = |name| attr(node, name).and_then(parse_i64).unwrap_or(0);
-    SrcRect { l: side("l"), t: side("t"), r: side("r"), b: side("b") }
+    SrcRect {
+        l: side("l"),
+        t: side("t"),
+        r: side("r"),
+        b: side("b"),
+    }
 }
 
 /// A `w:drawing`'s chart reference: the `r:id` of its `c:chart` graphic-data
@@ -1889,7 +1975,12 @@ const MAX_DML_DEPTH: usize = 32;
 /// its branches would find the same text box twice — once as the `mc:Choice`
 /// shape's own, once as the `mc:Fallback`'s `v:textbox`. That is exactly the
 /// duplication `splice_node` exists to prevent, so this walk uses it too.
-fn collect_dml_content(node: Node, depth: usize, tb_depth: usize, out: &mut Vec<RunContent>) {
+fn collect_dml_content(
+    node: Node,
+    depth: usize,
+    tb_depth: usize,
+    out: &mut Vec<RunContent>,
+) {
     if depth >= MAX_DML_DEPTH {
         return;
     }
@@ -1976,10 +2067,9 @@ fn dml_extent(wsp: Node) -> (Option<i64>, Option<i64>) {
                 .and_then(|n| n.children().find(|c| is_element(*c, "extent")))
         });
     match ext {
-        Some(ext) => (
-            attr(ext, "cx").and_then(parse_i64),
-            attr(ext, "cy").and_then(parse_i64),
-        ),
+        Some(ext) => {
+            (attr(ext, "cx").and_then(parse_i64), attr(ext, "cy").and_then(parse_i64))
+        }
         None => (None, None),
     }
 }
@@ -2007,7 +2097,8 @@ fn parse_dml_geometry(sp_pr: Node) -> Option<DmlGeometry> {
 /// emits — `typst-docx`'s own `write_custom_geom` writes exactly one path.
 fn parse_custom_geom(node: Node) -> Option<DmlGeometry> {
     let path_lst = node.children().find(|n| is_element(*n, "pathLst"))?;
-    let paths: Vec<Node> = path_lst.children().filter(|n| is_element(*n, "path")).collect();
+    let paths: Vec<Node> =
+        path_lst.children().filter(|n| is_element(*n, "path")).collect();
     let first = paths.first()?;
     let path_w = attr(*first, "w").and_then(parse_i64).unwrap_or(0);
     let path_h = attr(*first, "h").and_then(parse_i64).unwrap_or(0);
@@ -2019,7 +2110,10 @@ fn parse_custom_geom(node: Node) -> Option<DmlGeometry> {
                 .children()
                 .filter(|n| is_element(*n, "pt"))
                 .filter_map(|pt| {
-                    Some((attr(pt, "x").and_then(parse_i64)?, attr(pt, "y").and_then(parse_i64)?))
+                    Some((
+                        attr(pt, "x").and_then(parse_i64)?,
+                        attr(pt, "y").and_then(parse_i64)?,
+                    ))
                 })
                 .collect();
             match (cmd.tag_name().name(), pts.as_slice()) {
@@ -2088,7 +2182,10 @@ fn parse_dml_gradient(node: Node) -> Option<DmlGradient> {
         match child.tag_name().name() {
             "lin" => {
                 let angle_60k = attr(child, "ang").and_then(parse_i64).unwrap_or(0);
-                return Some(DmlGradient { stops, kind: DmlGradientKind::Linear { angle_60k } });
+                return Some(DmlGradient {
+                    stops,
+                    kind: DmlGradientKind::Linear { angle_60k },
+                });
             }
             "path" if attr(child, "path") == Some("circle") => {
                 let rect = child.children().find(|n| is_element(*n, "fillToRect"));
@@ -2317,7 +2414,9 @@ fn vml_primitive_shape(node: Node, kind: VmlShapeKind) -> RunContent {
 fn vml_color_attr(node: Node, attr_name: &str, child_name: &str) -> Option<EcoString> {
     attr(node, attr_name)
         .or_else(|| {
-            node.children().find(|n| is_element(*n, child_name)).and_then(|n| attr(n, "color"))
+            node.children()
+                .find(|n| is_element(*n, child_name))
+                .and_then(|n| attr(n, "color"))
         })
         .map(EcoString::from)
 }
@@ -2450,7 +2549,8 @@ fn parse_run_props(node: Node) -> RunProps {
         // A bare `<w:u/>` means a single underline; only an explicit
         // `w:val="none"` turns one off. Defaulting here keeps "no `w:u` at
         // all" (`None`) distinguishable from "underlined, style unstated".
-        underline: child("u").map(|n| EcoString::from(attr(n, "val").unwrap_or("single"))),
+        underline: child("u")
+            .map(|n| EcoString::from(attr(n, "val").unwrap_or("single"))),
         underline_color: child("u").and_then(|n| attr(n, "color")).map(EcoString::from),
         highlight: child("highlight").and_then(|n| attr(n, "val")).map(EcoString::from),
         color: child("color").and_then(|n| attr(n, "val")).map(EcoString::from),
@@ -2586,14 +2686,19 @@ fn parse_row(node: Node, depth: usize, tb_depth: usize) -> Row {
 }
 
 fn parse_cell(node: Node, depth: usize, tb_depth: usize) -> Cell {
-    let mut cell =
-        Cell { grid_span: 1, ..Default::default() };
+    let mut cell = Cell { grid_span: 1, ..Default::default() };
     for child in unwrap_wrappers(node) {
         match child.tag_name().name() {
             "tcPr" => parse_cell_props(child, &mut cell),
-            "p" => cell.content.push(BodyItem::Paragraph(parse_paragraph(child, tb_depth))),
+            "p" => cell
+                .content
+                .push(BodyItem::Paragraph(parse_paragraph(child, tb_depth))),
             "tbl" if depth < MAX_TABLE_DEPTH => {
-                cell.content.push(BodyItem::Table(parse_table(child, depth + 1, tb_depth)));
+                cell.content.push(BodyItem::Table(parse_table(
+                    child,
+                    depth + 1,
+                    tb_depth,
+                )));
             }
             _ => {}
         }
@@ -2823,7 +2928,8 @@ fn parse_chartex(root: Node, chart_data: Node) -> ChartData {
     // hierarchical category axis (a sunburst's leaf/stem/branch) nests more
     // than one `cx:lvl` under `cx:strDim`; only the first (finest) level is
     // kept, per `ChartData`'s doc comment.
-    let mut blocks: FxHashMap<EcoString, (Vec<EcoString>, Vec<EcoString>)> = FxHashMap::default();
+    let mut blocks: FxHashMap<EcoString, (Vec<EcoString>, Vec<EcoString>)> =
+        FxHashMap::default();
     for block in chart_data.children().filter(|n| is_element(*n, "data")) {
         let Some(id) = attr(block, "id").map(EcoString::from) else { continue };
         let categories = block
@@ -2937,7 +3043,10 @@ fn collect_indexed_pts<'a>(
 
 /// A classic chart's `c:pt`: text lives on a nested `c:v` child.
 fn pt_text_nested_v(pt: Node) -> Option<EcoString> {
-    pt.children().find(|n| is_element(*n, "v")).and_then(|v| v.text()).map(EcoString::from)
+    pt.children()
+        .find(|n| is_element(*n, "v"))
+        .and_then(|v| v.text())
+        .map(EcoString::from)
 }
 
 /// A ChartEx `cx:pt`: text sits directly on the point element itself.
@@ -3332,7 +3441,12 @@ mod tests {
         package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
         package.add_xml("word/styles.xml", "application/xml", STYLES_XML.into());
         package.add_xml("word/numbering.xml", "application/xml", NUMBERING_XML.into());
-        package.add_media("word/media/image1.png", "png", "image/png", vec![0x89, 0x50, 0x4E, 0x47]);
+        package.add_media(
+            "word/media/image1.png",
+            "png",
+            "image/png",
+            vec![0x89, 0x50, 0x4E, 0x47],
+        );
         package.add_relationships("word/document.xml", &doc_rels).unwrap();
 
         package.finish(&Rels::new()).unwrap()
@@ -3349,10 +3463,7 @@ mod tests {
         assert!(!package.rels["rId1"].external);
         assert_eq!(package.rels["rId2"].target, "https://example.com");
         assert!(package.rels["rId2"].external);
-        assert_eq!(
-            package.media["word/media/image1.png"],
-            vec![0x89, 0x50, 0x4E, 0x47]
-        );
+        assert_eq!(package.media["word/media/image1.png"], vec![0x89, 0x50, 0x4E, 0x47]);
 
         // -- styles --
         assert_eq!(package.styles.default_run.size_half_pt, Some(22));
@@ -3431,7 +3542,9 @@ mod tests {
         assert_eq!(d.alt.as_deref(), Some("a picture"));
 
         let RunItem::Run(r5) = &p.runs[5] else { panic!("expected a run") };
-        let RunContent::Math { xml: raw, .. } = &r5.content[0] else { panic!("expected math") };
+        let RunContent::Math { xml: raw, .. } = &r5.content[0] else {
+            panic!("expected math")
+        };
         assert!(raw.starts_with("<m:oMath>"));
         assert!(raw.contains("x+y"));
 
@@ -3589,7 +3702,9 @@ mod tests {
         );
 
         assert_eq!(p.runs.len(), 1);
-        let RunItem::Field(outer) = &p.runs[0] else { panic!("expected the outer field") };
+        let RunItem::Field(outer) = &p.runs[0] else {
+            panic!("expected the outer field")
+        };
         assert!(outer.instr.contains("TOC"));
         assert_eq!(outer.result.len(), 1);
         let RunItem::Field(inner) = &outer.result[0] else {
@@ -3903,8 +4018,10 @@ mod tests {
         assert_eq!(package.rels["rId1"].target, "styles.xml");
 
         // The header part landed in the furniture map...
-        let header_body =
-            package.furniture.get("word/header1.xml").expect("header1.xml in furniture");
+        let header_body = package
+            .furniture
+            .get("word/header1.xml")
+            .expect("header1.xml in furniture");
         let BodyItem::Paragraph(p) = &header_body[0] else {
             panic!("expected a paragraph")
         };
@@ -4168,9 +4285,16 @@ mod tests {
             "application/xml",
             FOOTNOTES_WITH_IMAGE_XML.into(),
         );
-        package.add_media("word/media/image1.png", "png", "image/png", vec![0x89, 0x50, 0x4E, 0x47]);
+        package.add_media(
+            "word/media/image1.png",
+            "png",
+            "image/png",
+            vec![0x89, 0x50, 0x4E, 0x47],
+        );
         package.add_relationships("word/document.xml", &doc_rels).unwrap();
-        package.add_relationships("word/footnotes.xml", &footnotes_rels).unwrap();
+        package
+            .add_relationships("word/footnotes.xml", &footnotes_rels)
+            .unwrap();
         let docx = package.finish(&Rels::new()).unwrap();
 
         let mut report = ImportReport::default();
@@ -4240,8 +4364,15 @@ mod tests {
 
         assert_eq!(p.runs.len(), 1);
         let RunItem::Run(r) = &p.runs[0] else { panic!("expected a run") };
-        assert_eq!(r.content.len(), 1, "the fallback must not add a second item: {:?}", r.content);
-        let RunContent::TextBox(items) = &r.content[0] else { panic!("expected a text box") };
+        assert_eq!(
+            r.content.len(),
+            1,
+            "the fallback must not add a second item: {:?}",
+            r.content
+        );
+        let RunContent::TextBox(items) = &r.content[0] else {
+            panic!("expected a text box")
+        };
         assert_eq!(body_items_text(items), "CHOICE TEXT");
     }
 
@@ -4260,7 +4391,9 @@ mod tests {
 
         assert_eq!(p.runs.len(), 1);
         let RunItem::Run(r) = &p.runs[0] else { panic!("expected a run") };
-        let RunContent::TextBox(items) = &r.content[0] else { panic!("expected a text box") };
+        let RunContent::TextBox(items) = &r.content[0] else {
+            panic!("expected a text box")
+        };
         assert_eq!(body_items_text(items), "VML box text");
     }
 
@@ -4349,7 +4482,12 @@ mod tests {
         );
 
         let RunItem::Run(r) = &p.runs[0] else { panic!("expected a run") };
-        assert_eq!(r.content.len(), 2, "expected two separate text boxes: {:?}", r.content);
+        assert_eq!(
+            r.content.len(),
+            2,
+            "expected two separate text boxes: {:?}",
+            r.content
+        );
         let RunContent::TextBox(a) = &r.content[0] else { panic!("expected a text box") };
         let RunContent::TextBox(b) = &r.content[1] else { panic!("expected a text box") };
         assert_eq!(body_items_text(a), "first shape");
@@ -4413,14 +4551,19 @@ mod tests {
         // Reaching this line at all demonstrates termination.
         let p = parse_test_paragraph(&xml);
         let RunItem::Run(r) = &p.runs[0] else { panic!("expected a run") };
-        let RunContent::TextBox(items) = &r.content[0] else { panic!("expected a text box") };
+        let RunContent::TextBox(items) = &r.content[0] else {
+            panic!("expected a text box")
+        };
         let text = body_items_text(items);
 
         assert!(
             text.contains(&format!("level{depth}")),
             "expected the outermost nested level to survive:\n{text}"
         );
-        assert!(!text.contains("innermost"), "content past the depth cap should be dropped:\n{text}");
+        assert!(
+            !text.contains("innermost"),
+            "content past the depth cap should be dropped:\n{text}"
+        );
     }
 
     // --- Charts --------------------------------------------------------------
@@ -4496,7 +4639,10 @@ mod tests {
         );
 
         assert_eq!(data.title.as_deref(), Some("my chart looks nice"));
-        assert_eq!(data.categories, vec!["Category 1", "Category 2", "Category 3", "Category 4"]);
+        assert_eq!(
+            data.categories,
+            vec!["Category 1", "Category 2", "Category 3", "Category 4"]
+        );
         assert_eq!(data.series.len(), 1);
         assert_eq!(data.series[0].name.as_deref(), Some("Series 1"));
         assert_eq!(data.series[0].values, vec!["4.3", "2.5", "3.5", "4.5"]);
@@ -4527,7 +4673,10 @@ mod tests {
                </c:ser></c:barChart></c:plotArea></c:chart>"#,
         );
 
-        assert_eq!(data.categories, vec!["Category 1", "Category 2", "Category 3", "Category 4"]);
+        assert_eq!(
+            data.categories,
+            vec!["Category 1", "Category 2", "Category 3", "Category 4"]
+        );
         assert_eq!(
             data.series[0].values,
             vec!["10", "", "30"],
@@ -4711,7 +4860,12 @@ mod tests {
 
         let mut report = ImportReport::default();
         let parsed = parse_package(&docx, &mut report).unwrap();
-        assert_eq!(parsed.charts.len(), 1, "expected only chart1.xml: {:?}", parsed.charts.keys());
+        assert_eq!(
+            parsed.charts.len(),
+            1,
+            "expected only chart1.xml: {:?}",
+            parsed.charts.keys()
+        );
         assert!(parsed.charts.contains_key("word/charts/chart1.xml"));
     }
 
@@ -4721,14 +4875,18 @@ mod tests {
     fn text_offset_at_matches_a_known_row_col() {
         let text = "line one\nline two\nabc";
         assert_eq!(text_offset_at(text, TextPos::new(1, 1)), 0);
-        assert_eq!(text_offset_at(text, TextPos::new(3, 1)), "line one\nline two\n".len());
+        assert_eq!(
+            text_offset_at(text, TextPos::new(3, 1)),
+            "line one\nline two\n".len()
+        );
         assert_eq!(text_offset_at(text, TextPos::new(2, 6)), "line one\nline ".len());
     }
 
     #[test]
     fn remove_duplicate_attribute_excises_only_the_repeat() {
         let text = r#"<w:jc xmlns:w="ns" w:val="center" w:val="center"/>"#;
-        let roxmltree::Error::DuplicatedAttribute(_, pos) = Document::parse(text).unwrap_err()
+        let roxmltree::Error::DuplicatedAttribute(_, pos) =
+            Document::parse(text).unwrap_err()
         else {
             panic!("expected a DuplicatedAttribute error")
         };
@@ -4739,7 +4897,8 @@ mod tests {
 
     #[test]
     fn tag_regions_finds_o_math_without_confusing_it_for_o_math_para() {
-        let text = "<a><m:oMath>1</m:oMath><m:oMathPara><m:oMath>2</m:oMath></m:oMathPara></a>";
+        let text =
+            "<a><m:oMath>1</m:oMath><m:oMathPara><m:oMath>2</m:oMath></m:oMathPara></a>";
         let regions = tag_regions(text, "m:oMath");
         assert_eq!(regions.len(), 2, "{regions:?}");
         assert_eq!(&text[regions[0].0..regions[0].1], "<m:oMath>1</m:oMath>");
@@ -4775,8 +4934,10 @@ mod tests {
         assert_eq!(body.sections.len(), 1);
         assert_eq!(body.sections[0].items.len(), 2);
         assert!(
-            report.notes.iter().any(|n| n.what == "word/document.xml"
-                && n.detail.contains("OMML")),
+            report
+                .notes
+                .iter()
+                .any(|n| n.what == "word/document.xml" && n.detail.contains("OMML")),
             "{:?}",
             report.notes
         );
@@ -4850,11 +5011,15 @@ mod tests {
         let docx = zip.finish().unwrap().into_inner();
 
         let mut report = ImportReport::default();
-        let parsed =
-            parse_package(&docx, &mut report).expect("must not abort on a bad companion part");
+        let parsed = parse_package(&docx, &mut report)
+            .expect("must not abort on a bad companion part");
         assert_eq!(parsed.body.sections.len(), 1);
         assert_eq!(parsed.body.sections[0].items.len(), 1);
         assert!(parsed.styles.by_id.is_empty());
-        assert!(report.notes.iter().any(|n| n.what == "styles.xml"), "{:?}", report.notes);
+        assert!(
+            report.notes.iter().any(|n| n.what == "styles.xml"),
+            "{:?}",
+            report.notes
+        );
     }
 }

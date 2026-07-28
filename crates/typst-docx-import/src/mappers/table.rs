@@ -2,7 +2,7 @@
 
 use typst_ooxml_core::units::twip_to_abs;
 
-use crate::lower::{lower_items, parse_hex_color, LowerCtx};
+use crate::lower::{LowerCtx, lower_items, parse_hex_color};
 use crate::resolve::styles::effective_table;
 use crate::tdoc::{self, Border, BoxStroke, Sides, TableCell, TableRow, VAlign};
 use crate::wml::model::{
@@ -62,7 +62,8 @@ fn resolve_vertical_merges(rows: &[Row]) -> Vec<Vec<Merged>> {
             for below in (row + 1)..rows.len() {
                 // The merge only continues while the row beneath has a
                 // `continue` cell starting at exactly the same column.
-                let Some(under) = merged[below].iter().position(|m| m.column == column) else {
+                let Some(under) = merged[below].iter().position(|m| m.column == column)
+                else {
                     break;
                 };
                 if rows[below].cells[under].v_merge != Some(false)
@@ -202,8 +203,15 @@ pub(crate) fn lower_table(table: &WmlTable, ctx: &mut LowerCtx) -> tdoc::Table {
         }
     };
 
-
-    tdoc::Table { columns, column_widths, rows, align, indent_pt, stroke, row_heights }
+    tdoc::Table {
+        columns,
+        column_widths,
+        rows,
+        align,
+        indent_pt,
+        stroke,
+        row_heights,
+    }
 }
 
 /// Per-row track sizes, or an empty vector when no row states one Typst can
@@ -486,7 +494,10 @@ mod tests {
             grid: vec![1000, 1000],
             rows: vec![Row {
                 is_header: false,
-                cells: vec![merge_cell("orphan", Some(false)), merge_cell("beside", None)],
+                cells: vec![
+                    merge_cell("orphan", Some(false)),
+                    merge_cell("beside", None),
+                ],
                 ..Default::default()
             }],
             ..Default::default()

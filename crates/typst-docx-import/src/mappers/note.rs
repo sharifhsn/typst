@@ -13,7 +13,7 @@
 
 use ecow::eco_format;
 
-use crate::lower::{lower_items, LowerCtx};
+use crate::lower::{LowerCtx, lower_items};
 use crate::tdoc::Inline;
 
 /// Resolve one `RunContent::NoteRef { endnote, id }` to its `Inline::Footnote`,
@@ -26,13 +26,21 @@ use crate::tdoc::Inline;
 /// - resolving it would re-enter a note already being lowered, directly or
 ///   through a chain (see [`LowerCtx::enter_note`]) — without this guard
 ///   a self- or mutually-referential note would recurse forever.
-pub(crate) fn lower_note_ref(endnote: bool, id: i64, ctx: &mut LowerCtx) -> Option<Inline> {
+pub(crate) fn lower_note_ref(
+    endnote: bool,
+    id: i64,
+    ctx: &mut LowerCtx,
+) -> Option<Inline> {
     let package = ctx.package;
-    let (notes, what) =
-        if endnote { (&package.endnotes, "endnote") } else { (&package.footnotes, "footnote") };
+    let (notes, what) = if endnote {
+        (&package.endnotes, "endnote")
+    } else {
+        (&package.footnotes, "footnote")
+    };
 
     let Some(body) = notes.get(&id) else {
-        ctx.report.drop(what, "referenced note not found in the part; reference dropped");
+        ctx.report
+            .drop(what, "referenced note not found in the part; reference dropped");
         return None;
     };
 
@@ -155,7 +163,8 @@ mod tests {
         let options = ImportOptions::default();
         let mut ctx = LowerCtx::new(&package, &options, &mut report);
 
-        let inline = lower_note_ref(true, 1, &mut ctx).expect("expected a resolved endnote");
+        let inline =
+            lower_note_ref(true, 1, &mut ctx).expect("expected a resolved endnote");
         assert!(matches!(&inline, Inline::Verbatim(v) if v == "#super[1]"), "{inline:?}");
         assert_eq!(ctx.take_endnotes().len(), 1);
         assert_eq!(report.notes.len(), 1);
@@ -199,9 +208,11 @@ mod tests {
         // but its self-referential inner one dropped — leaving the note's
         // sole paragraph with no visible content, so it lowers to no blocks
         // at all (see `mappers::para::lower_paragraph`'s `Empty` case).
-        let inline =
-            lower_note_ref(false, 1, &mut ctx).expect("the outer reference still resolves");
-        let Inline::Footnote(blocks) = inline else { panic!("expected Inline::Footnote") };
+        let inline = lower_note_ref(false, 1, &mut ctx)
+            .expect("the outer reference still resolves");
+        let Inline::Footnote(blocks) = inline else {
+            panic!("expected Inline::Footnote")
+        };
         assert!(blocks.is_empty(), "expected no blocks, got {blocks:?}");
         assert!(report.notes.iter().any(|n| n.what == "footnote"));
     }

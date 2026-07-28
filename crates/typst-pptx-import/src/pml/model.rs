@@ -99,7 +99,12 @@ pub struct ColorMap {
 
 impl Default for ColorMap {
     fn default() -> Self {
-        Self { bg1: "lt1".into(), tx1: "dk1".into(), bg2: "lt2".into(), tx2: "dk2".into() }
+        Self {
+            bg1: "lt1".into(),
+            tx1: "dk1".into(),
+            bg2: "lt2".into(),
+            tx2: "dk2".into(),
+        }
     }
 }
 
@@ -143,10 +148,16 @@ pub enum Shape {
     /// other shapes, and the "between" half has no Typst counterpart.
     Connector(TextShape),
     /// A chart, whose *cached* data can still be recovered as a table.
-    Chart { rel_id: EcoString, xfrm: Option<Xfrm> },
+    Chart {
+        rel_id: EcoString,
+        xfrm: Option<Xfrm>,
+    },
     /// Recognised, and deliberately not mapped. The payload names it for the
     /// report ("SmartArt diagram", "embedded OLE object").
-    Unsupported { kind: EcoString, xfrm: Option<Xfrm> },
+    Unsupported {
+        kind: EcoString,
+        xfrm: Option<Xfrm>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -280,12 +291,20 @@ pub enum Fill {
     /// which inherits.
     None,
     Solid(Color),
-    Gradient { stops: Vec<(u32, Color)>, angle: Option<i32>, radial: bool },
+    Gradient {
+        stops: Vec<(u32, Color)>,
+        angle: Option<i32>,
+        radial: bool,
+    },
     /// `a:blipFill` — a picture used as a fill.
-    Picture { rel_id: EcoString },
+    Picture {
+        rel_id: EcoString,
+    },
     /// `a:pattFill` — a two-colour hatch. Typst has no pattern primitive that
     /// means the same thing; the foreground colour stands in.
-    Pattern { fg: Color },
+    Pattern {
+        fg: Color,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -306,7 +325,10 @@ pub struct Line {
 pub enum Color {
     Srgb([u8; 3]),
     /// `a:schemeClr/@val`, plus the transforms applied to it.
-    Scheme { slot: EcoString, transforms: Vec<ColorTransform> },
+    Scheme {
+        slot: EcoString,
+        transforms: Vec<ColorTransform>,
+    },
     /// `a:sysClr` — resolved by its `lastClr` fallback.
     System([u8; 3]),
 }
@@ -356,9 +378,15 @@ pub enum Spacing {
 pub enum Bullet {
     /// `a:buNone` — explicitly no bullet, which must override an inherited one.
     None,
-    Char { glyph: EcoString, font: Option<EcoString> },
+    Char {
+        glyph: EcoString,
+        font: Option<EcoString>,
+    },
     /// `a:buAutoNum/@type` plus its start.
-    AutoNum { kind: EcoString, start: u32 },
+    AutoNum {
+        kind: EcoString,
+        start: u32,
+    },
 }
 
 #[derive(Debug, Default)]

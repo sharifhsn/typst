@@ -7,7 +7,7 @@
 
 use typst_ooxml_core::units::{half_point_to_pt, twip_to_abs};
 
-use crate::lower::{lower_items, parse_hex_color, LowerCtx};
+use crate::lower::{LowerCtx, lower_items, parse_hex_color};
 use crate::mappers::{comment, dml_shape, field, math, note, revision, shape};
 use crate::report::ImportReport;
 use crate::resolve::styles::effective_run;
@@ -44,9 +44,8 @@ pub(crate) fn lower_run_items(
                 let inner = lower_run_items(runs, para_style_id, ctx);
                 match rel_id {
                     Some(id) => match ctx.package.rels.get(id) {
-                        Some(rel) => {
-                            out.push(Inline::Link { dest: rel.target.clone(), body: inner })
-                        }
+                        Some(rel) => out
+                            .push(Inline::Link { dest: rel.target.clone(), body: inner }),
                         None => {
                             ctx.report.approximate(
                                 "hyperlink",
@@ -55,22 +54,25 @@ pub(crate) fn lower_run_items(
                             out.extend(inner);
                         }
                     },
-                    None => match anchor.as_ref().and_then(|a| ctx.package.bookmarks.get(a)) {
-                        // An internal jump: Typst's `#link` takes a label just
-                        // as happily as a URL, so the link survives intact.
-                        Some(label) => {
-                            out.push(Inline::LabelLink { label: label.clone(), body: inner })
-                        }
-                        None => {
-                            if anchor.is_some() {
-                                ctx.report.approximate(
+                    None => {
+                        match anchor.as_ref().and_then(|a| ctx.package.bookmarks.get(a)) {
+                            // An internal jump: Typst's `#link` takes a label just
+                            // as happily as a URL, so the link survives intact.
+                            Some(label) => out.push(Inline::LabelLink {
+                                label: label.clone(),
+                                body: inner,
+                            }),
+                            None => {
+                                if anchor.is_some() {
+                                    ctx.report.approximate(
                                     "internal hyperlink",
                                     "anchor has no matching bookmark; link dropped, text kept",
                                 );
+                                }
+                                out.extend(inner);
                             }
-                            out.extend(inner);
                         }
-                    },
+                    }
                 }
             }
             // A bookmark lowers to a label only if it survived collection —
@@ -193,7 +195,8 @@ fn lower_run(r: &Run, para_style_id: Option<&str>, ctx: &mut LowerCtx) -> Inline
             // `#line` mapping and its own report notes (a position note on
             // success, a drop note for a `v:line` that can't be lowered).
             RunContent::VmlShape(vml_shape) => {
-                if let Some(inline) = shape::lower_vml_shape(vml_shape, &mut *ctx.report) {
+                if let Some(inline) = shape::lower_vml_shape(vml_shape, &mut *ctx.report)
+                {
                     content.push(inline);
                 }
             }
@@ -215,9 +218,7 @@ fn lower_run(r: &Run, para_style_id: Option<&str>, ctx: &mut LowerCtx) -> Inline
             RunContent::DmlShape(shape) => {
                 dml_shape::lower_dml_shape(shape, ctx, &mut content)
             }
-            RunContent::DmlUnsupported => {
-                dml_shape::report_unsupported(&mut *ctx.report)
-            }
+            RunContent::DmlUnsupported => dml_shape::report_unsupported(&mut *ctx.report),
             // An OLE embedding: a whole foreign application's document, which
             // nothing here can revive. Word's rendered preview picture comes
             // through as an ordinary sibling drawing, so the *look* survives
@@ -244,11 +245,7 @@ fn lower_run(r: &Run, para_style_id: Option<&str>, ctx: &mut LowerCtx) -> Inline
     }
 
     let style = text_style_from_run_props(&eff, &mut *ctx.report);
-    if style.is_empty() {
-        content
-    } else {
-        vec![Inline::Styled { style, body: content }]
-    }
+    if style.is_empty() { content } else { vec![Inline::Styled { style, body: content }] }
 }
 
 /// Word's sixteen named highlight colors. Mirrors the exporter's own table
@@ -283,11 +280,17 @@ fn highlight_color(name: &str) -> Option<[u8; 3]> {
 /// Map `w:u` onto a Typst underline stroke. Word names far more line patterns
 /// than Typst has dashes for; the ones with no counterpart still underline
 /// (with the pattern loss reported) rather than losing the decoration.
-fn underline_from_val(val: &str, color: Option<[u8; 3]>, report: &mut ImportReport) -> Underline {
+fn underline_from_val(
+    val: &str,
+    color: Option<[u8; 3]>,
+    report: &mut ImportReport,
+) -> Underline {
     let dash = match val {
         "dotted" | "dottedHeavy" => Some("dotted"),
         "dash" | "dashedHeavy" | "dashLong" | "dashLongHeavy" => Some("dashed"),
-        "dotDash" | "dashDotHeavy" | "dotDotDash" | "dashDotDotHeavy" => Some("dash-dotted"),
+        "dotDash" | "dashDotHeavy" | "dotDotDash" | "dashDotDotHeavy" => {
+            Some("dash-dotted")
+        }
         _ => None,
     };
     if matches!(val, "double" | "wave" | "wavyHeavy" | "wavyDouble") {
@@ -296,7 +299,11 @@ fn underline_from_val(val: &str, color: Option<[u8; 3]>, report: &mut ImportRepo
             "Typst has no double/wavy underline; drawn as a single line",
         );
     }
-    Underline { color, dash, thick: matches!(val, "thick" | "wavyHeavy" | "dottedHeavy") }
+    Underline {
+        color,
+        dash,
+        thick: matches!(val, "thick" | "wavyHeavy" | "dottedHeavy"),
+    }
 }
 
 /// Split Word's single `w:lang` value ("en-US") into Typst's separate
@@ -320,12 +327,16 @@ pub(crate) fn lower_lang(tag: &str) -> Option<Lang> {
         return None;
     }
     let region = parts.next().map(str::trim).filter(|r| is_alpha(r, 2..=2));
-    Some(Lang { lang: lang.to_lowercase().into(), region: region.map(|r| r.to_uppercase().into()) })
+    Some(Lang {
+        lang: lang.to_lowercase().into(),
+        region: region.map(|r| r.to_uppercase().into()),
+    })
 }
 
 fn text_style_from_run_props(eff: &RunProps, report: &mut ImportReport) -> TextStyle {
     if eff.dstrike == Some(true) {
-        report.approximate("strikethrough", "double strikethrough drawn as a single line");
+        report
+            .approximate("strikethrough", "double strikethrough drawn as a single line");
     }
     TextStyle {
         font: eff.font.clone(),
@@ -334,7 +345,11 @@ fn text_style_from_run_props(eff: &RunProps, report: &mut ImportReport) -> TextS
         bold: eff.bold == Some(true),
         italic: eff.italic == Some(true),
         underline: eff.underline.as_deref().filter(|u| *u != "none").map(|val| {
-            underline_from_val(val, parse_hex_color(eff.underline_color.as_deref()), report)
+            underline_from_val(
+                val,
+                parse_hex_color(eff.underline_color.as_deref()),
+                report,
+            )
         }),
         strike: eff.strike == Some(true) || eff.dstrike == Some(true),
         smallcaps: eff.smallcaps == Some(true),
@@ -377,7 +392,10 @@ mod tests {
     }
 
     fn text_box_run(items: Vec<crate::wml::model::BodyItem>) -> RunItem {
-        RunItem::Run(Run { props: RunProps::default(), content: vec![RunContent::TextBox(items)] })
+        RunItem::Run(Run {
+            props: RunProps::default(),
+            content: vec![RunContent::TextBox(items)],
+        })
     }
 
     #[test]
@@ -441,7 +459,10 @@ mod tests {
     /// cleanly — an empty `Vec<Block>`, not dropped or panicking.
     #[test]
     fn empty_text_box_lowers_to_an_empty_block_list() {
-        let p = Paragraph { props: Default::default(), runs: vec![text_box_run(vec![])] };
+        let p = Paragraph {
+            props: Default::default(),
+            runs: vec![text_box_run(vec![])],
+        };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
         let options = ImportOptions::default();
@@ -499,7 +520,10 @@ mod tests {
     fn underline_pattern_maps_to_a_typst_dash() {
         let mut report = ImportReport::default();
         assert_eq!(underline_from_val("dotted", None, &mut report).dash, Some("dotted"));
-        assert_eq!(underline_from_val("dashLong", None, &mut report).dash, Some("dashed"));
+        assert_eq!(
+            underline_from_val("dashLong", None, &mut report).dash,
+            Some("dashed")
+        );
         assert_eq!(underline_from_val("single", None, &mut report).dash, None);
         assert!(underline_from_val("thick", None, &mut report).thick);
         assert!(report.notes.is_empty(), "{:?}", report.notes);
@@ -522,12 +546,18 @@ mod tests {
     fn underline_toggles_off_only_for_an_explicit_none() {
         let mut report = ImportReport::default();
         let on = text_style_from_run_props(
-            &RunProps { underline: Some("single".into()), ..Default::default() },
+            &RunProps {
+                underline: Some("single".into()),
+                ..Default::default()
+            },
             &mut report,
         );
         assert!(on.underline.is_some());
         let off = text_style_from_run_props(
-            &RunProps { underline: Some("none".into()), ..Default::default() },
+            &RunProps {
+                underline: Some("none".into()),
+                ..Default::default()
+            },
             &mut report,
         );
         assert!(off.underline.is_none());

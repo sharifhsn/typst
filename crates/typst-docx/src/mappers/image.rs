@@ -1818,28 +1818,30 @@ fn clipped_picture(frame: &Frame) -> Option<ClippedPicture<'_>> {
                 if !is_translation(&group.transform) {
                     return None;
                 }
-                found = Some(match group.clip.as_ref().map(|c| clip_to_pic_geom(c, size))
-                {
-                    // A real clip outline: the image inside it is the payload.
-                    Some(Some(geom @ PicGeom::RoundRect { .. })) => {
-                        let (pos, image, size_of_image) =
-                            single_frame_image(&group.frame)?;
-                        ClippedPicture {
-                            geom,
-                            frame: size,
-                            image,
-                            pos,
-                            size: size_of_image,
+                found =
+                    Some(match group.clip.as_ref().map(|c| clip_to_pic_geom(c, size)) {
+                        // A real clip outline: the image inside it is the payload.
+                        Some(Some(geom @ PicGeom::RoundRect { .. })) => {
+                            let (pos, image, size_of_image) =
+                                single_frame_image(&group.frame)?;
+                            ClippedPicture {
+                                geom,
+                                frame: size,
+                                image,
+                                pos,
+                                size: size_of_image,
+                            }
                         }
-                    }
-                    // A pass-through wrapper: no clip at all, or the plain
-                    // bounding rectangle Typst puts around a box's content,
-                    // neither of which removes anything. The real outline, if
-                    // there is one, is further in.
-                    None | Some(Some(PicGeom::Rect)) => clipped_picture(&group.frame)?,
-                    // A clip that is not a preset outline.
-                    Some(None) => return None,
-                });
+                        // A pass-through wrapper: no clip at all, or the plain
+                        // bounding rectangle Typst puts around a box's content,
+                        // neither of which removes anything. The real outline, if
+                        // there is one, is further in.
+                        None | Some(Some(PicGeom::Rect)) => {
+                            clipped_picture(&group.frame)?
+                        }
+                        // A clip that is not a preset outline.
+                        Some(None) => return None,
+                    });
             }
             FrameItem::Tag(_) | FrameItem::Link(..) => {}
             _ => return None,
@@ -1851,7 +1853,10 @@ fn clipped_picture(frame: &Frame) -> Option<ClippedPicture<'_>> {
 /// Whether a group's clip (if any) is just its own bounding rectangle, which
 /// removes nothing and so may be walked through.
 fn clip_is_bounding_rect(group: &typst_library::layout::GroupItem) -> bool {
-    group.clip.as_ref().is_none_or(|clip| *clip == Curve::rect(group.frame.size()))
+    group
+        .clip
+        .as_ref()
+        .is_none_or(|clip| *clip == Curve::rect(group.frame.size()))
 }
 
 /// Classifies a clip curve as a DrawingML preset picture outline.

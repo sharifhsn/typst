@@ -42,11 +42,7 @@ pub fn attr<'a>(node: Node<'a, '_>, name: &str) -> Option<&'a str> {
 /// A namespace-scoped attribute lookup, for `r:id`/`r:embed`/`r:link` — these
 /// share a local name with unrelated attributes in other namespaces, so a
 /// plain [`attr`] lookup isn't safe for them.
-pub fn attr_ns<'a>(
-    node: Node<'a, '_>,
-    namespace: &str,
-    name: &str,
-) -> Option<&'a str> {
+pub fn attr_ns<'a>(node: Node<'a, '_>, namespace: &str, name: &str) -> Option<&'a str> {
     node.attributes()
         .find(|a| a.namespace() == Some(namespace) && a.name() == name)
         .map(|a| a.value())

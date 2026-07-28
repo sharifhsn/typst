@@ -3,10 +3,12 @@
 use ecow::EcoString;
 use typst_ooxml_core::units::twip_to_abs;
 
-use crate::lower::{lower_items, LowerCtx};
+use crate::lower::{LowerCtx, lower_items};
 use crate::mappers::para::inlines_have_text;
 use crate::tdoc::{Block, Furniture, Margins, PageSetup};
-use crate::wml::model::{BodyItem, FurnitureKind, FurnitureRef, RunContent, RunItem, SectPr};
+use crate::wml::model::{
+    BodyItem, FurnitureKind, FurnitureRef, RunContent, RunItem, SectPr,
+};
 
 pub(crate) fn lower_section(sect: &SectPr, ctx: &mut LowerCtx) -> PageSetup {
     let mirrored = ctx.package.mirror_margins;
@@ -130,7 +132,9 @@ fn lower_furniture(
 ) -> Option<Furniture> {
     let package = ctx.package;
     let default = resolve_variant(refs, FurnitureKind::Default, ctx).unwrap_or_default();
-    let first = title_pg.then(|| resolve_variant(refs, FurnitureKind::First, ctx)).flatten();
+    let first = title_pg
+        .then(|| resolve_variant(refs, FurnitureKind::First, ctx))
+        .flatten();
     let even = package
         .even_and_odd_headers
         .then(|| resolve_variant(refs, FurnitureKind::Even, ctx))
@@ -161,7 +165,8 @@ fn resolve_variant(
     };
     let key = furniture_key(&rel.target);
     let Some(items) = package.furniture.get(&key) else {
-        ctx.report.drop("header/footer", "referenced part not found in package");
+        ctx.report
+            .drop("header/footer", "referenced part not found in package");
         return None;
     };
 
@@ -210,7 +215,9 @@ fn furniture_key(target: &str) -> EcoString {
 /// emitted as `header: []`.
 fn is_visually_empty(blocks: &[Block]) -> bool {
     blocks.iter().all(|block| match block {
-        Block::Paragraph { body, .. } | Block::Heading { body, .. } => !inlines_have_text(body),
+        Block::Paragraph { body, .. } | Block::Heading { body, .. } => {
+            !inlines_have_text(body)
+        }
         Block::List(_)
         | Block::Table(_)
         | Block::Chart(_)
@@ -237,9 +244,10 @@ fn is_visually_empty(blocks: &[Block]) -> bool {
 fn uses_tab_stops(items: &[BodyItem]) -> bool {
     items.iter().any(|item| match item {
         BodyItem::Paragraph(p) => p.runs.iter().any(run_item_has_tab),
-        BodyItem::Table(t) => {
-            t.rows.iter().any(|r| r.cells.iter().any(|c| uses_tab_stops(&c.content)))
-        }
+        BodyItem::Table(t) => t
+            .rows
+            .iter()
+            .any(|r| r.cells.iter().any(|c| uses_tab_stops(&c.content))),
     })
 }
 
@@ -282,12 +290,18 @@ mod tests {
     }
 
     fn default_ref() -> FurnitureRef {
-        FurnitureRef { kind: FurnitureKind::Default, rel_id: "rId1".into() }
+        FurnitureRef {
+            kind: FurnitureKind::Default,
+            rel_id: "rId1".into(),
+        }
     }
 
     /// A minimal package with one furniture part (`word/header1.xml`,
     /// reachable via `rId1`) holding `items`.
-    fn package_with_furniture(items: Vec<BodyItem>, even_and_odd_headers: bool) -> WmlPackage {
+    fn package_with_furniture(
+        items: Vec<BodyItem>,
+        even_and_odd_headers: bool,
+    ) -> WmlPackage {
         let mut rels = FxHashMap::default();
         rels.insert(
             "rId1".into(),
@@ -295,7 +309,12 @@ mod tests {
         );
         let mut furniture = FxHashMap::default();
         furniture.insert("word/header1.xml".into(), items);
-        WmlPackage { rels, furniture, even_and_odd_headers, ..Default::default() }
+        WmlPackage {
+            rels,
+            furniture,
+            even_and_odd_headers,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -304,8 +323,8 @@ mod tests {
         let mut report = ImportReport::default();
         let options = ImportOptions::default();
         let mut ctx = LowerCtx::new(&package, &options, &mut report);
-        let furniture =
-            lower_furniture(&[default_ref()], false, &mut ctx).expect("expected furniture");
+        let furniture = lower_furniture(&[default_ref()], false, &mut ctx)
+            .expect("expected furniture");
         assert_eq!(furniture.default.len(), 1);
         assert!(furniture.first.is_none());
         assert!(furniture.even.is_none());
@@ -318,7 +337,8 @@ mod tests {
         let options = ImportOptions::default();
         let mut ctx = LowerCtx::new(&package, &options, &mut report);
         // Only a `First` reference exists, and `title_pg` is false — inactive.
-        let refs = vec![FurnitureRef { kind: FurnitureKind::First, rel_id: "rId1".into() }];
+        let refs =
+            vec![FurnitureRef { kind: FurnitureKind::First, rel_id: "rId1".into() }];
         let furniture = lower_furniture(&refs, false, &mut ctx);
         assert!(furniture.is_none());
     }
@@ -339,8 +359,10 @@ mod tests {
         furniture.insert("word/header2.xml".into(), vec![text_paragraph("First page")]);
         let package = WmlPackage { rels, furniture, ..Default::default() };
 
-        let refs =
-            vec![default_ref(), FurnitureRef { kind: FurnitureKind::First, rel_id: "rId2".into() }];
+        let refs = vec![
+            default_ref(),
+            FurnitureRef { kind: FurnitureKind::First, rel_id: "rId2".into() },
+        ];
         let mut report = ImportReport::default();
         let options = ImportOptions::default();
 
@@ -360,7 +382,8 @@ mod tests {
         fn furniture_map() -> FxHashMap<EcoString, Vec<BodyItem>> {
             let mut furniture = FxHashMap::default();
             furniture.insert("word/header1.xml".into(), vec![text_paragraph("Default")]);
-            furniture.insert("word/header2.xml".into(), vec![text_paragraph("Even page")]);
+            furniture
+                .insert("word/header2.xml".into(), vec![text_paragraph("Even page")]);
             furniture
         }
         fn rels_map() -> FxHashMap<EcoString, Relationship> {
@@ -376,8 +399,10 @@ mod tests {
             rels
         }
 
-        let refs =
-            vec![default_ref(), FurnitureRef { kind: FurnitureKind::Even, rel_id: "rId2".into() }];
+        let refs = vec![
+            default_ref(),
+            FurnitureRef { kind: FurnitureKind::Even, rel_id: "rId2".into() },
+        ];
         let mut report = ImportReport::default();
         let options = ImportOptions::default();
 

@@ -306,7 +306,9 @@ fn register(numbering: &mut NumberingTable, levels: Vec<ListLevel>) -> u32 {
     // List instances come from `DocxCtx::next_num_id`, which has already
     // finished handing them out; continue past the highest one in use.
     let num_id = numbering.nums.iter().map(|num| num.num_id).max().unwrap_or(0) + 1;
-    numbering.nums.push(NumInstance { num_id, abstract_id, start_override: None });
+    numbering
+        .nums
+        .push(NumInstance { num_id, abstract_id, start_override: None });
     num_id
 }
 
@@ -439,7 +441,8 @@ fn retarget_number_references(blocks: &mut [Block], emptied: &[EcoString]) {
         return;
     }
     visit_field_instrs(blocks, &mut |instr: &mut EcoString| {
-        if let Some(name) = instr.strip_prefix(" REF ").and_then(|r| r.strip_suffix(" \\h "))
+        if let Some(name) =
+            instr.strip_prefix(" REF ").and_then(|r| r.strip_suffix(" \\h "))
             && emptied.iter().any(|emptied| emptied == name)
         {
             *instr = eco_format!(" REF {name} \\w \\h ");

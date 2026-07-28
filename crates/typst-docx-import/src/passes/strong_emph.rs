@@ -7,8 +7,8 @@
 //! needs a real `#text(..)` call.
 
 use crate::tdoc::{
-    push_furniture_trees, Block, Chart, ChartContent, Figure, Inline, Inlines, List, Table,
-    TextStyle, TypstDoc,
+    Block, Chart, ChartContent, Figure, Inline, Inlines, List, Table, TextStyle,
+    TypstDoc, push_furniture_trees,
 };
 
 /// Entry point: rewrite bold/italic-only styled runs into `Strong`/`Emph`
@@ -48,7 +48,9 @@ fn walk_block(block: &mut Block) {
         // chart-as-table's cells are plain text today, but get the same walk
         // as `Block::Table`'s cells for the same two reasons; a
         // chart-as-plot has no `Inlines` in it at all.
-        Block::Chart(Chart { content: ChartContent::Table(Table { rows, .. }), .. }) => {
+        Block::Chart(Chart {
+            content: ChartContent::Table(Table { rows, .. }), ..
+        }) => {
             for row in rows {
                 for cell in &mut row.cells {
                     for inner in &mut cell.body {
@@ -141,12 +143,10 @@ fn promote_inline(inline: Inline, out: &mut Inlines) {
             out.push(Inline::Footnote(blocks));
         }
         // Both halves of a ruby are ordinary inline runs.
-        Inline::Ruby { base, gloss } => {
-            out.push(Inline::Ruby {
-                base: promote_inlines(base),
-                gloss: promote_inlines(gloss),
-            })
-        }
+        Inline::Ruby { base, gloss } => out.push(Inline::Ruby {
+            base: promote_inlines(base),
+            gloss: promote_inlines(gloss),
+        }),
         // Same reasoning — a text box's body is its own block sequence too.
         Inline::TextBox(mut blocks) => {
             for block in &mut blocks {
@@ -341,7 +341,11 @@ mod tests {
         let mut d = doc(vec![Block::Paragraph {
             style: Default::default(),
             body: vec![Inline::Styled {
-                style: TextStyle { bold: true, color: Some([51, 51, 51]), ..Default::default() },
+                style: TextStyle {
+                    bold: true,
+                    color: Some([51, 51, 51]),
+                    ..Default::default()
+                },
                 body: vec![Inline::Text("link text".into())],
             }],
         }]);

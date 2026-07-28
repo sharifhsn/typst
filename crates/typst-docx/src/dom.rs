@@ -525,7 +525,10 @@ pub struct RunProps {
 /// (`crate::props::text_fill_from_gradient`).
 #[derive(Clone, PartialEq)]
 pub enum TextFill {
-    Linear { angle_60k: i32, stops: Vec<GradientStop> },
+    Linear {
+        angle_60k: i32,
+        stops: Vec<GradientStop>,
+    },
     Radial {
         stops: Vec<GradientStop>,
         focal_center_100k: [i32; 2],
@@ -880,7 +883,9 @@ pub enum ShapeGeom {
     Rect,
     /// A rounded rectangle, with the corner radius as an `adj` guide in 1/1000
     /// of a percent of the shorter side.
-    RoundRect { adj_100k: i32 },
+    RoundRect {
+        adj_100k: i32,
+    },
     Ellipse,
     /// An arbitrary vector path — straight and cubic-Bézier segments, mapping
     /// 1:1 to `#curve`'s Move/Line/Cubic/Close (a `#polygon`, or a diagonal

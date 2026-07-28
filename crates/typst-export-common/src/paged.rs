@@ -87,10 +87,9 @@ impl PagedGeometry {
         location: Option<Location>,
     ) -> Option<&PagedTableGeometry> {
         if let Some(location) = location
-            && let Some(table) = self
-                .tables
-                .iter()
-                .find(|table| table.logical_id == logical_id && table.location == Some(location))
+            && let Some(table) = self.tables.iter().find(|table| {
+                table.logical_id == logical_id && table.location == Some(location)
+            })
         {
             return Some(table);
         }

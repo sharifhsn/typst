@@ -28,11 +28,12 @@ use ecow::eco_format;
 use typst_ooxml_core::units::emu_to_abs;
 
 use crate::emit::{num, pt, rgba_lit};
-use crate::lower::{lower_items, LowerCtx};
+use crate::lower::{LowerCtx, lower_items};
 use crate::report::ImportReport;
 use crate::tdoc::{Block, Inline};
 use crate::wml::model::{
-    DmlDash, DmlFill, DmlGeometry, DmlGradient, DmlGradientKind, DmlSeg, DmlShape, DmlStroke,
+    DmlDash, DmlFill, DmlGeometry, DmlGradient, DmlGradientKind, DmlSeg, DmlShape,
+    DmlStroke,
 };
 
 /// Word's own default line width when an `a:ln` states none (¾pt), used only
@@ -46,12 +47,17 @@ const DEFAULT_LINE_WIDTH_PT: f64 = 0.75;
 /// Word put inside them, so that text follows as its own `Inline::TextBox`
 /// rather than being thrown away. Appends *nothing* for geometry with no Typst
 /// counterpart, which is recorded as a drop.
-pub(crate) fn lower_dml_shape(shape: &DmlShape, ctx: &mut LowerCtx, out: &mut Vec<Inline>) {
+pub(crate) fn lower_dml_shape(
+    shape: &DmlShape,
+    ctx: &mut LowerCtx,
+    out: &mut Vec<Inline>,
+) {
     let width_pt = shape.cx_emu.map(emu_pt).filter(|w| *w > 0.0);
     let height_pt = shape.cy_emu.map(emu_pt).filter(|h| *h > 0.0);
     let style = Style::of(shape, &mut *ctx.report);
 
-    let Some(call) = shape_call(shape, width_pt, height_pt, &style, &mut *ctx.report) else {
+    let Some(call) = shape_call(shape, width_pt, height_pt, &style, &mut *ctx.report)
+    else {
         return;
     };
 
@@ -438,10 +444,7 @@ fn fill_literal(fill: &DmlFill, report: &mut ImportReport) -> Option<String> {
 /// gradient into many stops precisely so consumers with a different
 /// interpolation space see the authored ramp, and collapsing them back to the
 /// endpoints would undo that.
-fn gradient_literal(
-    gradient: &DmlGradient,
-    report: &mut ImportReport,
-) -> String {
+fn gradient_literal(gradient: &DmlGradient, report: &mut ImportReport) -> String {
     let stops: Vec<String> = gradient
         .stops
         .iter()
@@ -470,8 +473,9 @@ fn gradient_literal(
             // built it, so the two axes agree; averaging them keeps a
             // hand-authored non-square one from landing off-centre, since
             // Typst's focal region is a circle either way.
-            let focal_radius =
-                (((100.0 - l - r) / 2.0).max(0.0) + ((100.0 - t - b) / 2.0).max(0.0)) / 2.0;
+            let focal_radius = (((100.0 - l - r) / 2.0).max(0.0)
+                + ((100.0 - t - b) / 2.0).max(0.0))
+                / 2.0;
             let (cx, cy) = (l + (100.0 - l - r) / 2.0, t + (100.0 - t - b) / 2.0);
 
             let mut args = stops;
@@ -494,10 +498,7 @@ fn gradient_literal(
 /// An `a:ln` as a Typst `stroke:` value, or `None` to leave the argument off
 /// entirely (an `a:ln` that states nothing this mapper reads — no color, no
 /// width, no dash — is indistinguishable from Typst's own default).
-fn stroke_literal(
-    stroke: &DmlStroke,
-    report: &mut ImportReport,
-) -> Option<String> {
+fn stroke_literal(stroke: &DmlStroke, report: &mut ImportReport) -> Option<String> {
     if stroke.no_fill {
         // Explicit: without this, Typst's `auto` would draw a border on an
         // unfilled shape that Word left bare.
@@ -598,8 +599,8 @@ pub(crate) fn report_unsupported(report: &mut ImportReport) {
 mod tests {
     use super::*;
     use crate::opts::ImportOptions;
-    use ImportReport;
     use crate::wml::model::{PresetGeom, WmlPackage};
+    use ImportReport;
 
     fn shape(geom: DmlGeometry) -> DmlShape {
         DmlShape {
@@ -639,7 +640,10 @@ mod tests {
     /// — the inverse of `typst_ooxml_core::dml::round_rect_adj`.
     #[test]
     fn a_round_rect_adjustment_becomes_a_corner_radius() {
-        let geom = DmlGeometry::Preset(PresetGeom { prst: "roundRect".into(), adj: Some(16667) });
+        let geom = DmlGeometry::Preset(PresetGeom {
+            prst: "roundRect".into(),
+            adj: Some(16667),
+        });
         let mut s = shape(geom);
         s.cx_emu = Some(1_778_000);
         s.cy_emu = Some(762_000);
@@ -746,6 +750,11 @@ mod tests {
         let mut out = Vec::new();
         lower_dml_shape(&shape(preset("wedgeRoundRectCallout")), &mut ctx, &mut out);
         assert!(out.is_empty());
-        assert!(report.notes.iter().any(|n| n.detail.contains("wedgeRoundRectCallout")));
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.detail.contains("wedgeRoundRectCallout"))
+        );
     }
 }

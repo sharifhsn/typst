@@ -6,10 +6,10 @@
 //! and falls back to the bounding rectangle for the rest — reported, because a
 //! star drawn as a rectangle is a visible lie if nobody says so.
 
-use ecow::{eco_format, EcoString};
+use ecow::{EcoString, eco_format};
 
 use crate::emit::{len, paint};
-use crate::lower::{emu, lower_fill, LowerCtx};
+use crate::lower::{LowerCtx, emu, lower_fill};
 use crate::pml::model::*;
 use crate::tdoc;
 
@@ -65,7 +65,9 @@ pub fn lower(shape: &TextShape, ctx: &mut LowerCtx<'_, '_>) -> Option<EcoString>
         {
             return Some(custom_curve(*w, *h, segs, size, &fill, &stroke));
         }
-        Some(Geometry::Preset { name, adjust }) => preset(name, adjust, &mut params, ctx, size),
+        Some(Geometry::Preset { name, adjust }) => {
+            preset(name, adjust, &mut params, ctx, size)
+        }
         _ => "rect".into(),
     };
     Some(eco_format!("{call}({})", params.join(", ")))
@@ -132,21 +134,12 @@ fn preset_polygon(name: &str) -> Option<&'static [(f64, f64)]> {
         "diamond" => &[(0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0, 0.5)],
         "parallelogram" => &[(0.25, 0.0), (1.0, 0.0), (0.75, 1.0), (0.0, 1.0)],
         "trapezoid" => &[(0.25, 0.0), (0.75, 0.0), (1.0, 1.0), (0.0, 1.0)],
-        "pentagon" => &[
-            (0.5, 0.0),
-            (1.0, 0.382),
-            (0.809, 1.0),
-            (0.191, 1.0),
-            (0.0, 0.382),
-        ],
-        "hexagon" => &[
-            (0.25, 0.0),
-            (0.75, 0.0),
-            (1.0, 0.5),
-            (0.75, 1.0),
-            (0.25, 1.0),
-            (0.0, 0.5),
-        ],
+        "pentagon" => {
+            &[(0.5, 0.0), (1.0, 0.382), (0.809, 1.0), (0.191, 1.0), (0.0, 0.382)]
+        }
+        "hexagon" => {
+            &[(0.25, 0.0), (0.75, 0.0), (1.0, 0.5), (0.75, 1.0), (0.25, 1.0), (0.0, 0.5)]
+        }
         "octagon" => &[
             (0.293, 0.0),
             (0.707, 0.0),
@@ -193,13 +186,9 @@ fn preset_polygon(name: &str) -> Option<&'static [(f64, f64)]> {
             (0.75, 0.5),
             (0.75, 0.0),
         ],
-        "chevron" | "homePlate" => &[
-            (0.0, 0.0),
-            (0.75, 0.0),
-            (1.0, 0.5),
-            (0.75, 1.0),
-            (0.0, 1.0),
-        ],
+        "chevron" | "homePlate" => {
+            &[(0.0, 0.0), (0.75, 0.0), (1.0, 0.5), (0.75, 1.0), (0.0, 1.0)]
+        }
         "plus" => &[
             (0.35, 0.0),
             (0.65, 0.0),
@@ -333,10 +322,7 @@ fn lower_stroke(line: &Line, ctx: &mut LowerCtx<'_, '_>) -> Option<String> {
             .custom_dash
             .iter()
             .flat_map(|(d, sp)| {
-                [
-                    len(*d as f64 / 100_000.0 * unit),
-                    len(*sp as f64 / 100_000.0 * unit),
-                ]
+                [len(*d as f64 / 100_000.0 * unit), len(*sp as f64 / 100_000.0 * unit)]
             })
             .collect();
         params.push(format!("dash: ({})", pattern.join(", ")));

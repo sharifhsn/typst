@@ -1430,10 +1430,8 @@ fn an_implausible_column_track_is_clamped_instead_of_starving_its_siblings() {
         "#set page(width: 240pt, height: 200pt, margin: 10pt)\n\
          #table(columns: (1fr, 2fr), [A], [B])",
     );
-    let ordinary_widths = grid_widths(element_fragments(
-        &ordinary["word/document.xml"],
-        "tbl",
-    )[0]);
+    let ordinary_widths =
+        grid_widths(element_fragments(&ordinary["word/document.xml"], "tbl")[0]);
     assert_eq!(ordinary_widths.len(), 2);
     assert!(
         (ordinary_widths.iter().sum::<i32>() - available).abs() <= 2,
@@ -2646,7 +2644,11 @@ fn text_box_with_a_nested_picture_keeps_drawing_ids_unique() {
         .filter_map(|n| n.attribute("id"))
         .collect();
     let unique: BTreeSet<&&str> = ids.iter().collect();
-    assert_eq!(ids.len(), unique.len(), "every wp:docPr id in the part is unique: {ids:?}");
+    assert_eq!(
+        ids.len(),
+        unique.len(),
+        "every wp:docPr id in the part is unique: {ids:?}"
+    );
     assert_all_wellformed(&p);
 }
 
@@ -3578,7 +3580,10 @@ Declare an immutable `let`, try to reassign it, and read the error."##,
     );
     let doc = &p["word/document.xml"];
     assert_eq!(doc.matches("<w:p ").count(), 1, "the sentence stays one paragraph");
-    assert!(!doc.contains("wps:txbx"), "no inline text box — it does not flow in Word/LibreOffice");
+    assert!(
+        !doc.contains("wps:txbx"),
+        "no inline text box — it does not flow in Word/LibreOffice"
+    );
     assert!(doc.contains("<w:shd "), "the code span is shaded run text instead");
     assert!(
         doc.contains("Declare an immutable")
@@ -3599,7 +3604,10 @@ fn bodyless_placed_shape_split_from_a_sentence_stays_inline() {
     );
     let doc = &p["word/document.xml"];
     assert_eq!(doc.matches("<w:p ").count(), 1, "the sentence stays one paragraph");
-    assert!(!doc.contains("wps:txbx"), "a bodyless shape is a vector drawing, not a text box");
+    assert!(
+        !doc.contains("wps:txbx"),
+        "a bodyless shape is a vector drawing, not a text box"
+    );
     assert!(doc.contains("A status marker") && doc.contains("inline with text."));
     assert_all_wellformed(&p);
 }
@@ -3835,9 +3843,8 @@ fn a_same_line_right_label_folds_into_its_line_as_a_right_tab() {
 
     // Vertically-aligned placements are page furniture, not line labels: the
     // positional signal must not claim them.
-    let furniture = parts(
-        "#place(top + right)[Furniture]\nBody text that keeps its own line.",
-    );
+    let furniture =
+        parts("#place(top + right)[Furniture]\nBody text that keeps its own line.");
     assert!(
         furniture["word/document.xml"].contains("<wp:anchor"),
         "top+right stays an anchored drawing"
@@ -3944,16 +3951,17 @@ fn only_a_fully_partitioned_columns_region_becomes_a_table() {
     // automatic flow, which a row of cells cannot express — content placed in
     // one cell can never continue into the next. Rendered as a table, the whole
     // remainder is trapped in cell two and can only grow downward.
-    let under = parts(
-        "#columns(3)[First. #colbreak() Rest of the content that must flow on.]",
-    );
+    let under =
+        parts("#columns(3)[First. #colbreak() Rest of the content that must flow on.]");
     let doc = &under["word/document.xml"];
     assert!(
         !doc.contains("<w:tbl>"),
         "an under-partitioned region must not be trapped in cells"
     );
     assert!(
-        sect_pr_chunks(doc).iter().any(|sect| sect.contains("<w:cols w:num=\"3\"")),
+        sect_pr_chunks(doc)
+            .iter()
+            .any(|sect| sect.contains("<w:cols w:num=\"3\"")),
         "it becomes a native three-column section instead"
     );
     assert!(
@@ -5036,7 +5044,8 @@ fn filled_block_wrapping_a_grid_shades_every_cell() {
     );
     let doc = &p["word/document.xml"];
     assert_eq!(
-        doc.matches("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"313C4E\"/>").count(),
+        doc.matches("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"313C4E\"/>")
+            .count(),
         2,
         "the block's fill must shade both grid cells, not vanish"
     );
@@ -6594,9 +6603,7 @@ fn weak_then_hard_pagebreak_preserves_the_blank_page() {
 fn weak_pagebreak_at_geometry_transition_adds_no_blank_pages() {
     // A weak break stacked onto a `set page` geometry change folds into the
     // section transition; only surplus *hard* breaks are real blank pages.
-    let p = parts(
-        "First.\n#pagebreak(weak: true)\n#set page(width: 300pt)\nSecond.",
-    );
+    let p = parts("First.\n#pagebreak(weak: true)\n#set page(width: 300pt)\nSecond.");
     let doc = &p["word/document.xml"];
     assert!(!doc.contains("<w:br w:type=\"page\"/>"));
     assert_all_wellformed(&p);
@@ -6895,7 +6902,9 @@ fn a_tag_terminated_body_does_not_gain_a_redundant_trailing_paragraph() {
     assert_eq!(paragraphs, 2, "the figure body and caption, and nothing else: {doc}");
     assert!(!doc.contains("<w:p/>"), "no empty terminator paragraph is appended: {doc}");
     assert!(
-        doc.rfind("</w:p>").zip(doc.rfind("<w:sectPr")).is_some_and(|(a, b)| a < b),
+        doc.rfind("</w:p>")
+            .zip(doc.rfind("<w:sectPr"))
+            .is_some_and(|(a, b)| a < b),
         "the body still ends in a paragraph before the sectPr: {doc}"
     );
     assert_all_wellformed(&p);
@@ -6903,16 +6912,17 @@ fn a_tag_terminated_body_does_not_gain_a_redundant_trailing_paragraph() {
     // Negative control: a body ending in a TABLE genuinely does not end in a
     // paragraph, and Word repairs a file that lacks one there — so the terminator
     // must still be appended, tag or no tag.
-    let p2 = parts(
-        "#table(columns: (40pt, 60pt), [left], [right])\n#label(\"after-table\")",
-    );
+    let p2 =
+        parts("#table(columns: (40pt, 60pt), [left], [right])\n#label(\"after-table\")");
     let doc2 = &p2["word/document.xml"];
     assert!(
         doc2.contains("<w:p/>"),
         "a table-terminated body still gets its mandatory paragraph: {doc2}"
     );
     assert!(
-        doc2.rfind("</w:tbl>").zip(doc2.rfind("<w:p/>")).is_some_and(|(a, b)| a < b),
+        doc2.rfind("</w:tbl>")
+            .zip(doc2.rfind("<w:p/>"))
+            .is_some_and(|(a, b)| a < b),
         "the mandatory paragraph follows the table: {doc2}"
     );
     assert_all_wellformed(&p2);
@@ -8674,7 +8684,9 @@ fn orphaned_whitespace_around_a_promoted_block_equation_is_dropped() {
          in between: {paragraphs:?}"
     );
     assert!(
-        paragraphs.iter().all(|p| !p.contains("<w:t xml:space=\"preserve\"> </w:t>")),
+        paragraphs
+            .iter()
+            .all(|p| !p.contains("<w:t xml:space=\"preserve\"> </w:t>")),
         "no paragraph should contain only a lone space"
     );
     assert_all_wellformed(&p);
@@ -8891,7 +8903,6 @@ fn negative_v_cancels_a_following_paragraph_s_natural_boundary_gap() {
     assert_all_wellformed(&p);
 }
 
-
 #[test]
 fn heading_numbers_become_live_word_numbering() {
     // Typst hands the exporter a finished `1.2`, but baking it in as text means
@@ -8920,16 +8931,14 @@ fn heading_numbers_become_live_word_numbering() {
         .find(|style| style.contains("w:styleId=\"Heading1\""))
         .expect("Heading1 style");
     assert!(
-        heading1.contains("<w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr>"),
+        heading1
+            .contains("<w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr>"),
         "Heading1 carries the numbering: {heading1}"
     );
 
     // …and the frozen text is gone, so the number is not shown twice.
     let doc = &p["word/document.xml"];
-    assert!(
-        !doc.contains("TypstHeadingNumber"),
-        "no baked number run survives: {doc}"
-    );
+    assert!(!doc.contains("TypstHeadingNumber"), "no baked number run survives: {doc}");
     assert!(visible_text(doc).starts_with("Intro"), "the heading is just its title");
 
     // A `@ref` to a heading keeps working: its bookmark stays (now empty) and
@@ -9016,9 +9025,11 @@ fn a_moved_heading_counter_keeps_typst_numbers() {
         "the second heading is still Typst's 8., not Word's 2."
     );
     let compiled = compile_docx(src, &[]);
-    assert!(compiled.fidelity_report().decisions().iter().any(|decision| {
-        decision.reason == DecisionReason::TypstOwnedHeadingNumber
-    }));
+    assert!(
+        compiled.fidelity_report().decisions().iter().any(|decision| {
+            decision.reason == DecisionReason::TypstOwnedHeadingNumber
+        })
+    );
     assert_all_wellformed(&p);
 }
 
@@ -9027,7 +9038,9 @@ fn documents_without_heading_numbers_report_no_loss() {
     // Nothing to make live and nothing lost: an unnumbered document must not be
     // charged an approximation.
     let compiled = compile_docx("= Intro\n= Methods", &[]);
-    assert!(!compiled.fidelity_report().decisions().iter().any(|decision| {
-        decision.reason == DecisionReason::TypstOwnedHeadingNumber
-    }));
+    assert!(
+        !compiled.fidelity_report().decisions().iter().any(|decision| {
+            decision.reason == DecisionReason::TypstOwnedHeadingNumber
+        })
+    );
 }

@@ -60,7 +60,10 @@ pub enum Block {
     Image(Image),
     /// A drawn shape. `call` is a complete Typst expression; `body` is the
     /// text it contains, if any, which stays structured so passes can reach it.
-    Shape { call: EcoString, body: Option<Vec<Para>> },
+    Shape {
+        call: EcoString,
+        body: Option<Vec<Para>>,
+    },
     Table(Table),
     /// Nested content that keeps its own coordinate space.
     Group(Vec<Item>),
@@ -115,8 +118,14 @@ pub enum Align {
 pub enum Inline {
     Text(EcoString),
     /// Character formatting wrapping other inlines.
-    Styled { props: TextProps, body: Vec<Inline> },
-    Link { dest: LinkTarget, body: Vec<Inline> },
+    Styled {
+        props: TextProps,
+        body: Vec<Inline>,
+    },
+    Link {
+        dest: LinkTarget,
+        body: Vec<Inline>,
+    },
     LineBreak,
     /// A live slide number.
     SlideNumber,
@@ -184,5 +193,9 @@ pub struct Cell {
 pub enum Paint {
     /// `#rrggbb`, with alpha folded in when it is not opaque.
     Rgb([u8; 4]),
-    Gradient { stops: Vec<(f64, [u8; 4])>, angle: f64, radial: bool },
+    Gradient {
+        stops: Vec<(f64, [u8; 4])>,
+        angle: f64,
+        radial: bool,
+    },
 }

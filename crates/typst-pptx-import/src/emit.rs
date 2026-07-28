@@ -71,7 +71,8 @@ fn emit_slide(out: &mut String, slide: &Slide, index: usize, doc: &TypstDoc) {
         // Kept rather than dropped: the content was authored, and a reader
         // deleting a comment is a smaller surprise than a reader discovering
         // a slide vanished.
-        let _ = writeln!(out, "// Hidden in the source presentation (p:sld/@show=\"0\").");
+        let _ =
+            writeln!(out, "// Hidden in the source presentation (p:sld/@show=\"0\").");
     }
     if let Some(notes) = &slide.notes {
         // The same `<pdfpc-file>` payload `typst-pptx` reads back on export,
@@ -107,7 +108,18 @@ fn emit_slide(out: &mut String, slide: &Slide, index: usize, doc: &TypstDoc) {
 fn emit_item(out: &mut String, item: &Item, depth: usize, doc: &TypstDoc) {
     let pad = "  ".repeat(depth);
     match item {
-        Item::Placed { x, y, w, h, rot, flip_h, flip_v, inset, anchor, block } => {
+        Item::Placed {
+            x,
+            y,
+            w,
+            h,
+            rot,
+            flip_h,
+            flip_v,
+            inset,
+            anchor,
+            block,
+        } => {
             // `#place` with an explicit box is the pair that reproduces a
             // PowerPoint shape: the place fixes the origin, the box fixes the
             // extent, and neither disturbs the flow around it.
@@ -157,7 +169,12 @@ fn emit_item(out: &mut String, item: &Item, depth: usize, doc: &TypstDoc) {
                     body
                 )
             };
-            let _ = writeln!(out, "{pad}#place(top + left, dx: {}, dy: {}, {inner})", len(*x), len(*y));
+            let _ = writeln!(
+                out,
+                "{pad}#place(top + left, dx: {}, dy: {}, {inner})",
+                len(*x),
+                len(*y)
+            );
         }
         Item::Flow(block) => {
             let _ = writeln!(out, "{pad}{}", block_string(block, depth, doc));
@@ -268,7 +285,8 @@ fn paragraph(para: &Para, depth: usize) -> String {
     // `above`/`below` are *block* spacing and `leading` is *paragraph* line
     // spacing. Passing the first two to `par` is a hard error, which is how
     // the corpus found this: 60-odd real decks failed to compile on it.
-    if para.leading.is_some() || para.space_before.is_some() || para.space_after.is_some() {
+    if para.leading.is_some() || para.space_before.is_some() || para.space_after.is_some()
+    {
         let mut block_params = Vec::new();
         if let Some(before) = para.space_before {
             block_params.push(format!("above: {}", len(before)));
@@ -281,10 +299,8 @@ fn paragraph(para: &Para, depth: usize) -> String {
             None => String::new(),
         };
         let close = if inner.is_empty() { "]" } else { "]]" };
-        wrappers.push((
-            format!("block({})[{inner}", block_params.join(", ")),
-            close.into(),
-        ));
+        wrappers
+            .push((format!("block({})[{inner}", block_params.join(", ")), close.into()));
     }
     if let Some(left) = para.margin_left.filter(|v| *v > 0.0) {
         wrappers.push((format!("pad(left: {})[", len(left)), "]".into()));

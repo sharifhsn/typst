@@ -25,7 +25,10 @@ use crate::wml::parse::{vml_coord_pt, vml_length_pt};
 /// than emitting an invisible or wrong line. Every other shape always
 /// produces something, even with no width/height/color at all — Typst's own
 /// defaults take over, same as a bare `#rect()`.
-pub(crate) fn lower_vml_shape(shape: &VmlShape, report: &mut ImportReport) -> Option<Inline> {
+pub(crate) fn lower_vml_shape(
+    shape: &VmlShape,
+    report: &mut ImportReport,
+) -> Option<Inline> {
     let width = vml_length_pt(&shape.style, "width");
     let height = vml_length_pt(&shape.style, "height");
     let fill = fill_color(shape);
@@ -40,7 +43,8 @@ pub(crate) fn lower_vml_shape(shape: &VmlShape, report: &mut ImportReport) -> Op
                 report.drop("VML line", "explicitly unstroked; nothing would be visible");
                 return None;
             }
-            let Some(length) = line_length(shape.from.as_deref(), shape.to.as_deref()) else {
+            let Some(length) = line_length(shape.from.as_deref(), shape.to.as_deref())
+            else {
                 report.drop(
                     "VML line",
                     "endpoints could not be turned into a length; shape dropped",
@@ -162,7 +166,9 @@ fn oval_call(
 
 fn line_call(length_pt: f64, stroke: StrokeArg) -> String {
     match stroke {
-        StrokeArg::Color(c) => format!("#line(length: {}, stroke: {})", pt(length_pt), rgb_lit(c)),
+        StrokeArg::Color(c) => {
+            format!("#line(length: {}, stroke: {})", pt(length_pt), rgb_lit(c))
+        }
         // An explicitly unstroked line never reaches this function (see
         // `lower_vml_shape`, which drops it before calling `line_call` at
         // all), so `None` can't actually occur here — but falling through to

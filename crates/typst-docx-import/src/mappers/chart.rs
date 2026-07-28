@@ -24,8 +24,8 @@ use ecow::EcoString;
 use crate::lower::LowerCtx;
 use crate::opts::ChartStyle;
 use crate::tdoc::{
-    Block, Chart, ChartContent, Inline, ParStyle, Plot, PlotKind, PlotSeries, Table, TableCell,
-    TableRow,
+    Block, Chart, ChartContent, Inline, ParStyle, Plot, PlotKind, PlotSeries, Table,
+    TableCell, TableRow,
 };
 use crate::wml::model::{ChartData, ChartKind, DrawingRef};
 
@@ -193,7 +193,11 @@ fn chart_table(data: &ChartData) -> Table {
         rows.push(TableRow {
             header: true,
             cells: std::iter::once(text_cell(""))
-                .chain(data.series.iter().map(|s| text_cell(s.name.as_deref().unwrap_or(""))))
+                .chain(
+                    data.series
+                        .iter()
+                        .map(|s| text_cell(s.name.as_deref().unwrap_or(""))),
+                )
                 .collect(),
         });
         for (i, category) in data.categories.iter().enumerate() {
@@ -238,7 +242,10 @@ fn text_cell(text: &str) -> TableCell {
     let body = if text.is_empty() {
         Vec::new()
     } else {
-        vec![Block::Paragraph { style: ParStyle::default(), body: vec![Inline::Text(text.into())] }]
+        vec![Block::Paragraph {
+            style: ParStyle::default(),
+            body: vec![Inline::Text(text.into())],
+        }]
     };
     TableCell { body, ..TableCell::empty() }
 }
@@ -262,7 +269,10 @@ mod tests {
         let mut rels = FxHashMap::default();
         rels.insert(
             "rId1".into(),
-            Relationship { target: format!("charts/{chart_name}").into(), external: false },
+            Relationship {
+                target: format!("charts/{chart_name}").into(),
+                external: false,
+            },
         );
         let mut charts = FxHashMap::default();
         charts.insert(format!("word/charts/{chart_name}").into(), data);
@@ -317,7 +327,10 @@ mod tests {
     /// Whether `report` carries a `"chart"` note whose detail names `needle`
     /// — the one check every fallback-reason test below makes.
     fn has_chart_note(report: &ImportReport, needle: &str) -> bool {
-        report.notes.iter().any(|n| n.what == "chart" && n.detail.contains(needle))
+        report
+            .notes
+            .iter()
+            .any(|n| n.what == "chart" && n.detail.contains(needle))
     }
 
     fn bar_chart_data(
@@ -369,7 +382,10 @@ mod tests {
             title: None,
             categories: vec![],
             series: vec![
-                ChartSeries { name: Some("A".into()), values: vec!["1".into(), "2".into()] },
+                ChartSeries {
+                    name: Some("A".into()),
+                    values: vec!["1".into(), "2".into()],
+                },
                 ChartSeries { name: Some("B".into()), values: vec!["3".into()] },
             ],
             kind: ChartKind::Bar,
@@ -400,7 +416,10 @@ mod tests {
         let mut rels = FxHashMap::default();
         rels.insert(
             "rId1".into(),
-            Relationship { target: "charts/chart1.xml".into(), external: false },
+            Relationship {
+                target: "charts/chart1.xml".into(),
+                external: false,
+            },
         );
         let package = WmlPackage { rels, ..Default::default() };
         let (chart, report) = lower(&package, &ImportOptions::default(), "rId1");
@@ -475,7 +494,10 @@ mod tests {
     fn scatter_chart_lowers_to_a_plot() {
         let data = ChartData {
             kind: ChartKind::Scatter,
-            series: vec![ChartSeries { name: None, values: vec!["1".into(), "-2.5".into()] }],
+            series: vec![ChartSeries {
+                name: None,
+                values: vec!["1".into(), "-2.5".into()],
+            }],
             ..Default::default()
         };
         let package = package_with("chart1.xml", data);
@@ -493,7 +515,10 @@ mod tests {
     fn area_chart_lowers_to_a_line_plot_with_an_approximation_note() {
         let data = ChartData {
             kind: ChartKind::Area,
-            series: vec![ChartSeries { name: None, values: vec!["1".into(), "2".into()] }],
+            series: vec![ChartSeries {
+                name: None,
+                values: vec!["1".into(), "2".into()],
+            }],
             ..Default::default()
         };
         let package = package_with("chart1.xml", data);
@@ -516,7 +541,10 @@ mod tests {
         let data = ChartData {
             kind: ChartKind::Other,
             title: Some("Share".into()),
-            series: vec![ChartSeries { name: None, values: vec!["1".into(), "2".into()] }],
+            series: vec![ChartSeries {
+                name: None,
+                values: vec!["1".into(), "2".into()],
+            }],
             ..Default::default()
         };
         let package = package_with("chart1.xml", data);
@@ -537,7 +565,10 @@ mod tests {
         let data = bar_chart_data(
             None,
             &[],
-            vec![ChartSeries { name: None, values: vec!["N/A".into(), "2.5".into()] }],
+            vec![ChartSeries {
+                name: None,
+                values: vec!["N/A".into(), "2.5".into()],
+            }],
         );
         let package = package_with("chart1.xml", data);
         let (chart, report) = lower(&package, &plot_options(), "rId1");
@@ -577,7 +608,8 @@ mod tests {
     /// series is empty) has nothing to plot.
     #[test]
     fn no_plottable_values_falls_back_to_table_with_a_note() {
-        let data = bar_chart_data(None, &[], vec![ChartSeries { name: None, values: vec![] }]);
+        let data =
+            bar_chart_data(None, &[], vec![ChartSeries { name: None, values: vec![] }]);
         let package = package_with("chart1.xml", data);
         let (chart, report) = lower(&package, &plot_options(), "rId1");
         table_of(&chart.expect("expected a chart"));

@@ -6,7 +6,7 @@ use typst_library::World;
 use typst_library::engine::{Engine, Route, Sink, Traced};
 use typst_library::foundations::{NativeElement, Output, ShowSet, StyleChain};
 use typst_library::introspection::{
-    CounterDisplayElem, Introspector, Locator, Location, Tag,
+    CounterDisplayElem, Introspector, Location, Locator, Tag,
 };
 use typst_library::layout::{
     Abs, ColumnRegion, Frame, FrameItem, Point, Ratio, Size, Transform,
@@ -1294,8 +1294,7 @@ pub fn equation_sources(document: &PagedDocument, world: &dyn World) -> Equation
             // layout pass, failing an export of a document that is fine. Refuse
             // this one equation instead and let the frame walk paint it.
             Err(_) => {
-                out.refused
-                    .insert(loc, DecisionReason::UnresolvableMathTextFallback);
+                out.refused.insert(loc, DecisionReason::UnresolvableMathTextFallback);
                 continue;
             }
         };
@@ -1310,8 +1309,7 @@ pub fn equation_sources(document: &PagedDocument, world: &dyn World) -> Equation
                 continue;
             }
             Err(_) => {
-                out.refused
-                    .insert(loc, DecisionReason::UnresolvableMathTextFallback);
+                out.refused.insert(loc, DecisionReason::UnresolvableMathTextFallback);
                 continue;
             }
         };
@@ -1874,12 +1872,12 @@ fn background(ctx: &mut SlideCtx, slide_index: usize, page: &Page) -> Option<Fil
 mod tests {
     use std::sync::Arc;
 
+    use typst_layout::Page;
     use typst_library::foundations::{Content, Smart};
     use typst_library::layout::{Angle, Axes, Sides};
     use typst_library::visualize::{
         Color, ColorSpace, Gradient, ProcessColor, ProcessColorSpace, RadialGradient, Rgb,
     };
-    use typst_layout::Page;
 
     use super::*;
 
@@ -1931,10 +1929,7 @@ mod tests {
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].source.slide_index, 3);
         assert_eq!(decisions[0].representation, Representation::Approximate);
-        assert_eq!(
-            decisions[0].reason,
-            DecisionReason::PageBackgroundWhiteFallback
-        );
+        assert_eq!(decisions[0].reason, DecisionReason::PageBackgroundWhiteFallback);
         assert_eq!(decisions[0].occurrences, 1);
     }
 
@@ -1979,8 +1974,16 @@ mod tests {
 
         // The skew lands on the second (index 1) slide, to prove the decision
         // is attributed to the right one rather than always slide 0.
-        let first = Page { frame: blank_frame, number: 1, ..page_with_fill(None) };
-        let second = Page { frame: skewed_frame, number: 2, ..page_with_fill(None) };
+        let first = Page {
+            frame: blank_frame,
+            number: 1,
+            ..page_with_fill(None)
+        };
+        let second = Page {
+            frame: skewed_frame,
+            number: 2,
+            ..page_with_fill(None)
+        };
 
         let document =
             PagedDocument::new(eco_vec![first, second], DocumentInfo::default());

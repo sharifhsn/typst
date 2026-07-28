@@ -13,10 +13,7 @@ use ecow::EcoString;
 use crate::ast::{Block, Inline};
 
 /// Applies every whole-document normalization pass in dependency order.
-pub(crate) fn run(
-    blocks: &mut Vec<Block>,
-    cite_anchors: &HashMap<EcoString, EcoString>,
-) {
+pub(crate) fn run(blocks: &mut Vec<Block>, cite_anchors: &HashMap<EcoString, EcoString>) {
     // Settle the anchor namespace first, because it re-coalesces every inline
     // list it touches: one realized citation arrives as several runs, each in
     // its own `Link`, and a synthesized anchor landing between two of them would
@@ -584,7 +581,9 @@ mod tests {
     /// through.
     #[test]
     fn table_cells_are_not_a_blind_spot() {
-        use crate::ast::{Alignment, Caption, Cell, Row, TableBody, TableFoot, TableHead};
+        use crate::ast::{
+            Alignment, Caption, Cell, Row, TableBody, TableFoot, TableHead,
+        };
 
         let cell = |blocks| Cell(empty_attr(), Alignment::AlignDefault, 1, 1, blocks);
         let mut blocks = vec![Block::Table(

@@ -347,7 +347,9 @@ fn write_text_fill(w: &mut XmlWriter, fill: &TextFill) {
 fn write_w14_gradient_stops(w: &mut XmlWriter, stops: &[GradientStop]) {
     w.open("w14:gsLst").start_children();
     for stop in stops {
-        w.open("w14:gs").attr("w14:pos", &stop.pos_100k.to_string()).start_children();
+        w.open("w14:gs")
+            .attr("w14:pos", &stop.pos_100k.to_string())
+            .start_children();
         write_w14_srgb(w, stop.color);
         w.close();
     }
@@ -362,7 +364,9 @@ fn write_w14_srgb(w: &mut XmlWriter, rgba: [u8; 4]) {
     if a == 255 {
         w.open("w14:srgbClr").attr("w14:val", &hex([r, g, b])).empty();
     } else {
-        w.open("w14:srgbClr").attr("w14:val", &hex([r, g, b])).start_children();
+        w.open("w14:srgbClr")
+            .attr("w14:val", &hex([r, g, b]))
+            .start_children();
         w.open("w14:alpha")
             .attr("w14:val", &ooxml_color::alpha_to_100k(a).to_string())
             .empty();
@@ -589,9 +593,7 @@ mod tests {
         Gradient::Linear(Arc::new(LinearGradient {
             stops: vec![(red(), Ratio::zero()), (blue(), Ratio::one())],
             angle: Angle::deg(90.0),
-            space: typst_library::visualize::ColorSpace::Process(
-                ProcessColorSpace::Srgb,
-            ),
+            space: typst_library::visualize::ColorSpace::Process(ProcessColorSpace::Srgb),
             relative: Smart::Auto,
             anti_alias: false,
         }))
@@ -619,9 +621,7 @@ mod tests {
             stops: vec![(red(), Ratio::zero()), (blue(), Ratio::one())],
             angle: Angle::zero(),
             center: Axes::new(Ratio::new(0.5), Ratio::new(0.5)),
-            space: typst_library::visualize::ColorSpace::Process(
-                ProcessColorSpace::Srgb,
-            ),
+            space: typst_library::visualize::ColorSpace::Process(ProcessColorSpace::Srgb),
             relative: Smart::Auto,
             anti_alias: false,
         }));

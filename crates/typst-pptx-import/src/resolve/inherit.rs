@@ -91,7 +91,10 @@ fn overlay(over: &[LevelStyle], base: &[LevelStyle]) -> Vec<LevelStyle> {
             let empty = LevelStyle::default();
             let o = over.get(i).unwrap_or(&empty);
             let b = base.get(i).unwrap_or(&empty);
-            LevelStyle { run: o.run.over(&b.run), para: o.para.over(&b.para) }
+            LevelStyle {
+                run: o.run.over(&b.run),
+                para: o.para.over(&b.para),
+            }
         })
         .collect()
 }
@@ -101,7 +104,10 @@ fn overlay(over: &[LevelStyle], base: &[LevelStyle]) -> Vec<LevelStyle> {
 /// Two-pass on purpose. An exact `idx` match is authoritative; only when there
 /// is none does a type match apply, and a title on a layout is spelled
 /// `title` or `ctrTitle` interchangeably.
-fn find_placeholder<'a>(shapes: &'a [Shape], want: &Placeholder) -> Option<&'a TextShape> {
+fn find_placeholder<'a>(
+    shapes: &'a [Shape],
+    want: &Placeholder,
+) -> Option<&'a TextShape> {
     if want.idx.is_some()
         && let Some(found) = walk(shapes, &|ph| ph.idx == want.idx && ph.idx.is_some())
     {
@@ -116,7 +122,10 @@ fn find_placeholder<'a>(shapes: &'a [Shape], want: &Placeholder) -> Option<&'a T
 ///
 /// `pred` is a `&dyn Fn` rather than a generic: this recurses, and a generic
 /// recursive function monomorphizes into an unbounded family of copies.
-fn walk<'a>(shapes: &'a [Shape], pred: &dyn Fn(&Placeholder) -> bool) -> Option<&'a TextShape> {
+fn walk<'a>(
+    shapes: &'a [Shape],
+    pred: &dyn Fn(&Placeholder) -> bool,
+) -> Option<&'a TextShape> {
     for shape in shapes {
         match shape {
             Shape::Text(text) => {

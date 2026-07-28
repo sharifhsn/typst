@@ -2,7 +2,7 @@
 
 use ecow::EcoString;
 
-use crate::lower::{emu, lower_fill, LowerCtx};
+use crate::lower::{LowerCtx, emu, lower_fill};
 use crate::mappers::text;
 use crate::pml::model::*;
 use crate::resolve::inherit::Inherited;
@@ -60,7 +60,11 @@ pub fn lower(table: &Table, ctx: &mut LowerCtx<'_, '_>) -> tdoc::Block {
     // inventing a grid for them would repeat the Word importer's worst bug in
     // the opposite direction.
     if table.style_id.is_some()
-        && table.rows.iter().flat_map(|r| &r.cells).all(|c| c.borders.iter().all(Option::is_none))
+        && table
+            .rows
+            .iter()
+            .flat_map(|r| &r.cells)
+            .all(|c| c.borders.iter().all(Option::is_none))
     {
         ctx.report.approximate(
             "table style",

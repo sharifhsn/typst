@@ -24,7 +24,7 @@
 
 use ecow::{EcoString, eco_format};
 use typst_library::diag::SourceResult;
-use typst_library::foundations::{Content, Dict, StyleChain, Str, Value};
+use typst_library::foundations::{Content, Dict, Str, StyleChain, Value};
 use typst_library::introspection::{MetadataElem, QueryLabelIntrospection, Tag};
 use typst_syntax::Span;
 
@@ -110,10 +110,8 @@ fn open_comment(
     // well-formed `w:comment` — a dangling id with no paragraph is the classic
     // cause of a Word "repair" prompt.
     if blocks.is_empty() {
-        blocks.push(Block::Para(Para {
-            props: ParaProps::default(),
-            content: Vec::new(),
-        }));
+        blocks
+            .push(Block::Para(Para { props: ParaProps::default(), content: Vec::new() }));
     }
     // Apply the `CommentText` paragraph style to every body paragraph that
     // does not already carry an explicit style, mirroring the footnote body's

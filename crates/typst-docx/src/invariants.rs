@@ -1388,13 +1388,17 @@ impl State {
     /// document. Unlike [`Self::finish_part`], this is not scoped per part and
     /// not called until every part has been visited — see `validate`.
     fn finish_comment_ranges(&self) -> Result<(), DocumentInvariantError> {
-        if let Some(id) =
-            self.comment_range_end_ids.difference(&self.comment_range_start_ids).next()
+        if let Some(id) = self
+            .comment_range_end_ids
+            .difference(&self.comment_range_start_ids)
+            .next()
         {
             return Err(DocumentInvariantError::OrphanCommentRangeEnd(*id));
         }
-        if let Some(id) =
-            self.comment_range_start_ids.difference(&self.comment_range_end_ids).next()
+        if let Some(id) = self
+            .comment_range_start_ids
+            .difference(&self.comment_range_end_ids)
+            .next()
         {
             return Err(DocumentInvariantError::MissingCommentRangeEnd(*id));
         }
@@ -1432,14 +1436,13 @@ mod dangling_field_tests {
                 "_MissingNumber".into()
             ))
         );
-        let missing =
-            fallback_dangling_internal_fields(
-                &mut body,
-                &mut [],
-                &mut [],
-                &mut [],
-                &mut [],
-            );
+        let missing = fallback_dangling_internal_fields(
+            &mut body,
+            &mut [],
+            &mut [],
+            &mut [],
+            &mut [],
+        );
 
         assert_eq!(missing.fields, [EcoString::from("_MissingNumber")]);
         assert!(missing.links.is_empty());
@@ -1462,14 +1465,13 @@ mod dangling_field_tests {
             }),
             reference_paragraph("_TargetNumber"),
         ];
-        let missing =
-            fallback_dangling_internal_fields(
-                &mut body,
-                &mut [],
-                &mut [],
-                &mut [],
-                &mut [],
-            );
+        let missing = fallback_dangling_internal_fields(
+            &mut body,
+            &mut [],
+            &mut [],
+            &mut [],
+            &mut [],
+        );
 
         assert_eq!(missing, DanglingTargets::default());
         let Block::Para(para) = &body[1] else { panic!("paragraph") };
@@ -1489,14 +1491,13 @@ mod dangling_field_tests {
             reference_paragraph("_TargetNumber"),
         ];
 
-        let missing =
-            fallback_dangling_internal_fields(
-                &mut body,
-                &mut [],
-                &mut [],
-                &mut [],
-                &mut [],
-            );
+        let missing = fallback_dangling_internal_fields(
+            &mut body,
+            &mut [],
+            &mut [],
+            &mut [],
+            &mut [],
+        );
         assert_eq!(missing, DanglingTargets::default());
         let Block::Para(para) = &body[1] else { panic!("paragraph") };
         let [ParaChild::Run(Run::Field(field))] = para.content.as_slice() else {
@@ -1527,14 +1528,13 @@ mod dangling_field_tests {
     #[test]
     fn dangling_internal_link_becomes_plain_runs() {
         let mut body = vec![link_paragraph(None, "_MissingTarget")];
-        let missing =
-            fallback_dangling_internal_fields(
-                &mut body,
-                &mut [],
-                &mut [],
-                &mut [],
-                &mut [],
-            );
+        let missing = fallback_dangling_internal_fields(
+            &mut body,
+            &mut [],
+            &mut [],
+            &mut [],
+            &mut [],
+        );
 
         assert_eq!(missing.links, [EcoString::from("_MissingTarget")]);
         assert!(missing.fields.is_empty());
@@ -1550,14 +1550,13 @@ mod dangling_field_tests {
         // `r:id` + `w:anchor` names a fragment in the *target* document; no
         // bookmark of ours can or should back it.
         let mut body = vec![link_paragraph(Some("rId4"), "section-two")];
-        let missing =
-            fallback_dangling_internal_fields(
-                &mut body,
-                &mut [],
-                &mut [],
-                &mut [],
-                &mut [],
-            );
+        let missing = fallback_dangling_internal_fields(
+            &mut body,
+            &mut [],
+            &mut [],
+            &mut [],
+            &mut [],
+        );
 
         assert_eq!(missing, DanglingTargets::default());
         let Block::Para(para) = &body[0] else { panic!("paragraph") };

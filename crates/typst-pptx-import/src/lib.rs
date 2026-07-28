@@ -68,7 +68,10 @@ impl std::fmt::Display for ImportError {
         match self {
             Self::Package(e) => write!(f, "invalid OPC package: {e}"),
             Self::NotAPresentation => {
-                write!(f, "not a PowerPoint presentation (ppt/presentation.xml is missing)")
+                write!(
+                    f,
+                    "not a PowerPoint presentation (ppt/presentation.xml is missing)"
+                )
             }
             Self::Xml(e) => write!(f, "malformed XML: {e}"),
         }

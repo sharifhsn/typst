@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use crate::opts::ImportOptions;
 use crate::tdoc::{
     Align, Block, Border, BoxStroke, BreakKind, Chart, ChartContent, CommentAnchor,
-    DocumentInfo, Figure, Furniture, Inline, Inlines, LegendPos, List, Margins, PageSetup,
-    ParStyle, Plot, PlotKind, PlotSeries, RevisionAnchor, Script, Section, SectionStart,
-    Sides, Stmt, Table, TableCell, TextStyle, TypstDoc, Underline, VAlign,
+    DocumentInfo, Figure, Furniture, Inline, Inlines, LegendPos, List, Margins,
+    PageSetup, ParStyle, Plot, PlotKind, PlotSeries, RevisionAnchor, Script, Section,
+    SectionStart, Sides, Stmt, Table, TableCell, TextStyle, TypstDoc, Underline, VAlign,
 };
 use crate::wml::model::WmlPackage;
 
@@ -105,8 +105,7 @@ struct Emitter<'a> {
 /// `place` leaves the sentence sitting exactly where it would without the
 /// annotation — which is what furigana is supposed to look like. Verified by
 /// rendering both against a real Japanese sentence.
-const RUBY_HELPER: &str =
-    "#let ruby(base, gloss) = box(place(top + center, dy: -0.85em, text(size: 0.5em, gloss)) + base)";
+const RUBY_HELPER: &str = "#let ruby(base, gloss) = box(place(top + center, dy: -0.85em, text(size: 0.5em, gloss)) + base)";
 
 /// A chart under [`crate::opts::ChartStyle::Plot`] is drawn with `lilaq`
 /// (`typst.app/universe/package/lilaq`), so a document that renders at least
@@ -382,7 +381,11 @@ impl Emitter<'_> {
     /// goal. `None` if nothing does — the break (and any
     /// `#counter(page).update(..)` [`Self::render_section`] adds separately)
     /// is enough on its own.
-    fn render_set_page_diff(&mut self, previous: &PageSetup, next: &PageSetup) -> Option<String> {
+    fn render_set_page_diff(
+        &mut self,
+        previous: &PageSetup,
+        next: &PageSetup,
+    ) -> Option<String> {
         let mut simple_args = Vec::new();
         if next.width_pt != previous.width_pt
             && let Some(width) = next.width_pt
@@ -445,10 +448,16 @@ impl Emitter<'_> {
             lines.push(format!("  {arg},"));
         }
         if header_changed {
-            push_indented(&mut lines, &self.render_page_furniture_diff("header", &next.header));
+            push_indented(
+                &mut lines,
+                &self.render_page_furniture_diff("header", &next.header),
+            );
         }
         if footer_changed {
-            push_indented(&mut lines, &self.render_page_furniture_diff("footer", &next.footer));
+            push_indented(
+                &mut lines,
+                &self.render_page_furniture_diff("footer", &next.footer),
+            );
         }
         lines.push(")".to_string());
         Some(lines.join("\n"))
@@ -460,7 +469,11 @@ impl Emitter<'_> {
     /// accumulate down the style chain rather than resetting between calls,
     /// so simply omitting the argument when a section drops its header would
     /// leave the *previous* section's header showing on every later page.
-    fn render_page_furniture_diff(&mut self, name: &str, furniture: &Option<Furniture>) -> String {
+    fn render_page_furniture_diff(
+        &mut self,
+        name: &str,
+        furniture: &Option<Furniture>,
+    ) -> String {
         match furniture {
             Some(furniture) => self.render_furniture_arg(name, furniture),
             None => format!("{name}: none"),
@@ -646,11 +659,18 @@ impl Emitter<'_> {
                 // member's own, so the lookup that recovers its bytes can't
                 // require the two to match exactly.
                 let stem = file_stem(basename);
-                self.package.media.iter().find(|(name, _)| {
-                    let their_basename =
-                        name.as_str().rsplit(['/', '\\']).next().unwrap_or(name.as_str());
-                    file_stem(their_basename) == stem
-                }).map(|(_, bytes)| bytes)
+                self.package
+                    .media
+                    .iter()
+                    .find(|(name, _)| {
+                        let their_basename = name
+                            .as_str()
+                            .rsplit(['/', '\\'])
+                            .next()
+                            .unwrap_or(name.as_str());
+                        file_stem(their_basename) == stem
+                    })
+                    .map(|(_, bytes)| bytes)
             });
             if let Some(bytes) = bytes {
                 self.assets.push((emitted_path, bytes.clone()));
@@ -780,8 +800,11 @@ impl Emitter<'_> {
             // Typst takes a single marker bare and several as a tuple that it
             // cycles by depth — the same cycling Word gets from one
             // `w:lvlText` per `w:ilvl`, so the levels line up as written.
-            let markers: Vec<String> =
-                list.markers.iter().map(|m| format!("[{}]", escape_markup(m))).collect();
+            let markers: Vec<String> = list
+                .markers
+                .iter()
+                .map(|m| format!("[{}]", escape_markup(m)))
+                .collect();
             let arg = match markers.as_slice() {
                 [single] => single.clone(),
                 many => format!("({})", many.join(", ")),
@@ -927,8 +950,8 @@ fn render_set_par(style: &ParStyle) -> String {
     // gap between consecutive paragraphs is the first's `after` plus the
     // second's `before`.
     if style.spacing_before_pt.is_some() || style.spacing_after_pt.is_some() {
-        let spacing =
-            style.spacing_before_pt.unwrap_or(0.0) + style.spacing_after_pt.unwrap_or(0.0);
+        let spacing = style.spacing_before_pt.unwrap_or(0.0)
+            + style.spacing_after_pt.unwrap_or(0.0);
         args.push(format!("spacing: {}", pt(spacing)));
     }
     format!("#set par({})", args.join(", "))
@@ -942,7 +965,8 @@ impl Emitter<'_> {
         // always begins with `*`, `_` or `#` — never alphanumeric — so using
         // the shorthand rendering to probe the *next* piece's first character
         // gives the same answer as the form eventually chosen for it.
-        let pieces: Vec<String> = inlines.iter().map(|inline| self.render_inline(inline)).collect();
+        let pieces: Vec<String> =
+            inlines.iter().map(|inline| self.render_inline(inline)).collect();
 
         let mut out = String::new();
         for (i, (inline, piece)) in inlines.iter().zip(&pieces).enumerate() {
@@ -1050,11 +1074,9 @@ impl Emitter<'_> {
         };
 
         let mut fields = vec!["kind: \"comment\"".to_string()];
-        for (name, value) in [
-            ("author", &info.author),
-            ("initials", &info.initials),
-            ("date", &info.date),
-        ] {
+        for (name, value) in
+            [("author", &info.author), ("initials", &info.initials), ("date", &info.date)]
+        {
             if let Some(value) = value {
                 fields.push(format!("{name}: {}", string_literal(value)));
             }
@@ -1330,7 +1352,9 @@ fn stroke_dict(stroke: &BoxStroke) -> String {
         ("right", stroke.right),
     ]
     .into_iter()
-    .filter_map(|(side, border)| border.map(|border| format!("{side}: {}", border_lit(&border))))
+    .filter_map(|(side, border)| {
+        border.map(|border| format!("{side}: {}", border_lit(&border)))
+    })
     .collect();
     format!("({})", parts.join(", "))
 }
@@ -1560,7 +1584,11 @@ fn render_bar_marks(series: &[PlotSeries]) -> Vec<String> {
             let offset = (i as f64 - (n as f64 - 1.0) / 2.0) * width;
             let xs = fmt_tuple((0..s.values.len()).map(|j| j as f64 + offset));
             let ys = fmt_tuple(s.values.iter().copied());
-            format!("lq.bar({xs}, {ys}, width: {}{})", fmt_pt(width), render_series_label(s))
+            format!(
+                "lq.bar({xs}, {ys}, width: {}{})",
+                fmt_pt(width),
+                render_series_label(s)
+            )
         })
         .collect()
 }
@@ -1617,7 +1645,8 @@ mod tests {
     #[test]
     fn empty_doc_is_empty() {
         let d = doc(vec![], vec![]);
-        let (source, assets) = emit(&d, &WmlPackage::default(), &ImportOptions::default());
+        let (source, assets) =
+            emit(&d, &WmlPackage::default(), &ImportOptions::default());
         assert_eq!(source, "");
         assert!(assets.is_empty());
     }
@@ -1703,8 +1732,16 @@ mod tests {
             start: None,
             markers: Vec::new(),
             items: vec![
-                ListItem { ordered: false, level: 0, body: vec![Inline::Text("one".into())] },
-                ListItem { ordered: false, level: 1, body: vec![Inline::Text("two".into())] },
+                ListItem {
+                    ordered: false,
+                    level: 0,
+                    body: vec![Inline::Text("one".into())],
+                },
+                ListItem {
+                    ordered: false,
+                    level: 1,
+                    body: vec![Inline::Text("two".into())],
+                },
             ],
         };
         let d = doc(vec![], vec![Block::List(list)]);
@@ -1855,7 +1892,10 @@ mod tests {
     #[test]
     fn escape_markup_brackets_and_line_comments() {
         assert_eq!(escape_markup("[100] a. Plot"), "\\[100\\] a. Plot");
-        assert_eq!(escape_markup("see http://x.org/~u/d.csv"), "see http:\\//x.org/\\~u/d.csv");
+        assert_eq!(
+            escape_markup("see http://x.org/~u/d.csv"),
+            "see http:\\//x.org/\\~u/d.csv"
+        );
         // A lone slash is harmless and stays readable; only the pair is broken up.
         assert_eq!(escape_markup("and/or"), "and/or");
         // Runs of slashes leave no unescaped `//` pair behind.
@@ -1946,7 +1986,10 @@ mod tests {
     #[test]
     fn set_par_justify_renders_as_justify_true() {
         let d = doc(
-            vec![Stmt::SetPar(ParStyle { align: Some(Align::Justify), ..Default::default() })],
+            vec![Stmt::SetPar(ParStyle {
+                align: Some(Align::Justify),
+                ..Default::default()
+            })],
             vec![Block::Paragraph {
                 style: ParStyle::default(),
                 body: vec![Inline::Text("Hello".into())],
@@ -1956,14 +1999,21 @@ mod tests {
     }
 
     fn para(text: &str) -> Block {
-        Block::Paragraph { style: ParStyle::default(), body: vec![Inline::Text(text.into())] }
+        Block::Paragraph {
+            style: ParStyle::default(),
+            body: vec![Inline::Text(text.into())],
+        }
     }
 
     #[test]
     fn default_only_header_renders_as_a_plain_content_block() {
         let d = doc(
             vec![Stmt::SetPage(PageSetup {
-                header: Some(Furniture { default: vec![para("Simple header")], first: None, even: None }),
+                header: Some(Furniture {
+                    default: vec![para("Simple header")],
+                    first: None,
+                    even: None,
+                }),
                 ..Default::default()
             })],
             vec![para("Hi")],
@@ -1981,7 +2031,10 @@ mod tests {
             even: Some(vec![para("Even")]),
         };
         let d = doc(
-            vec![Stmt::SetPage(PageSetup { header: Some(furniture), ..Default::default() })],
+            vec![Stmt::SetPage(PageSetup {
+                header: Some(furniture),
+                ..Default::default()
+            })],
             vec![para("Hi")],
         );
         let out = run(&d);
@@ -1994,9 +2047,16 @@ mod tests {
 
     #[test]
     fn variant_without_a_default_falls_back_to_an_empty_content_block() {
-        let furniture = Furniture { default: vec![], first: Some(vec![para("First")]), even: None };
+        let furniture = Furniture {
+            default: vec![],
+            first: Some(vec![para("First")]),
+            even: None,
+        };
         let d = doc(
-            vec![Stmt::SetPage(PageSetup { footer: Some(furniture), ..Default::default() })],
+            vec![Stmt::SetPage(PageSetup {
+                footer: Some(furniture),
+                ..Default::default()
+            })],
             vec![],
         );
         let out = run(&d);
@@ -2008,8 +2068,16 @@ mod tests {
         let d = doc(
             vec![Stmt::SetPage(PageSetup {
                 width_pt: Some(595.28),
-                header: Some(Furniture { default: vec![para("H")], first: None, even: None }),
-                footer: Some(Furniture { default: vec![para("F")], first: None, even: None }),
+                header: Some(Furniture {
+                    default: vec![para("H")],
+                    first: None,
+                    even: None,
+                }),
+                footer: Some(Furniture {
+                    default: vec![para("F")],
+                    first: None,
+                    even: None,
+                }),
                 ..Default::default()
             })],
             vec![],
@@ -2024,7 +2092,10 @@ mod tests {
     // --- Charts: `ChartContent::Table` / `ChartContent::Plot` ---------------
 
     fn series(name: Option<&str>, values: &[f64]) -> PlotSeries {
-        PlotSeries { name: name.map(Into::into), values: values.to_vec() }
+        PlotSeries {
+            name: name.map(Into::into),
+            values: values.to_vec(),
+        }
     }
 
     #[test]
@@ -2041,7 +2112,10 @@ mod tests {
                 cells: vec![TableCell { body: vec![para("1")], ..TableCell::empty() }],
             }],
         };
-        let chart = Chart { title: Some("Sales".into()), content: ChartContent::Table(table) };
+        let chart = Chart {
+            title: Some("Sales".into()),
+            content: ChartContent::Table(table),
+        };
         let d = doc(vec![], vec![Block::Chart(chart)]);
         let out = run(&d);
         assert!(out.contains("#figure(table("), "{out}");
@@ -2100,7 +2174,10 @@ mod tests {
             categories: vec!["Cat 1".into(), "Cat 2".into(), "Cat 3".into()],
             series: vec![series(None, &[1.0, 2.0, 3.0])],
         };
-        let chart = Chart { title: Some("Trend".into()), content: ChartContent::Plot(plot) };
+        let chart = Chart {
+            title: Some("Trend".into()),
+            content: ChartContent::Plot(plot),
+        };
         let out = run(&doc(vec![], vec![Block::Chart(chart)]));
         assert!(
             out.contains("xaxis: (ticks: ((0, [Cat 1]), (1, [Cat 2]), (2, [Cat 3]))),"),
@@ -2144,7 +2221,9 @@ mod tests {
         // same rule every other number in this emitter's output already
         // follows — see `fmt_pt`'s own doc comment.
         assert!(
-            out.contains("lq.bar((0.25, 1.25, 2.25), (2, 2, 3), width: 0.25, label: [S3])"),
+            out.contains(
+                "lq.bar((0.25, 1.25, 2.25), (2, 2, 3), width: 0.25, label: [S3])"
+            ),
             "{out}"
         );
     }
@@ -2199,19 +2278,21 @@ mod tests {
     /// import at all — nothing in the source actually needs it.
     #[test]
     fn no_lilaq_import_when_every_chart_is_a_table() {
-        let table =
-            Table {
-                columns: 1,
-                column_widths: vec![],
-                rows: vec![],
-                align: None,
-                indent_pt: None,
-                stroke: None,
-                row_heights: Vec::new(),
-            };
+        let table = Table {
+            columns: 1,
+            column_widths: vec![],
+            rows: vec![],
+            align: None,
+            indent_pt: None,
+            stroke: None,
+            row_heights: Vec::new(),
+        };
         let d = doc(
             vec![],
-            vec![Block::Chart(Chart { title: None, content: ChartContent::Table(table) })],
+            vec![Block::Chart(Chart {
+                title: None,
+                content: ChartContent::Table(table),
+            })],
         );
         let out = run(&d);
         assert!(!out.contains("lilaq"), "{out}");

@@ -19,7 +19,7 @@
 //! suggests: Word uses its own full vocabulary, including `JournalArticle`,
 //! which the exporter never emits but which maps back exactly.
 
-use ecow::{eco_format, EcoString};
+use ecow::{EcoString, eco_format};
 
 use crate::wml::model::WordSource;
 
@@ -57,7 +57,10 @@ fn entry_type(source_type: &str) -> &'static str {
 fn has_parent(source_type: &str) -> bool {
     matches!(
         source_type,
-        "JournalArticle" | "ArticleInAPeriodical" | "BookSection" | "ConferenceProceedings"
+        "JournalArticle"
+            | "ArticleInAPeriodical"
+            | "BookSection"
+            | "ConferenceProceedings"
     )
 }
 
@@ -174,7 +177,9 @@ fn date(source: &WordSource) -> Option<EcoString> {
         v.as_deref()?.trim().parse::<u32>().ok().filter(|n| *n >= 1)
     };
     match (two(&source.month), two(&source.day)) {
-        (Some(m), Some(d)) if m <= 12 && d <= 31 => Some(eco_format!("{year}-{m:02}-{d:02}")),
+        (Some(m), Some(d)) if m <= 12 && d <= 31 => {
+            Some(eco_format!("{year}-{m:02}-{d:02}"))
+        }
         (Some(m), _) if m <= 12 => Some(eco_format!("{year}-{m:02}")),
         _ => Some(year.into()),
     }

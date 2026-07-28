@@ -8,12 +8,14 @@
 use ecow::EcoString;
 use typst_ooxml_core::units::twip_to_abs;
 
-use crate::lower::{parse_hex_color, LowerCtx};
+use crate::lower::{LowerCtx, parse_hex_color};
 use crate::mappers::run::lower_paragraph_inlines;
 use crate::mappers::{chart, drawing, math, revision, table};
 use crate::resolve::styles::{effective_para, heading_level};
 use crate::tdoc::{Align, Block, BreakKind, Inline, Inlines, ParStyle};
-use crate::wml::model::{BreakType, DrawingRef, ParaProps, Paragraph, RunContent, RunItem};
+use crate::wml::model::{
+    BreakType, DrawingRef, ParaProps, Paragraph, RunContent, RunItem,
+};
 
 /// What a single Word paragraph lowers to: the block Word *anchored* in it —
 /// a figure or a chart, which Word hangs off a paragraph but Typst renders as
@@ -46,14 +48,27 @@ pub struct ParaResult {
 pub enum ParaKind {
     Break(BreakKind),
     Rule,
-    Heading { level: u8, body: Inlines },
+    Heading {
+        level: u8,
+        body: Inlines,
+    },
     /// `num_id` is carried through so the caller can resolve the list's
     /// format and starting number once it knows every level the run uses —
     /// see `lower::PendingList`.
-    ListItem { ordered: bool, level: u8, body: Inlines, num_id: Option<i64> },
-    Paragraph { style: ParStyle, body: Inlines },
+    ListItem {
+        ordered: bool,
+        level: u8,
+        body: Inlines,
+        num_id: Option<i64>,
+    },
+    Paragraph {
+        style: ParStyle,
+        body: Inlines,
+    },
     /// A paragraph that *is* a display equation (`m:oMathPara`).
-    Equation { body: EcoString },
+    Equation {
+        body: EcoString,
+    },
     /// A paragraph with no visible content — skipped to avoid blank-line spam.
     Empty,
 }
@@ -183,7 +198,12 @@ pub(crate) fn lower_paragraph(p: &Paragraph, ctx: &mut LowerCtx) -> ParaResult {
     } else if let Some(num) = eff_para.num {
         let ordered = package.numbering.is_ordered(num.num_id, num.ilvl);
         let level = num.ilvl.clamp(0, i64::from(u8::MAX)) as u8;
-        ParaKind::ListItem { ordered, level, body: inlines, num_id: Some(num.num_id) }
+        ParaKind::ListItem {
+            ordered,
+            level,
+            body: inlines,
+            num_id: Some(num.num_id),
+        }
     } else if has_text || anchors {
         // `has_anchors` keeps a paragraph whose only content is a comment or
         // revision record — a wholly-deleted paragraph is exactly that, and
@@ -282,7 +302,9 @@ fn sole_break_kind(p: &Paragraph) -> Option<BreakKind> {
         let RunItem::Run(r) = run_item else { return None };
         for c in &r.content {
             match c {
-                RunContent::Break(BreakType::Page) if kind.is_none() => kind = Some(BreakKind::Page),
+                RunContent::Break(BreakType::Page) if kind.is_none() => {
+                    kind = Some(BreakKind::Page)
+                }
                 RunContent::Break(BreakType::Column) if kind.is_none() => {
                     kind = Some(BreakKind::Column)
                 }
@@ -379,7 +401,9 @@ pub(crate) fn inlines_have_text(inlines: &Inlines) -> bool {
         // and dropped, which would silently delete the note along with it.
         Inline::Footnote(_) => true,
         // A ruby's visible text is its base (plus the reading above it).
-        Inline::Ruby { base, gloss } => inlines_have_text(base) || inlines_have_text(gloss),
+        Inline::Ruby { base, gloss } => {
+            inlines_have_text(base) || inlines_have_text(gloss)
+        }
         // Same reasoning, more consequential: a text box's own content lives
         // in its nested block sequence, not the paragraph's inline text.
         // Treating it as "no text" would risk classifying a paragraph whose
@@ -486,7 +510,9 @@ mod tests {
                 assert_eq!(body.len(), 1);
                 assert!(matches!(&body[0], Inline::TextBox(_)));
             }
-            ParaKind::Empty => panic!("the text box was dropped along with the paragraph"),
+            ParaKind::Empty => {
+                panic!("the text box was dropped along with the paragraph")
+            }
             _ => panic!("expected ParaKind::Paragraph, got a different variant"),
         }
     }
@@ -562,7 +588,10 @@ mod tests {
         };
 
         let p = Paragraph {
-            props: ParaProps { style_id: Some("Heading1".into()), ..Default::default() },
+            props: ParaProps {
+                style_id: Some("Heading1".into()),
+                ..Default::default()
+            },
             runs: vec![RunItem::Field(Field {
                 instr: " TOC \\o \"1-3\" \\h ".into(),
                 result: vec![RunItem::Run(Run {
@@ -592,8 +621,10 @@ mod tests {
 
     fn math_paragraph(display: bool, with_text: bool) -> Paragraph {
         let mut content = vec![RunContent::Math {
-            xml: format!(r#"<m:oMath xmlns:m="{MATH_NS}"><m:r><m:t>x</m:t></m:r></m:oMath>"#)
-                .into(),
+            xml: format!(
+                r#"<m:oMath xmlns:m="{MATH_NS}"><m:r><m:t>x</m:t></m:r></m:oMath>"#
+            )
+            .into(),
             display,
         }];
         if with_text {

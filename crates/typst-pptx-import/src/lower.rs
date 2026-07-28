@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use ecow::{eco_format, EcoString};
+use ecow::{EcoString, eco_format};
 use rustc_hash::FxHashMap;
 
 use crate::mappers::{
@@ -136,8 +136,7 @@ impl LowerCtx<'_, '_> {
         }
 
         let index = self.assets.len() + 1;
-        let path: EcoString =
-            eco_format!("{}/image{index}.{ext}", self.opts.assets_dir);
+        let path: EcoString = eco_format!("{}/image{index}.{ext}", self.opts.assets_dir);
         self.assets.push((PathBuf::from(path.as_str()), bytes));
         self.seen_media.insert(rel_id.into(), path.clone());
         Some(path)
@@ -353,10 +352,9 @@ fn lower_shape(
                 return;
             }
             let block = match drawn {
-                Some(call) => tdoc::Block::Shape {
-                    call,
-                    body: has_text.then_some(paras),
-                },
+                Some(call) => {
+                    tdoc::Block::Shape { call, body: has_text.then_some(paras) }
+                }
                 None => tdoc::Block::Paras(paras),
             };
             let insets = if has_text {
@@ -403,7 +401,8 @@ fn lower_shape(
         }
         Shape::Chart { rel_id, xfrm } => {
             let Some(target) = ctx.parser.target(rel_id) else {
-                ctx.report.drop("chart", "the chart's relationship could not be resolved");
+                ctx.report
+                    .drop("chart", "the chart's relationship could not be resolved");
                 return;
             };
             let part = target.part.clone();

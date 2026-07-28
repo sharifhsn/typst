@@ -43,7 +43,7 @@
 //! anything this mapper doesn't specifically recognise still recurses into
 //! its children — never dropped, never spliced in as raw XML.
 
-use ecow::{eco_format, EcoString};
+use ecow::{EcoString, eco_format};
 use roxmltree::Node;
 use typst_ooxml_core::xmlread::{child, children, local};
 
@@ -95,10 +95,14 @@ fn ensure_namespaces(fragment: &str) -> String {
     }
     let mut extra = String::new();
     if !has_m {
-        extra.push_str(" xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"");
+        extra.push_str(
+            " xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"",
+        );
     }
     if !has_w {
-        extra.push_str(" xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"");
+        extra.push_str(
+            " xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"",
+        );
     }
     format!("{}{}{}", &fragment[..gt], extra, &fragment[gt..])
 }
@@ -113,7 +117,12 @@ fn ensure_namespaces(fragment: &str) -> String {
 /// which is always safe (Typst's math layout computes inter-atom spacing
 /// itself; source whitespace does not affect rendering) and is what keeps a
 /// multi-letter run from becoming a single illegal identifier (hazard 1).
-fn convert_element(node: Node, out: &mut Vec<EcoString>, report: &mut ImportReport, depth: usize) {
+fn convert_element(
+    node: Node,
+    out: &mut Vec<EcoString>,
+    report: &mut ImportReport,
+    depth: usize,
+) {
     if !node.is_element() {
         return;
     }
@@ -147,7 +156,9 @@ fn convert_element(node: Node, out: &mut Vec<EcoString>, report: &mut ImportRepo
         // Word has no in-math box primitive Typst can represent, and the
         // content is what matters — unwrap silently (no report: this is a
         // deliberate simplification, not a loss anyone needs to audit).
-        "box" | "borderBox" => out.push(convert_row(child(node, "e").unwrap_or(node), report, next_depth)),
+        "box" | "borderBox" => {
+            out.push(convert_row(child(node, "e").unwrap_or(node), report, next_depth))
+        }
         "func" => out.push(convert_func(node, report, next_depth)),
         "limLow" => out.push(convert_limlow(node, report, next_depth)),
         "limUpp" => out.push(convert_limupp(node, report, next_depth)),
@@ -188,7 +199,11 @@ fn convert_element(node: Node, out: &mut Vec<EcoString>, report: &mut ImportRepo
 
 /// Converts the children of `node` (an `m:e`/`m:num`/`m:oMath`/…) to a list
 /// of atoms, in document order.
-fn convert_children(node: Node, report: &mut ImportReport, depth: usize) -> Vec<EcoString> {
+fn convert_children(
+    node: Node,
+    report: &mut ImportReport,
+    depth: usize,
+) -> Vec<EcoString> {
     let mut out = Vec::new();
     for c in node.children() {
         convert_element(c, &mut out, report, depth);
@@ -342,7 +357,9 @@ fn tokenize(text: &str, nor: bool, out: &mut Vec<EcoString>, report: &mut Import
                 // quoted phrase, not scatter into separate hazard-1 atoms —
                 // so an upright run absorbs interior spaces too, trimmed off
                 // the end below.
-                while i < chars.len() && (chars[i].is_ascii_alphabetic() || chars[i] == ' ') {
+                while i < chars.len()
+                    && (chars[i].is_ascii_alphabetic() || chars[i] == ' ')
+                {
                     i += 1;
                 }
             } else {
@@ -350,7 +367,8 @@ fn tokenize(text: &str, nor: bool, out: &mut Vec<EcoString>, report: &mut Import
                     i += 1;
                 }
             }
-            let word: String = chars[start..i].iter().collect::<String>().trim_end().to_string();
+            let word: String =
+                chars[start..i].iter().collect::<String>().trim_end().to_string();
             push_word(&word, nor, out, report);
             continue;
         }
@@ -529,10 +547,10 @@ fn push_word(word: &str, nor: bool, out: &mut Vec<EcoString>, report: &mut Impor
 /// (mirrors the `ops!` table in `typst-library`'s `math::op` exactly — using
 /// anything outside this list bare would be its own multi-letter hazard).
 const KNOWN_OPERATORS: &[&str] = &[
-    "arccos", "arcsin", "arctan", "arg", "cos", "cosh", "cot", "coth", "csc", "csch", "ctg",
-    "deg", "det", "dim", "exp", "gcd", "lcm", "hom", "id", "im", "inf", "ker", "lg", "lim", "ln",
-    "log", "max", "min", "mod", "Pr", "sec", "sech", "sin", "sinc", "sinh", "sup", "tan", "tanh",
-    "tg", "tr",
+    "arccos", "arcsin", "arctan", "arg", "cos", "cosh", "cot", "coth", "csc", "csch",
+    "ctg", "deg", "det", "dim", "exp", "gcd", "lcm", "hom", "id", "im", "inf", "ker",
+    "lg", "lim", "ln", "log", "max", "min", "mod", "Pr", "sec", "sech", "sin", "sinc",
+    "sinh", "sup", "tan", "tanh", "tg", "tr",
 ];
 
 /// Superscript digit `⁰`–`⁹` -> its ASCII digit.
@@ -613,7 +631,8 @@ fn fold_math_alphanumeric(c: char) -> Option<(char, bool)> {
         let offset = cp - LATIN_BASE;
         let style = offset / 52;
         let within = offset % 52;
-        let (index, upper) = if within < 26 { (within, true) } else { (within - 26, false) };
+        let (index, upper) =
+            if within < 26 { (within, true) } else { (within - 26, false) };
         let base = (if upper { b'A' } else { b'a' }) + index as u8;
         return Some((base as char, style == 1));
     }
@@ -668,11 +687,15 @@ fn fold_math_alphanumeric(c: char) -> Option<(char, bool)> {
 /// the six variants are themselves a distinct (rarer) glyph collapsed onto
 /// the plain letter, so they're never "exact" even in the italic style.
 fn greek_slot(within: u32) -> (char, bool) {
-    const UPPER: [char; 17] =
-        ['Α', 'Β', 'Γ', 'Δ', 'Ε', 'Ζ', 'Η', 'Θ', 'Ι', 'Κ', 'Λ', 'Μ', 'Ν', 'Ξ', 'Ο', 'Π', 'Ρ'];
+    const UPPER: [char; 17] = [
+        'Α', 'Β', 'Γ', 'Δ', 'Ε', 'Ζ', 'Η', 'Θ', 'Ι', 'Κ', 'Λ', 'Μ', 'Ν', 'Ξ', 'Ο', 'Π',
+        'Ρ',
+    ];
     const UPPER2: [char; 7] = ['Σ', 'Τ', 'Υ', 'Φ', 'Χ', 'Ψ', 'Ω'];
-    const LOWER: [char; 17] =
-        ['α', 'β', 'γ', 'δ', 'ε', 'ζ', 'η', 'θ', 'ι', 'κ', 'λ', 'μ', 'ν', 'ξ', 'ο', 'π', 'ρ'];
+    const LOWER: [char; 17] = [
+        'α', 'β', 'γ', 'δ', 'ε', 'ζ', 'η', 'θ', 'ι', 'κ', 'λ', 'μ', 'ν', 'ξ', 'ο', 'π',
+        'ρ',
+    ];
     const LOWER2: [char; 7] = ['σ', 'τ', 'υ', 'φ', 'χ', 'ψ', 'ω'];
     const VARIANTS: [char; 6] = ['ε', 'θ', 'κ', 'φ', 'ρ', 'π'];
     match within {
@@ -783,8 +806,12 @@ fn frac_type(node: Node) -> FracType {
 /// rather than assuming argument order.
 fn convert_radical(node: Node, report: &mut ImportReport, depth: usize) -> EcoString {
     let radicand = convert_row(child(node, "e").unwrap_or(node), report, depth);
-    let deg_hidden = child(node, "radPr").and_then(|pr| child(pr, "degHide")).is_some_and(is_on);
-    let deg = child(node, "deg").map(|d| convert_row(d, report, depth)).unwrap_or_default();
+    let deg_hidden = child(node, "radPr")
+        .and_then(|pr| child(pr, "degHide"))
+        .is_some_and(is_on);
+    let deg = child(node, "deg")
+        .map(|d| convert_row(d, report, depth))
+        .unwrap_or_default();
     if deg_hidden || deg.trim().is_empty() {
         eco_format!("sqrt({})", operand(&radicand))
     } else {
@@ -901,7 +928,10 @@ fn convert_spre(node: Node, report: &mut ImportReport, depth: usize) -> EcoStrin
 /// too, for real-world files that leave the flag off but the element empty).
 fn convert_nary(node: Node, report: &mut ImportReport, depth: usize) -> EcoString {
     let pr = child(node, "naryPr");
-    let chr = pr.and_then(|pr| child(pr, "chr")).and_then(mval).and_then(|s| s.chars().next());
+    let chr = pr
+        .and_then(|pr| child(pr, "chr"))
+        .and_then(mval)
+        .and_then(|s| s.chars().next());
     let op: EcoString = match chr {
         None | Some('∫') => "integral".into(),
         Some('∑') => "sum".into(),
@@ -925,9 +955,15 @@ fn convert_nary(node: Node, report: &mut ImportReport, depth: usize) -> EcoStrin
 
     let sub_hidden = pr.and_then(|pr| child(pr, "subHide")).is_some_and(is_on);
     let sup_hidden = pr.and_then(|pr| child(pr, "supHide")).is_some_and(is_on);
-    let sub = child(node, "sub").map(|n| convert_row(n, report, depth)).unwrap_or_default();
-    let sup = child(node, "sup").map(|n| convert_row(n, report, depth)).unwrap_or_default();
-    let e = child(node, "e").map(|n| convert_row(n, report, depth)).unwrap_or_default();
+    let sub = child(node, "sub")
+        .map(|n| convert_row(n, report, depth))
+        .unwrap_or_default();
+    let sup = child(node, "sup")
+        .map(|n| convert_row(n, report, depth))
+        .unwrap_or_default();
+    let e = child(node, "e")
+        .map(|n| convert_row(n, report, depth))
+        .unwrap_or_default();
 
     let mut s = op.to_string();
     if !sub_hidden && !sub.trim().is_empty() {
@@ -945,8 +981,12 @@ fn convert_nary(node: Node, report: &mut ImportReport, depth: usize) -> EcoStrin
 
 /// `m:func` — a named function application (`m:fName`, `m:e`): `fName (e)`.
 fn convert_func(node: Node, report: &mut ImportReport, depth: usize) -> EcoString {
-    let name = child(node, "fName").map(|n| convert_row(n, report, depth)).unwrap_or_default();
-    let e = child(node, "e").map(|n| convert_row(n, report, depth)).unwrap_or_default();
+    let name = child(node, "fName")
+        .map(|n| convert_row(n, report, depth))
+        .unwrap_or_default();
+    let e = child(node, "e")
+        .map(|n| convert_row(n, report, depth))
+        .unwrap_or_default();
     eco_format!("{} ({})", name.trim(), operand(&e))
 }
 
@@ -994,7 +1034,13 @@ fn convert_delim(node: Node, report: &mut ImportReport, depth: usize) -> EcoStri
     if let [only] = cells.as_slice()
         && let Some(matrix) = sole_child(*only, "m")
     {
-        return convert_matrix_delimited(matrix, beg.as_deref(), end.as_deref(), report, depth);
+        return convert_matrix_delimited(
+            matrix,
+            beg.as_deref(),
+            end.as_deref(),
+            report,
+            depth,
+        );
     }
 
     // Escaped here, at the point of embedding as bare math source — a fence
@@ -1056,7 +1102,10 @@ fn convert_matrix_delimited(
             eco_format!("cases({})", cases.join(", "))
         }
         (Some("("), Some(")")) => {
-            eco_format!("mat({})", rows.iter().map(|r| r.join(", ")).collect::<Vec<_>>().join("; "))
+            eco_format!(
+                "mat({})",
+                rows.iter().map(|r| r.join(", ")).collect::<Vec<_>>().join("; ")
+            )
         }
         (b, _) => {
             let delim = b.unwrap_or("(");
@@ -1072,14 +1121,21 @@ fn convert_matrix_delimited(
 /// `m:m` — matrix: `mat(a, b; c, d)`.
 fn convert_matrix(node: Node, report: &mut ImportReport, depth: usize) -> EcoString {
     let rows = matrix_rows(node, report, depth);
-    eco_format!("mat({})", rows.iter().map(|r| r.join(", ")).collect::<Vec<_>>().join("; "))
+    eco_format!(
+        "mat({})",
+        rows.iter().map(|r| r.join(", ")).collect::<Vec<_>>().join("; ")
+    )
 }
 
 /// Each `m:mr` row's `m:e` cells, converted and trimmed. An empty cell gets
 /// [`operand`]'s `zws` placeholder — `mat(1, , 3)`'s middle slot is a missing
 /// positional argument to `mat(..)`, the exact shape [`operand`] guards
 /// against everywhere else.
-fn matrix_rows(node: Node, report: &mut ImportReport, depth: usize) -> Vec<Vec<EcoString>> {
+fn matrix_rows(
+    node: Node,
+    report: &mut ImportReport,
+    depth: usize,
+) -> Vec<Vec<EcoString>> {
     children(node, "mr")
         .map(|row| {
             children(row, "e")
@@ -1104,7 +1160,10 @@ fn convert_eqarr(node: Node, report: &mut ImportReport, depth: usize) -> EcoStri
 /// unrecognised mark, is `hat` — OMML's own default when `m:chr` is absent).
 fn convert_accent(node: Node, report: &mut ImportReport, depth: usize) -> EcoString {
     let e = convert_row(child(node, "e").unwrap_or(node), report, depth);
-    let chr = child(node, "accPr").and_then(|pr| child(pr, "chr")).and_then(mval).and_then(|s| s.chars().next());
+    let chr = child(node, "accPr")
+        .and_then(|pr| child(pr, "chr"))
+        .and_then(mval)
+        .and_then(|s| s.chars().next());
     let func = match chr {
         None => "hat",
         Some('\u{0302}' | '^') => "hat",
@@ -1145,7 +1204,10 @@ fn convert_bar(node: Node, report: &mut ImportReport, depth: usize) -> EcoString
 fn convert_groupchr(node: Node, report: &mut ImportReport, depth: usize) -> EcoString {
     let e = convert_row(child(node, "e").unwrap_or(node), report, depth);
     let pr = child(node, "groupChrPr");
-    let chr = pr.and_then(|pr| child(pr, "chr")).and_then(mval).and_then(|s| s.chars().next());
+    let chr = pr
+        .and_then(|pr| child(pr, "chr"))
+        .and_then(mval)
+        .and_then(|s| s.chars().next());
     let pos = pr.and_then(|pr| child(pr, "pos")).and_then(mval);
     if chr == Some('⏞') || pos == Some("top") {
         eco_format!("overbrace({})", operand(&e))
@@ -1180,7 +1242,10 @@ fn convert_phant(node: Node, report: &mut ImportReport, depth: usize) -> EcoStri
 /// The first element child of `node` if it is the *sole* element child and
 /// has local name `name` — used to detect "a delimiter whose only content is
 /// a matrix" ([`convert_delim`]'s sole-matrix special case).
-fn sole_child<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Option<Node<'a, 'input>> {
+fn sole_child<'a, 'input>(
+    node: Node<'a, 'input>,
+    name: &str,
+) -> Option<Node<'a, 'input>> {
     let mut elems = node.children().filter(|n| n.is_element());
     let first = elems.next()?;
     if elems.next().is_some() {
@@ -1251,7 +1316,8 @@ mod tests {
         }
     }
 
-    const NS: &str = r#"xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math""#;
+    const NS: &str =
+        r#"xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math""#;
 
     fn o_math(inner: &str) -> String {
         format!(r#"<m:oMath {NS}>{inner}</m:oMath>"#)
@@ -1458,11 +1524,7 @@ mod tests {
     #[test]
     fn matrix_wrapped_in_default_parens_becomes_mat() {
         let mr = |a: &str, b: &str| {
-            format!(
-                r#"<m:mr><m:e>{}</m:e><m:e>{}</m:e></m:mr>"#,
-                run(a),
-                run(b)
-            )
+            format!(r#"<m:mr><m:e>{}</m:e><m:e>{}</m:e></m:mr>"#, run(a), run(b))
         };
         let m = format!(r#"<m:m>{}{}</m:m>"#, mr("1", "2"), mr("3", "4"));
         let inner = format!(r#"<m:d><m:e>{m}</m:e></m:d>"#);
@@ -1482,11 +1544,7 @@ mod tests {
     #[test]
     fn bare_matrix() {
         let mr = |a: &str, b: &str| {
-            format!(
-                r#"<m:mr><m:e>{}</m:e><m:e>{}</m:e></m:mr>"#,
-                run(a),
-                run(b)
-            )
+            format!(r#"<m:mr><m:e>{}</m:e><m:e>{}</m:e></m:mr>"#, run(a), run(b))
         };
         let inner = format!(r#"<m:m>{}{}</m:m>"#, mr("1", "2"), mr("3", "4"));
         assert_eq!(convert(&o_math(&inner)), "mat(1, 2; 3, 4)");
@@ -1616,7 +1674,9 @@ mod tests {
         // U+1D400-range bold).
         let src = o_math(&run("𝒙"));
         let mut report = ImportReport::default();
-        let Inline::Math(s) = omml_to_inline(&src, &mut report) else { panic!("expected math") };
+        let Inline::Math(s) = omml_to_inline(&src, &mut report) else {
+            panic!("expected math")
+        };
         assert_eq!(s.as_str(), "x");
         assert_eq!(report.notes.len(), 1);
     }
@@ -1682,7 +1742,10 @@ mod tests {
     /// cosmetic issue.
     #[test]
     fn unbalanced_literal_parens_in_plain_text_are_escaped_as_symbols() {
-        let inner = format!(r#"<m:rad><m:radPr><m:degHide m:val="on"/></m:radPr><m:deg/><m:e>{}</m:e></m:rad>"#, plain_run(")2("));
+        let inner = format!(
+            r#"<m:rad><m:radPr><m:degHide m:val="on"/></m:radPr><m:deg/><m:e>{}</m:e></m:rad>"#,
+            plain_run(")2(")
+        );
         assert_eq!(convert(&o_math(&inner)), "sqrt(paren.r 2 paren.l)");
     }
 

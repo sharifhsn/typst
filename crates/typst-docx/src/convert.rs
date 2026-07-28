@@ -342,7 +342,8 @@ pub fn convert_children(
             last_was_par = false;
         } else if is_inline(child) {
             if !have_pending && pending.is_empty() {
-                pending_orphaned_whitespace = child.is::<typst_library::text::SpaceElem>();
+                pending_orphaned_whitespace =
+                    child.is::<typst_library::text::SpaceElem>();
                 let props = ParaProps {
                     review_origin: Some(
                         ctx.review_origin(child.span(), ReviewCandidateKind::Paragraph),
@@ -1143,8 +1144,7 @@ fn handle_block_inner(
     } else if let Some(elem) = child.to_packed::<TableCell>() {
         // Same as `GridCell` above, for `#table.cell(..)`.
         out.extend(ctx.blocks(&elem.body, styles)?);
-    } else if let Some(elem) = child.to_packed::<typst_library::layout::PagebreakElem>()
-    {
+    } else if let Some(elem) = child.to_packed::<typst_library::layout::PagebreakElem>() {
         // A hard page break maps to a `<w:br w:type="page"/>` in its own
         // paragraph — it must advance a page even when the current one is
         // empty, so stacked hard breaks yield real blank pages. A *weak*
@@ -1352,11 +1352,10 @@ fn handle_block_inner(
         // Word draws the bottom border regardless of the line box's height, so
         // clamp the carrier line to the stroke's own extent, exactly like the
         // minimized break carriers.
-        let line_twip =
-            crate::props::abs_to_twip(typst_library::layout::Abs::pt(
-                fx.thickness.to_pt(),
-            ))
-            .max(20);
+        let line_twip = crate::props::abs_to_twip(typst_library::layout::Abs::pt(
+            fx.thickness.to_pt(),
+        ))
+        .max(20);
         out.push(Block::Para(Para {
             props: crate::dom::ParaProps {
                 pbdr: Some(crate::dom::ParaBorders {
@@ -1840,13 +1839,13 @@ fn handle_block_box(
 
     // Recurse into the body to obtain its paragraphs, scoping relative child
     // dimensions to this block's box.
-    let mut inner = ctx.with_shape_height_base(
-        scoped_height.or(ctx.shape_height_base),
-        |ctx| match scoped_width_dxa {
-            Some(w) => ctx.with_available_width(w, |ctx| ctx.blocks(content, styles)),
-            None => ctx.blocks(content, styles),
-        },
-    )?;
+    let mut inner =
+        ctx.with_shape_height_base(scoped_height.or(ctx.shape_height_base), |ctx| {
+            match scoped_width_dxa {
+                Some(w) => ctx.with_available_width(w, |ctx| ctx.blocks(content, styles)),
+                None => ctx.blocks(content, styles),
+            }
+        })?;
 
     // A fixed-height filled block is a bounded visual region (terminal panes,
     // cards, dashboards), not merely a sequence of shaded paragraphs. Word
@@ -2226,7 +2225,9 @@ fn stamp_box_decorations(
 pub(crate) fn container_clips(child: &Content, styles: StyleChain) -> bool {
     use typst_library::layout::{BlockElem, BoxElem};
     child.to_packed::<BoxElem>().is_some_and(|elem| elem.clip.get(styles))
-        || child.to_packed::<BlockElem>().is_some_and(|elem| elem.clip.get(styles))
+        || child
+            .to_packed::<BlockElem>()
+            .is_some_and(|elem| elem.clip.get(styles))
 }
 
 /// Whether a native element is a framed container (`#box`/`#rect`/`#square`) that

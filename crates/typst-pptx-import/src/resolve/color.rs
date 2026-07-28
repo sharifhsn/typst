@@ -172,8 +172,10 @@ mod tests {
     fn shade_darkens_and_tint_lightens() {
         let map = ColorMap::default();
         let half = |t| Color::Scheme { slot: "accent1".into(), transforms: vec![t] };
-        let shaded = resolve(&half(ColorTransform::Shade(50_000)), &theme(), &map).unwrap();
-        let tinted = resolve(&half(ColorTransform::Tint(50_000)), &theme(), &map).unwrap();
+        let shaded =
+            resolve(&half(ColorTransform::Shade(50_000)), &theme(), &map).unwrap();
+        let tinted =
+            resolve(&half(ColorTransform::Tint(50_000)), &theme(), &map).unwrap();
         assert!(shaded[0] < 0x44, "shade must darken: {shaded:?}");
         assert!(tinted[0] > 0x44, "tint must lighten: {tinted:?}");
     }

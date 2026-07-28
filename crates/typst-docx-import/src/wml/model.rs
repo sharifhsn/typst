@@ -194,7 +194,11 @@ pub enum RunItem {
     /// a hyperlink's content — common for cross-references and TOC entries,
     /// where the hyperlink supplies the jump target and a nested
     /// PAGEREF/REF field supplies the displayed page number.
-    Hyperlink { rel_id: Option<EcoString>, anchor: Option<EcoString>, runs: Vec<RunItem> },
+    Hyperlink {
+        rel_id: Option<EcoString>,
+        anchor: Option<EcoString>,
+        runs: Vec<RunItem>,
+    },
     /// `w:bookmarkStart` — a named anchor. Word writes a bookmark as a
     /// start/end pair *around* a range, but Typst has only point labels, so
     /// only the start is modelled: it is the position a `REF`/`PAGEREF` field
@@ -210,7 +214,10 @@ pub enum RunItem {
     /// becomes an opening anchor and a closing one. Unlike a bookmark, which
     /// genuinely only needs its start, both ends matter here — they are what
     /// says *which words* the comment is about.
-    CommentRange { id: i64, end: bool },
+    CommentRange {
+        id: i64,
+        end: bool,
+    },
     /// The start of an **insertion** (`w:ins`, or `w:moveTo` for text moved
     /// in): the runs that follow, up to the matching [`Self::RevisionEnd`],
     /// are content somebody added. They are ordinary live content — an
@@ -225,7 +232,10 @@ pub enum RunItem {
     /// that it is *not* in the document any more — so the removed runs are
     /// carried inside the item itself, to be lowered into the metadata value
     /// where they render nothing but stay readable.
-    Deletion { info: RevisionInfo, runs: Vec<RunItem> },
+    Deletion {
+        info: RevisionInfo,
+        runs: Vec<RunItem>,
+    },
     /// A Word field. Both OOXML spellings — the `w:fldSimple` element and the
     /// flattened `w:fldChar` begin/separate/end run sequence — are folded
     /// back into this one logical item at parse time, so lowering sees a
@@ -280,12 +290,18 @@ pub enum RunContent {
     /// The wrapper is flattened at parse time (one fragment per `m:oMath`), so
     /// without this flag the block/inline distinction would be lost and every
     /// equation would come back as inline `$..$`.
-    Math { xml: EcoString, display: bool },
+    Math {
+        xml: EcoString,
+        display: bool,
+    },
     /// `w:ruby` — a phonetic guide (furigana): `gloss` is the small reading
     /// set above `base`. Both halves hold ordinary runs, and `w:ruby` sits
     /// *inside* a `w:r`, which is why it is run content rather than a
     /// [`RunItem`] beside one.
-    Ruby { base: Vec<RunItem>, gloss: Vec<RunItem> },
+    Ruby {
+        base: Vec<RunItem>,
+        gloss: Vec<RunItem>,
+    },
     /// `w:commentReference` — the mark Word draws at a comment's anchor,
     /// inside a run of its own. A comment always has one; the surrounding
     /// [`RunItem::CommentRange`] pair is what Word omits for a point comment,
@@ -294,7 +310,10 @@ pub enum RunContent {
     CommentRef(i64),
     /// A `w:footnoteReference`/`w:endnoteReference` — the marker in the body
     /// text. The note's content lives in a separate part, keyed by this id.
-    NoteRef { endnote: bool, id: i64 },
+    NoteRef {
+        endnote: bool,
+        id: i64,
+    },
     /// A shape's text (`w:txbxContent`) — the body content of a DrawingML
     /// text box (`wps:txbx`) or its VML equivalent (`v:textbox`). Word floats
     /// these; we keep the content and lose the geometry.
@@ -346,7 +365,9 @@ pub enum RunContent {
     /// `v:imagedata`), and that is parsed by the ordinary VML path into a
     /// sibling [`Self::Drawing`] — so the object still *shows* what it looked
     /// like, it just isn't live any more.
-    EmbeddedObject { prog_id: Option<EcoString> },
+    EmbeddedObject {
+        prog_id: Option<EcoString>,
+    },
     /// A `wps:wsp` with geometry but nothing this importer can paint it with:
     /// no `a:srgbClr` fill or line colour (a theme-coloured shape, whose
     /// palette lives in `theme1.xml`), and no text box to fall back on. The
@@ -458,7 +479,11 @@ pub enum DmlGeometry {
     /// the shape's extent — the two are proportional, so the segment
     /// coordinates need scaling by `ext / path` before they mean anything in
     /// document space.
-    Custom { path_w: i64, path_h: i64, segments: Vec<DmlSeg> },
+    Custom {
+        path_w: i64,
+        path_h: i64,
+        segments: Vec<DmlSeg>,
+    },
 }
 
 /// One `a:path` command. Named for the DrawingML elements, which map 1:1 onto

@@ -8,8 +8,8 @@ use std::io::{Cursor, Read, Write};
 
 use ecow::{EcoString, eco_format};
 use rustc_hash::FxHashMap;
-use zip::write::{SimpleFileOptions, ZipWriter};
 use zip::read::ZipArchive;
+use zip::write::{SimpleFileOptions, ZipWriter};
 use zip::{CompressionMethod, DateTime};
 
 use crate::xml::escape_attr;
@@ -70,8 +70,7 @@ fn exceeds_xml_depth(xml: &str, limit: usize) -> bool {
             // An open tag — unless it self-closes (`<.../>`).
             _ => {
                 let end = bytes[i..].iter().position(|&b| b == b'>').map(|p| i + p);
-                let self_closing =
-                    end.is_some_and(|e| e > i && bytes[e - 1] == b'/');
+                let self_closing = end.is_some_and(|e| e > i && bytes[e - 1] == b'/');
                 if !self_closing {
                     depth += 1;
                     if depth > limit {
@@ -136,8 +135,7 @@ impl<'a> Reader<'a> {
         if bytes.len() > limits.max_archive_bytes {
             return Err(ReadError::Unsafe("archive is too large"));
         }
-        let mut archive =
-            ZipArchive::new(Cursor::new(bytes)).map_err(ReadError::Zip)?;
+        let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(ReadError::Zip)?;
         if archive.len() > limits.max_entries {
             return Err(ReadError::Unsafe("archive has too many entries"));
         }
@@ -246,8 +244,7 @@ pub fn rel_entries(root: roxmltree::Node) -> Vec<RelEntry> {
             let id = crate::xmlread::attr(node, "Id")?;
             let target = crate::xmlread::attr(node, "Target")?;
             let type_uri = crate::xmlread::attr(node, "Type").unwrap_or("");
-            let external =
-                crate::xmlread::attr(node, "TargetMode") == Some("External");
+            let external = crate::xmlread::attr(node, "TargetMode") == Some("External");
             Some(RelEntry {
                 id: id.into(),
                 type_uri: type_uri.into(),
@@ -269,11 +266,8 @@ pub fn resolve_target(source_part: &str, target: &str) -> EcoString {
         return EcoString::from(target.trim_start_matches('/'));
     }
     let base = source_part.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-    let mut segments: Vec<&str> = if base.is_empty() {
-        Vec::new()
-    } else {
-        base.split('/').collect()
-    };
+    let mut segments: Vec<&str> =
+        if base.is_empty() { Vec::new() } else { base.split('/').collect() };
     for seg in target.split('/') {
         match seg {
             "." | "" => {}

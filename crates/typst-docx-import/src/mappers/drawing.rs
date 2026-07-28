@@ -1,7 +1,7 @@
 //! The `drawing` mapper: a Word inline/anchored image (`w:drawing`) → the
 //! Typst IR's [`Figure`].
 
-use ecow::{eco_format, EcoString};
+use ecow::{EcoString, eco_format};
 use typst_ooxml_core::units::emu_to_abs;
 
 use crate::report::ImportReport;
@@ -52,7 +52,8 @@ pub fn lower_drawing(
     }
     let sniffed = sniff_image_format(bytes);
     let is_supported = sniffed.is_some()
-        || extension(&media_key).is_some_and(|ext| SUPPORTED_IMAGE_EXTS.contains(&ext.as_str()));
+        || extension(&media_key)
+            .is_some_and(|ext| SUPPORTED_IMAGE_EXTS.contains(&ext.as_str()));
     if !is_supported {
         let ext = extension(&media_key).unwrap_or_default();
         report.drop("image", eco_format!("{ext} images are not supported by Typst"));
@@ -115,7 +116,10 @@ fn corner_radius_pt(
     if geom.prst != "roundRect" {
         report.approximate(
             "picture frame",
-            eco_format!("`{}` outline has no Typst equivalent; drawn unframed", geom.prst),
+            eco_format!(
+                "`{}` outline has no Typst equivalent; drawn unframed",
+                geom.prst
+            ),
         );
         return None;
     }
@@ -147,7 +151,12 @@ fn source_crop(
     // divide by zero below.
     let frac = |value: i64| value.clamp(0, 100_000) as f64 / 100_000.0;
     let SrcRect { l, t, r, b } = rect;
-    let crop = Crop { left: frac(l), top: frac(t), right: frac(r), bottom: frac(b) };
+    let crop = Crop {
+        left: frac(l),
+        top: frac(t),
+        right: frac(r),
+        bottom: frac(b),
+    };
     if crop.left + crop.right >= 1.0 || crop.top + crop.bottom >= 1.0 {
         report.drop("picture crop", "crops away the whole image; ignored");
         return None;
@@ -160,7 +169,8 @@ fn source_crop(
 /// Used both as [`sniff_image_format`]'s vocabulary and, per its own doc
 /// comment, as the *fallback* check when sniffing the leading bytes is
 /// inconclusive.
-const SUPPORTED_IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "svg", "svgz", "webp"];
+const SUPPORTED_IMAGE_EXTS: &[&str] =
+    &["png", "jpg", "jpeg", "gif", "svg", "svgz", "webp"];
 
 fn extension(part: &str) -> Option<EcoString> {
     let name = part.rsplit(['/', '\\']).next()?;
@@ -244,7 +254,10 @@ mod tests {
         let mut rels = FxHashMap::default();
         rels.insert(
             "rId1".into(),
-            Relationship { target: format!("media/{media_name}").into(), external: false },
+            Relationship {
+                target: format!("media/{media_name}").into(),
+                external: false,
+            },
         );
         let mut media = FxHashMap::default();
         media.insert(format!("word/media/{media_name}").into(), vec![0u8; 4]);
@@ -288,7 +301,10 @@ mod tests {
         let mut rels = FxHashMap::default();
         rels.insert(
             "rId1".into(),
-            Relationship { target: format!("media/{media_name}").into(), external: false },
+            Relationship {
+                target: format!("media/{media_name}").into(),
+                external: false,
+            },
         );
         let mut media = FxHashMap::default();
         media.insert(format!("word/media/{media_name}").into(), bytes);
@@ -306,10 +322,15 @@ mod tests {
         let package = package_with_bytes("image1.jpeg", bytes);
 
         let mut report = ImportReport::default();
-        let figure = lower_drawing(&drawing(), &package, &mut report)
-            .expect("a PNG sniffed under a lying extension should still lower to a figure");
+        let figure = lower_drawing(&drawing(), &package, &mut report).expect(
+            "a PNG sniffed under a lying extension should still lower to a figure",
+        );
         assert_eq!(figure.image_path, "word/media/image1.png");
-        assert!(report.notes.is_empty(), "no loss here — the image works fine: {:?}", report.notes);
+        assert!(
+            report.notes.is_empty(),
+            "no loss here — the image works fine: {:?}",
+            report.notes
+        );
     }
 
     /// The opposite direction: a metafile that lies the *other* way, naming

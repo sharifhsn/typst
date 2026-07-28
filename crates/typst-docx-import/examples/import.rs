@@ -23,7 +23,9 @@ fn main() -> ExitCode {
         None | Some("table") => false,
         Some("plot") => true,
         Some(other) => {
-            eprintln!("error: unknown --charts value {other:?} (expected \"table\" or \"plot\")");
+            eprintln!(
+                "error: unknown --charts value {other:?} (expected \"table\" or \"plot\")"
+            );
             return ExitCode::from(2);
         }
     };

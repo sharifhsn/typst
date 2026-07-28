@@ -1,6 +1,6 @@
 //! `p:pic` → a Typst image.
 
-use crate::lower::{emu, LowerCtx};
+use crate::lower::{LowerCtx, emu};
 use crate::pml::model::*;
 use crate::tdoc;
 

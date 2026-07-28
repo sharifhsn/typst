@@ -1519,7 +1519,8 @@ fn clamp_implausible_columns(
         .filter(|(i, _)| is_gutter(*i))
         .map(|(_, &c)| i64::from(c.clamp(0, available)))
         .sum();
-    let content = cols.len() - cols.iter().enumerate().filter(|(i, _)| is_gutter(*i)).count();
+    let content =
+        cols.len() - cols.iter().enumerate().filter(|(i, _)| is_gutter(*i)).count();
     if content == 0 {
         return cols;
     }
@@ -1718,7 +1719,12 @@ fn row_sizing(grid: &CellGrid, y: usize) -> Option<Sizing> {
 
 /// Whether a row is unbreakable. A row is kept together when every cell whose
 /// rowspan is fully contained in it is unbreakable.
-fn row_cant_split(grid: &CellGrid, y: usize, height_dxa: Option<i32>, ctx: &DocxCtx) -> bool {
+fn row_cant_split(
+    grid: &CellGrid,
+    y: usize,
+    height_dxa: Option<i32>,
+    ctx: &DocxCtx,
+) -> bool {
     let ncols = grid.non_gutter_column_count();
     let mut any = false;
     for x in 0..ncols {

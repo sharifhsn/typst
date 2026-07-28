@@ -269,14 +269,11 @@ fn stops_relative_to_bounding_box(
 fn mix_rgba(a: [u8; 4], b: [u8; 4], t: f64) -> [u8; 4] {
     let t = t.clamp(0.0, 1.0);
     let channel = |a: u8, b: u8| {
-        (f64::from(a) + (f64::from(b) - f64::from(a)) * t).round().clamp(0.0, 255.0) as u8
+        (f64::from(a) + (f64::from(b) - f64::from(a)) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
     };
-    [
-        channel(a[0], b[0]),
-        channel(a[1], b[1]),
-        channel(a[2], b[2]),
-        channel(a[3], b[3]),
-    ]
+    [channel(a[0], b[0]), channel(a[1], b[1]), channel(a[2], b[2]), channel(a[3], b[3])]
 }
 
 /// Lowers a Typst linear gradient to a DrawingML fill.
@@ -481,7 +478,9 @@ fn custom_dash(array: &[Abs], thickness: Abs) -> Option<Vec<DashStop>> {
 /// of a percent.
 fn line_width_percent(length: Abs, thickness: Abs) -> Option<i32> {
     let percent = (length / thickness * 100_000.0).round();
-    (1.0..=f64::from(i32::MAX)).contains(&percent).then_some(percent as i32)
+    (1.0..=f64::from(i32::MAX))
+        .contains(&percent)
+        .then_some(percent as i32)
 }
 
 /// Rotates a dash array so that it starts where a non-zero phase does.
@@ -1127,7 +1126,10 @@ mod tests {
             DashSpec::Preset("dash")
         );
         // An empty array is Typst's `solid`.
-        assert_eq!(dash_spec(&pattern(&[], 0.0), Abs::pt(1.0)), DashSpec::Preset("solid"));
+        assert_eq!(
+            dash_spec(&pattern(&[], 0.0), Abs::pt(1.0)),
+            DashSpec::Preset("solid")
+        );
     }
 
     fn stops(pairs: &[(i32, u8)]) -> Vec<GradientStop> {

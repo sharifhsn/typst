@@ -23,8 +23,8 @@ use rustc_hash::FxHashSet;
 
 use crate::report::ImportReport;
 use crate::tdoc::{
-    push_furniture_trees, Block, Chart, ChartContent, Figure, Inline, Inlines, List, Section,
-    Table, TypstDoc,
+    Block, Chart, ChartContent, Figure, Inline, Inlines, List, Section, Table, TypstDoc,
+    push_furniture_trees,
 };
 
 type Labels = FxHashSet<ecow::EcoString>;
@@ -56,14 +56,18 @@ pub fn run(doc: &mut TypstDoc, report: &mut ImportReport) {
 
 fn collect_block(block: &Block, out: &mut Labels) {
     match block {
-        Block::Heading { body, .. } | Block::Paragraph { body, .. } => collect_inlines(body, out),
+        Block::Heading { body, .. } | Block::Paragraph { body, .. } => {
+            collect_inlines(body, out)
+        }
         Block::List(List { items, .. }) => {
             for item in items {
                 collect_inlines(&item.body, out);
             }
         }
         Block::Table(Table { rows, .. })
-        | Block::Chart(Chart { content: ChartContent::Table(Table { rows, .. }), .. }) => {
+        | Block::Chart(Chart {
+            content: ChartContent::Table(Table { rows, .. }), ..
+        }) => {
             for row in rows {
                 for cell in &row.cells {
                     for inner in &cell.body {
@@ -145,7 +149,9 @@ fn rewrite_block(block: &mut Block, emitted: &Labels, downgraded: &mut bool) {
             }
         }
         Block::Table(Table { rows, .. })
-        | Block::Chart(Chart { content: ChartContent::Table(Table { rows, .. }), .. }) => {
+        | Block::Chart(Chart {
+            content: ChartContent::Table(Table { rows, .. }), ..
+        }) => {
             for row in rows {
                 for cell in &mut row.cells {
                     for inner in &mut cell.body {
@@ -207,10 +213,14 @@ fn rewrite_inlines(inlines: Inlines, emitted: &Labels, downgraded: &mut bool) ->
             Inline::Emph(body) => {
                 out.push(Inline::Emph(rewrite_inlines(body, emitted, downgraded)))
             }
-            Inline::Link { dest, body } => out
-                .push(Inline::Link { dest, body: rewrite_inlines(body, emitted, downgraded) }),
-            Inline::Styled { style, body } => out
-                .push(Inline::Styled { style, body: rewrite_inlines(body, emitted, downgraded) }),
+            Inline::Link { dest, body } => out.push(Inline::Link {
+                dest,
+                body: rewrite_inlines(body, emitted, downgraded),
+            }),
+            Inline::Styled { style, body } => out.push(Inline::Styled {
+                style,
+                body: rewrite_inlines(body, emitted, downgraded),
+            }),
             Inline::Ruby { base, gloss } => out.push(Inline::Ruby {
                 base: rewrite_inlines(base, emitted, downgraded),
                 gloss: rewrite_inlines(gloss, emitted, downgraded),
@@ -264,7 +274,10 @@ mod tests {
 
         match &doc.body[0] {
             Block::Paragraph { body, .. } => {
-                assert!(matches!(&body[..], [Inline::Text(t)] if t == "see above"), "{body:?}");
+                assert!(
+                    matches!(&body[..], [Inline::Text(t)] if t == "see above"),
+                    "{body:?}"
+                );
             }
             other => panic!("expected a paragraph, got {other:?}"),
         }
@@ -312,7 +325,10 @@ mod tests {
 
         match &doc.body[0] {
             Block::Paragraph { body, .. } => {
-                assert!(matches!(&body[..], [Inline::Text(t)] if t == "page "), "{body:?}");
+                assert!(
+                    matches!(&body[..], [Inline::Text(t)] if t == "page "),
+                    "{body:?}"
+                );
             }
             other => panic!("expected a paragraph, got {other:?}"),
         }

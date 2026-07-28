@@ -715,12 +715,7 @@ mod tests {
     use typst_syntax::Span;
 
     fn run(x: f64, y: f64, text: &str, width: f64) -> (Point, EcoString, Abs, Abs) {
-        (
-            Point::new(Abs::pt(x), Abs::pt(y)),
-            text.into(),
-            Abs::pt(10.0),
-            Abs::pt(width),
-        )
+        (Point::new(Abs::pt(x), Abs::pt(y)), text.into(), Abs::pt(10.0), Abs::pt(width))
     }
 
     #[test]

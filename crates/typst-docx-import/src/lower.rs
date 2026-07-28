@@ -1,7 +1,7 @@
 //! Lower the Word IR ([`crate::wml`]) to the Typst IR ([`crate::tdoc`]).
 //! The mirror of the exporter's `convert.rs` + `mappers/`.
 
-use ecow::{eco_format, EcoString};
+use ecow::{EcoString, eco_format};
 use typst_ooxml_core::units::half_point_to_pt;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -12,9 +12,12 @@ use crate::opts::ImportOptions;
 use crate::report::ImportReport;
 use crate::resolve::styles::{effective_para, heading_level};
 use crate::tdoc::{
-    self, Block, Date, DocumentInfo, Inline, List, ListItem, ParStyle, Stmt, TextStyle, TypstDoc,
+    self, Block, Date, DocumentInfo, Inline, List, ListItem, ParStyle, Stmt, TextStyle,
+    TypstDoc,
 };
-use crate::wml::model::{BodyItem, DocumentMeta, Numbering, RunProps, SectionStart, WmlPackage};
+use crate::wml::model::{
+    BodyItem, DocumentMeta, Numbering, RunProps, SectionStart, WmlPackage,
+};
 
 /// Everything the lowering phase threads through: the package being read, the
 /// options that govern how it's lowered, the loss report, and the guards
@@ -146,7 +149,9 @@ impl<'a> LowerCtx<'a> {
     /// `contains` scan to check for a repeat is cheap — no need for a
     /// `HashSet` here.
     pub(crate) fn enter_note(&mut self, endnote: bool, id: i64) -> bool {
-        if self.note_stack.len() >= MAX_NOTE_DEPTH || self.note_stack.contains(&(endnote, id)) {
+        if self.note_stack.len() >= MAX_NOTE_DEPTH
+            || self.note_stack.contains(&(endnote, id))
+        {
             return false;
         }
         self.note_stack.push((endnote, id));
@@ -236,8 +241,9 @@ pub(crate) fn lower(ctx: &mut LowerCtx) -> TypstDoc {
     }
 
     if let Some(numbering) = heading_numbering(ctx.package) {
-        doc.preamble
-            .push(Stmt::Verbatim(eco_format!("#set heading(numbering: \"{numbering}\")")));
+        doc.preamble.push(Stmt::Verbatim(eco_format!(
+            "#set heading(numbering: \"{numbering}\")"
+        )));
     }
 
     doc.body = lower_items(&first.items, ctx);
@@ -268,7 +274,11 @@ pub(crate) fn lower(ctx: &mut LowerCtx) -> TypstDoc {
         }
 
         let body = lower_items(&section.items, ctx);
-        doc.body.push(Block::Section(tdoc::Section { setup: setup.clone(), start, body }));
+        doc.body.push(Block::Section(tdoc::Section {
+            setup: setup.clone(),
+            start,
+            body,
+        }));
         previous = setup;
     }
 
@@ -309,7 +319,10 @@ fn numbered_endnote(number: usize, mut body: Vec<Block>) -> Vec<Block> {
         // Fold the number into the note's own opening paragraph, so it reads
         // as one block rather than a stray number on a line of its own.
         Some(Block::Paragraph { body: inlines, .. }) => inlines.insert(0, marker),
-        _ => body.insert(0, Block::Paragraph { style: ParStyle::default(), body: vec![marker] }),
+        _ => body.insert(
+            0,
+            Block::Paragraph { style: ParStyle::default(), body: vec![marker] },
+        ),
     }
     body
 }
@@ -346,7 +359,9 @@ pub(crate) fn lower_items(items: &[BodyItem], ctx: &mut LowerCtx) -> Vec<Block> 
 
                 if let Some(block) = anchored {
                     if let Some(pending) = pending_list.take() {
-                        blocks.push(pending.finish(&ctx.package.numbering, &mut *ctx.report));
+                        blocks.push(
+                            pending.finish(&ctx.package.numbering, &mut *ctx.report),
+                        );
                     }
                     blocks.push(block);
                 }
@@ -363,10 +378,10 @@ pub(crate) fn lower_items(items: &[BodyItem], ctx: &mut LowerCtx) -> Vec<Block> 
                         // bullet — and silently lost the roman numerals.
                         let continues =
                             pending_list.as_ref().is_some_and(|p| p.num_id == num_id);
-                        if !continues
-                            && let Some(pending) = pending_list.take()
-                        {
-                            blocks.push(pending.finish(&ctx.package.numbering, &mut *ctx.report));
+                        if !continues && let Some(pending) = pending_list.take() {
+                            blocks.push(
+                                pending.finish(&ctx.package.numbering, &mut *ctx.report),
+                            );
                         }
                         match pending_list.as_mut() {
                             Some(pending) => pending.push(item),
@@ -375,7 +390,9 @@ pub(crate) fn lower_items(items: &[BodyItem], ctx: &mut LowerCtx) -> Vec<Block> 
                     }
                     other => {
                         if let Some(pending) = pending_list.take() {
-                            blocks.push(pending.finish(&ctx.package.numbering, &mut *ctx.report));
+                            blocks.push(
+                                pending.finish(&ctx.package.numbering, &mut *ctx.report),
+                            );
                         }
                         push_para_kind(&mut blocks, other);
                     }
@@ -412,8 +429,12 @@ struct PendingList {
 impl PendingList {
     fn new(item: ListItem, num_id: Option<i64>) -> Self {
         let deepest = item.level;
-        let list =
-            List { items: vec![item], numbering: None, start: None, markers: Vec::new() };
+        let list = List {
+            items: vec![item],
+            numbering: None,
+            start: None,
+            markers: Vec::new(),
+        };
         PendingList { list, num_id, deepest }
     }
 
@@ -541,7 +562,9 @@ fn push_para_kind(blocks: &mut Vec<Block>, kind: ParaKind) {
         ParaKind::Break(kind) => blocks.push(Block::Break(kind)),
         ParaKind::Rule => blocks.push(Block::Rule),
         ParaKind::Heading { level, body } => blocks.push(Block::Heading { level, body }),
-        ParaKind::Paragraph { style, body } => blocks.push(Block::Paragraph { style, body }),
+        ParaKind::Paragraph { style, body } => {
+            blocks.push(Block::Paragraph { style, body })
+        }
         ParaKind::Equation { body } => blocks.push(Block::Equation { body }),
         ParaKind::Empty => {}
         ParaKind::ListItem { .. } => unreachable!("list items are handled by the caller"),
@@ -557,7 +580,8 @@ fn push_para_kind(blocks: &mut Vec<Block>, kind: ParaKind) {
 /// Typst, so it's reported as a drop rather than vanishing quietly.
 fn document_info(meta: &DocumentMeta, report: &mut ImportReport) -> DocumentInfo {
     if meta.description.is_some() {
-        report.drop("document description", "Typst's `document` has no description field");
+        report
+            .drop("document description", "Typst's `document` has no description field");
     }
     DocumentInfo {
         title: meta.title.clone(),
@@ -588,8 +612,11 @@ fn parse_w3cdtf_date(value: &str) -> Option<Date> {
     let day: u32 = parts.next()?.parse().ok()?;
     // Typst's `datetime` rejects an out-of-range component outright, which
     // would fail the whole compile over a cosmetic field.
-    ((1..=12).contains(&month) && (1..=31).contains(&day))
-        .then_some(Date { year, month, day })
+    ((1..=12).contains(&month) && (1..=31).contains(&day)).then_some(Date {
+        year,
+        month,
+        day,
+    })
 }
 
 /// The document's heading numbering, as a Typst `#set heading(numbering: ..)`
@@ -672,19 +699,24 @@ mod tests {
     use super::*;
     use crate::tdoc::Inline;
     use crate::wml::model::{
-        Body, LevelFormat, NumRef, Numbering, ParaProps, Paragraph, Run, RunContent, RunItem,
-        RunProps, Section, SectPr, Style, StyleKind, Styles,
+        Body, LevelFormat, NumRef, Numbering, ParaProps, Paragraph, Run, RunContent,
+        RunItem, RunProps, SectPr, Section, Style, StyleKind, Styles,
     };
 
     fn text_run(text: &str) -> RunItem {
-        RunItem::Run(Run { props: RunProps::default(), content: vec![RunContent::Text(text.into())] })
+        RunItem::Run(Run {
+            props: RunProps::default(),
+            content: vec![RunContent::Text(text.into())],
+        })
     }
 
     /// A single-section `Body` with default page properties — the shape every
     /// test in this module wants, since none of them are testing sectioning
     /// itself (that's `wml::parse`'s own test module).
     fn single_section(items: Vec<BodyItem>) -> Body {
-        Body { sections: vec![Section { items, props: SectPr::default() }] }
+        Body {
+            sections: vec![Section { items, props: SectPr::default() }],
+        }
     }
 
     #[test]
@@ -705,7 +737,10 @@ mod tests {
         );
         let package = WmlPackage {
             body: single_section(vec![BodyItem::Paragraph(Paragraph {
-                props: ParaProps { style_id: Some("Heading1".into()), ..Default::default() },
+                props: ParaProps {
+                    style_id: Some("Heading1".into()),
+                    ..Default::default()
+                },
                 runs: vec![text_run("Title")],
             })]),
             styles: Styles { by_id, ..Default::default() },
@@ -732,13 +767,23 @@ mod tests {
         let mut instances = FxHashMap::default();
         instances.insert(1, 100);
         let mut level_fmt = FxHashMap::default();
-        level_fmt.insert(0, LevelFormat { num_fmt: "bullet".into(), start: None, lvl_text: None });
+        level_fmt.insert(
+            0,
+            LevelFormat {
+                num_fmt: "bullet".into(),
+                start: None,
+                lvl_text: None,
+            },
+        );
         let mut abstract_nums = FxHashMap::default();
         abstract_nums.insert(100, level_fmt);
 
         let para = |text: &str| {
             BodyItem::Paragraph(Paragraph {
-                props: ParaProps { num: Some(NumRef { num_id: 1, ilvl: 0 }), ..Default::default() },
+                props: ParaProps {
+                    num: Some(NumRef { num_id: 1, ilvl: 0 }),
+                    ..Default::default()
+                },
                 runs: vec![text_run(text)],
             })
         };
@@ -759,8 +804,12 @@ mod tests {
             Block::List(list) => {
                 assert_eq!(list.items.len(), 2);
                 assert!(!list.items[0].ordered);
-                assert!(matches!(&list.items[0].body[..], [Inline::Text(t)] if t == "Item 1"));
-                assert!(matches!(&list.items[1].body[..], [Inline::Text(t)] if t == "Item 2"));
+                assert!(
+                    matches!(&list.items[0].body[..], [Inline::Text(t)] if t == "Item 1")
+                );
+                assert!(
+                    matches!(&list.items[1].body[..], [Inline::Text(t)] if t == "Item 2")
+                );
             }
             other => panic!("expected a list, got {other:?}"),
         }
@@ -769,7 +818,11 @@ mod tests {
     #[test]
     fn direct_bold_color_run_becomes_styled_inline() {
         let run = RunItem::Run(Run {
-            props: RunProps { bold: Some(true), color: Some("FF0000".into()), ..Default::default() },
+            props: RunProps {
+                bold: Some(true),
+                color: Some("FF0000".into()),
+                ..Default::default()
+            },
             content: vec![RunContent::Text("Hi".into())],
         });
         let package = WmlPackage {
@@ -886,7 +939,10 @@ mod tests {
         let package = WmlPackage {
             body: Body {
                 sections: vec![
-                    Section { items: vec![para_item("first")], props: SectPr::default() },
+                    Section {
+                        items: vec![para_item("first")],
+                        props: SectPr::default(),
+                    },
                     Section {
                         items: vec![para_item("second")],
                         props: SectPr {
@@ -905,11 +961,18 @@ mod tests {
         let mut ctx = LowerCtx::new(&package, &options, &mut report);
         lower(&mut ctx);
 
-        assert!(report.notes.iter().all(|n| n.what != "continuous section"), "{:?}", report.notes);
+        assert!(
+            report.notes.iter().all(|n| n.what != "continuous section"),
+            "{:?}",
+            report.notes
+        );
     }
 
     fn para_item(text: &str) -> BodyItem {
-        BodyItem::Paragraph(Paragraph { props: ParaProps::default(), runs: vec![text_run(text)] })
+        BodyItem::Paragraph(Paragraph {
+            props: ParaProps::default(),
+            runs: vec![text_run(text)],
+        })
     }
 
     // The five tests below moved here from `report.rs` — they exercise
@@ -1009,7 +1072,10 @@ mod tests {
     fn a_description_is_reported_as_dropped() {
         let mut report = ImportReport::default();
         let info = document_info(
-            &DocumentMeta { description: Some("A test.".into()), ..Default::default() },
+            &DocumentMeta {
+                description: Some("A test.".into()),
+                ..Default::default()
+            },
             &mut report,
         );
 
@@ -1024,7 +1090,14 @@ mod tests {
         instances.insert(1, 100);
         let mut levels = FxHashMap::default();
         for (ilvl, fmt) in formats.iter().enumerate() {
-            levels.insert(ilvl as i64, LevelFormat { num_fmt: (*fmt).into(), start: None, lvl_text: None });
+            levels.insert(
+                ilvl as i64,
+                LevelFormat {
+                    num_fmt: (*fmt).into(),
+                    start: None,
+                    lvl_text: None,
+                },
+            );
         }
         let mut abstract_nums = FxHashMap::default();
         abstract_nums.insert(100, levels);
@@ -1066,7 +1139,13 @@ mod tests {
     #[test]
     fn a_start_override_beats_the_shared_definition() {
         let mut numbering = numbering_with(&["decimal"]);
-        numbering.abstract_nums.get_mut(&100).unwrap().get_mut(&0).unwrap().start = Some(1);
+        numbering
+            .abstract_nums
+            .get_mut(&100)
+            .unwrap()
+            .get_mut(&0)
+            .unwrap()
+            .start = Some(1);
         numbering.start_overrides.insert((1, 0), 7);
         assert_eq!(numbering.start(1, 0), Some(7));
         // An instance with no override still sees the shared start.

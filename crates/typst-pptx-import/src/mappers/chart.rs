@@ -33,7 +33,8 @@ pub fn lower(part: &str, ctx: &mut LowerCtx<'_, '_>) -> Option<tdoc::Block> {
 
     for ser in doc.descendants().filter(|n| is_el(*n, "ser")) {
         // The series name lives in `c:tx`, itself a cached string reference.
-        let name = child(ser, "tx").and_then(|tx| cache_values(tx).into_iter().next().flatten());
+        let name =
+            child(ser, "tx").and_then(|tx| cache_values(tx).into_iter().next().flatten());
 
         // Categories are shared across series; the first series that states
         // them wins, and later ones only matter if it stated none.
@@ -73,15 +74,15 @@ pub fn lower(part: &str, ctx: &mut LowerCtx<'_, '_>) -> Option<tdoc::Block> {
     let columns = header.len();
     rows.push(tdoc::Row { height: None, cells: header });
 
-    let count = categories.len().max(series.iter().map(|s| s.values.len()).max().unwrap_or(0));
+    let count = categories
+        .len()
+        .max(series.iter().map(|s| s.values.len()).max().unwrap_or(0));
     for index in 0..count {
         let mut cells = vec![cell(
             categories.get(index).cloned().unwrap_or_else(|| EcoString::from("")),
         )];
         for s in &series {
-            cells.push(cell(
-                s.values.get(index).cloned().flatten().unwrap_or_default(),
-            ));
+            cells.push(cell(s.values.get(index).cloned().flatten().unwrap_or_default()));
         }
         rows.push(tdoc::Row { height: None, cells });
     }

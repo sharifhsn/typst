@@ -62,7 +62,10 @@ impl TypstDoc {
 /// (for the preamble's initial page setup) and, per-section, by every tier-2
 /// pass's own `Block::Section` handling (for a later section's own page
 /// setup) — both hang furniture off a [`PageSetup`] the exact same way.
-pub(crate) fn push_furniture_trees<'a>(page: &'a mut PageSetup, trees: &mut Vec<&'a mut Vec<Block>>) {
+pub(crate) fn push_furniture_trees<'a>(
+    page: &'a mut PageSetup,
+    trees: &mut Vec<&'a mut Vec<Block>>,
+) {
     // Disjoint fields, so both may be borrowed mutably at once.
     let furniture = [page.header.as_mut(), page.footer.as_mut()];
     for furniture in furniture.into_iter().flatten() {
@@ -121,9 +124,15 @@ pub struct Date {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
     /// `= Heading` (level 1..=6 → one to six `=`).
-    Heading { level: u8, body: Inlines },
+    Heading {
+        level: u8,
+        body: Inlines,
+    },
     /// An ordinary markup paragraph.
-    Paragraph { style: ParStyle, body: Inlines },
+    Paragraph {
+        style: ParStyle,
+        body: Inlines,
+    },
     /// A bullet/numbered list (possibly nested via item `level`).
     List(List),
     Table(Table),
@@ -134,9 +143,14 @@ pub enum Block {
     /// under [`crate::opts::ChartStyle::Plot`]. See [`Chart`].
     Chart(Chart),
     /// A fenced code block (` ```lang … ``` `).
-    CodeBlock { lang: Option<EcoString>, text: EcoString },
+    CodeBlock {
+        lang: Option<EcoString>,
+        text: EcoString,
+    },
     /// A block equation — Typst math source (or an OMML fallback string).
-    Equation { body: EcoString },
+    Equation {
+        body: EcoString,
+    },
     /// A horizontal rule (`#line(length: 100%)`).
     Rule,
     Break(BreakKind),
@@ -188,15 +202,24 @@ pub enum Inline {
     /// Inline raw/code span (`` `…` ``).
     Raw(EcoString),
     /// `#link("dest")[body]` — an external target.
-    Link { dest: EcoString, body: Inlines },
+    Link {
+        dest: EcoString,
+        body: Inlines,
+    },
     /// `#link(<label>)[body]` — a jump to a bookmark elsewhere in the
     /// document. Distinct from [`Self::Link`] because Typst takes a label as a
     /// bare `<..>` term, not a quoted string, so the two can't share one
     /// destination field without smuggling markup through it.
-    LabelLink { label: EcoString, body: Inlines },
+    LabelLink {
+        label: EcoString,
+        body: Inlines,
+    },
     /// Direct character formatting the semantic wrappers don't capture
     /// (font/size/color/underline/…): `#text(..)[body]`.
-    Styled { style: TextStyle, body: Inlines },
+    Styled {
+        style: TextStyle,
+        body: Inlines,
+    },
     /// Inline equation source (`$…$`).
     Math(EcoString),
     /// A live page number for a bookmark (`PAGEREF`). Structured rather than
@@ -215,7 +238,10 @@ pub enum Inline {
     /// `#ruby[base][gloss]` — a phonetic guide (furigana). Typst has no ruby
     /// primitive, so the emitter defines a `ruby` helper in the preamble when
     /// a document uses one.
-    Ruby { base: Inlines, gloss: Inlines },
+    Ruby {
+        base: Inlines,
+        gloss: Inlines,
+    },
     /// `#footnote[…]` — the note's content inlined at the reference site,
     /// which is how Typst models footnotes (there is no separate note store).
     Footnote(Vec<Block>),
@@ -233,7 +259,10 @@ pub enum Inline {
     /// [`Self::Verbatim`], which the VML shape mapper still uses. It is a
     /// variant of its own only because `body` cannot ride inside a string:
     /// those are real blocks, and the passes have to reach them.
-    Shape { call: EcoString, body: Vec<Block> },
+    Shape {
+        call: EcoString,
+        body: Vec<Block>,
+    },
     /// Raw Typst source, emitted verbatim (escape hatch).
     Verbatim(EcoString),
 }
@@ -529,7 +558,10 @@ impl BoxStroke {
 pub enum Border {
     /// Word explicitly draws no border here (`w:val="nil"`).
     None,
-    Line { thickness_pt: f64, color: Option<[u8; 3]> },
+    Line {
+        thickness_pt: f64,
+        color: Option<[u8; 3]>,
+    },
 }
 
 /// Four per-side lengths in points — Typst's `inset:`/`pad`-style dictionary.
@@ -755,8 +787,16 @@ mod tests {
 
     #[test]
     fn a_pure_column_change_still_matches() {
-        let a = PageSetup { width_pt: Some(400.0), columns: Some(2), ..Default::default() };
-        let b = PageSetup { width_pt: Some(400.0), columns: Some(3), ..Default::default() };
+        let a = PageSetup {
+            width_pt: Some(400.0),
+            columns: Some(2),
+            ..Default::default()
+        };
+        let b = PageSetup {
+            width_pt: Some(400.0),
+            columns: Some(3),
+            ..Default::default()
+        };
         assert!(a.matches_except_columns(&b));
     }
 
@@ -769,8 +809,14 @@ mod tests {
 
     #[test]
     fn a_page_numbering_format_change_does_not_match() {
-        let a = PageSetup { page_num_fmt: Some("decimal".into()), ..Default::default() };
-        let b = PageSetup { page_num_fmt: Some("lowerRoman".into()), ..Default::default() };
+        let a = PageSetup {
+            page_num_fmt: Some("decimal".into()),
+            ..Default::default()
+        };
+        let b = PageSetup {
+            page_num_fmt: Some("lowerRoman".into()),
+            ..Default::default()
+        };
         assert!(!a.matches_except_columns(&b));
     }
 

@@ -28,13 +28,13 @@ use typst_library::layout::{
     AlignElem, BoxElem, HElem, InlineElem, PageElem, PagebreakElem, VElem,
 };
 use typst_library::math::{EquationElem, Mathy};
-use typst_library::visualize::ImageElem;
 use typst_library::model::{
     CiteElem, CiteGroup, DocumentElem, EnumElem, FootnoteElem, LinkElem, ListElem,
     ListItemLike, ListLike, ParElem, ParbreakElem, RefElem, TermsElem,
 };
 use typst_library::routines::{Arenas, FragmentKind, Pair, RealizationKind};
 use typst_library::text::{LinebreakElem, RawElem, SmartQuoteElem, SpaceElem, TextElem};
+use typst_library::visualize::ImageElem;
 use typst_syntax::Span;
 use typst_utils::{ListSet, SliceExt, SmallBitSet};
 

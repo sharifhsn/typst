@@ -36,8 +36,8 @@ use typst_syntax::{FileId, Span};
 use crate::dom::{
     Block, BookmarkTable, BreakKind, Comment, Field, FieldCacheStatus, FieldDisplay,
     FieldMode, Footnote, HeadingStyleSample, Jc, ListLevel, ListSpec, NumberingTable,
-    ParaProps, ReviewCandidateKind, ReviewJoinId, ReviewOrigin, Run, RunProps,
-    TocFigure, TocHeading, Underline, VertAlign,
+    ParaProps, ReviewCandidateKind, ReviewJoinId, ReviewOrigin, Run, RunProps, TocFigure,
+    TocHeading, Underline, VertAlign,
 };
 use crate::fallback::CachedOverlay;
 use crate::mappers;
@@ -2497,9 +2497,11 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                             _ => None,
                         };
                         let height_base = match elem.height.get(styles) {
-                            Smart::Custom(r) => {
-                                mappers::shape::resolve_axis(r, styles, self.shape_height_base)
-                            }
+                            Smart::Custom(r) => mappers::shape::resolve_axis(
+                                r,
+                                styles,
+                                self.shape_height_base,
+                            ),
                             Smart::Auto => None,
                         };
                         let width_dxa = width_base.map(props::abs_to_twip);
@@ -2838,7 +2840,10 @@ fn unwrap_sole_image(
     if let Some(seq) = body.to_packed::<SequenceElem>() {
         let mut only = None;
         for child in &seq.children {
-            if child.is::<SpaceElem>() || child.is::<ParbreakElem>() || child.is::<TagElem>() {
+            if child.is::<SpaceElem>()
+                || child.is::<ParbreakElem>()
+                || child.is::<TagElem>()
+            {
                 continue;
             }
             if only.is_some() {

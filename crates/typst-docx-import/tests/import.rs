@@ -5,7 +5,7 @@
 //! `*`/`_`, and lists as `-`/`+`.
 
 use typst_docx_import::{
-    import_docx, import_docx_with, ChartStyle, ImportOptions, Tier, TrackedChanges,
+    ChartStyle, ImportOptions, Tier, TrackedChanges, import_docx, import_docx_with,
 };
 use typst_ooxml_core::opc::{Package, PackageOptions, RelMode, Rels};
 
@@ -377,7 +377,10 @@ fn empty_placeholder_header_produces_no_header_argument() {
         None,
     );
     let src = import_docx(&docx).expect("import should succeed").source;
-    assert!(!src.contains("header:"), "empty placeholder header should be dropped:\n{src}");
+    assert!(
+        !src.contains("header:"),
+        "empty placeholder header should be dropped:\n{src}"
+    );
 }
 
 /// The collision case: the document's own `rId1` means one thing
@@ -589,7 +592,10 @@ fn footnote_reference_lowers_to_a_footnote_call_containing_the_note_text() {
     let docx = build_docx_with_notes(doc_body, Some(&footnotes_xml), None);
 
     let src = import_docx(&docx).expect("import should succeed").source;
-    assert!(src.contains("#footnote[snoska]"), "note text not inlined as a footnote:\n{src}");
+    assert!(
+        src.contains("#footnote[snoska]"),
+        "note text not inlined as a footnote:\n{src}"
+    );
     assert!(src.contains("See this."), "surrounding text lost:\n{src}");
 }
 
@@ -616,7 +622,10 @@ fn boilerplate_separator_notes_never_appear_in_output() {
         !src.contains("CONTINUATION_MARKER"),
         "continuation-separator boilerplate leaked:\n{src}"
     );
-    assert!(src.contains("snoska"), "the real note was lost along with the boilerplate:\n{src}");
+    assert!(
+        src.contains("snoska"),
+        "the real note was lost along with the boilerplate:\n{src}"
+    );
 }
 
 /// A reference whose id has nothing to resolve against (missing part, or an
@@ -633,13 +642,18 @@ fn dangling_footnote_reference_degrades_gracefully() {
     let footnotes_xml = note_xml("footnotes", "footnote", "1", "unrelated note");
     let docx = build_docx_with_notes(doc_body, Some(&footnotes_xml), None);
 
-    let result = import_docx(&docx).expect("import should succeed despite the dangling ref");
+    let result =
+        import_docx(&docx).expect("import should succeed despite the dangling ref");
     assert!(
         !result.source.contains("#footnote["),
         "a dangling ref must not fabricate a footnote:\n{}",
         result.source
     );
-    assert!(result.source.contains("Body text."), "surrounding text lost:\n{}", result.source);
+    assert!(
+        result.source.contains("Body text."),
+        "surrounding text lost:\n{}",
+        result.source
+    );
     assert!(
         result.report.notes.iter().any(|n| n.what == "footnote"),
         "expected a report note about the dangling footnote:\n{:?}",
@@ -668,7 +682,11 @@ fn self_referential_footnote_does_not_hang_the_importer() {
 
     // Reaching this line at all demonstrates termination.
     let result = import_docx(&docx).expect("import should succeed, not hang or crash");
-    assert!(result.source.contains("Body text."), "surrounding text lost:\n{}", result.source);
+    assert!(
+        result.source.contains("Body text."),
+        "surrounding text lost:\n{}",
+        result.source
+    );
     assert!(
         result.source.contains("self-ref:"),
         "the note's own (non-cyclic) text was lost:\n{}",
@@ -710,7 +728,8 @@ fn endnote_is_marked_in_place_and_collected_at_the_document_end() {
         result.source
     );
     let is_endnote_approximation = |n: &typst_docx_import::report::Note| {
-        n.what == "endnote" && n.severity == typst_docx_import::report::Severity::Approximate
+        n.what == "endnote"
+            && n.severity == typst_docx_import::report::Severity::Approximate
     };
     assert!(
         result.report.notes.iter().any(is_endnote_approximation),
@@ -773,7 +792,10 @@ fn mc_alternate_content_text_box_is_not_duplicated() {
         1,
         "the choice text must appear exactly once:\n{src}"
     );
-    assert!(!src.contains("FALLBACK TEXT"), "the fallback text must not appear at all:\n{src}");
+    assert!(
+        !src.contains("FALLBACK TEXT"),
+        "the fallback text must not appear at all:\n{src}"
+    );
     assert!(src.contains("#box["), "expected a text box:\n{src}");
 }
 
@@ -859,13 +881,22 @@ fn vml_imagedata_picture_is_imported_and_extracted_as_an_asset() {
     assert_eq!(image_rid, "rId1");
 
     package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
-    package.add_media("word/media/picture.png", "png", "image/png", vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    package.add_media(
+        "word/media/picture.png",
+        "png",
+        "image/png",
+        vec![0xDE, 0xAD, 0xBE, 0xEF],
+    );
     package.add_relationships("word/document.xml", &rels).unwrap();
     let docx = package.finish(&Rels::new()).unwrap();
 
     let result = import_docx(&docx).expect("import should succeed");
     assert!(result.source.contains("#image("), "missing image call:\n{}", result.source);
-    assert!(result.source.contains("picture.png"), "wrong asset name:\n{}", result.source);
+    assert!(
+        result.source.contains("picture.png"),
+        "wrong asset name:\n{}",
+        result.source
+    );
     assert!(result.source.contains("width: 54pt"), "missing size:\n{}", result.source);
 
     let (_, bytes) = result
@@ -887,7 +918,11 @@ fn vml_textpath_wordart_becomes_plain_text_with_a_note() {
     let docx = docx_with_body(doc_body);
 
     let result = import_docx(&docx).expect("import should succeed");
-    assert!(result.source.contains("My Text Here"), "missing WordArt text:\n{}", result.source);
+    assert!(
+        result.source.contains("My Text Here"),
+        "missing WordArt text:\n{}",
+        result.source
+    );
     assert!(
         result.report.notes.iter().any(|n| n.what == "WordArt"),
         "expected a WordArt approximation note: {:?}",
@@ -958,7 +993,11 @@ fn vml_shape_with_custom_geometry_and_no_text_box_is_dropped_with_a_note() {
         result.source
     );
     assert!(
-        result.report.notes.iter().any(|n| n.what == "VML shape" && n.detail.contains("geometry")),
+        result
+            .report
+            .notes
+            .iter()
+            .any(|n| n.what == "VML shape" && n.detail.contains("geometry")),
         "expected a dropped-geometry note: {:?}",
         result.report.notes
     );
@@ -998,7 +1037,10 @@ fn omml_equation_lowers_to_real_typst_math_inline() {
         "expected real Typst math (sSup/rad/f folded to plain letters), not the old \
          linearized fallback:\n{src}"
     );
-    assert!(src.contains("The result is"), "surrounding paragraph text must survive:\n{src}");
+    assert!(
+        src.contains("The result is"),
+        "surrounding paragraph text must survive:\n{src}"
+    );
 }
 
 // --- Charts (c:chart / ChartEx) -----------------------------------------------
@@ -1087,13 +1129,23 @@ fn chart_lowers_to_a_captioned_data_table() {
     let result = import_docx(&docx).expect("import should succeed");
     let src = &result.source;
     assert!(src.contains("#figure(table("), "expected a captioned table:\n{src}");
-    assert!(src.contains("caption: [my chart looks nice]"), "missing/wrong caption:\n{src}");
+    assert!(
+        src.contains("caption: [my chart looks nice]"),
+        "missing/wrong caption:\n{src}"
+    );
     assert!(src.contains("table.header([], [Series 1])"), "missing header row:\n{src}");
-    assert!(src.contains("[Category 1]") && src.contains("[4.3]"), "missing data:\n{src}");
-    assert!(src.contains("[Category 2]") && src.contains("[2.5]"), "missing data:\n{src}");
+    assert!(
+        src.contains("[Category 1]") && src.contains("[4.3]"),
+        "missing data:\n{src}"
+    );
+    assert!(
+        src.contains("[Category 2]") && src.contains("[2.5]"),
+        "missing data:\n{src}"
+    );
 
     let is_chart_approximation = |n: &typst_docx_import::report::Note| {
-        n.what == "chart" && n.severity == typst_docx_import::report::Severity::Approximate
+        n.what == "chart"
+            && n.severity == typst_docx_import::report::Severity::Approximate
     };
     assert!(
         result.report.notes.iter().any(is_chart_approximation),
@@ -1112,7 +1164,8 @@ fn chart_lowers_to_a_captioned_data_table() {
 fn dangling_chart_reference_degrades_gracefully() {
     let docx = docx_with_chart("", Some("charts/colors1.xml"));
 
-    let result = import_docx(&docx).expect("import should succeed despite the dangling ref");
+    let result =
+        import_docx(&docx).expect("import should succeed despite the dangling ref");
     assert!(
         !result.source.contains("table("),
         "a dangling chart ref must not fabricate a table:\n{}",
@@ -1236,7 +1289,10 @@ fn three_series_bar_chart_xml() -> &'static str {
 }
 
 fn plot_options() -> ImportOptions {
-    ImportOptions { charts: typst_docx_import::ChartStyle::Plot, ..Default::default() }
+    ImportOptions {
+        charts: typst_docx_import::ChartStyle::Plot,
+        ..Default::default()
+    }
 }
 
 /// The default options (`ChartStyle::Table`) must produce exactly the same
@@ -1258,13 +1314,15 @@ fn default_chart_style_stays_a_table_and_never_imports_lilaq() {
 /// exactly once even with *two* charts in the document.
 #[test]
 fn bar_chart_under_chart_style_plot_produces_grouped_lq_bar_calls_and_one_import() {
-    let docx = docx_with_two_charts(three_series_bar_chart_xml(), three_series_bar_chart_xml());
-    let result =
-        import_docx_with(&docx, &plot_options()).expect("import should succeed");
+    let docx =
+        docx_with_two_charts(three_series_bar_chart_xml(), three_series_bar_chart_xml());
+    let result = import_docx_with(&docx, &plot_options()).expect("import should succeed");
     let src = &result.source;
 
     assert!(
-        src.contains("lq.bar((-0.25, 0.75, 1.75), (4.3, 2.5, 3.5), width: 0.25, label: [S1])"),
+        src.contains(
+            "lq.bar((-0.25, 0.75, 1.75), (4.3, 2.5, 3.5), width: 0.25, label: [S1])"
+        ),
         "{src}"
     );
     assert!(
@@ -1294,8 +1352,7 @@ fn line_chart_under_chart_style_plot_produces_lq_plot() {
       </c:numCache></c:numRef></c:val>
     </c:ser></c:lineChart></c:plotArea></c:chart>"#;
     let docx = docx_with_chart(chart_inner, None);
-    let result =
-        import_docx_with(&docx, &plot_options()).expect("import should succeed");
+    let result = import_docx_with(&docx, &plot_options()).expect("import should succeed");
     assert!(
         result.source.contains("lq.plot((0, 1), (1, 2), label: [Temp])"),
         "{}",
@@ -1315,8 +1372,7 @@ fn pie_chart_under_chart_style_plot_still_falls_back_to_table_with_a_note() {
       </c:numCache></c:numRef></c:val>
     </c:ser></c:pieChart></c:plotArea></c:chart>"#;
     let docx = docx_with_chart(chart_inner, None);
-    let result =
-        import_docx_with(&docx, &plot_options()).expect("import should succeed");
+    let result = import_docx_with(&docx, &plot_options()).expect("import should succeed");
     assert!(result.source.contains("#table("), "{}", result.source);
     assert!(!result.source.contains("lilaq"), "{}", result.source);
     assert!(
@@ -1341,12 +1397,15 @@ fn non_numeric_chart_values_fall_back_to_table_with_a_note_under_plot_mode() {
       </c:numCache></c:numRef></c:val>
     </c:ser></c:barChart></c:plotArea></c:chart>"#;
     let docx = docx_with_chart(chart_inner, None);
-    let result =
-        import_docx_with(&docx, &plot_options()).expect("import should succeed");
+    let result = import_docx_with(&docx, &plot_options()).expect("import should succeed");
     assert!(result.source.contains("#table("), "{}", result.source);
     assert!(!result.source.contains("lilaq"), "{}", result.source);
     assert!(
-        result.report.notes.iter().any(|n| n.what == "chart" && n.detail.contains("not numeric")),
+        result
+            .report
+            .notes
+            .iter()
+            .any(|n| n.what == "chart" && n.detail.contains("not numeric")),
         "expected a reason naming the non-numeric values: {:?}",
         result.report.notes
     );
@@ -1364,8 +1423,7 @@ fn no_lilaq_import_when_every_chart_falls_back_under_plot_mode() {
       </c:numCache></c:numRef></c:val>
     </c:ser></c:pieChart></c:plotArea></c:chart>"#;
     let docx = docx_with_chart(chart_inner, None);
-    let result =
-        import_docx_with(&docx, &plot_options()).expect("import should succeed");
+    let result = import_docx_with(&docx, &plot_options()).expect("import should succeed");
     assert!(!result.source.contains("#import"), "{}", result.source);
     assert!(!result.source.contains("lilaq"), "{}", result.source);
 }
@@ -1462,7 +1520,10 @@ fn ruby_annotations_survive_with_a_generated_helper() {
   <w:p><w:r><w:t>plain</w:t></w:r></w:p>
 </w:body></w:document>"#,
     );
-    assert!(!plain.contains("#let ruby("), "helper emitted for a doc without ruby:\n{plain}");
+    assert!(
+        !plain.contains("#let ruby("),
+        "helper emitted for a doc without ruby:\n{plain}"
+    );
 }
 
 /// Word anchors a picture or chart *on* a paragraph, and that paragraph can
@@ -1587,12 +1648,17 @@ fn tracked_changes_render_accepted_and_keep_their_record() {
         src.contains("kind: \"deletion\", author: \"a\", body: [DeletedText"),
         "deleted text not carried in the record:\n{src}"
     );
-    let loose = src.replace("body: [DeletedText ]", "").replace("body: [MovedOut]", "");
+    let loose = src
+        .replace("body: [DeletedText ]", "")
+        .replace("body: [MovedOut]", "");
     assert!(!loose.contains("DeletedText"), "w:del content leaked into the text:\n{src}");
     assert!(!loose.contains("MovedOut"), "w:moveFrom leaked into the text:\n{src}");
 
     // `Accept` throws the record away and leaves the same visible text.
-    let opts = ImportOptions { tracked: TrackedChanges::Accept, ..Default::default() };
+    let opts = ImportOptions {
+        tracked: TrackedChanges::Accept,
+        ..Default::default()
+    };
     let accepted = import_docx_with(&bytes, &opts).expect("import should succeed").source;
     assert!(accepted.contains("Kept") && accepted.contains("InsertedText"));
     assert!(!accepted.contains("DeletedText"), "accept kept a deletion:\n{accepted}");
@@ -1681,7 +1747,8 @@ fn parenthetical_after_a_styled_run_does_not_become_a_trailing_argument_list() {
     <w:r><w:t>(Easterly &amp; Kraay, 2000)</w:t></w:r>
   </w:p>
 </w:body></w:document>"#;
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     package.add_xml("word/document.xml", "application/xml", doc.into());
     package.add_relationships("word/document.xml", &Rels::new()).unwrap();
     let bytes = package.finish(&Rels::new()).unwrap();
@@ -1704,7 +1771,8 @@ fn page_break_inside_a_table_cell_is_dropped_and_the_rest_of_the_table_survives(
     <w:tr><w:tc><w:p><w:r><w:t>still here</w:t></w:r></w:p></w:tc></w:tr>
   </w:tbl>
 </w:body></w:document>"#;
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     package.add_xml("word/document.xml", "application/xml", doc.into());
     package.add_relationships("word/document.xml", &Rels::new()).unwrap();
     let bytes = package.finish(&Rels::new()).unwrap();
@@ -1739,7 +1807,8 @@ fn toc_field_inside_a_heading_falls_back_to_cached_text() {
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>
 </w:styles>"#;
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     package.add_xml("word/document.xml", "application/xml", doc.into());
     package.add_xml("word/styles.xml", "application/xml", styles.into());
     package.add_relationships("word/document.xml", &Rels::new()).unwrap();
@@ -1748,7 +1817,11 @@ fn toc_field_inside_a_heading_falls_back_to_cached_text() {
     let result = import_docx(&bytes).expect("import should succeed");
     assert!(!result.source.contains("#outline()"), "{}", result.source);
     assert!(result.source.contains("= Stale Contents"), "{}", result.source);
-    assert!(result.report.notes.iter().any(|n| n.what == "field TOC"), "{:?}", result.report.notes);
+    assert!(
+        result.report.notes.iter().any(|n| n.what == "field TOC"),
+        "{:?}",
+        result.report.notes
+    );
 }
 
 /// Fix: `word/media/image1.jpeg` that actually begins `\x89PNG` — a real
@@ -1770,7 +1843,8 @@ fn an_image_with_a_lying_extension_is_sniffed_and_renamed() {
   </a:graphicData></a:graphic>
 </wp:inline></w:drawing></w:r></w:p></w:body>
 </w:document>"#;
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     let mut rels = Rels::new();
     let image_rid = rels.add(
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
@@ -1789,8 +1863,10 @@ fn an_image_with_a_lying_extension_is_sniffed_and_renamed() {
     let result = import_docx(&bytes).expect("import should succeed");
     assert!(result.source.contains("image1.png"), "{}", result.source);
     assert!(!result.source.contains("image1.jpeg"), "{}", result.source);
-    let (path, asset_bytes) =
-        result.assets.first().expect("expected the sniffed PNG to be extracted as an asset");
+    let (path, asset_bytes) = result
+        .assets
+        .first()
+        .expect("expected the sniffed PNG to be extracted as an asset");
     assert_eq!(path.to_str().unwrap(), "assets/image1.png");
     assert_eq!(asset_bytes, &png_bytes);
 }
@@ -1828,9 +1904,11 @@ fn malformed_equation_and_duplicate_attribute_degrade_instead_of_aborting_the_im
     for doc in [equation_doc, duplicate_attr_doc] {
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
-        for (name, body) in
-            [("[Content_Types].xml", CT), ("_rels/.rels", RELS), ("word/document.xml", doc)]
-        {
+        for (name, body) in [
+            ("[Content_Types].xml", CT),
+            ("_rels/.rels", RELS),
+            ("word/document.xml", doc),
+        ] {
             zip.start_file(name, opts).unwrap();
             zip.write_all(body.as_bytes()).unwrap();
         }
@@ -1951,7 +2029,8 @@ fn section_column_count_survives() {
 // --- Multi-section documents -------------------------------------------------
 
 fn import_document(doc_xml: &str) -> String {
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     package.add_xml("word/document.xml", "application/xml", doc_xml.into());
     package.add_relationships("word/document.xml", &Rels::new()).unwrap();
     let bytes = package.finish(&Rels::new()).unwrap();
@@ -2023,7 +2102,10 @@ fn page_number_format_and_restart_produce_numbering_and_counter_update() {
 </w:body></w:document>"#;
 
     let src = import_document(doc);
-    assert!(src.contains("numbering: \"i\""), "front matter's roman numbering lost:\n{src}");
+    assert!(
+        src.contains("numbering: \"i\""),
+        "front matter's roman numbering lost:\n{src}"
+    );
     assert!(src.contains("numbering: \"1\""), "body's decimal format lost:\n{src}");
     assert!(
         src.contains("#counter(page).update(1)"),
@@ -2045,7 +2127,8 @@ fn per_section_headers_differ() {
   <w:sectPr><w:headerReference w:type="default" r:id="rId2"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>
 </w:body></w:document>"#;
 
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     let mut rels = Rels::new();
     rels.add(
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
@@ -2072,8 +2155,14 @@ fn per_section_headers_differ() {
     let bytes = package.finish(&Rels::new()).unwrap();
 
     let src = import_docx(&bytes).expect("import should succeed").source;
-    assert!(src.contains("header: [Front matter header]"), "first section's header lost:\n{src}");
-    assert!(src.contains("header: [Body header]"), "second section's header lost:\n{src}");
+    assert!(
+        src.contains("header: [Front matter header]"),
+        "first section's header lost:\n{src}"
+    );
+    assert!(
+        src.contains("header: [Body header]"),
+        "second section's header lost:\n{src}"
+    );
 }
 
 /// The floor this whole feature must not break: a single-section document
@@ -2085,8 +2174,14 @@ fn single_section_document_is_unaffected() {
     let src = import_docx(&docx).expect("import should succeed").source;
 
     assert_eq!(src.matches("#set page(").count(), 1, "{src}");
-    assert!(!src.contains("#pagebreak()"), "no section boundary should mean no break:\n{src}");
-    assert!(!src.contains("#columns("), "single section should never wrap in columns:\n{src}");
+    assert!(
+        !src.contains("#pagebreak()"),
+        "no section boundary should mean no break:\n{src}"
+    );
+    assert!(
+        !src.contains("#columns("),
+        "single section should never wrap in columns:\n{src}"
+    );
 }
 
 // --- DrawingML shapes (`wps:wsp`/`wpg:wgp` inside a `w:drawing`) --------------
@@ -2109,7 +2204,9 @@ fn drawingml_preset_shape_becomes_a_native_shape_call() {
 
     let result = import_docx(&docx).expect("import should succeed");
     assert!(
-        result.source.contains("#rect(width: 200pt, height: 44pt, fill: rgb(\"C0392B\"))"),
+        result
+            .source
+            .contains("#rect(width: 200pt, height: 44pt, fill: rgb(\"C0392B\"))"),
         "missing rect call:\n{}",
         result.source
     );
@@ -2210,7 +2307,10 @@ fn drawingml_group_yields_every_shape() {
     let docx = docx_with_body(doc_body);
 
     let src = import_docx(&docx).expect("import should succeed").source;
-    assert!(src.contains("#rect(width: 50pt, height: 50pt, fill: rgb(\"FF0000\"))"), "{src}");
+    assert!(
+        src.contains("#rect(width: 50pt, height: 50pt, fill: rgb(\"FF0000\"))"),
+        "{src}"
+    );
     assert!(src.contains("#circle(radius: 25pt, fill: rgb(\"0000FF\"))"), "{src}");
 }
 
@@ -2269,7 +2369,8 @@ fn a_round_rect_picture_frame_and_crop_survive() {
   </w:body>
 </w:document>"#;
 
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     let mut rels = Rels::new();
     rels.add(
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
@@ -2277,7 +2378,12 @@ fn a_round_rect_picture_frame_and_crop_survive() {
         RelMode::Internal,
     );
     package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
-    package.add_media("word/media/swatch.png", "png", "image/png", vec![0x89, b'P', b'N', b'G']);
+    package.add_media(
+        "word/media/swatch.png",
+        "png",
+        "image/png",
+        vec![0x89, b'P', b'N', b'G'],
+    );
     package.add_relationships("word/document.xml", &rels).unwrap();
     let docx = package.finish(&Rels::new()).unwrap();
 
@@ -2311,7 +2417,8 @@ fn an_unmappable_picture_frame_is_reported_rather_than_guessed() {
   </w:body>
 </w:document>"#;
 
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     let mut rels = Rels::new();
     rels.add(
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
@@ -2319,7 +2426,12 @@ fn an_unmappable_picture_frame_is_reported_rather_than_guessed() {
         RelMode::Internal,
     );
     package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
-    package.add_media("word/media/swatch.png", "png", "image/png", vec![0x89, b'P', b'N', b'G']);
+    package.add_media(
+        "word/media/swatch.png",
+        "png",
+        "image/png",
+        vec![0x89, b'P', b'N', b'G'],
+    );
     package.add_relationships("word/document.xml", &rels).unwrap();
     let docx = package.finish(&Rels::new()).unwrap();
 
@@ -2461,7 +2573,8 @@ fn default_bullet_glyphs_emit_no_set_rule() {
 /// A document body plus its own `word/numbering.xml` — the numbering-bearing
 /// counterpart of [`docx_with_body`].
 fn docx_with_body_and_numbering(doc_body: &str, numbering_xml: &str) -> Vec<u8> {
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     let document_xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -2477,7 +2590,8 @@ fn docx_with_body_and_numbering(doc_body: &str, numbering_xml: &str) -> Vec<u8> 
 /// A document body plus a `word/settings.xml` — the document-wide switches
 /// (`w:mirrorMargins`, `w:evenAndOddHeaders`) live there, not in the body.
 fn docx_with_body_and_settings(doc_body: &str, settings_xml: &str) -> Vec<u8> {
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     let document_xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -2506,7 +2620,9 @@ fn a_borderless_word_table_does_not_gain_typsts_default_grid() {
         <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
         <w:tr><w:tc><w:p><w:r><w:t>plain</w:t></w:r></w:p></w:tc></w:tr>
       </w:tbl>"#;
-    let src = import_docx(&docx_with_body(body)).expect("import should succeed").source;
+    let src = import_docx(&docx_with_body(body))
+        .expect("import should succeed")
+        .source;
     assert!(src.contains("stroke: none"), "borderless table gained a grid:\n{src}");
 }
 
@@ -2526,7 +2642,9 @@ fn a_table_border_width_survives_in_points() {
         <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
         <w:tr><w:tc><w:p><w:r><w:t>ruled</w:t></w:r></w:p></w:tc></w:tr>
       </w:tbl>"#;
-    let src = import_docx(&docx_with_body(body)).expect("import should succeed").source;
+    let src = import_docx(&docx_with_body(body))
+        .expect("import should succeed")
+        .source;
     assert!(src.contains("stroke: 2pt + rgb(\"FF0000\")"), "border lost:\n{src}");
 }
 
@@ -2568,7 +2686,9 @@ fn a_boxed_paragraph_gets_a_stroke_but_a_lone_bottom_rule_stays_a_line() {
         <w:right w:val="single" w:sz="8" w:space="4"/>
       </w:pBdr></w:pPr><w:r><w:t>boxed</w:t></w:r></w:p>
       <w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="4"/></w:pBdr></w:pPr></w:p>"#;
-    let src = import_docx(&docx_with_body(body)).expect("import should succeed").source;
+    let src = import_docx(&docx_with_body(body))
+        .expect("import should succeed")
+        .source;
     assert!(src.contains("stroke: (top: 1pt"), "paragraph box lost:\n{src}");
     assert!(src.contains("inset: 4pt"), "border spacing lost:\n{src}");
     assert!(src.contains("#line(length: 100%)"), "bottom rule idiom regressed:\n{src}");
@@ -2622,7 +2742,8 @@ fn an_unusual_header_distance_reaches_the_page_setup() {
 <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:p><w:r><w:t>Running head</w:t></w:r></w:p></w:hdr>"#;
 
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     let mut doc_rels = Rels::new();
     let header_rid = doc_rels.add(
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
@@ -2678,7 +2799,8 @@ fn a_centred_picture_paragraph_centres_the_figure() {
     </w:p>
   </w:body></w:document>"#;
 
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     let mut doc_rels = Rels::new();
     doc_rels.add(
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
@@ -2710,7 +2832,8 @@ fn a_negative_page_margin_does_not_panic_the_furniture_band() {
 <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:p><w:r><w:t>Head</w:t></w:r></w:p></w:hdr>"#;
 
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     let mut doc_rels = Rels::new();
     let header_rid = doc_rels.add(
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
@@ -2766,7 +2889,8 @@ fn an_ole_object_keeps_its_preview_picture_and_reports_what_was_embedded() {
     </w:r></w:p>
   </w:body></w:document>"#;
 
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     let mut doc_rels = Rels::new();
     doc_rels.add(
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
@@ -2853,7 +2977,8 @@ fn comments_become_invisible_queryable_metadata_delimiting_the_commented_span() 
   </w:comment>
 </w:comments>"#;
 
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
     package.add_xml("word/comments.xml", "application/xml", COMMENTS_XML.into());
     package.add_relationships("word/document.xml", &Rels::new()).unwrap();
@@ -2867,7 +2992,10 @@ fn comments_become_invisible_queryable_metadata_delimiting_the_commented_span() 
     let open = src.find("<comment-7>").expect("no opening anchor");
     let close = src.find("<comment-7-end>").expect("no closing anchor");
     let bit = src.find("this bit").expect("commented text lost");
-    assert!(open < bit && bit < close, "anchors don't bracket the commented span:\n{src}");
+    assert!(
+        open < bit && bit < close,
+        "anchors don't bracket the commented span:\n{src}"
+    );
 
     // The payload rides on the opening anchor, as an invisible `#metadata`.
     assert!(src.contains("kind: \"comment\""), "no comment payload:\n{src}");
@@ -2880,7 +3008,10 @@ fn comments_become_invisible_queryable_metadata_delimiting_the_commented_span() 
     // it would surface as stray text inside the comment body.
     assert!(!src.contains("annotationRef"), "annotation ref leaked:\n{src}");
     // The closing anchor carries no payload — one comment, stated once.
-    assert!(src.contains("#metadata(none) <comment-7-end>"), "bad closing anchor:\n{src}");
+    assert!(
+        src.contains("#metadata(none) <comment-7-end>"),
+        "bad closing anchor:\n{src}"
+    );
 }
 
 /// A comment Word anchored to a *point* writes no range pair at all — only
@@ -2904,7 +3035,8 @@ fn a_point_anchored_comment_carries_its_payload_on_the_reference_mark() {
   </w:comment>
 </w:comments>"#;
 
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
     package.add_xml("word/comments.xml", "application/xml", COMMENTS_XML.into());
     package.add_relationships("word/document.xml", &Rels::new()).unwrap();
@@ -2913,7 +3045,10 @@ fn a_point_anchored_comment_carries_its_payload_on_the_reference_mark() {
     let src = import_docx(&bytes).expect("import should succeed").source;
     assert!(src.contains("author: \"Grace Hopper\""), "point comment lost:\n{src}");
     assert!(src.contains("<comment-3>"), "no anchor:\n{src}");
-    assert!(!src.contains("comment-3-end"), "invented a range that Word never wrote:\n{src}");
+    assert!(
+        !src.contains("comment-3-end"),
+        "invented a range that Word never wrote:\n{src}"
+    );
 }
 
 /// An anchor whose comment is missing from `word/comments.xml` is dangling.
@@ -2931,14 +3066,22 @@ fn a_dangling_comment_anchor_is_reported_and_emits_nothing() {
     </w:p>
   </w:body></w:document>"#;
 
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
     package.add_relationships("word/document.xml", &Rels::new()).unwrap();
     let bytes = package.finish(&Rels::new()).unwrap();
 
     let result = import_docx(&bytes).expect("import should succeed");
-    assert!(result.source.contains("Orphaned."), "text lost with the anchor:\n{}", result.source);
-    assert!(!result.source.contains("comment-9"), "emitted a label with nothing behind it");
+    assert!(
+        result.source.contains("Orphaned."),
+        "text lost with the anchor:\n{}",
+        result.source
+    );
+    assert!(
+        !result.source.contains("comment-9"),
+        "emitted a label with nothing behind it"
+    );
     assert!(result.report.notes.iter().any(|n| n.what == "comment"), "went unreported");
 }
 
@@ -3025,7 +3168,8 @@ fn word_sources_become_a_hayagriva_sidecar_with_live_citations() {
   </b:Source>
 </b:Sources>"#;
 
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
     package.add_xml("customXml/item1.xml", "application/xml", SOURCES_XML.into());
     package.add_relationships("word/document.xml", &Rels::new()).unwrap();
@@ -3035,7 +3179,10 @@ fn word_sources_become_a_hayagriva_sidecar_with_live_citations() {
     let src = &result.source;
     // The citation is live, not Word's frozen "(Kramer & Chen, 2006)".
     assert!(src.contains("#cite(<Kra06>)"), "citation not made live:\n{src}");
-    assert!(src.contains("#bibliography(\"bibliography.yml\")"), "no bibliography:\n{src}");
+    assert!(
+        src.contains("#bibliography(\"bibliography.yml\")"),
+        "no bibliography:\n{src}"
+    );
 
     // ...and the sidecar it names rides out as an asset, or the emitted
     // source would not compile.
@@ -3067,13 +3214,18 @@ fn a_citation_with_no_matching_source_keeps_its_cached_text() {
     </w:p>
   </w:body></w:document>"#;
 
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     package.add_xml("word/document.xml", "application/xml", DOCUMENT_XML.into());
     package.add_relationships("word/document.xml", &Rels::new()).unwrap();
     let bytes = package.finish(&Rels::new()).unwrap();
 
     let result = import_docx(&bytes).expect("import should succeed");
-    assert!(result.source.contains("(Ghost, 1999)"), "cached text lost:\n{}", result.source);
+    assert!(
+        result.source.contains("(Ghost, 1999)"),
+        "cached text lost:\n{}",
+        result.source
+    );
     assert!(!result.source.contains("#cite("), "cited a source that does not exist");
     // No citation resolved, so no bibliography and no sidecar to go with it.
     assert!(!result.source.contains("#bibliography"), "emitted an empty bibliography");
@@ -3287,7 +3439,8 @@ fn a_picture_inside_a_hyperlink_is_recovered_and_its_lost_link_reported() {
   </a:graphicData></a:graphic>
 </wp:inline></w:drawing></w:r></w:hyperlink></w:p></w:body>
 </w:document>"#;
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     let mut rels = Rels::new();
     rels.add(
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
@@ -3340,7 +3493,8 @@ fn a_table_only_formatting_revision_is_reported() {
   </w:tc></w:tr>
 </w:tbl></w:body>
 </w:document>"#;
-    let mut package = Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
+    let mut package =
+        Package::new(PackageOptions { rels_overrides: true, media_defaults: &[] });
     package.add_xml("word/document.xml", "application/xml", doc.into());
     package.add_relationships("word/document.xml", &Rels::new()).unwrap();
     let bytes = package.finish(&Rels::new()).unwrap();

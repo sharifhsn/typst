@@ -1,8 +1,8 @@
 //! Paragraphs and runs → Typst inlines.
 
-use crate::lower::{emu, LowerCtx};
+use crate::lower::{LowerCtx, emu};
 use crate::pml::model::*;
-use crate::resolve::inherit::{level_para_props, level_run_props, Inherited};
+use crate::resolve::inherit::{Inherited, level_para_props, level_run_props};
 use crate::tdoc;
 
 pub fn lower_paragraphs(
@@ -199,19 +199,19 @@ fn symbol_bullet(glyph: &str, font: Option<&str>) -> ecow::EcoString {
         c => c,
     };
     let mapped = match (font.to_ascii_lowercase().as_str(), code) {
-        ("symbol", 0xB7) => '\u{2022}',       // ·  → •
-        ("symbol", 0x2D) => '\u{2013}',       // -  → –
-        (_, 0x6C) => '\u{25CF}',              // l  → ●
-        (_, 0x6E) => '\u{25A0}',              // n  → ■
-        (_, 0x71) => '\u{2751}',              // q  → ❑
-        (_, 0x76) => '\u{2756}',              // v  → ❖
-        (_, 0x75) => '\u{2022}',              // u  → •
-        (_, 0xA7) => '\u{25AA}',              // §  → ▪
-        (_, 0xA8) => '\u{25AB}',              // ¨  → ▫
-        (_, 0xD8) => '\u{27A2}',              // Ø  → ➢
-        (_, 0xFC) => '\u{2713}',              // ü  → ✓
-        (_, 0xFE) => '\u{2611}',              // þ  → ☑
-        (_, 0x4A) => '\u{263A}',              // J  → ☺
+        ("symbol", 0xB7) => '\u{2022}', // ·  → •
+        ("symbol", 0x2D) => '\u{2013}', // -  → –
+        (_, 0x6C) => '\u{25CF}',        // l  → ●
+        (_, 0x6E) => '\u{25A0}',        // n  → ■
+        (_, 0x71) => '\u{2751}',        // q  → ❑
+        (_, 0x76) => '\u{2756}',        // v  → ❖
+        (_, 0x75) => '\u{2022}',        // u  → •
+        (_, 0xA7) => '\u{25AA}',        // §  → ▪
+        (_, 0xA8) => '\u{25AB}',        // ¨  → ▫
+        (_, 0xD8) => '\u{27A2}',        // Ø  → ➢
+        (_, 0xFC) => '\u{2713}',        // ü  → ✓
+        (_, 0xFE) => '\u{2611}',        // þ  → ☑
+        (_, 0x4A) => '\u{263A}',        // J  → ☺
         _ => return glyph.into(),
     };
     ecow::EcoString::from(mapped)
@@ -280,7 +280,10 @@ mod tests {
         );
         // The same code point addressed through the private use area.
         assert_eq!(
-            lower_list(&bullet("\u{F071}", Some("Wingdings"))).unwrap().marker.as_deref(),
+            lower_list(&bullet("\u{F071}", Some("Wingdings")))
+                .unwrap()
+                .marker
+                .as_deref(),
             Some("\u{2751}")
         );
         // A real font states real characters; leave them alone.

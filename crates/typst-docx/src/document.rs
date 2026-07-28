@@ -1884,18 +1884,13 @@ fn make_room_for_terminal_paragraph(body: &mut [Block], sect: &SectPr) {
     }
     // The terminal paragraph is inserted after the last *visible* block; trailing
     // introspection `Tag`s emit nothing, so look past them for the final table.
-    let Some(last) = body
-        .iter_mut()
-        .rev()
-        .find(|b| !matches!(b, Block::Tag(_)))
-    else {
+    let Some(last) = body.iter_mut().rev().find(|b| !matches!(b, Block::Tag(_))) else {
         return;
     };
     let Block::Table(tbl) = last else {
         return;
     };
-    let total: i64 =
-        tbl.rows.iter().filter_map(|r| r.height.map(|h| h.val as i64)).sum();
+    let total: i64 = tbl.rows.iter().filter_map(|r| r.height.map(|h| h.val as i64)).sum();
     if total <= 0 {
         return;
     }
@@ -2344,7 +2339,9 @@ fn run_geometry(
         let Tag::Start(elem, _) = &child.to_packed::<TagElem>()?.tag else {
             return None;
         };
-        elem.to_packed::<CounterUpdateElem>()?.page_number_reset().map(|n| n as i64)
+        elem.to_packed::<CounterUpdateElem>()?
+            .page_number_reset()
+            .map(|n| n as i64)
     });
     let number_align = sc.get(PageElem::number_align);
     let number_in_header = matches!(number_align.y(), Some(OuterVAlignment::Top));
@@ -2509,7 +2506,11 @@ fn build_section(
     // format (a thesis body restarting at arabic 1), in which case the format
     // is Word's default decimal.
     if geom.numbering.is_some() || geom.page_num_start.is_some() {
-        let fmt = geom.numbering.as_ref().map(|n| numbering_fmt(ctx, n)).unwrap_or("decimal");
+        let fmt = geom
+            .numbering
+            .as_ref()
+            .map(|n| numbering_fmt(ctx, n))
+            .unwrap_or("decimal");
         sect.pg_num = Some(PgNumType { fmt, start: geom.page_num_start });
     }
 
@@ -2707,8 +2708,10 @@ fn furniture_blocks_are_empty(blocks: &[Block]) -> bool {
 /// the conservative full-margin boundary (see `adjust_furniture_band`'s doc
 /// comment) because its laid-out extent isn't represented here.
 fn furniture_content_height(blocks: &[Block]) -> Option<i32> {
-    let serialized: Vec<&Block> =
-        blocks.iter().filter(|block| !matches!(block, Block::Tag(_))).collect();
+    let serialized: Vec<&Block> = blocks
+        .iter()
+        .filter(|block| !matches!(block, Block::Tag(_)))
+        .collect();
     match serialized[..] {
         [Block::Para(_)] => single_line_furniture_height(blocks),
         // A one-row table (a common "name/title cell + logo cell" header
@@ -4163,7 +4166,12 @@ mod terminal_paragraph_tests {
 
     fn zero_margin_page() -> SectPr {
         // Content height == page height == 15840 twips.
-        SectPr { page_h: 15840, margin_top: 0, margin_bottom: 0, ..SectPr::default() }
+        SectPr {
+            page_h: 15840,
+            margin_top: 0,
+            margin_bottom: 0,
+            ..SectPr::default()
+        }
     }
 
     fn row_val(b: &Block) -> i32 {
@@ -4193,7 +4201,11 @@ mod terminal_paragraph_tests {
         make_room_for_terminal_paragraph(&mut with_flow, &sect);
         // FlowSpace is a *visible* terminator (an empty para), so the table is
         // no longer last — it must be left alone.
-        assert_eq!(row_val(&with_flow[0]), 15840, "a non-tag terminator keeps the table last");
+        assert_eq!(
+            row_val(&with_flow[0]),
+            15840,
+            "a non-tag terminator keeps the table last"
+        );
     }
 
     #[test]

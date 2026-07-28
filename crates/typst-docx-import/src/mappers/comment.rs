@@ -19,7 +19,7 @@
 
 use ecow::eco_format;
 
-use crate::lower::{lower_items, LowerCtx};
+use crate::lower::{LowerCtx, lower_items};
 use crate::tdoc::{CommentAnchor, CommentInfo, Inline};
 
 /// Lower one comment anchor — a `w:commentRangeStart`/`End`, or the
@@ -49,8 +49,11 @@ pub(crate) fn lower_comment_anchor(
         return None;
     }
 
-    let label: ecow::EcoString =
-        if closing { eco_format!("comment-{id}-end") } else { eco_format!("comment-{id}") };
+    let label: ecow::EcoString = if closing {
+        eco_format!("comment-{id}-end")
+    } else {
+        eco_format!("comment-{id}")
+    };
     // Word writes a `w:commentReference` *after* a range's closing anchor, so
     // the same id legitimately arrives more than once; only the first opening
     // anchor and the first closing one become labels, since a duplicate label

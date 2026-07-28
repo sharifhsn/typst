@@ -11,8 +11,8 @@
 //! inside [`Block::Heading`] bodies, not just when they match the doc default.
 
 use crate::tdoc::{
-    push_furniture_trees, Block, Chart, ChartContent, Figure, Inline, Inlines, List, Stmt, Table,
-    TextStyle, TypstDoc,
+    Block, Chart, ChartContent, Figure, Inline, Inlines, List, Stmt, Table, TextStyle,
+    TypstDoc, push_furniture_trees,
 };
 
 /// Entry point: collapse every run in the document — body *and* header/footer
@@ -67,7 +67,9 @@ fn walk_block(block: &mut Block, default: &TextStyle) {
         // `Inlines` anywhere in it at all — series names and category labels
         // are plain `EcoString`, escaped straight to markup at emit time
         // (see `emit::render_plot`) — so there's nothing to walk.
-        Block::Chart(Chart { content: ChartContent::Table(Table { rows, .. }), .. }) => {
+        Block::Chart(Chart {
+            content: ChartContent::Table(Table { rows, .. }), ..
+        }) => {
             for row in rows {
                 for cell in &mut row.cells {
                     for inner in &mut cell.body {
@@ -116,7 +118,12 @@ fn collapse_inlines(inlines: Inlines, default: &TextStyle, in_heading: bool) -> 
     out
 }
 
-fn collapse_inline(inline: Inline, default: &TextStyle, in_heading: bool, out: &mut Inlines) {
+fn collapse_inline(
+    inline: Inline,
+    default: &TextStyle,
+    in_heading: bool,
+    out: &mut Inlines,
+) {
     match inline {
         // A comment's body is ordinary body content, so it gets the same
         // treatment as a footnote's — an annotation should read as idiomatic
@@ -143,7 +150,9 @@ fn collapse_inline(inline: Inline, default: &TextStyle, in_heading: bool, out: &
         Inline::Strong(body) => {
             out.push(Inline::Strong(collapse_inlines(body, default, in_heading)))
         }
-        Inline::Emph(body) => out.push(Inline::Emph(collapse_inlines(body, default, in_heading))),
+        Inline::Emph(body) => {
+            out.push(Inline::Emph(collapse_inlines(body, default, in_heading)))
+        }
         Inline::LabelLink { label, body } => out.push(Inline::LabelLink {
             label,
             body: collapse_inlines(body, default, in_heading),

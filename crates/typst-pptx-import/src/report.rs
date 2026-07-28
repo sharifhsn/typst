@@ -41,7 +41,12 @@ impl ImportReport {
         self.push(Severity::Drop, what.into(), detail.into());
     }
 
-    fn push(&mut self, severity: Severity, what: ecow::EcoString, detail: ecow::EcoString) {
+    fn push(
+        &mut self,
+        severity: Severity,
+        what: ecow::EcoString,
+        detail: ecow::EcoString,
+    ) {
         dedup_push(&mut self.entries, &mut self.seen, Entry { severity, what, detail });
     }
 }

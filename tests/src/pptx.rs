@@ -840,10 +840,9 @@ fn radial_gradient_shape_maps_to_a_native_circle_path() {
     // A conic gradient has no `a:gradFill` path that sweeps by angle, and an
     // off-centre outer circle cannot be expressed at all (DrawingML's outer
     // path is always the shape's own rectangle): both keep the raster fallback.
-    for fill in [
-        "gradient.conic(red, blue)",
-        "gradient.radial(red, blue, center: (20%, 80%))",
-    ] {
+    for fill in
+        ["gradient.conic(red, blue)", "gradient.radial(red, blue, center: (20%, 80%))"]
+    {
         let raster = parts(&format!(
             "#set page(width: 160pt, height: 100pt, margin: 0pt)\n\
              #rect(width: 100pt, height: 60pt, fill: {fill})"
@@ -2216,8 +2215,8 @@ fn omath(equation: &str) -> String {
     ));
     let slide = p["ppt/slides/slide1.xml"].clone();
     let start = slide.find("<m:oMath>").expect("slide should contain native OMML");
-    let end = slide.find("</m:oMath>").expect("OMML should be closed")
-        + "</m:oMath>".len();
+    let end =
+        slide.find("</m:oMath>").expect("OMML should be closed") + "</m:oMath>".len();
     slide[start..end].to_owned()
 }
 
@@ -2404,7 +2403,9 @@ fn math_fallback_text_reads_back_the_new_structures() {
             .find(|node| {
                 node.tag_name().name() == "Fallback"
                     && node.tag_name().namespace()
-                        == Some("http://schemas.openxmlformats.org/markup-compatibility/2006")
+                        == Some(
+                            "http://schemas.openxmlformats.org/markup-compatibility/2006",
+                        )
             })
             .expect("math should have a compatibility fallback")
             .descendants()

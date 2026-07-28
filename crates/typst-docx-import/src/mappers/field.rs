@@ -11,7 +11,7 @@
 //! document's visible content and dropping it would be a much bigger
 //! fidelity hit than leaving it non-live.
 
-use ecow::{eco_format, EcoString};
+use ecow::{EcoString, eco_format};
 
 use crate::lower::LowerCtx;
 use crate::mappers::bibliography;
@@ -88,8 +88,8 @@ fn bookmark_argument(instr: &str) -> Option<EcoString> {
 /// text is kept as-is and only the jump is made live — a strictly smaller loss
 /// than the generic fallback, which keeps the text but no link at all.
 fn lower_reference(field_type: &str, field: &Field, ctx: &mut LowerCtx) -> Inlines {
-    let Some(label) =
-        bookmark_argument(&field.instr).and_then(|name| ctx.package.bookmarks.get(&name).cloned())
+    let Some(label) = bookmark_argument(&field.instr)
+        .and_then(|name| ctx.package.bookmarks.get(&name).cloned())
     else {
         return lower_fallback(field_type, field, ctx);
     };
@@ -108,8 +108,8 @@ fn lower_reference(field_type: &str, field: &Field, ctx: &mut LowerCtx) -> Inlin
 /// recomputes the page number under Typst's own pagination instead of
 /// repeating whatever Word last cached — the same reasoning as `PAGE`.
 fn lower_page_reference(field_type: &str, field: &Field, ctx: &mut LowerCtx) -> Inlines {
-    let Some(label) =
-        bookmark_argument(&field.instr).and_then(|name| ctx.package.bookmarks.get(&name).cloned())
+    let Some(label) = bookmark_argument(&field.instr)
+        .and_then(|name| ctx.package.bookmarks.get(&name).cloned())
     else {
         return lower_fallback(field_type, field, ctx);
     };
@@ -173,7 +173,12 @@ mod bookmark_argument_tests {
 /// e.g. `" PAGE "` → `"PAGE"`, `" hyperlink \"x\""` → `"HYPERLINK"`. Empty
 /// for a blank/whitespace-only instruction.
 fn first_token_upper(instr: &str) -> EcoString {
-    instr.split_whitespace().next().unwrap_or_default().to_ascii_uppercase().into()
+    instr
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase()
+        .into()
 }
 
 /// The first `"..."`-quoted argument in a field instruction, e.g. the URL in
@@ -225,7 +230,10 @@ mod tests {
     /// instead, exactly like any other unmapped field.
     #[test]
     fn toc_field_inside_a_heading_falls_back_to_cached_text_instead_of_a_live_outline() {
-        let field = Field { instr: " TOC \\o \"1-3\" \\h ".into(), result: text_result("stale") };
+        let field = Field {
+            instr: " TOC \\o \"1-3\" \\h ".into(),
+            result: text_result("stale"),
+        };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
         let options = ImportOptions::default();
@@ -239,7 +247,10 @@ mod tests {
 
     #[test]
     fn toc_field_discards_stale_result() {
-        let field = Field { instr: " TOC \\o \"1-3\" \\h ".into(), result: text_result("stale") };
+        let field = Field {
+            instr: " TOC \\o \"1-3\" \\h ".into(),
+            result: text_result("stale"),
+        };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
         let options = ImportOptions::default();
@@ -271,8 +282,10 @@ mod tests {
 
     #[test]
     fn hyperlink_field_falls_back_to_dest_text_when_result_empty() {
-        let field =
-            Field { instr: " HYPERLINK \"https://example.com\" ".into(), result: Vec::new() };
+        let field = Field {
+            instr: " HYPERLINK \"https://example.com\" ".into(),
+            result: Vec::new(),
+        };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
         let options = ImportOptions::default();
@@ -281,7 +294,9 @@ mod tests {
         match &inlines[..] {
             [Inline::Link { dest, body }] => {
                 assert_eq!(dest.as_str(), "https://example.com");
-                assert!(matches!(&body[..], [Inline::Text(t)] if t == "https://example.com"));
+                assert!(
+                    matches!(&body[..], [Inline::Text(t)] if t == "https://example.com")
+                );
             }
             other => panic!("expected a link, got {other:?}"),
         }
@@ -291,7 +306,10 @@ mod tests {
     fn hyperlink_field_without_quoted_dest_falls_through_to_fallback() {
         // No quoted argument at all (an unquoted `\l` bookmark switch) — the
         // instruction carries no destination `lower_hyperlink` can extract.
-        let field = Field { instr: " HYPERLINK \\l _Toc1 ".into(), result: text_result("5") };
+        let field = Field {
+            instr: " HYPERLINK \\l _Toc1 ".into(),
+            result: text_result("5"),
+        };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
         let options = ImportOptions::default();
@@ -304,7 +322,10 @@ mod tests {
 
     #[test]
     fn unmapped_field_falls_back_to_cached_result_and_reports_once() {
-        let field = Field { instr: " FILENAME \\* MERGEFORMAT ".into(), result: text_result("report.docx") };
+        let field = Field {
+            instr: " FILENAME \\* MERGEFORMAT ".into(),
+            result: text_result("report.docx"),
+        };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
         let options = ImportOptions::default();
@@ -318,7 +339,10 @@ mod tests {
 
     #[test]
     fn duplicate_unmapped_fields_produce_one_note() {
-        let field = Field { instr: " AUTHOR ".into(), result: text_result("Jane Doe") };
+        let field = Field {
+            instr: " AUTHOR ".into(),
+            result: text_result("Jane Doe"),
+        };
         let package = WmlPackage::default();
         let mut report = ImportReport::default();
         let options = ImportOptions::default();

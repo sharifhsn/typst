@@ -6,7 +6,7 @@
 //! decisions.
 
 use typst_ooxml_core::opc::{Package, PackageOptions, RelMode, Rels};
-use typst_pptx_import::{import_pptx, import_pptx_with, Fidelity, ImportOptions};
+use typst_pptx_import::{Fidelity, ImportOptions, import_pptx, import_pptx_with};
 
 const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const P_NS: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
@@ -79,7 +79,11 @@ impl Deck {
             "", self.master_extra
         );
         let mut master_rels = Rels::new();
-        master_rels.add(REL_LAYOUT, "../slideLayouts/slideLayout1.xml", RelMode::Internal);
+        master_rels.add(
+            REL_LAYOUT,
+            "../slideLayouts/slideLayout1.xml",
+            RelMode::Internal,
+        );
         master_rels.add(REL_THEME, "../theme/theme1.xml", RelMode::Internal);
 
         let layout = format!(
@@ -123,7 +127,9 @@ impl Deck {
         package
             .add_relationships("ppt/slideMasters/slideMaster1.xml", &master_rels)
             .unwrap();
-        package.add_relationships("ppt/slides/slide1.xml", &slide_rels).unwrap();
+        package
+            .add_relationships("ppt/slides/slide1.xml", &slide_rels)
+            .unwrap();
         package.finish(&Rels::new()).unwrap()
     }
 }
@@ -178,7 +184,11 @@ fn a_placeholder_inherits_its_position_from_the_layout() {
     let result = import_pptx(&deck.build()).expect("import should succeed");
     assert!(result.source.contains("Inherited"), "{}", result.source);
     // 1828800 EMU = 2in = 144pt, straight from the layout.
-    assert!(result.source.contains("dx: 144pt"), "position must come from the layout:\n{}", result.source);
+    assert!(
+        result.source.contains("dx: 144pt"),
+        "position must come from the layout:\n{}",
+        result.source
+    );
 }
 
 #[test]
@@ -218,7 +228,10 @@ fn idiomatic_fidelity_promotes_the_title_to_a_heading() {
     let placed = import_pptx(&bytes).unwrap();
     assert!(placed.source.contains("#place"), "placed mode keeps coordinates");
 
-    let opts = ImportOptions { fidelity: Fidelity::Idiomatic, ..ImportOptions::default() };
+    let opts = ImportOptions {
+        fidelity: Fidelity::Idiomatic,
+        ..ImportOptions::default()
+    };
     let idiomatic = import_pptx_with(&bytes, &opts).unwrap();
     assert!(
         idiomatic.source.contains("== My Title"),
@@ -407,7 +420,11 @@ fn a_charts_cached_data_is_recovered_as_a_table() {
     };
     let result = import_pptx(&deck.build()).expect("import should succeed");
     for want in ["Revenue", "Q1", "Q2", "120", "145"] {
-        assert!(result.source.contains(want), "chart data `{want}` must survive:\n{}", result.source);
+        assert!(
+            result.source.contains(want),
+            "chart data `{want}` must survive:\n{}",
+            result.source
+        );
     }
     let notes = format!("{}", result.report);
     assert!(notes.contains("chart"), "the undrawn plot must be reported: {notes}");

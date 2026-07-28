@@ -41,7 +41,10 @@ fn merge_run(base: &RunProps, over: &RunProps) -> RunProps {
         smallcaps: over.smallcaps.or(base.smallcaps),
         caps: over.caps.or(base.caps),
         underline: over.underline.clone().or_else(|| base.underline.clone()),
-        underline_color: over.underline_color.clone().or_else(|| base.underline_color.clone()),
+        underline_color: over
+            .underline_color
+            .clone()
+            .or_else(|| base.underline_color.clone()),
         highlight: over.highlight.clone().or_else(|| base.highlight.clone()),
         color: over.color.clone().or_else(|| base.color.clone()),
         size_half_pt: over.size_half_pt.or(base.size_half_pt),
@@ -102,7 +105,11 @@ fn merge_borders(base: &Borders, over: &Borders) -> Borders {
 
 /// Effective run properties: direct `rPr` over character-style over
 /// paragraph-style-run over docDefaults.
-pub fn effective_run(styles: &Styles, para_style_id: Option<&str>, direct: &RunProps) -> RunProps {
+pub fn effective_run(
+    styles: &Styles,
+    para_style_id: Option<&str>,
+    direct: &RunProps,
+) -> RunProps {
     let mut acc = styles.default_run.clone();
 
     if let Some(pid) = para_style_id {

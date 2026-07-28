@@ -193,9 +193,10 @@ fn blocks_contain_drawing(blocks: &[Block]) -> bool {
             .content
             .iter()
             .any(|child| matches!(child, ParaChild::Run(Run::Drawing(_)))),
-        Block::Table(table) => table.rows.iter().any(|row| {
-            row.cells.iter().any(|cell| blocks_contain_drawing(&cell.blocks))
-        }),
+        Block::Table(table) => table
+            .rows
+            .iter()
+            .any(|row| row.cells.iter().any(|cell| blocks_contain_drawing(&cell.blocks))),
         _ => false,
     })
 }
@@ -634,14 +635,14 @@ fn build(
 /// heights — and bails (`None`) when it is not: resolving a cell-relative
 /// `height: 100%` against the page manufactured full-page ink and forced each
 /// such shape onto its own page.
-pub(crate) fn resolve_axis(r: Rel<Length>, styles: StyleChain, base: Option<Abs>) -> Option<Abs> {
+pub(crate) fn resolve_axis(
+    r: Rel<Length>,
+    styles: StyleChain,
+    base: Option<Abs>,
+) -> Option<Abs> {
     use typst_library::foundations::Resolve;
     let rel = r.resolve(styles);
-    if rel.rel.is_zero() {
-        Some(rel.abs)
-    } else {
-        base.map(|base| rel.relative_to(base))
-    }
+    if rel.rel.is_zero() { Some(rel.abs) } else { base.map(|base| rel.relative_to(base)) }
 }
 
 /// Resolves an explicit `(width, height)` to absolute sizes, or `None` if
