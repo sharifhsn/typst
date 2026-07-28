@@ -330,6 +330,46 @@ fn table_exports_as_native_drawingml_table() {
     for text in ["a", "b", "c", "d", "e", "f"] {
         assert!(slide.contains(&format!("<a:t>{text}</a:t>")), "missing {text}");
     }
+
+    let doc = roxmltree::Document::parse(slide).unwrap();
+    let graphic_frame = doc
+        .descendants()
+        .find(|node| node.tag_name().name() == "graphicFrame")
+        .expect("native table should have a graphic frame");
+    let transform = graphic_frame
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "xfrm")
+        .expect("graphic frame should have a transform");
+    assert_eq!(
+        transform.tag_name().namespace(),
+        Some("http://schemas.openxmlformats.org/presentationml/2006/main"),
+        "graphic-frame transforms use p:xfrm, not the shape-level a:xfrm"
+    );
+
+    for properties in doc.descendants().filter(|node| node.tag_name().name() == "tcPr") {
+        let children = properties
+            .children()
+            .filter(|node| node.is_element())
+            .map(|node| node.tag_name().name())
+            .collect::<Vec<_>>();
+        let last_border = children
+            .iter()
+            .rposition(|name| matches!(*name, "lnL" | "lnR" | "lnT" | "lnB"))
+            .expect("table cell should emit its four borders");
+        let fill = children
+            .iter()
+            .position(|name| {
+                matches!(
+                    *name,
+                    "noFill" | "solidFill" | "gradFill" | "blipFill" | "pattFill"
+                )
+            })
+            .expect("table cell should emit its fill");
+        assert!(
+            last_border < fill,
+            "CT_TableCellProperties requires borders before the fill"
+        );
+    }
     assert_all_wellformed(&p);
 }
 
@@ -2087,13 +2127,24 @@ fn table_cell_fills_survive_every_resolver_route() {
         tc_props(slide)
             .iter()
             .map(|block| {
-                // The cell fill is the first child of `tcPr`; everything from
-                // the first `<a:ln*>` onward is border paint, not cell paint.
-                let body = &block[block.find('>')? + 1..];
-                let body = &body[..body.find("<a:ln").unwrap_or(body.len())];
-                let start = body.find("<a:solidFill><a:srgbClr val=\"")?;
-                let rest = &body[start + "<a:solidFill><a:srgbClr val=\"".len()..];
-                Some(rest[..6].to_string())
+                // CT_TableCellProperties orders the cell fill after its border
+                // lines. Parse only direct children so a border's nested fill
+                // cannot be mistaken for the cell paint.
+                let wrapped = format!(
+                    "<root xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">{block}</root>"
+                );
+                let doc = roxmltree::Document::parse(&wrapped).unwrap();
+                let properties = doc
+                    .root_element()
+                    .children()
+                    .find(|node| node.is_element())?;
+                let fill = properties
+                    .children()
+                    .find(|node| node.is_element() && node.tag_name().name() == "solidFill")?;
+                fill.children()
+                    .find(|node| node.is_element() && node.tag_name().name() == "srgbClr")
+                    .and_then(|node| node.attribute("val"))
+                    .map(str::to_string)
             })
             .collect()
     };

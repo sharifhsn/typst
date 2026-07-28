@@ -309,7 +309,7 @@ fn write_table_box(
     w.leaf("p:nvPr");
     w.close();
 
-    write_xfrm(w, table.x_emu, table.y_emu, table.w_emu, table.h_emu, 0);
+    write_graphic_frame_xfrm(w, table.x_emu, table.y_emu, table.w_emu, table.h_emu);
 
     w.open("a:graphic").start_children();
     w.open("a:graphicData")
@@ -390,13 +390,16 @@ fn write_table_cell(w: &mut XmlWriter, cell: &TableCell, rels: &mut impl SlideRe
         );
     }
     w.start_children();
-    dml::write_fill_with_tile_resolver(w, cell.fill.as_ref(), "0", |media| {
-        rels.image_rid(media)
-    });
+    // CT_TableCellProperties orders borders before the cell fill. PowerPoint
+    // treats a fill-first `tcPr` as corrupt even though more permissive
+    // consumers accept it.
     write_cell_border(w, "a:lnL", cell.borders.left.as_ref());
     write_cell_border(w, "a:lnR", cell.borders.right.as_ref());
     write_cell_border(w, "a:lnT", cell.borders.top.as_ref());
     write_cell_border(w, "a:lnB", cell.borders.bottom.as_ref());
+    dml::write_fill_with_tile_resolver(w, cell.fill.as_ref(), "0", |media| {
+        rels.image_rid(media)
+    });
     w.close();
     w.close();
 }
@@ -807,6 +810,16 @@ fn write_xfrm(w: &mut XmlWriter, x: i64, y: i64, cx: i64, cy: i64, rot_60k: i32)
     write_xfrm_with_flips(w, x, y, cx, cy, rot_60k, None);
 }
 
+/// Writes the transform for a PresentationML graphic frame.
+///
+/// Graphic frames use `p:xfrm`, unlike shapes and pictures whose transforms
+/// are DrawingML `a:xfrm` elements.
+fn write_graphic_frame_xfrm(w: &mut XmlWriter, x: i64, y: i64, cx: i64, cy: i64) {
+    w.open("p:xfrm").start_children();
+    write_xfrm_body(w, x, y, cx, cy);
+    w.close();
+}
+
 fn write_xfrm_with_flips(
     w: &mut XmlWriter,
     x: i64,
@@ -828,6 +841,11 @@ fn write_xfrm_with_flips(
         w.attr("flipV", "1");
     }
     w.start_children();
+    write_xfrm_body(w, x, y, cx, cy);
+    w.close();
+}
+
+fn write_xfrm_body(w: &mut XmlWriter, x: i64, y: i64, cx: i64, cy: i64) {
     w.open("a:off")
         .attr("x", &x.to_string())
         .attr("y", &y.to_string())
@@ -836,7 +854,6 @@ fn write_xfrm_with_flips(
         .attr("cx", &cx.max(1).to_string())
         .attr("cy", &cy.max(1).to_string())
         .empty();
-    w.close();
 }
 
 fn write_geom(w: &mut XmlWriter, geom: &PathGeom, w_emu: i64, h_emu: i64) {
