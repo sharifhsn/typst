@@ -1894,27 +1894,32 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                         }
                     }
                 }
-            } else if child.is::<typst_library::layout::PlaceElem>()
-                || (child
-                    .to_packed::<typst_library::layout::BoxElem>()
-                    .is_some_and(|b| box_is_plain(b, child_styles))
-                    && crate::convert::contains_place(child)
-                    // Only pure layout scaffolding (no visible text): a
-                    // text-bearing place-box keeps its existing live-extraction
-                    // path — rasterizing it here would demote live text to an
-                    // image just to reposition its tags.
-                    && !contains_visible_text(child))
+            } else if child
+                .to_packed::<typst_library::layout::BoxElem>()
+                .is_some_and(|b| box_is_plain(b, child_styles))
+                && crate::convert::contains_place(child)
+                // Only pure layout scaffolding (no visible text): a
+                // text-bearing place-box keeps its existing live-extraction
+                // path — rasterizing it here would demote live text to an
+                // image just to reposition its tags.
+                && !contains_visible_text(child)
             {
-                // An inline `#place` — or a plain `#box` holding one — that the
-                // shape-composition path (checked at the top of this function)
-                // declined. It rasterizes exactly as before, but at this
-                // paragraph-child level its harvested frame tags can stay AT
-                // THIS POSITION instead of being deferred to the end of the
-                // document. A placed body is often layout scaffolding whose
-                // only real output is a state/counter update (e.g. the
-                // `drafting` package stores page properties from inside a
-                // `box(place(layout(..)))`), and a later `state.get()` only
-                // sees the update if it precedes the read in tag order.
+                // A plain box holding a place that the shape-composition path
+                // (checked at the top of this function) declined. It rasterizes
+                // exactly as before, but at this paragraph-child level its
+                // harvested frame tags can stay AT THIS POSITION instead of
+                // being deferred to the end of the document. A placed body is
+                // often layout scaffolding whose only real output is a
+                // state/counter update (e.g. the `drafting` package stores page
+                // properties from inside a `box(place(layout(..)))`), and a
+                // later `state.get()` only sees the update if it precedes the
+                // read in tag order.
+                //
+                // A direct `PlaceElem` intentionally takes the shared inline
+                // handler below. That path preserves live fields, links, and
+                // styled text before considering a raster fallback, and the
+                // per-child deferred-tag splice immediately below now gives it
+                // the same source-order guarantee.
                 let (tags, runs, failed) = mappers::image::laid_out_fallback_with_tags(
                     child,
                     child_styles,
@@ -2059,6 +2064,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                 .map(crate::props::abs_to_twip)
                 .filter(|w| *w >= 1 && *w < avail_dxa);
             let scoped_h = sized_h.or(self.shape_height_base);
+            let deferred_before = self.deferred_tags.len();
             let runs = {
                 let body = &elem.body;
                 let inner = props.clone();
@@ -2079,6 +2085,16 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                     0,
                 );
                 out.extend(runs);
+            } else if self.deferred_tags.len() > deferred_before
+                && elem.body.plain_text().trim().is_empty()
+            {
+                // A tag-only placement is layout scaffolding, not failed
+                // visible content. State/counter updates produced by an inline
+                // `layout` callback belong exactly here in document order; the
+                // paragraph-child caller will splice these deferred tags back
+                // at this child's position. Re-running the placement through a
+                // raster probe would duplicate the updates and could falsely
+                // report an unavailable visual for an intentionally empty body.
             } else {
                 // Some procedural canvases wrap their positioned label in a
                 // move/rotate/style stack that cannot be re-realized as legal

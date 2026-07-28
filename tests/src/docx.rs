@@ -8507,26 +8507,26 @@ fn decorative_positioned_drop_does_not_report_indentation_as_lost_text() {
 }
 
 #[test]
-fn failed_inline_placed_fallback_distinguishes_failure_from_empty_scaffolding() {
+fn inline_placed_semantics_avoid_a_failed_whole_region_fallback() {
     let src = "#set page(width: 120mm, height: 80mm, margin: 10mm)\n\
                Before #box(place(top, layout(size => if size.height > 70mm { panic(\"inline placed region rejected\") } else { [VISIBLE INLINE BODY] }))) After";
     let compiled = compile_docx(src, &[]);
     let report = compiled.fidelity_report();
     assert!(report.decisions().iter().any(|decision| {
-        decision.reason == DecisionReason::InlinePositionedContentUnavailable
-            && decision.representation == Representation::Drop
+        decision.reason == DecisionReason::PositionedContentFlowFallback
+            && decision.representation == Representation::Approximate
     }));
-    assert!(report.suppressed_diagnostics().iter().any(|entry| {
-        entry.stage == ExportStage::FallbackLayout && entry.kind == SuppressedKind::Error
+    assert!(!report.decisions().iter().any(|decision| {
+        decision.source.element == "place"
+            && decision.representation == Representation::Drop
     }));
 
     let p = parts_with_manifest(src);
     let document = &p["word/document.xml"];
     assert!(document.contains("Before"));
+    assert!(document.contains("VISIBLE INLINE BODY"));
     assert!(document.contains("After"));
-    assert!(
-        p["customXml/typstFidelity.xml"].contains("InlinePositionedContentUnavailable")
-    );
+    assert!(p["customXml/typstFidelity.xml"].contains("PositionedContentFlowFallback"));
     assert_all_wellformed(&p);
 
     let scaffolding = compile_docx(
