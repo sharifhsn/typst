@@ -24,9 +24,6 @@ for the full current verdict.
   back to Word's default link formatting.
 - Text boxes can now carry gradient fills natively.
 - Licensed fonts are embedded when their OpenType permissions allow it.
-- Native table packages now use the schema-required PresentationML transform
-  namespace and table-cell property order. This was found by a real PowerPoint
-  repair prompt, reproduced with the Open XML SDK, and fixed before release.
 - Corpus-driven hardening pass: a large batch of real-document fallback and
   classification fixes landed together as part of consolidating the combined
   DOCX branch history (see "Corpus and validation" below).
@@ -40,6 +37,9 @@ for the full current verdict.
 
 ### PowerPoint (.pptx)
 
+- Native table packages now use the schema-required PresentationML transform
+  namespace and table-cell property order. This was found by a real PowerPoint
+  repair prompt, reproduced with the Open XML SDK, and fixed before release.
 - Tables are substantially more native: cell alignment, insets, gutters (as
   editable spacer tracks), border dash styles, and richer per-cell content are
   now preserved instead of falling back.
@@ -146,8 +146,7 @@ identified that revision and had SHA-256
 
 See
 [`docs/dev/office-export-shipping-readiness.md`](office-export-shipping-readiness.md)
-for full detail, including why a fresh authority is required before classifying
-the aggregate DOCX pagination delta against v12 on current HEAD.
+for the complete current evidence and the retained dated campaign history.
 
 <details>
 <summary>Historical commit detail from the first Office.3 development slice</summary>
