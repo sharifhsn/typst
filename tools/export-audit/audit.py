@@ -14,7 +14,7 @@ signals point:
   selftest    prove every detector against planted defects (run this first;
               a checker that can only report success is not a gate)
   invariants  referential integrity + determinism over real exports
-  text        PDF-vs-package text fidelity (occurrence- and CJK-aware)
+  text        PDF-vs-Office-package text fidelity (occurrence- and CJK-aware)
   visual      LibreOffice-render similarity scores per document -> scores.json
   rank        order scores worst-first, optionally against a baseline
   sheet       contact sheets (typst | office render) for the worst pages,
@@ -24,6 +24,7 @@ Usage:
   uv run audit.py selftest
   uv run audit.py invariants --binary target/release/typst --kind document -n 150
   uv run audit.py text       --binary target/release/typst -n 150
+  uv run audit.py text       --binary target/release/typst --kind presentation -n 60
   uv run audit.py visual     --binary target/release/typst --kind presentation -n 40
   uv run audit.py rank  --scores /tmp/export-audit/scores.json [--baseline old.json]
   uv run audit.py sheet --scores /tmp/export-audit/scores.json --binary ... -k 8
@@ -43,7 +44,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import detectors
-from corpuslib import check_binary, docs, docx_text, export, read_parts, root_for
+from corpuslib import check_binary, docs, docx_text, export, pptx_text, read_parts, root_for
 
 SOFFICE = "/opt/homebrew/bin/soffice"
 WORD_APP = "Microsoft Word"
@@ -300,9 +301,12 @@ def cmd_text(args) -> int:
     ratios: list[float] = []
     link_docs = link_lost = 0
 
-    for src in docs(args.n, "document", args.filter):
-        pdf, docx = work / "t.pdf", work / "t.docx"
-        if not (export(binary, src, "pdf", pdf) and export(binary, src, "docx", docx)):
+    is_deck = args.kind == "presentation"
+    office_format = "pptx" if is_deck else "docx"
+
+    for src in docs(args.n, args.kind, args.filter):
+        pdf, office = work / "t.pdf", work / f"t.{office_format}"
+        if not (export(binary, src, "pdf", pdf) and export(binary, src, office_format, office)):
             failures.append(str(src))
             continue
         t = subprocess.run(["pdftotext", str(pdf), "-"], capture_output=True, timeout=120)
@@ -310,13 +314,17 @@ def cmd_text(args) -> int:
             failures.append(f"{src} (pdftotext)")
             continue
         pdf_text = t.stdout.decode("utf-8", "replace")
-        parts = read_parts(docx)
-        body, furniture = docx_text(parts)
+        parts = read_parts(office)
+        body, furniture = (pptx_text(parts), "") if is_deck else docx_text(parts)
         loss = detectors.text_loss(pdf_text, body, furniture)
         seq = detectors.sequence_similarity(pdf_text, body)
         ratios.append(seq)
-        collapsed = detectors.formatting_collapse(
-            _pdf_height_classes(pdf), _body_sz_count(parts)
+        # The run-size detector is WordprocessingML-specific (`w:sz`). PPTX
+        # uses DrawingML and needs its own formatting-survival detector; do
+        # not misclassify a slide merely because it has no Word run sizes.
+        collapsed = (
+            detectors.formatting_collapse(_pdf_height_classes(pdf), _body_sz_count(parts))
+            if not is_deck else False
         )
         found: dict = {}
         if detectors.text_fired(loss):

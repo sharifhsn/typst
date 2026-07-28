@@ -36,7 +36,6 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TYPST = os.path.abspath(os.path.join(ROOT, "../../target/release/typst"))
-IMPORT = os.path.abspath(os.path.join(ROOT, "../../target/debug/examples/import"))
 OUT = os.path.join(ROOT, "conformance-out")
 
 
@@ -137,7 +136,7 @@ def main():
         if not a:
             print("  unreadable"); continue
 
-        r = subprocess.run([IMPORT, src, typ], capture_output=True, timeout=180)
+        r = subprocess.run([TYPST, "import", src, typ], capture_output=True, timeout=180)
         if r.returncode != 0:
             print("  IMPORT FAILED:", (r.stdout + r.stderr).decode()[-120:]); continue
         notes = [l for l in (r.stdout + r.stderr).decode("utf8", "replace").splitlines()

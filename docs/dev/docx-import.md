@@ -103,10 +103,17 @@ import.
 
 ```sh
 cargo build --release
-cargo build -p typst-docx-import --example import
-python3 tools/docx-import-corpus/corpus.py --fetch   # first run only, ~8 MB
-python3 tools/docx-import-corpus/corpus.py
+uv run tools/docx-import-corpus/corpus.py --fetch   # first run only, ~8 MB
+uv run tools/docx-import-corpus/corpus.py
 ```
+
+The default, repo-local ignored paths are `tools/docx-import-corpus/poi-docs/`
+for fetched fixtures and `poi-out/` for per-document Typst/log artifacts and
+the durable `results.json`. Fetch resolves POI's branch to an immutable commit,
+verifies every Git blob, and records source provenance plus SHA-256 hashes in
+`poi-docs/manifest.json`; retain both files with any release-gate result.
+Override either location with `--corpus` or `--out` when comparing a separate
+fixture snapshot.
 
 It exits non-zero if any document that imported produced source that does not
 compile — the one outcome that is always a genuine defect. Pass `--baseline

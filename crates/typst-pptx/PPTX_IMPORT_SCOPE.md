@@ -1,4 +1,12 @@
-# Scoping a PowerPoint importer (`typst-pptx-import`)
+# Historical scoping record: PowerPoint importer (`typst-pptx-import`)
+
+> **Historical design document — implementation has shipped.** This was the
+> pre-implementation scope and risk analysis. The current importer lives in
+> [`../typst-pptx-import`](../typst-pptx-import); use its
+> [README](../typst-pptx-import/README.md) for supported features, command-line
+> examples, measured round-trip behaviour, and known limitations. The stages
+> below are retained because they explain the architecture, not because they
+> are an open roadmap.
 
 What a `.pptx` → Typst converter would have to do, what it could not, and what
 order to build it in. Written from a **542-presentation corpus** (LibreOffice

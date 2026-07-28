@@ -1,6 +1,17 @@
 # Office export shipping readiness
 
-Status date: 2026-07-18, revised 2026-07-22.
+Status date: 2026-07-18, revised 2026-07-22. Release-hygiene addendum:
+2026-07-27.
+
+> **How to read this document.** The detailed corpus numbers and validation
+> narrative below are preserved dated evidence, mostly frozen at the revisions
+> named beside them; they are not a score for the current branch HEAD. Since
+> that snapshot, the branch also gained separate arbitrary Office importers:
+> [`typst-docx-import`](../../crates/typst-docx-import/README.md) for DOCX and
+> [`typst-pptx-import`](../../crates/typst-pptx-import/README.md) for PPTX.
+> Both are exposed through the experimental `typst import` CLI as well as Rust
+> APIs. They are not exposed by the browser demo. Their content-oriented import
+> evidence must not be presented as export visual-fidelity evidence.
 
 This is the current product and validation snapshot after consolidating the DOCX,
 PPTX, Pandoc, shared Office, DOCX review, and corpus-hardening branch histories
@@ -22,11 +33,20 @@ onto `codex/office-export`. Performance branches remain separate.
   `typst-ooxml-math` crate that used to duplicate it was deleted on 2026-07-22
   with nothing depending on it; this is an import-side capability and was never
   part of DOCX/PPTX export.
+- **Office import:** `typst-docx-import` and `typst-pptx-import` now convert
+  arbitrary OOXML packages to Typst source plus assets and emit loss reports.
+  DOCX import targets readable content migration, not pixel recreation; PPTX
+  import defaults to coordinate-preserving Touying output and has documented
+  text-box baseline limitations. The experimental `typst import` command is an
+  end-user entry point with no-overwrite output and optional JSON loss reports;
+  import is not yet available in the WASM demo.
 
-The safe product wording is: **Typst can export experimental `.docx` and `.pptx`
-files with substantial native editability and image fallbacks. Compatibility and
-fidelity are document- and consumer-dependent.** Do not claim arbitrary-document
-fidelity or production support yet.
+The safe current product wording is: **Typst can export experimental `.docx` and
+`.pptx` files with substantial native editability and image fallbacks.
+Compatibility and fidelity are document- and consumer-dependent. Experimental
+DOCX/PPTX import is available through `typst import`, with explicit loss
+reports.** Do not claim arbitrary-document fidelity, production support, or
+browser import yet.
 
 ## What works now
 
@@ -413,7 +433,11 @@ write a bibliography sidecar and rasterize visual content that has no Pandoc nod
   to install. Pandoc resolves every id inline during the walk and bakes it into
   the AST, so the introspector's anchor map had no consumer and was removed.
 
-## Validation completed on the combined branch
+## Historical validation completed on the combined branch
+
+The following bullets are the 2026-07-18/22 validation snapshot. Current
+release decisions require fresh exact-HEAD runs; later focused fixes in this
+document are deliberately not folded into the frozen corpus authority.
 
 - DOCX integration: 233 tests passed.
 - PPTX integration: 65 tests passed.

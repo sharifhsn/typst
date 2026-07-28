@@ -1,7 +1,14 @@
 # Typst → PPTX support matrix
 
-Coverage of `typst-pptx`, the PowerPoint exporter. There is no importer — see
-[`PPTX_IMPORT_SCOPE.md`](PPTX_IMPORT_SCOPE.md) for what one would take.
+Coverage of `typst-pptx`, the PowerPoint exporter. The separate
+[`typst-pptx-import`](../typst-pptx-import) crate now imports arbitrary PPTX
+files into Touying Typst source; see its [current support matrix and measured
+round-trip limits](../typst-pptx-import/README.md#support-matrix). This file is
+export-only: its “In the wild” column is import-priority context, not a claim
+that the exporter consumes PowerPoint features.
+
+[`PPTX_IMPORT_SCOPE.md`](PPTX_IMPORT_SCOPE.md) is the historical pre-implementation
+design record. It is retained for rationale, not current capability.
 
 **Built the other way round from the DOCX matrix, deliberately.** That one was
 written from what the code does, so it could only ever list gaps already known

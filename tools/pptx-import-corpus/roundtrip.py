@@ -19,13 +19,15 @@ Three measurements, cheapest first:
      wrong coordinates is a different bug from one that vanishes, and the
      `Placed` fidelity mode exists precisely to make this comparable.
 
-    python3 roundtrip.py --corpus /tmp/pptx-corpus/docs --limit 60
+    python3 roundtrip.py --limit 60   # uses the repo-local fetched corpus
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import dataclasses
+import json
 import os
 import re
 import subprocess
@@ -36,8 +38,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-IMPORTER = REPO / "target" / "debug" / "examples" / "import"
-TYPST = REPO / "target" / "debug" / "typst"
+DEFAULT_CORPUS = Path(__file__).resolve().parent / "corpus"
+DEFAULT_OUT = Path(__file__).resolve().parent / "out"
+TYPST = REPO / "target" / "release" / "typst"
 
 TEXT_RE = re.compile(rb"<a:t>([^<]*)</a:t>")
 SLIDE_RE = re.compile(r"^ppt/slides/slide\d+\.xml$")
@@ -115,7 +118,10 @@ def run_one(path: Path, timeout: int) -> Row:
         tmpd = Path(tmp)
         typ, out = tmpd / "rt.typ", tmpd / "rt.pptx"
         proc = subprocess.run(
-            [str(IMPORTER), str(path), str(typ)], capture_output=True, timeout=timeout, text=True
+            [str(TYPST), "import", str(path), str(typ)],
+            capture_output=True,
+            timeout=timeout,
+            text=True,
         )
         if proc.returncode != 0:
             return Row(name, False, None, (0, 0), (0, 0), (0, 0), None, None, 0, "import failed")
@@ -182,16 +188,20 @@ def run_one(path: Path, timeout: int) -> Row:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--corpus", default="/tmp/pptx-corpus/docs")
+    ap.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
+    ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--filter", default="")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 4) - 2))
     ap.add_argument("--timeout", type=int, default=180)
     args = ap.parse_args()
 
+    if not args.corpus.is_dir():
+        print(f"no presentations under {args.corpus} (run: corpus.py fetch)", file=sys.stderr)
+        return 2
     files = sorted(
         p
-        for p in Path(args.corpus).iterdir()
+        for p in args.corpus.iterdir()
         if p.suffix.lower() in (".pptx", ".pptm") and args.filter in p.name
     )
     if args.limit:
@@ -208,6 +218,18 @@ def main() -> int:
                 r = fut.result()
             except Exception as e:
                 print(f"  {futs[fut].stem[:48]:50s} ERROR {e}")
+                rows.append(
+                    Row(
+                        futs[fut].stem,
+                        False,
+                        None,
+                        (0, 0),
+                        (0, 0),
+                        (0, 0),
+                        None,
+                        error=str(e),
+                    )
+                )
                 continue
             rows.append(r)
             if not r.ok:
@@ -271,6 +293,18 @@ def main() -> int:
             f"inherited decoration adds more)"
         )
         print(f"tables          : {tbls[0]}/{tbls[1]} kept")
+    rows.sort(key=lambda row: row.name)
+    args.out.mkdir(parents=True, exist_ok=True)
+    results_path = args.out / "roundtrip-results.json"
+    payload = {
+        "schema": 1,
+        "corpus_manifest": str(args.corpus / "manifest.json"),
+        "presentations": len(rows),
+        "round_tripped": len(good),
+        "results": [dataclasses.asdict(row) for row in rows],
+    }
+    results_path.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"wrote {results_path}")
     return 0 if len(good) == len(rows) else 1
 
 

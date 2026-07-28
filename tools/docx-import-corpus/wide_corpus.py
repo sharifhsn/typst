@@ -213,17 +213,25 @@ def cmd_run(args):
         wd = os.path.join(out, name[:80])
         os.makedirs(wd, exist_ok=True)
         typ = os.path.join(wd, "doc.typ")
-        rec = {"name": name, "import": "FAIL", "compile": "-", "error": ""}
+        rec = {
+            "name": name,
+            "import": "FAIL",
+            "compile": "-",
+            "error": "",
+            "fatal": False,
+        }
         try:
-            r = subprocess.run([args.importer, path, typ], capture_output=True,
+            r = subprocess.run([args.typst, "import", path, typ], capture_output=True,
                                timeout=120)
         except subprocess.TimeoutExpired:
             rec["error"] = "import TIMEOUT"
+            rec["fatal"] = True
             return rec
         if r.returncode != 0:
             log = (r.stdout + r.stderr).decode("utf8", "replace").strip().splitlines()
             rec["error"] = ("CRASH" if r.returncode < 0
                             else (log[-1] if log else f"exit {r.returncode}"))[:110]
+            rec["fatal"] = r.returncode < 0
             return rec
         rec["import"] = "ok"
         # An empty result is the right answer for a document with no content.
@@ -236,9 +244,11 @@ def cmd_run(args):
                                capture_output=True, timeout=180)
         except subprocess.TimeoutExpired:
             rec["compile"] = "TIMEOUT"
+            rec["fatal"] = True
             return rec
         rec["compile"] = "ok" if c.returncode == 0 else "FAIL"
         if c.returncode != 0:
+            rec["fatal"] = True
             log = (c.stdout + c.stderr).decode("utf8", "replace")
             errs = [l.strip() for l in log.splitlines() if l.lower().startswith("error")]
             rec["error"] = (errs[0] if errs else "")[:110]
@@ -263,9 +273,10 @@ def cmd_run(args):
     print(f"documents   : {len(results)}")
     print(f"import ok   : {ok_i}/{len(results)}")
     print(f"compile ok  : {ok_c}/{ok_i}")
-    print(f"crash       : {sum(1 for r in results if 'CRASH' in r['error'])}")
+    fatal = sum(1 for r in results if r.get("fatal"))
+    print(f"fatal       : {fatal}")
     json.dump(results, open(os.path.join(ROOT, "wide-results.json"), "w"), indent=1)
-    return 1 if ok_c < ok_i else 0
+    return 1 if fatal or ok_c < ok_i else 0
 
 
 def main():
@@ -275,11 +286,8 @@ def main():
     ap.add_argument("--filter")
     ap.add_argument("--jobs", type=int, default=10)
     ap.add_argument("--typst", default=os.path.join(ROOT, "../../target/release/typst"))
-    ap.add_argument("--importer",
-                    default=os.path.join(ROOT, "../../target/debug/examples/import"))
     args = ap.parse_args()
     args.typst = os.path.abspath(args.typst)
-    args.importer = os.path.abspath(args.importer)
     return {"fetch": cmd_fetch, "describe": cmd_describe, "run": cmd_run}[
         args.command](args) or 0
 

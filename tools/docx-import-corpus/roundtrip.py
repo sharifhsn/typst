@@ -118,7 +118,7 @@ def docx_leg(args, src):
     wd = os.path.join(args.out, os.path.basename(src)[:-5][:80])
     os.makedirs(wd, exist_ok=True)
     typ, back = os.path.join(wd, "d.typ"), os.path.join(wd, "back.docx")
-    if run([args.importer, src, typ], 120)[0] != 0 or os.path.getsize(typ) == 0:
+    if run([args.typst, "import", src, typ], 120)[0] != 0 or os.path.getsize(typ) == 0:
         return None
     if run([args.typst, "compile", "--root", wd, "--format", "docx", typ, back])[0] != 0:
         return None
@@ -170,7 +170,7 @@ def typst_leg(args, src):
         return ("skip", None, None)
     if run([args.typst, "compile", "--root", root, "--format", "docx", src, docx])[0] != 0:
         return ("export", None, None)
-    if run([args.importer, docx, typ], 120)[0] != 0 or os.path.getsize(typ) == 0:
+    if run([args.typst, "import", docx, typ], 120)[0] != 0 or os.path.getsize(typ) == 0:
         return ("import", None, None)
     if run([args.typst, "compile", "--root", wd, typ, c_pdf])[0] != 0:
         return ("recompile", None, None)
@@ -230,11 +230,8 @@ def main():
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--out", default=os.path.join(ROOT, "roundtrip-out"))
     ap.add_argument("--typst", default=os.path.join(ROOT, "../../target/release/typst"))
-    ap.add_argument("--importer",
-                    default=os.path.join(ROOT, "../../target/debug/examples/import"))
     args = ap.parse_args()
     args.typst = os.path.abspath(args.typst)
-    args.importer = os.path.abspath(args.importer)
     if os.path.exists(args.out):
         shutil.rmtree(args.out)
     os.makedirs(args.out)

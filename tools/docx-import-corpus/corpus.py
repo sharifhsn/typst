@@ -22,10 +22,10 @@ deliberately including fuzzer-corrupted, truncated, encrypted and torture
 files. Fetch it with `--fetch`.
 
 Usage:
-    python3 corpus.py --fetch                 # download the corpus (~8 MB)
-    python3 corpus.py                         # run everything
-    python3 corpus.py --filter headerFooter   # run one document
-    python3 corpus.py --baseline out.json     # compare against a saved run
+    uv run corpus.py --fetch                 # download into ./poi-docs (~8 MB)
+    uv run corpus.py                         # run everything
+    uv run corpus.py --filter headerFooter   # run one document
+    uv run corpus.py --baseline out.json     # compare against a saved run
 
 Requires `soffice` (LibreOffice) and `pdftotext` (poppler) on PATH, and a
 release Typst binary.
@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import os
 import re
@@ -42,15 +43,17 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 TYPST = REPO / "target" / "release" / "typst"
-IMPORTER = REPO / "target" / "debug" / "examples" / "import"
-POI_API = (
-    "https://api.github.com/repos/apache/poi/contents/test-data/document?ref=trunk"
-)
+POI_REPO = "apache/poi"
+POI_REF = "trunk"
+POI_PATH = "test-data/document"
+DEFAULT_CORPUS = REPO / "tools" / "docx-import-corpus" / "poi-docs"
+DEFAULT_OUT = REPO / "tools" / "docx-import-corpus" / "poi-out"
 
 # Two or more letters: digits and punctuation are too noisy to compare across
 # two different renderers' line breaking and hyphenation.
@@ -102,12 +105,15 @@ def run_one(docx: Path, out_dir: Path, slot: int) -> dict:
         "compile": "-",
         "coverage": None,
         "notes": 0,
+        "fatal": False,
     }
 
     typ = wd / "doc.typ"
     try:
         r = subprocess.run(
-            [str(IMPORTER), str(docx), str(typ)], capture_output=True, timeout=120
+            [str(TYPST), "import", str(docx), str(typ)],
+            capture_output=True,
+            timeout=120,
         )
         log = (r.stdout + r.stderr).decode("utf-8", "replace")
         (wd / "import.log").write_text(log)
@@ -117,8 +123,10 @@ def run_one(docx: Path, out_dir: Path, slot: int) -> dict:
         else:
             tail = log.strip().splitlines()
             rec["error"] = tail[-1][:90] if tail else f"exit {r.returncode}"
+            rec["fatal"] = r.returncode < 0 or r.returncode == 0
     except subprocess.TimeoutExpired:
         rec["error"] = "import timeout"
+        rec["fatal"] = True
         return rec
     if rec["import"] != "ok":
         return rec
@@ -134,10 +142,12 @@ def run_one(docx: Path, out_dir: Path, slot: int) -> dict:
         (wd / "compile.log").write_text(clog)
         rec["compile"] = "ok" if c.returncode == 0 else "FAIL"
         if c.returncode != 0:
+            rec["fatal"] = True
             errs = [line for line in clog.splitlines() if "error" in line.lower()]
             rec["error"] = (errs[0] if errs else clog.splitlines()[0] if clog else "")[:90]
     except subprocess.TimeoutExpired:
         rec["compile"] = "TIMEOUT"
+        rec["fatal"] = True
         return rec
 
     src_pdf = soffice_pdf(docx, wd, slot)
@@ -156,39 +166,93 @@ def run_one(docx: Path, out_dir: Path, slot: int) -> dict:
 
 def fetch_corpus(dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(POI_API) as fh:
+    headers = {"User-Agent": "typst-docx-corpus"}
+    commit_request = urllib.request.Request(
+        f"https://api.github.com/repos/{POI_REPO}/commits/{POI_REF}", headers=headers
+    )
+    with urllib.request.urlopen(commit_request, timeout=60) as fh:
+        commit = json.load(fh)["sha"]
+    contents_request = urllib.request.Request(
+        f"https://api.github.com/repos/{POI_REPO}/contents/{POI_PATH}?ref={commit}",
+        headers=headers,
+    )
+    with urllib.request.urlopen(contents_request, timeout=60) as fh:
         entries = json.load(fh)
     docs = [e for e in entries if e["name"].lower().endswith(".docx")]
-    print(f"fetching {len(docs)} documents into {dest}")
+    print(f"fetching {len(docs)} documents from {POI_REPO}@{commit[:12]} into {dest}")
 
-    def get(entry: dict) -> str:
+    def git_blob_sha(data: bytes) -> str:
+        header = f"blob {len(data)}\0".encode()
+        return hashlib.sha1(header + data).hexdigest()
+
+    def get(entry: dict) -> dict:
         path = dest / entry["name"]
-        if path.exists() and path.stat().st_size == entry["size"]:
-            return "skip"
-        try:
-            urllib.request.urlretrieve(entry["download_url"], path)
-            return "ok"
-        except Exception as exc:  # noqa: BLE001 - report and continue
-            return f"ERR {exc}"
+        data = path.read_bytes() if path.exists() else b""
+        status = "skip"
+        if git_blob_sha(data) != entry["sha"]:
+            source_path = urllib.parse.quote(f"{POI_PATH}/{entry['name']}", safe="/")
+            request = urllib.request.Request(
+                f"https://raw.githubusercontent.com/{POI_REPO}/{commit}/{source_path}",
+                headers=headers,
+            )
+            with urllib.request.urlopen(request, timeout=120) as response:
+                data = response.read()
+            if git_blob_sha(data) != entry["sha"]:
+                raise RuntimeError(f"Git blob hash mismatch for {entry['name']}")
+            path.write_bytes(data)
+            status = "ok"
+        return {
+            "file": entry["name"],
+            "bytes": len(data),
+            "git_blob": entry["sha"],
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "status": status,
+        }
 
-    with concurrent.futures.ThreadPoolExecutor(8) as ex:
-        results = list(ex.map(get, docs))
-    fetched = sum(1 for r in results if r == "ok")
-    errors = [r for r in results if r.startswith("ERR")]
-    print(f"  {fetched} downloaded, {len(results) - fetched - len(errors)} already present")
-    for err in errors:
-        print(f"  {err}")
+    records = []
+    errors = []
+    with concurrent.futures.ThreadPoolExecutor(8) as executor:
+        future_entries = {executor.submit(get, entry): entry for entry in docs}
+        for future in concurrent.futures.as_completed(future_entries):
+            entry = future_entries[future]
+            try:
+                records.append(future.result())
+            except Exception as error:
+                errors.append(f"{entry['name']}: {error}")
+
+    if errors:
+        for error in errors:
+            print(f"  ERR {error}", file=sys.stderr)
+        raise RuntimeError(f"{len(errors)} corpus downloads failed")
+
+    records.sort(key=lambda record: record["file"])
+    fetched = sum(record.pop("status") == "ok" for record in records)
+    manifest = {
+        "schema": 1,
+        "source": {
+            "repository": POI_REPO,
+            "requested_ref": POI_REF,
+            "commit": commit,
+            "subtree": POI_PATH,
+        },
+        "documents": len(records),
+        "entries": records,
+    }
+    (dest / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"  {fetched} downloaded, {len(records) - fetched} already verified")
 
 
 def summarize(results: list[dict], baseline: list[dict] | None) -> None:
     ok_import = sum(1 for r in results if r["import"] == "ok")
     ok_compile = sum(1 for r in results if r["compile"] == "ok")
+    fatal = sum(1 for r in results if r.get("fatal"))
     covs = [r["coverage"] for r in results if r["coverage"] is not None]
 
     print("\n" + "=" * 78)
     print(f"documents      : {len(results)}")
     print(f"import ok      : {ok_import}/{len(results)}")
     print(f"compile ok     : {ok_compile}/{ok_import}")
+    print(f"fatal failures : {fatal}")
     if covs:
         ordered = sorted(covs)
         print(
@@ -227,8 +291,10 @@ def summarize(results: list[dict], baseline: list[dict] | None) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--corpus", type=Path, default=Path("/tmp/docx-poi"))
-    ap.add_argument("--out", type=Path, default=None, help="work dir (default <corpus>/out)")
+    ap.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS,
+                    help=f"corpus directory (default {DEFAULT_CORPUS})")
+    ap.add_argument("--out", type=Path, default=None,
+                    help=f"work dir (default {DEFAULT_OUT})")
     ap.add_argument("--fetch", action="store_true", help="download the POI corpus first")
     ap.add_argument("--filter", default=None, help="only documents whose name contains this")
     ap.add_argument("--jobs", type=int, default=8)
@@ -238,10 +304,6 @@ def main() -> int:
     if args.fetch:
         fetch_corpus(args.corpus)
 
-    if not IMPORTER.exists():
-        print(f"missing {IMPORTER}\nbuild it with:", file=sys.stderr)
-        print("  cargo build -p typst-docx-import --example import", file=sys.stderr)
-        return 2
     if not TYPST.exists():
         print(f"missing {TYPST}\nbuild it with:\n  cargo build --release", file=sys.stderr)
         return 2
@@ -253,7 +315,7 @@ def main() -> int:
         print(f"no .docx found in {args.corpus} (try --fetch)", file=sys.stderr)
         return 2
 
-    out_dir = args.out or (args.corpus / "out")
+    out_dir = args.out or DEFAULT_OUT
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
@@ -277,14 +339,15 @@ def main() -> int:
     baseline = json.loads(args.baseline.read_text()) if args.baseline else None
     summarize(results, baseline)
 
-    results_path = args.corpus / "results.json"
+    results_path = out_dir / "results.json"
     results_path.write_text(json.dumps(results, indent=1))
     print(f"\nwrote {results_path}")
 
     # A non-zero exit means a document that imported produced source that does
     # not compile — the one outcome that is always a genuine defect.
     broken = [r for r in results if r["import"] == "ok" and r["compile"] != "ok"]
-    return 1 if broken else 0
+    fatal = [r for r in results if r.get("fatal")]
+    return 1 if broken or fatal else 0
 
 
 if __name__ == "__main__":

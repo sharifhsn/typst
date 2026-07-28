@@ -13,6 +13,7 @@ requires a locally installed LibreOffice and Poppler.
 from __future__ import annotations
 
 import argparse
+import html
 import hashlib
 import json
 import os
@@ -37,6 +38,29 @@ WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 TEXT_TAGS = {f"{{{WORD_NS}}}t", f"{{{MATH_NS}}}t"}
 TEXT_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
+FIELD_INSTRUCTION = re.compile(
+    r'<w:instrText(?:\s[^>]*)?>(.*?)</w:instrText>'
+    r'|<w:fldSimple\b[^>]*\bw:instr="([^"]*)"',
+    re.DOTALL,
+)
+
+
+def internal_hyperlink_field_count(document: str) -> int:
+    """Count internal links stored as Word ``REF``/``PAGEREF`` fields.
+
+    Word represents an internal link as a field instruction with ``\\h``;
+    unlike an external relationship it need not use a ``w:hyperlink`` element.
+    Keep this distinct from the literal-element count so external hyperlinks
+    retain their existing editability check.
+    """
+    count = 0
+    for instr_text, simple_instr in FIELD_INSTRUCTION.findall(document):
+        instruction = html.unescape(instr_text or simple_instr)
+        if re.match(r"\s*(?:PAGE)?REF\b", instruction, re.IGNORECASE) and re.search(
+            r"\\h\b", instruction, re.IGNORECASE
+        ):
+            count += 1
+    return count
 
 
 def sha256(path: Path) -> str:
@@ -155,6 +179,8 @@ def editability_metrics(parts: dict[str, bytes]) -> dict[str, int]:
     document = parts.get("word/document.xml", b"").decode("utf-8", "replace")
     footnotes = parts.get("word/footnotes.xml", b"").decode("utf-8", "replace")
     endnotes = parts.get("word/endnotes.xml", b"").decode("utf-8", "replace")
+    literal_hyperlinks = len(re.findall(r"<w:hyperlink(?: |>)", document))
+    internal_hyperlink_fields = internal_hyperlink_field_count(document)
     return {
         "paragraphs": len(re.findall(r"<w:p(?: |>)", document)),
         "heading_styles": len(re.findall(r'w:pStyle w:val="Heading[1-9]"', document)),
@@ -162,7 +188,12 @@ def editability_metrics(parts: dict[str, bytes]) -> dict[str, int]:
         "tables": len(re.findall(r"<w:tbl(?: |>)", document)),
         "table_headers": len(re.findall(r"<w:tblHeader(?: |/|>)", document)),
         "omml_math": len(re.findall(r"<m:oMath(?: |>)", document)),
-        "hyperlinks": len(re.findall(r"<w:hyperlink(?: |>)", document)),
+        # A literal w:hyperlink is still counted for external links. REF and
+        # PAGEREF fields with \\h are the native Word representation for
+        # internal links, so the aggregate reflects either editable form.
+        "hyperlinks": literal_hyperlinks + internal_hyperlink_fields,
+        "literal_hyperlinks": literal_hyperlinks,
+        "internal_hyperlink_fields": internal_hyperlink_fields,
         "footnotes": len(re.findall(r'<w:footnote w:id="(?:[0-9]|[1-9][0-9]+)"', footnotes)),
         "endnotes": len(re.findall(r'<w:endnote w:id="(?:[0-9]|[1-9][0-9]+)"', endnotes)),
         "drawings": len(re.findall(r"<w:drawing(?: |>)", document)),

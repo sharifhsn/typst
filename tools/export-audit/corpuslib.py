@@ -46,7 +46,7 @@ MANIFEST = CORPUS / "_meta/manifest.tsv"
 FLOW = re.compile(
     rb"<(w:t|m:t|a:t)[^>]*>([^<]*)</\1>"
     rb"|<w:(?:br|cr|tab)\b[^>]*/?>"
-    rb"|</w:(?:p|tc|tr|tbl|sdt|hyperlink|drawing)>"
+    rb"|</(?:w:(?:p|tc|tr|tbl|sdt|hyperlink|drawing)|a:p)>"
     rb"|</m:oMath>"
 )
 ALT = re.compile(rb'descr="([^"]*)"')
@@ -55,6 +55,7 @@ CJK_CLASS = "぀-ヿ㐀-䶿一-鿿豈-﫿가-힯"
 CJK = re.compile(f"[{CJK_CLASS}]")
 CJK_RUN = re.compile(f"[{CJK_CLASS}]+")
 HDRFTR = re.compile(r"word/(header|footer)\d*\.xml$")
+SLIDE = re.compile(r"ppt/slides/slide(\d+)\.xml$")
 
 
 def docs(limit: int, kind: str = "document", filt: str = "") -> list[Path]:
@@ -139,6 +140,20 @@ def docx_text(parts: dict[str, bytes]) -> tuple[str, str]:
             continue
         (furniture if HDRFTR.match(n) else body).append(part_text(data))
     return "".join(body), "".join(furniture)
+
+
+def pptx_text(parts: dict[str, bytes]) -> str:
+    """Text visible on slides, in numeric slide order.
+
+    Layouts, masters, themes, and notes are deliberately excluded: they do
+    not appear as slide-body text in the PDF used by the audit and would turn
+    inherited placeholder text or speaker notes into false survival.
+    """
+    slides = []
+    for name, data in parts.items():
+        if match := SLIDE.fullmatch(name):
+            slides.append((int(match.group(1)), data))
+    return "".join(part_text(data) for _, data in sorted(slides))
 
 
 def norm(s: str) -> str:

@@ -47,7 +47,7 @@ Two kinds of check live here, and the distinction matters:
 | Fixture release gate | `tools/docx-validate` | package validity, editability, fixture visuals | minutes, CI |
 | **typ_leak scoreboard** | `audit.py leak` | the campaign's objective function: export failures + typst/office page-count divergence, one number with the leaking documents by name; `--baseline` diffs runs (NEW / FIXED / moved) | ~4 s/doc |
 | **Corpus invariants** | `audit.py invariants` | dead anchors, dangling rels, unresolved numIds/r:ids, `w:` in slides, **duplicate docPr / bookmark / cNvPr / sldId ids**, **drawings in text boxes/notes (Word refuses to open these)**, nondeterminism — at scale | ~1 s/doc |
-| **Corpus text fidelity** | `audit.py text` | content that vanishes or mangles; **scrambled reading order** (`--links` also flags external-link loss) | ~2 s/doc |
+| **Corpus text fidelity** | `audit.py text` | content that vanishes or mangles; **scrambled reading order** (`--links` also flags external-link loss). Supports DOCX documents and PPTX slides via `--kind presentation`; the Word run-size-collapse signal is DOCX-only. | ~2 s/doc |
 | **Corpus visuals, ranked** | `audit.py visual` → `rank` → `sheet` | gross layout breakage vs the PDF, plus **colour that vanished** (`desaturated`); a *ranker*, not a detector | ~15 s/doc; vision only on the ranked worst |
 | **Generative cross-product** | `audit.py generate` | export failure, invariant breaks, and silent sentinel loss over construct × context pairs | ~2 s/pair, one shot |
 | **Consumer re-save** | `audit.py resave` | content a real consumer (LibreOffice) silently drops from our output | ~10 s/doc, on ~15 |
@@ -118,6 +118,7 @@ uv run audit.py generate --binary ../../target/release/typst   # construct x con
 uv run audit.py invariants --binary ../../target/release/typst -n 150
 uv run audit.py invariants --binary ../../target/release/typst --kind presentation -n 60
 uv run audit.py text --binary ../../target/release/typst -n 150 --links
+uv run audit.py text --binary ../../target/release/typst --kind presentation -n 60 --links
 
 uv run audit.py visual --binary ../../target/release/typst -n 60
 uv run audit.py rank --scores /tmp/export-audit/scores.json -k 15   # DESAT column marks vanished colour

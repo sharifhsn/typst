@@ -24,6 +24,7 @@ docs/dist
 node_modules
 tools/test-helper/dist
 package-lock.json
+__pycache__/
 
 # Nix
 /result
@@ -37,5 +38,9 @@ package-lock.json
 tools/docx-import-corpus/wide-docs/
 tools/docx-import-corpus/wide-out/
 tools/docx-import-corpus/wide-results.json
+tools/docx-import-corpus/poi-docs/
+tools/docx-import-corpus/poi-out/
 tools/docx-import-corpus/roundtrip-out/
 tools/docx-import-corpus/conformance-out/
+tools/pptx-import-corpus/corpus/
+tools/pptx-import-corpus/out/
