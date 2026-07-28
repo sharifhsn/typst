@@ -41,7 +41,7 @@ impl TypstDoc {
     /// [`Block::Figure`]'s caption already are: each pass's own block-walking
     /// function recurses into `Section::body` directly as it iterates this
     /// one tree, and reaches `Section::setup`'s own header/footer via
-    /// [`push_furniture_trees`] — the same helper this method uses for the
+    /// `push_furniture_trees` — the same helper this method uses for the
     /// preamble's initial page setup, just called one section at a time
     /// instead of once. See `passes::collapse_style`/`passes::strong_emph`'s
     /// `Block::Section` arm.
@@ -600,7 +600,7 @@ pub struct Chart {
 /// How a chart's data is represented in the Typst IR. `Table` is always
 /// available (see [`crate::wml::model::ChartData`]'s doc comment); `Plot`
 /// only when [`crate::opts::ChartStyle::Plot`] is requested *and*
-/// [`crate::mappers::chart::lower_chart`] finds the chart plottable —
+/// `crate::mappers::chart::lower_chart` finds the chart plottable —
 /// otherwise it falls back to `Table` there too.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChartContent {

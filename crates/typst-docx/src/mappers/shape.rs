@@ -856,7 +856,7 @@ pub fn move_(
 /// where the rotation/scale already shows up as an ordinary
 /// `FrameItem::Group` (exactly the shape [`extract_shapes`]/[`collect_shapes`]
 /// already knows how to bake into path coordinates via
-/// [`similarity_scale`]), so this is just that same walk with no translate
+/// [`dml::similarity_scale`]), so this is just that same walk with no translate
 /// step. `None` (fall through to rasterize) for anything [`build_shapes_drawing`]
 /// doesn't recognize (text, an image, a skew/non-uniform scale).
 pub fn transformed(
@@ -1093,7 +1093,7 @@ fn fit_raw_to_word_coordinates(raw: Vec<dml::RawSeg>) -> (Vec<dml::RawSeg>, bool
 /// Walks every item in `frame`, extracting each native-representable shape —
 /// or bailing (`None`) the moment it finds anything that isn't one (text, an
 /// image, an unrepresentable fill/stroke, or a transform that isn't a
-/// similarity — see [`similarity_scale`]). Recurses through nested
+/// similarity — see [`dml::similarity_scale`]). Recurses through nested
 /// `FrameItem::Group`s (ordinary block-flow nesting, or a real
 /// `#rotate`/`#scale`/`#move`), accumulating their transforms so a rotated or
 /// uniformly-scaled shape/composition is recovered too: since an OOXML
@@ -1686,7 +1686,7 @@ fn resolved_fill(ctx: &mut DocxCtx, fill: &Option<Paint>) -> Option<Option<Shape
 /// composition, or under rotation/translation/reflection alone) — since
 /// rotating/translating a stroked path leaves its perceived width unchanged
 /// but scaling it does, the flat OOXML line width must scale by the same
-/// factor to stay visually correct (see [`similarity_scale`]).
+/// factor to stay visually correct (see [`dml::similarity_scale`]).
 fn resolved_stroke(
     stroke: &Option<typst_library::visualize::FixedStroke>,
     scale: f64,

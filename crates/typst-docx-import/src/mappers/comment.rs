@@ -15,7 +15,7 @@
 //! pair around the commented words) or to a *point* (just the
 //! `w:commentReference` mark). Both are handled by attaching the payload to
 //! whichever anchor for a given id arrives first, and emitting a bare closing
-//! anchor for the span's other end — see [`lower_comment_anchor`].
+//! anchor for the span's other end — see `lower_comment_anchor`.
 
 use ecow::eco_format;
 

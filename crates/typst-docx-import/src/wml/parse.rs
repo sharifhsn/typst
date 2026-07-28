@@ -670,7 +670,7 @@ fn parse_document(xml: &str, report: &mut ImportReport) -> Result<Body, ImportEr
 }
 
 /// How deep a nest of *transparent wrapper* elements [`unwrap_wrappers`]/
-/// [`splice_wrappers`] will follow before giving up and dropping the
+/// `splice_wrappers` will follow before giving up and dropping the
 /// content, rather than recursing further. Bounded for the same reason as
 /// [`MAX_TABLE_DEPTH`]: a hostile document must not be able to drive
 /// unbounded recursion. Shared by both wrappers [`splice_node`] handles (see
@@ -974,7 +974,7 @@ fn parse_document_body(node: Node) -> Body {
 /// image, while `document.xml.rels`'s `rId1` is `styles.xml`). Rather than
 /// merge blindly and silently resolve a header's image against the wrong
 /// target, every relationship from a furniture part's `.rels` is inserted
-/// under a `"{part}!{rid}"` key, and [`namespace_furniture_rels`] rewrites
+/// under a `"{part}!{rid}"` key, and `namespace_furniture_rels` rewrites
 /// that part's own content to reference ids in the same namespaced form.
 /// Downstream lookup code (`package.rels.get(id)`) then needs no change at
 /// all — it just resolves whatever id it's handed, bare or namespaced.

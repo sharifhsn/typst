@@ -1,4 +1,4 @@
-//! [`PmlPackage`] → [`TypstDoc`].
+//! [`PmlPackage`] → [`crate::TypstDoc`].
 //!
 //! Where every judgement lives. The parser reads and the emitter prints; this
 //! is the only layer allowed to decide that a `rot` becomes a `#rotate`, that

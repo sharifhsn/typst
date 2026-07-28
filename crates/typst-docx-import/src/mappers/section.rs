@@ -1,4 +1,4 @@
-//! The `section` mapper: Word `w:sectPr` → the Typst IR's [`tdoc::PageSetup`].
+//! The `section` mapper: Word `w:sectPr` → the Typst IR's [`crate::tdoc::PageSetup`].
 
 use ecow::EcoString;
 use typst_ooxml_core::units::twip_to_abs;
@@ -188,7 +188,7 @@ fn resolve_variant(
 
 /// Resolve a `w:headerReference`/`w:footerReference`'s relationship target
 /// (relative to `word/`, e.g. `header1.xml`) to the zip name used as
-/// [`WmlPackage::furniture`]'s key. Mirrors how a document-level drawing's
+/// `WmlPackage::furniture`'s key. Mirrors how a document-level drawing's
 /// relationship target becomes a media part name ([`crate::mappers::drawing`])
 /// — `document.xml` and `headerN.xml` are both direct children of `word/`, so
 /// the same relative resolution applies — but is also robust to a producer

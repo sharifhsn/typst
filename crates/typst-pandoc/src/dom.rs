@@ -1,7 +1,7 @@
 //! The output document type that ties `PandocDocument` to `Target::Pandoc`.
 //!
 //! Unlike the DOCX exporter there is no OOXML IR here: the conversion produces
-//! the vendored Pandoc [`ast`] types directly. This module only carries the
+//! the vendored Pandoc `ast` types directly. This module only carries the
 //! `Output`/`Document` glue plus the realized blocks, the document metadata,
 //! and the introspector.
 

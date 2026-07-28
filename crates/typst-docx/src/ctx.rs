@@ -762,7 +762,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
 
     /// Embeds image bytes as a media part (the part is deduped by byte hash and
     /// shared across the package); returns the rId of a relationship to it,
-    /// allocated in the *active* part's relationships (see [`Self::active_rels`]).
+    /// allocated in the *active* part's relationships (see `Self::active_rels`).
     pub fn add_image(&mut self, bytes: &[u8], ext: &str) -> EcoString {
         let id = self.media.add(bytes, ext);
         let part = self.media.part(id);
@@ -1662,7 +1662,7 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
 
     /// Lowers a paragraph interior into paragraph children, preserving
     /// hyperlinks (`LinkElem` → `<w:hyperlink>`). Other inline elements lower to
-    /// runs via [`Self::handle_inline`].
+    /// runs via `Self::handle_inline`.
     pub fn inline_pchildren(
         &mut self,
         body: &Content,

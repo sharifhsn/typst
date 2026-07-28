@@ -90,7 +90,7 @@ pub fn docx_document(
 /// page number minus one) lets an `auto` page axis (`set page(width: ..,
 /// height: auto)`, an extremely common ticket/certificate/single-page-diagram
 /// idiom) resolve to Typst's own true content-driven size instead of a
-/// hardcoded A4 fallback — see [`real_section_size`].
+/// hardcoded A4 fallback — see `real_section_size`.
 pub fn docx_document_with_paged_introspector(
     engine: &mut Engine,
     content: &Content,

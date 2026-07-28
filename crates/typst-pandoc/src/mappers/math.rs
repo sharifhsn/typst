@@ -3,7 +3,8 @@
 //!
 //! Pandoc stores math as an opaque LaTeX *string*
 //! (`Math InlineMath "<tex>"` / `Math DisplayMath "<tex>"`). Typst has no
-//! Typst-math→LaTeX emitter, so we resolve the equation body to the [`MathItem`]
+//! Typst-math→LaTeX emitter, so we resolve the equation body to the
+//! [`typst_library::math::ir::MathItem`]
 //! IR — the very same IR the DOCX backend lowers to OMML — via
 //! [`resolve_equation`], then walk it into a LaTeX string with
 //! [`crate::mappers::math_latex::emit`]. Inline equations become

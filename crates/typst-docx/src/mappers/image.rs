@@ -400,7 +400,8 @@ fn figure_body_para_is_placeholder(para: &Para) -> bool {
         && props.pbdr.is_none()
 }
 
-/// Lowers a STANDALONE [`FigureCaption`] — one that reached the dispatch
+/// Lowers a STANDALONE [`typst_library::model::FigureCaption`] — one that
+/// reached the dispatch
 /// outside its `#figure` (a custom `show figure: it => .. it.caption ..` rule
 /// that emits the caption separately, common in two-column paper templates) —
 /// into a `Caption`-styled paragraph. `FigureCaption::realize` prepends the

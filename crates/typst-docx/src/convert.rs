@@ -1763,7 +1763,8 @@ pub(crate) fn is_empty_plain_box(
         })
 }
 
-/// Lowers a raw [`BlockElem`] (`#block(..)` / `#rect(..)`-via-block), mapping
+/// Lowers a raw [`typst_library::layout::BlockElem`] (`#block(..)` /
+/// `#rect(..)`-via-block), mapping
 /// `fill:`/`stroke:`/`inset:` to paragraph shading + borders + indentation
 /// (G5) and `above:`/`below:` to spacing (G4b) when the body is representable
 /// as paragraphs. Gradient/tiling fills and layouter bodies fall through to the

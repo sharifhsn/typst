@@ -2,7 +2,7 @@
 //! fields (`w:fldSimple`/`w:fldChar` — see [`crate::mappers::field`]) → the
 //! Typst IR's [`Inlines`]. A run's footnote/endnote references
 //! ([`RunContent::NoteRef`]) resolve here too, via
-//! [`crate::mappers::note::lower_note_ref`] — one more thing a run's content
+//! `crate::mappers::note::lower_note_ref` — one more thing a run's content
 //! can hold, alongside text/tabs/breaks/drawings/math/text boxes.
 
 use typst_ooxml_core::units::{half_point_to_pt, twip_to_abs};

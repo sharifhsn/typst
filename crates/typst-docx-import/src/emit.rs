@@ -546,7 +546,7 @@ impl Emitter<'_> {
     /// `lq.diagram(..)` expression from [`Self::render_plot`] — captioned
     /// with the chart's title if it has one, exactly like
     /// [`Self::render_figure`] wraps an `image(..)` call. The title is plain
-    /// text (see [`crate::wml::parse::parse_chart_title`]), not structured
+    /// text (see `parse_chart_title`), not structured
     /// `Inlines`, so it's markup-escaped directly rather than routed through
     /// [`Self::render_inlines`]. Deliberately never also passes the title to
     /// `lq.diagram`'s own `title:` argument — the figure caption is the one
@@ -606,7 +606,7 @@ impl Emitter<'_> {
     }
 
     /// One `lq.plot`/`lq.scatter`/`lq.bar` call per series — see
-    /// [`Self::render_xy_marks`] and [`Self::render_bar_marks`] for the two
+    /// [`Self::render_xy_marks`] and `render_bar_marks` for the two
     /// shapes ([`PlotKind::Bar`] needs grouped x-offsets; the other two plot
     /// a series straight against its own point index).
     fn render_plot_marks(&mut self, plot: &Plot) -> Vec<String> {
@@ -619,7 +619,7 @@ impl Emitter<'_> {
 
     /// A line/scatter series plotted against its own point index: `func((0,
     /// 1, …), (v₀, v₁, …), label: [name])`. `label:` is omitted for an
-    /// unnamed series (see [`Self::render_bar_marks`] for the same rule on
+    /// unnamed series (see `render_bar_marks` for the same rule on
     /// the bar path).
     fn render_xy_marks(&mut self, func: &str, series: &[PlotSeries]) -> Vec<String> {
         series

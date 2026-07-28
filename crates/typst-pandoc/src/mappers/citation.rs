@@ -33,7 +33,7 @@
 //! introspection loop ("citation could not be located"). As a consequence a cite
 //! is realized into formatted hayagriva text (with a `DirectLinkElem`→`LinkElem`
 //! to the bib entry's well-known backlink `Location`) *before* it reaches this
-//! mapper, so the raw-`RefElem` arm below ([`reference`]) is seldom hit for bib
+//! mapper, so the raw-`RefElem` arm below ([`reference()`]) is seldom hit for bib
 //! cites — the in-text cite is just linked text that the generic walk already
 //! emits as a `Link` to `#ref-<hash(location)>`.
 //!
@@ -56,7 +56,7 @@
 //! `finish-cite.md`: the pinned hayagriva 0.10.1 exposes no BibLaTeX/CSL-JSON
 //! serializer (only a hayagriva-YAML writer pandoc rejects), and emitting
 //! structured `Cite` nodes needs a cite-key↔`Location` map that is private to
-//! `typst-library`. The [`reference`] arm below already builds a structured
+//! `typst-library`. The [`reference()`] arm below already builds a structured
 //! `Inline::Cite` with a baked fallback should a raw `RefElem` ever reach it, so
 //! the structured path is half-wired and forward-compatible.
 

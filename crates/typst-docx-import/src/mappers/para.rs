@@ -320,7 +320,7 @@ fn sole_break_kind(p: &Paragraph) -> Option<BreakKind> {
 /// a wrapper (a hyperlink, or a field's cached result).
 ///
 /// Descending into those wrappers is not a refinement, it is the difference
-/// between keeping the picture and losing it. [`lower_run`] deliberately
+/// between keeping the picture and losing it. `lower_run` deliberately
 /// ignores `RunContent::Drawing` because a paragraph's picture is hoisted to
 /// block level *here* — so a drawing this function declines to find is seen by
 /// no other code path at all and disappears without so much as a report entry.

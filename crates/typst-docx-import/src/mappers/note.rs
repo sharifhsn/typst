@@ -1,13 +1,13 @@
 //! The `note` mapper: a `w:footnoteReference`/`w:endnoteReference`
-//! ([`RunContent::NoteRef`]), resolved against
-//! [`WmlPackage::footnotes`]/[`WmlPackage::endnotes`], → the Typst IR's
+//! (`RunContent::NoteRef`), resolved against
+//! `WmlPackage::footnotes`/`WmlPackage::endnotes`, → the Typst IR's
 //! [`Inline::Footnote`].
 //!
 //! Typst has no separate note store — `#footnote[..]` always inlines the
 //! note's content at the reference site and renders it at the foot of *that*
 //! page. A footnote maps onto this directly. An endnote does not: Word
 //! collects endnotes at the document's end, so only a superscript mark is
-//! left at the reference and the body is handed to [`LowerCtx::collect_endnote`]
+//! left at the reference and the body is handed to `LowerCtx::collect_endnote`
 //! for `lower::lower` to emit, in order, after the body — a reported
 //! approximation rather than a silent equivalence.
 

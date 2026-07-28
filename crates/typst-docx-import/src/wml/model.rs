@@ -45,7 +45,7 @@ pub struct WmlPackage {
     pub meta: DocumentMeta,
     /// Every `w:bookmarkStart` name in the document, mapped to the Typst label
     /// it lowers to. Built once after parsing (see
-    /// [`crate::wml::parse::collect_bookmarks`]) because resolution runs in
+    /// (`collect_bookmarks`) because resolution runs in
     /// both directions: a paragraph needs the label to *emit*, while a
     /// `REF`/`PAGEREF` field or an internal hyperlink elsewhere in the
     /// document — possibly earlier than the bookmark itself — needs to know

@@ -13,7 +13,7 @@
 //! ([`crate::emit`] emits the `#import` for it) — but only for the chart
 //! kinds `lilaq` has a mark for ([`crate::wml::model::ChartKind`]) and only
 //! when every series' cached values are complete and numeric
-//! ([`build_plot`]'s doc comment). Anything else falls back to the table,
+//! (`build_plot`'s doc comment). Anything else falls back to the table,
 //! same as if `Plot` had never been requested — a chart is never dropped
 //! outright just because it can't be drawn.
 
@@ -111,7 +111,7 @@ pub(crate) fn lower_chart(d: &DrawingRef, ctx: &mut LowerCtx) -> Option<Chart> {
 ///   strings, but a category axis mislabeled as a value series, or genuinely
 ///   non-numeric cached text, means there's nothing to plot.
 /// - A *missing* value: Word's sparse `idx` handling (see
-///   [`crate::wml::parse::collect_indexed_pts`]) fills a hidden/filtered
+///   (`collect_indexed_pts`) fills a hidden/filtered
 ///   point with an empty string rather than omitting it, so a series can be
 ///   "complete" in length but have a hole in the middle. [`PlotSeries`] has
 ///   no per-point x coordinate of its own — a plotted point's x is simply its

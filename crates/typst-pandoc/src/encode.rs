@@ -22,9 +22,9 @@ pub struct PandocOptions {
 
 /// Serializes a Pandoc document into JSON bytes.
 ///
-/// Builds the [`Pandoc`] envelope (api-version + meta + blocks) and streams it
-/// out with a single `serde_json` pass — strictly less work than a PDF compile,
-/// which this skips layout/raster/PDF for entirely. The in-memory value is
+/// Builds the internal `Pandoc` envelope (api-version + meta + blocks) and
+/// streams it out with a single `serde_json` pass — strictly less work than a
+/// PDF compile, which this skips layout/raster/PDF for entirely. The in-memory value is
 /// necessary and cheap (same order as the realized tree); we avoid building a
 /// giant intermediate `String`.
 #[typst_macros::time(name = "pandoc encode")]

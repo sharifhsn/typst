@@ -85,7 +85,7 @@ impl<'a, 'e> PandocCtx<'a, 'e> {
         }
     }
 
-    /// Populates [`Self::cite_anchors`] from the document's `Works`, mapping each
+    /// Populates `Self::cite_anchors` from the document's `Works`, mapping each
     /// bibliography entry's anchor id to its citation key. The anchor ids are
     /// derived through [`Self::anchor_id`] from the entries' backlink locations —
     /// the exact ids in-text citation `Link`s target — so the post-walk pass can
@@ -267,7 +267,7 @@ impl<'a, 'e> PandocCtx<'a, 'e> {
     ///
     /// * **The element carries an explicit Typst label** (`= Intro <intro>`):
     ///   derive the id from the label name, sanitized to a valid Pandoc/LaTeX id
-    ///   (see [`sanitize_label_id`]). Labels are unique per document, so the
+    ///   (see `sanitize_label_id`). Labels are unique per document, so the
     ///   sanitized ids are collision-free among labeled elements, and the id is
     ///   stable across edits that don't rename the label — far more useful than
     ///   an opaque hash for downstream tooling and human-readable output.
@@ -282,12 +282,12 @@ impl<'a, 'e> PandocCtx<'a, 'e> {
     /// The whole `ref-` prefix is the exporter's: the hash fallback writes
     /// `ref-<hash>`, and a bibliography entry writes `ref-<citation key>`. To keep
     /// a user label from ever colliding with that namespace — or producing an id
-    /// that LaTeX/HTML reject — [`sanitize_label_id`] prefixes a label-derived id
+    /// that LaTeX/HTML reject — `sanitize_label_id` prefixes a label-derived id
     /// with `L-` whenever it would be empty, start with a digit, or fall inside
     /// the reserved prefix. In the common case (`<intro>`) the id is just
     /// `intro`, verbatim.
     ///
-    /// A bibliography entry additionally goes through the [`Self::bib_ids`]
+    /// A bibliography entry additionally goes through the `Self::bib_ids`
     /// override, which swaps the hash for pandoc's `ref-<citation key>`
     /// convention wherever the key allows it.
     pub fn anchor_id(&self, loc: typst_library::introspection::Location) -> EcoString {

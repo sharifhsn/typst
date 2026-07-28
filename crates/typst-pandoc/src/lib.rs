@@ -3,7 +3,7 @@
 //! Mirrors `typst-docx`/`typst-html`: a `Target::Pandoc` for which no element
 //! show rules are registered, so the realized native element tree reaches the
 //! converter intact. The converter walks that tree into a typed Pandoc AST
-//! ([`ast`]) and serializes it to a single self-contained Pandoc JSON object.
+//! (`ast`) and serializes it to a single self-contained Pandoc JSON object.
 
 mod ast;
 mod convert;

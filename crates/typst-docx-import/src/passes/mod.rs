@@ -2,14 +2,14 @@
 //! strong/emph, collapse uniform formatting into `#set text`, hoist a
 //! preamble. Each is a self-contained rewrite, run in a fixed order:
 //!
-//! 1. [`collapse_style`] — drop `#text(..)` fields that just restate the
+//! 1. `collapse_style` — drop `#text(..)` fields that just restate the
 //!    document default (and, inside headings, the fields the heading itself
 //!    implies), unwrapping runs that end up empty.
-//! 2. [`strong_emph`] — promote what `collapse_style` left as a bold/italic-
+//! 2. `strong_emph` — promote what `collapse_style` left as a bold/italic-
 //!    only `#text(..)` run into `*strong*`/`_emph_` markup.
-//! 3. [`hoist_par`] — if a strong majority of paragraphs justify, hoist that
+//! 3. `hoist_par` — if a strong majority of paragraphs justify, hoist that
 //!    into `#set par(justify: true)` instead of repeating it per paragraph.
-//! 4. [`resolve_labels`] — downgrade any cross-reference whose target label
+//! 4. `resolve_labels` — downgrade any cross-reference whose target label
 //!    didn't survive lowering, which Typst would otherwise reject outright.
 //!
 //! The first three are lossless rewrites (they only ever remove *redundant*

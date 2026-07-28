@@ -155,7 +155,7 @@ pub fn resolved_fill(fill: &Option<Paint>, alpha: AlphaMode) -> Option<Option<Fi
 /// DrawingML always runs from `a:fillToRect` to the shape's bounding box. The
 /// focal circle is exactly what `a:fillToRect` expresses; the outer radius is
 /// absorbed by rescaling the stop offsets into bounding-box space (see
-/// [`stops_relative_to_bounding_box`]).
+/// `stops_relative_to_bounding_box`).
 ///
 /// `None` (rasterize) for the two cases that have no faithful mapping:
 /// * an outer circle that is not centered — DrawingML's outer path is always
@@ -393,7 +393,7 @@ pub fn line_cap_to_ooxml(cap: LineCap) -> &'static str {
 /// A preset still wins when the pattern *is* that preset, because a named
 /// pattern is what a consumer's line UI shows and round-trips; the nearest-fit
 /// [`prst_dash`] heuristic remains only for the patterns `a:custDash` cannot
-/// state at all (see [`custom_dash`]).
+/// state at all (see `custom_dash`).
 pub fn dash_spec(dash: &DashPattern<Abs, Abs>, thickness: Abs) -> DashSpec {
     if dash.array.is_empty() {
         return DashSpec::Preset("solid");
