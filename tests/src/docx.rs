@@ -4600,6 +4600,46 @@ fn url_link_preserves_typst_appearance() {
 }
 
 #[test]
+fn bare_url_keeps_its_external_hyperlink() {
+    // Typst turns a bare URL into a semantic link during realization. DOCX
+    // must preserve the target, not only the monospace/blue link appearance.
+    let p = parts("See https://typst.app/docs now.");
+    let rels = &p["word/_rels/document.xml.rels"];
+    assert!(
+        rels.contains("Target=\"https://typst.app/docs\"")
+            && rels.contains("TargetMode=\"External\""),
+        "bare URL target survives as an external relationship: {rels}"
+    );
+    assert!(
+        p["word/document.xml"].contains("<w:hyperlink r:id="),
+        "bare URL text remains wrapped by a native hyperlink"
+    );
+    assert_all_wellformed(&p);
+}
+
+#[test]
+fn bare_url_wrapped_by_show_rule_keeps_its_external_hyperlink() {
+    // Link-styling packages commonly wrap the realized link in a plain box to
+    // prevent a line break. The box may lose geometry in Word, but it must not
+    // flatten the semantic hyperlink to styled text, including in footnotes.
+    let p = parts(
+        "#show link: it => box(it)\nBody https://typst.app/docs.\n#footnote[See https://typst.app/issues.]",
+    );
+    assert!(
+        p["word/_rels/document.xml.rels"].contains("Target=\"https://typst.app/docs\""),
+        "body URL keeps its relationship"
+    );
+    assert!(
+        p["word/_rels/footnotes.xml.rels"]
+            .contains("Target=\"https://typst.app/issues\""),
+        "footnote URL keeps its part-local relationship"
+    );
+    assert!(p["word/document.xml"].contains("<w:hyperlink r:id="));
+    assert!(p["word/footnotes.xml"].contains("<w:hyperlink r:id="));
+    assert_all_wellformed(&p);
+}
+
+#[test]
 fn explicitly_colored_url_link_preserves_typst_style() {
     let p = parts(
         "Before #text(fill: red, weight: \"bold\")[#link(\"https://example.com\")[Styled link]] after.",
@@ -8991,4 +9031,3 @@ fn documents_without_heading_numbers_report_no_loss() {
         decision.reason == DecisionReason::TypstOwnedHeadingNumber
     }));
 }
-

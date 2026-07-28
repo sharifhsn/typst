@@ -642,12 +642,44 @@ fn push_inline(
     use typst_library::model::LinkElem;
     if let Some(elem) = child.to_packed::<LinkElem>() {
         out.extend(ctx.link_children(elem, styles, &RunProps::default())?);
+    } else if let Some(elem) = child.to_packed::<typst_library::layout::BoxElem>()
+        && box_is_plain(elem, styles)
+        && let Some(body) = elem.body.get_ref(styles)
+        && body_extractable(body)
+        && body_inline_extractable(body)
+        && contains_link(body)
+    {
+        // A `show link: it => box(it)` recipe can reach this top-level inline
+        // path when realization splits a paragraph around the box (notably in
+        // footnote stories). Run-only lowering would preserve the link's blue
+        // text but erase its target. A plain box has no visual frame to keep,
+        // so retain its paragraph-child semantics and only approximate its
+        // no-break geometry.
+        out.extend(ctx.plain_box_pchildren(elem, body, styles, RunProps::default())?);
     } else {
         let mut runs = Vec::new();
         ctx.handle_inline(child, styles, &RunProps::default(), &mut runs)?;
         out.extend(runs.into_iter().map(ParaChild::Run));
     }
     Ok(())
+}
+
+fn contains_link(body: &Content) -> bool {
+    use std::ops::ControlFlow;
+    use typst_library::model::LinkElem;
+
+    let mut found = body.is::<LinkElem>();
+    if !found {
+        let _ = body.traverse(&mut |child: Content| {
+            if child.is::<LinkElem>() {
+                found = true;
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+    }
+    found
 }
 
 /// Flushes buffered paragraph children into a paragraph block.

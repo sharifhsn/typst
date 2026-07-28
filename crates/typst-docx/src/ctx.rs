@@ -1768,6 +1768,34 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
                         }
                     }
                 }
+            } else if let Some(elem) =
+                child.to_packed::<typst_library::layout::BoxElem>()
+                && box_is_plain(elem, child_styles)
+                && let Some(body) = elem.body.get_cloned(child_styles)
+                && crate::convert::body_extractable(&body)
+                && crate::convert::body_inline_extractable(&body)
+                // A sole image with an explicit box height needs the image-
+                // sizing path in `handle_inline`; paragraph-child recursion is
+                // for semantic wrappers, not for discarding that constraint.
+                && !(unwrap_sole_image(&body).is_some()
+                    && matches!(
+                        elem.height.get(child_styles),
+                        typst_library::foundations::Smart::Custom(_)
+                    ))
+            {
+                // A link show rule commonly returns `box(it)` to keep the
+                // displayed URL together. At paragraph-child level we can
+                // discard the plain box's line-breaking geometry while still
+                // preserving semantic children such as `<w:hyperlink>`.
+                // Sending the body through `inline_runs` instead flattens those
+                // wrappers to styled text. Scope relative child geometry to the
+                // box exactly as the run-only fallback does below.
+                out.extend(self.plain_box_pchildren(
+                    elem,
+                    &body,
+                    child_styles,
+                    props.clone(),
+                )?);
             } else if let Some((fbody, fill, bdr)) =
                 mappers::shape::inline_frame(child, child_styles)
                 && (fill.is_some() || bdr.is_some())
@@ -1958,6 +1986,44 @@ impl<'a, 'e> DocxCtx<'a, 'e> {
             }
         }
         Ok(merged)
+    }
+
+    /// Lowers the body of a visually plain inline box while retaining
+    /// paragraph-child semantics such as hyperlinks. Relative children still
+    /// resolve against the box's own dimensions even though Word cannot retain
+    /// the box's no-break geometry itself.
+    pub(crate) fn plain_box_pchildren(
+        &mut self,
+        elem: &typst_library::foundations::Packed<typst_library::layout::BoxElem>,
+        body: &Content,
+        styles: StyleChain,
+        props: RunProps,
+    ) -> SourceResult<Vec<crate::dom::ParaChild>> {
+        use typst_library::foundations::Smart;
+        use typst_library::layout::Sizing;
+
+        let width_base = match elem.width.get(styles) {
+            Sizing::Rel(r) => {
+                mappers::shape::resolve_axis(r, styles, Some(self.available_width))
+            }
+            _ => None,
+        };
+        let height_base = match elem.height.get(styles) {
+            Smart::Custom(r) => {
+                mappers::shape::resolve_axis(r, styles, self.shape_height_base)
+            }
+            Smart::Auto => None,
+        };
+        let width_dxa = width_base.map(props::abs_to_twip);
+        self.with_shape_height_base(height_base.or(self.shape_height_base), |ctx| {
+            if let Some(width_dxa) = width_dxa {
+                ctx.with_available_width(width_dxa, |ctx| {
+                    ctx.inline_pchildren(body, styles, props.clone())
+                })
+            } else {
+                ctx.inline_pchildren(body, styles, props)
+            }
+        })
     }
 
     /// Handles a single realized inline child, appending runs to `out`.
