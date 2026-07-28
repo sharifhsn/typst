@@ -55,9 +55,13 @@ Two kinds of check live here, and the distinction matters:
 
 ### Which consumer renders our output (`--consumer`)
 
-`visual` and `sheet` take `--consumer soffice` (the default) or `--consumer
-word`. LibreOffice is fast and scriptable, but it is a **proxy**: it is not the
-consumer this format exists for, and it is markedly more forgiving than Word.
+`visual` and `sheet` take `--consumer soffice` (the default), `--consumer
+office`, or an explicit `--consumer word` / `--consumer powerpoint`.
+`office` routes DOCX to Microsoft Word and PPTX to Microsoft PowerPoint; the
+explicit choices reject the wrong format instead of accidentally sending a
+slide deck to Word. LibreOffice is fast and scriptable, but it is a **proxy**:
+it is not the consumer either format exists for, and it is markedly more
+forgiving than the native Office apps.
 
 That difference is not academic. The very first real-Word run raised *"You
 can't put drawing objects into a text box, callout, comment, footnote, or
@@ -73,18 +77,22 @@ Where a rule can be checked statically, prefer that — `drawings_in_text_boxes`
 now runs in the `invariants` layer, needing neither Word nor a render, so the
 expensive consumer is for discovery rather than routine gating.
 
-Word is driven through AppleScript (`osascript`), not a headless binary, with
-two consequences worth knowing:
+Word and PowerPoint are driven through AppleScript (`osascript`), not headless
+binaries, with two consequences worth knowing:
 
-- It is a GUI app. `_word_ready` launches it with `open -g` so it stays
-  backgrounded, then waits until it answers; a **cold** launch does not respond
-  for minutes, so the warm instance is reused across a sweep.
-- A document Word objects to raises a **modal dialog**, which wedges every
+- They are GUI apps. The readiness probe launches the requested app with
+  `open -g` so it stays backgrounded, then waits until it answers; a **cold**
+  launch may not respond for minutes, so the warm instance is reused.
+- A package Office objects to can raise a **modal dialog**, which wedges every
   later conversion. A conversion that times out therefore closes all open
-  documents before giving up — and a timeout is itself a signal that Word may
-  be rejecting that document, worth reading as more than slowness.
+  documents/presentations before giving up — and a timeout is itself a signal
+  that the native consumer may be rejecting that package.
 
-It is the slower instrument by some margin: run it on a reduced `-n`.
+Both lanes stage their input and intermediate PDF inside the app's macOS
+container, then copy the PDF back to the audit output. This avoids the first-run
+`Grant File Access` dialog without granting either app access to the checkout.
+
+Native Office is the slower instrument by some margin: run it on a reduced `-n`.
 
 ### Why two visual instruments (measured, not assumed)
 
@@ -121,22 +129,25 @@ uv run audit.py text --binary ../../target/release/typst -n 150 --links
 uv run audit.py text --binary ../../target/release/typst --kind presentation -n 60 --links
 
 uv run audit.py visual --binary ../../target/release/typst -n 60
-uv run audit.py rank --scores /tmp/export-audit/scores.json -k 15   # DESAT column marks vanished colour
-uv run audit.py sheet --scores /tmp/export-audit/scores.json \
+uv run audit.py rank --scores ../../target/export-audit/scores.json -k 15   # DESAT marks vanished colour
+uv run audit.py sheet --scores ../../target/export-audit/scores.json \
     --binary ../../target/release/typst -k 8
 
 uv run audit.py resave --binary ../../target/release/typst -n 15   # LibreOffice re-save round-trip
 
-# Ground truth: the same scoring, rendered by real Word. Slower (a GUI app
-# driven over AppleScript), so keep -n small and treat it as discovery.
-uv run audit.py visual --binary ../../target/release/typst --consumer word -n 20
+# Native-consumer discovery: DOCX goes to Word and presentations go to
+# PowerPoint. Keep -n small because both are GUI apps driven over AppleScript.
+uv run audit.py visual --binary ../../target/release/typst --consumer office -n 20
+uv run audit.py visual --binary ../../target/release/typst --kind presentation \
+    --consumer office -n 12
 ```
 
 `generate` needs no corpus — it manufactures its own inputs and is the one
 layer that runs in a single shot. `text --links` adds a `typst query` per
-document (drop the flag for the fast path). The `resave` and `visual` layers
-each spawn LibreOffice per document and are the slow tail; run them last on a
-reduced `-n`.
+document (drop the flag for the fast path). The default output is durable under
+`target/export-audit/` rather than a system temporary directory. The `resave`
+and `visual` layers each spawn a consumer per document and are the slow tail;
+run them last on a reduced `-n`.
 
 Then *look at the sheets* (typst render left, office render right). The
 cheap metric only decides where looking is worth it; the looking is the

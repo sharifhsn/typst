@@ -26,8 +26,8 @@ Usage:
   uv run audit.py text       --binary target/release/typst -n 150
   uv run audit.py text       --binary target/release/typst --kind presentation -n 60
   uv run audit.py visual     --binary target/release/typst --kind presentation -n 40
-  uv run audit.py rank  --scores /tmp/export-audit/scores.json [--baseline old.json]
-  uv run audit.py sheet --scores /tmp/export-audit/scores.json --binary ... -k 8
+  uv run audit.py rank  --scores ../../target/export-audit/scores.json [--baseline old.json]
+  uv run audit.py sheet --scores ../../target/export-audit/scores.json --binary ... -k 8
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -48,6 +49,13 @@ from corpuslib import check_binary, docs, docx_text, export, pptx_text, read_par
 
 SOFFICE = "/opt/homebrew/bin/soffice"
 WORD_APP = "Microsoft Word"
+POWERPOINT_APP = "Microsoft PowerPoint"
+WORD_STAGING = Path.home() / "Library/Containers/com.microsoft.Word/Data/Documents/typst-export-audit"
+POWERPOINT_STAGING = (
+    Path.home()
+    / "Library/Containers/com.microsoft.Powerpoint/Data/Documents/typst-export-audit"
+)
+DEFAULT_OUT = Path(__file__).resolve().parents[2] / "target" / "export-audit"
 
 _WORDBOX = re.compile(
     rb'<word xMin="[0-9.]+" yMin="([0-9.]+)" xMax="[0-9.]+" yMax="([0-9.]+)"'
@@ -136,27 +144,73 @@ def _soffice_pdf(office: Path, work: Path, timeout: int = 300) -> Path | None:
     return out if out.exists() else None
 
 
-def _word_ready(timeout: int = 40) -> bool:
-    """Brings Word up in the background and waits until it answers.
+def _office_app_ready(app: str, timeout: int = 40) -> bool:
+    """Brings a native Office app up in the background and waits until it answers.
 
-    A *cold* launch does not answer AppleScript for a long time — an unguarded
-    conversion against a cold Word sat for over two minutes and produced
+    A *cold* launch may not answer AppleScript for a long time — an unguarded
+    conversion against a cold Office app can sit for minutes and produce
     nothing. Launch detached with `-g` (so it never steals focus), then poll a
     cheap query until it responds; every later conversion reuses that warm
     instance.
     """
-    subprocess.run(["open", "-g", "-a", WORD_APP], capture_output=True)
+    subprocess.run(["open", "-g", "-a", app], capture_output=True)
     deadline = timeout
     while deadline > 0:
         r = subprocess.run(
-            ["osascript", "-e", f'tell application "{WORD_APP}" to return name of it'],
+            ["osascript", "-e", f'tell application "{app}" to return name of it'],
             capture_output=True, timeout=30,
         )
-        if r.returncode == 0 and b"Word" in r.stdout:
+        if r.returncode == 0 and app.encode() in r.stdout:
             return True
         deadline -= 2
         subprocess.run(["sleep", "2"], capture_output=True)
     return False
+
+
+def _word_ready(timeout: int = 40) -> bool:
+    return _office_app_ready(WORD_APP, timeout)
+
+
+def _powerpoint_ready(timeout: int = 40) -> bool:
+    return _office_app_ready(POWERPOINT_APP, timeout)
+
+
+def _applescript_string(value: Path) -> str:
+    """Quote an absolute path for an AppleScript string literal."""
+    return str(value.resolve()).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _reset_native_consumer(app: str, collection: str) -> None:
+    """Best-effort recovery after a native Office conversion times out.
+
+    A repair or folder-access dialog can block the app's object model. Dismiss
+    an actual Cancel button in that app only, then close its open package(s), so
+    one refusal does not poison every later corpus item. GUI scripting may be
+    unavailable on a host; recovery is deliberately best-effort in that case.
+    """
+    dismiss = (
+        'tell application "System Events"\n'
+        f'  if exists process "{app}" then\n'
+        f'    tell process "{app}"\n'
+        "      repeat with candidate in windows\n"
+        '        if exists button "Cancel" of candidate then click button "Cancel" of candidate\n'
+        "      end repeat\n"
+        "    end tell\n"
+        "  end if\n"
+        "end tell\n"
+    )
+    commands = [
+        (["osascript", "-"], dismiss.encode()),
+        (["osascript", "-e",
+          f'tell application "{app}" to close every {collection} saving no'], None),
+    ]
+    for command, payload in commands:
+        try:
+            subprocess.run(
+                command, input=payload, capture_output=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _word_pdf(office: Path, work: Path, timeout: int = 180) -> Path | None:
@@ -173,33 +227,118 @@ def _word_pdf(office: Path, work: Path, timeout: int = 180) -> Path | None:
     """
     out = work / (office.stem + "_word.pdf")
     out.unlink(missing_ok=True)
+    # Word is sandboxed just like PowerPoint. Keeping both the document and the
+    # PDF inside its container during automation avoids a modal folder-access
+    # prompt, while the final evidence still lives in the repository's durable
+    # audit directory.
+    WORD_STAGING.mkdir(parents=True, exist_ok=True)
+    staged_office = WORD_STAGING / "input.docx"
+    staged_out = WORD_STAGING / "output.pdf"
+    staged_office.unlink(missing_ok=True)
+    staged_out.unlink(missing_ok=True)
+    shutil.copy2(office, staged_office)
+    office_arg = _applescript_string(staged_office)
+    out_arg = _applescript_string(staged_out)
     script = (
         f'tell application "{WORD_APP}"\n'
-        f'  open POSIX file "{office}"\n'
+        f'  open POSIX file "{office_arg}"\n'
         f"  set theDoc to active document\n"
-        f'  save as theDoc file name "{out}" file format format PDF\n'
+        f'  save as theDoc file name "{out_arg}" file format format PDF\n'
         f"  close theDoc saving no\n"
         f"end tell\n"
     )
     try:
-        subprocess.run(
+        completed = subprocess.run(
             ["osascript", "-"], input=script.encode(), capture_output=True,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         # Leave no modal document behind to wedge the next conversion.
-        subprocess.run(
-            ["osascript", "-e",
-             f'tell application "{WORD_APP}" to close every document saving no'],
-            capture_output=True, timeout=60,
-        )
+        _reset_native_consumer(WORD_APP, "document")
+        staged_office.unlink(missing_ok=True)
+        staged_out.unlink(missing_ok=True)
         return None
+    if completed.returncode == 0 and staged_out.exists():
+        shutil.copy2(staged_out, out)
+    staged_office.unlink(missing_ok=True)
+    staged_out.unlink(missing_ok=True)
     return out if out.exists() else None
+
+
+def _powerpoint_pdf(office: Path, work: Path, timeout: int = 180) -> Path | None:
+    """Convert one presentation to PDF through real Microsoft PowerPoint.
+
+    This is the PPTX counterpart to `_word_pdf`: it proves that PowerPoint can
+    open and render the package rather than treating Word or LibreOffice as a
+    presentation authority. A refusal, modal timeout, or missing PDF remains a
+    per-presentation failure so a reduced corpus run keeps its earlier results.
+    """
+    out = work / (office.stem + "_powerpoint.pdf")
+    out.unlink(missing_ok=True)
+    # PowerPoint for Mac is sandboxed and otherwise raises a modal "Grant File
+    # Access" prompt for an arbitrary corpus/output directory. Stage the input
+    # and render inside its own Documents container, then copy the evidence back
+    # to the durable audit directory. This keeps the native lane unattended and
+    # avoids granting PowerPoint broad access to the source checkout.
+    POWERPOINT_STAGING.mkdir(parents=True, exist_ok=True)
+    staged_office = POWERPOINT_STAGING / "input.pptx"
+    staged_out = POWERPOINT_STAGING / "output.pdf"
+    staged_office.unlink(missing_ok=True)
+    staged_out.unlink(missing_ok=True)
+    shutil.copy2(office, staged_office)
+    office_arg = _applescript_string(staged_office)
+    out_arg = _applescript_string(staged_out)
+    script = (
+        f'tell application "{POWERPOINT_APP}"\n'
+        f'  open POSIX file "{office_arg}"\n'
+        f"  set thePresentation to active presentation\n"
+        f'  save thePresentation in POSIX file "{out_arg}" as save as PDF\n'
+        f"  close thePresentation saving no\n"
+        f"end tell\n"
+    )
+    try:
+        completed = subprocess.run(
+            ["osascript", "-"], input=script.encode(), capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        _reset_native_consumer(POWERPOINT_APP, "presentation")
+        staged_office.unlink(missing_ok=True)
+        staged_out.unlink(missing_ok=True)
+        return None
+    if completed.returncode == 0 and staged_out.exists():
+        shutil.copy2(staged_out, out)
+    staged_office.unlink(missing_ok=True)
+    staged_out.unlink(missing_ok=True)
+    return out if out.exists() else None
+
+
+def _consumer_for(consumer: str, office_format: str) -> str:
+    """Resolve and validate the reader for one Office output format."""
+    if consumer == "office":
+        return "powerpoint" if office_format == "pptx" else "word"
+    if consumer == "word" and office_format != "docx":
+        raise ValueError("Microsoft Word is only a DOCX consumer; use PowerPoint for PPTX")
+    if consumer == "powerpoint" and office_format != "pptx":
+        raise ValueError("Microsoft PowerPoint is only a PPTX consumer; use Word for DOCX")
+    return consumer
+
+
+def _consumer_ready(consumer: str) -> bool:
+    if consumer == "word":
+        return _word_ready()
+    if consumer == "powerpoint":
+        return _powerpoint_ready()
+    return True
 
 
 def _consumer_pdf(office: Path, work: Path, consumer: str) -> Path | None:
     """Render one Office file through the requested consumer."""
-    return _word_pdf(office, work) if consumer == "word" else _soffice_pdf(office, work)
+    if consumer == "word":
+        return _word_pdf(office, work)
+    if consumer == "powerpoint":
+        return _powerpoint_pdf(office, work)
+    return _soffice_pdf(office, work)
 
 
 def _thumb(png: Path):
@@ -369,8 +508,13 @@ def cmd_visual(args) -> int:
     window = 0 if is_deck else 2  # decks are one page per slide by design
     scores, failures = {}, []
     out = Path(args.out) / "scores.json"
-    if args.consumer == "word" and not _word_ready():
-        print("Word did not become scriptable; aborting", file=sys.stderr)
+    try:
+        consumer = _consumer_for(args.consumer, fmt)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 2
+    if not _consumer_ready(consumer):
+        print(f"{consumer.title()} did not become scriptable; aborting", file=sys.stderr)
         return 1
 
     for src in docs(args.n, args.kind, args.filter):
@@ -380,9 +524,9 @@ def cmd_visual(args) -> int:
             continue
         for stale in work.glob("*.png"):
             stale.unlink()
-        conv = _consumer_pdf(office, work, args.consumer)
+        conv = _consumer_pdf(office, work, consumer)
         if conv is None:
-            failures.append(f"{src} ({args.consumer})")
+            failures.append(f"{src} ({consumer})")
             continue
         gold_pngs = _pages(gold_pdf, work / "gold", args.pages)
         got_pngs = _pages(conv, work / "got", args.pages)
@@ -412,6 +556,7 @@ def cmd_visual(args) -> int:
             else:
                 per_tile.append(0.0)
         scores[str(src)] = {
+            "consumer": consumer,
             "score": round(sum(per_page) / len(per_page), 4),
             "tile": min(per_tile) if per_tile else 0.0,
             "desaturated": desat,
@@ -679,8 +824,13 @@ def cmd_leak(args) -> int:
     out = work / "leak.json"
     baseline = json.loads(Path(args.baseline).read_text()) if args.baseline else {}
     results: dict = {}
-    if args.consumer == "word" and not _word_ready():
-        print("Word did not become scriptable; aborting", file=sys.stderr)
+    try:
+        consumer = _consumer_for(args.consumer, "docx")
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 2
+    if not _consumer_ready(consumer):
+        print(f"{consumer.title()} did not become scriptable; aborting", file=sys.stderr)
         return 1
 
     for src in docs(args.n, "document", args.filter):
@@ -689,7 +839,7 @@ def cmd_leak(args) -> int:
         if not (export(binary, src, "pdf", tpdf) and export(binary, src, "docx", office)):
             entry = {"leak": "export_failed"}
         else:
-            rendered = _consumer_pdf(office, work, args.consumer)
+            rendered = _consumer_pdf(office, work, consumer)
             if rendered is None:
                 entry = {"leak": "consumer_failed"}
             else:
@@ -749,8 +899,13 @@ def cmd_sheet(args) -> int:
     work = Path(args.out); work.mkdir(parents=True, exist_ok=True)
     worst_docs = sorted(scores, key=lambda d: scores[d]["score"])[: args.k]
     fmt = "pptx" if args.kind == "presentation" else "docx"
-    if args.consumer == "word" and not _word_ready():
-        print("Word did not become scriptable; aborting", file=sys.stderr)
+    try:
+        consumer = _consumer_for(args.consumer, fmt)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 2
+    if not _consumer_ready(consumer):
+        print(f"{consumer.title()} did not become scriptable; aborting", file=sys.stderr)
         return 1
 
     for idx, doc in enumerate(worst_docs):
@@ -760,7 +915,7 @@ def cmd_sheet(args) -> int:
         gold_pdf, office = work / "g.pdf", work / f"o.{fmt}"
         if not (export(binary, src, "pdf", gold_pdf) and export(binary, src, fmt, office)):
             continue
-        rendered = _consumer_pdf(office, work, args.consumer)
+        rendered = _consumer_pdf(office, work, consumer)
         if rendered is None:
             continue
         for side, pdf in (("L", gold_pdf), ("R", rendered)):
@@ -848,11 +1003,12 @@ def main() -> int:
     common.add_argument("--kind", default="document",
                         choices=["document", "presentation"])
     common.add_argument("--filter", default="")
-    common.add_argument("--out", default="/tmp/export-audit")
+    common.add_argument("--out", default=str(DEFAULT_OUT))
     common.add_argument(
-        "--consumer", default="soffice", choices=["soffice", "word"],
-        help="which reader renders our output: LibreOffice (fast, a proxy) or"
-             " real Microsoft Word (ground truth, slower — use a reduced -n)",
+        "--consumer", default="soffice",
+        choices=["soffice", "office", "word", "powerpoint"],
+        help="which reader renders our output: LibreOffice (fast proxy), office"
+             " (Word for DOCX, PowerPoint for PPTX), or one explicit native app",
     )
     sub.add_parser("selftest", parents=[common]).set_defaults(fn=cmd_selftest)
     sub.add_parser("invariants", parents=[common]).set_defaults(fn=cmd_invariants)

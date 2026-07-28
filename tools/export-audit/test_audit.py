@@ -35,5 +35,29 @@ class PresentationTextCommandTests(unittest.TestCase):
         pptx_text.assert_called_once()
 
 
+class OfficeConsumerRoutingTests(unittest.TestCase):
+    def test_native_office_routes_each_format_to_its_real_consumer(self) -> None:
+        self.assertEqual(audit._consumer_for("office", "docx"), "word")
+        self.assertEqual(audit._consumer_for("office", "pptx"), "powerpoint")
+
+    def test_explicit_native_consumer_rejects_the_wrong_format(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Word is only a DOCX consumer"):
+            audit._consumer_for("word", "pptx")
+        with self.assertRaisesRegex(ValueError, "PowerPoint is only a PPTX consumer"):
+            audit._consumer_for("powerpoint", "docx")
+
+    def test_consumer_pdf_dispatches_pptx_to_powerpoint(self) -> None:
+        office = Path("deck.pptx")
+        work = Path("out")
+        rendered = Path("out/deck_powerpoint.pdf")
+        with (
+            mock.patch.object(audit, "_powerpoint_pdf", return_value=rendered) as powerpoint,
+            mock.patch.object(audit, "_word_pdf", side_effect=AssertionError("wrong consumer")),
+            mock.patch.object(audit, "_soffice_pdf", side_effect=AssertionError("wrong consumer")),
+        ):
+            self.assertEqual(audit._consumer_pdf(office, work, "powerpoint"), rendered)
+        powerpoint.assert_called_once_with(office, work)
+
+
 if __name__ == "__main__":
     unittest.main()
