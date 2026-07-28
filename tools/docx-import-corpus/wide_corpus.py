@@ -17,9 +17,9 @@ Mac and Outlook, LibreOffice, Collabora, OpenOffice, WPS, OnlyOffice,
 TextMaker — in sixty-odd languages. Most are bug-report attachments, i.e.
 documents that already broke somebody's word processor.
 
-    python3 wide_corpus.py fetch          # ~65 MB, deduplicated by content
-    python3 wide_corpus.py describe       # producers, features, languages
-    python3 wide_corpus.py run            # import + compile over everything
+    uv run wide_corpus.py fetch          # ~65 MB, deduplicated by content
+    uv run wide_corpus.py describe       # producers, features, languages
+    uv run wide_corpus.py run            # import + compile over everything
 
 Exits non-zero if any document that imported produced source that does not
 compile — the outcome that is always a bug, as opposed to a clean refusal of a
@@ -91,6 +91,21 @@ def gh(path):
         return None
 
 
+def resolve_commit(repo, ref):
+    commit = gh(f"repos/{repo}/commits/{urllib.parse.quote(ref, safe='')}")
+    if not isinstance(commit, dict) or not commit.get("sha"):
+        raise RuntimeError(f"could not resolve {repo}@{ref} to an immutable commit")
+    return commit["sha"]
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def enumerate_source(label, repo, ref, path):
     parent = os.path.dirname(path) or ""
     siblings = gh(f"repos/{repo}/contents/{parent}?ref={ref}") or []
@@ -115,10 +130,19 @@ def enumerate_source(label, repo, ref, path):
 
 def cmd_fetch(args):
     os.makedirs(args.dir, exist_ok=True)
-    found = []
+    found, resolved_sources = [], []
     for label, repo, ref, path in SOURCES:
-        items = enumerate_source(label, repo, ref, path)
-        print(f"{label:<13} {repo:<32} {len(items):>5} .docx")
+        commit = resolve_commit(repo, ref)
+        items = enumerate_source(label, repo, commit, path)
+        print(f"{label:<13} {repo:<32} {len(items):>5} .docx  {commit[:12]}")
+        resolved_sources.append({
+            "label": label,
+            "repository": repo,
+            "requested_ref": ref,
+            "commit": commit,
+            "subtree": path,
+            "candidates": len(items),
+        })
         found.extend(items)
     print(f"\ncandidates: {len(found)}")
 
@@ -142,19 +166,52 @@ def cmd_fetch(args):
             if digest in seen or total + len(blob) > MAX_TOTAL_BYTES:
                 continue
             seen.add(digest)
-            label, repo, _ref, path = item
+            label, repo, commit, path = item
             name = f"{label}-{os.path.basename(path)}"[:120]
             dest = os.path.join(args.dir, name)
-            n = 1
-            while os.path.exists(dest):
-                dest = os.path.join(args.dir, f"{name[:-5]}~{n}.docx")
-                n += 1
-            open(dest, "wb").write(blob)
-            manifest.append({"file": os.path.basename(dest), "repo": repo,
-                             "path": path, "sha256": digest, "bytes": len(blob)})
+            write_blob = True
+            if os.path.exists(dest) and sha256_file(dest) == digest:
+                write_blob = False
+            elif os.path.exists(dest):
+                n = 1
+                while True:
+                    candidate = os.path.join(args.dir, f"{name[:-5]}~{n}.docx")
+                    if not os.path.exists(candidate):
+                        dest = candidate
+                        break
+                    if sha256_file(candidate) == digest:
+                        dest = candidate
+                        write_blob = False
+                        break
+                    n += 1
+            if write_blob:
+                with open(dest, "wb") as fh:
+                    fh.write(blob)
+            manifest.append({
+                "file": os.path.basename(dest),
+                "repository": repo,
+                "commit": commit,
+                "path": path,
+                "sha256": digest,
+                "bytes": len(blob),
+            })
             total += len(blob)
             kept += 1
-    json.dump(manifest, open(os.path.join(args.dir, "manifest.json"), "w"), indent=1)
+    manifest.sort(key=lambda entry: (entry["repository"], entry["path"]))
+    authority = {
+        "schema": 1,
+        "sources": resolved_sources,
+        "unique_files": kept,
+        "bytes": total,
+        "entries": manifest,
+    }
+    expected_files = {entry["file"] for entry in manifest}
+    for old in os.listdir(args.dir):
+        if old.lower().endswith(".docx") and old not in expected_files:
+            os.remove(os.path.join(args.dir, old))
+    with open(os.path.join(args.dir, "manifest.json"), "w") as fh:
+        json.dump(authority, fh, indent=1)
+        fh.write("\n")
     print(f"kept {kept} unique documents, {total/1024**2:.1f} MB -> {args.dir}")
 
 
@@ -205,6 +262,25 @@ def cmd_run(args):
     os.makedirs(out)
     docs = sorted(os.path.join(args.dir, f) for f in os.listdir(args.dir)
                   if f.lower().endswith(".docx"))
+    manifest_path = os.path.join(args.dir, "manifest.json")
+    if not os.path.isfile(manifest_path):
+        raise RuntimeError(f"missing immutable corpus manifest: {manifest_path}; run fetch")
+    with open(manifest_path) as fh:
+        manifest = json.load(fh)
+    if not isinstance(manifest, dict) or manifest.get("schema") != 1:
+        raise RuntimeError("wide corpus manifest has an unsupported schema; re-fetch it")
+    expected = {entry["file"]: entry for entry in manifest.get("entries", [])}
+    actual = {os.path.basename(path) for path in docs}
+    if actual != set(expected):
+        missing = sorted(set(expected) - actual)
+        extra = sorted(actual - set(expected))
+        raise RuntimeError(
+            f"wide corpus differs from its manifest: missing={missing[:5]} extra={extra[:5]}"
+        )
+    for path in docs:
+        name = os.path.basename(path)
+        if sha256_file(path) != expected[name]["sha256"]:
+            raise RuntimeError(f"wide corpus hash mismatch: {name}; re-fetch it")
     if args.filter:
         docs = [d for d in docs if args.filter.lower() in os.path.basename(d).lower()]
 
@@ -275,7 +351,30 @@ def cmd_run(args):
     print(f"compile ok  : {ok_c}/{ok_i}")
     fatal = sum(1 for r in results if r.get("fatal"))
     print(f"fatal       : {fatal}")
-    json.dump(results, open(os.path.join(ROOT, "wide-results.json"), "w"), indent=1)
+    authority = {
+        "schema": 1,
+        "typst": {
+            "path": args.typst,
+            "sha256": sha256_file(args.typst),
+        },
+        "corpus": {
+            "manifest": manifest_path,
+            "manifest_sha256": sha256_file(manifest_path),
+            "sources": manifest["sources"],
+            "unique_files": manifest["unique_files"],
+            "selected_files": len(docs),
+        },
+        "summary": {
+            "documents": len(results),
+            "import_ok": ok_i,
+            "compile_ok": ok_c,
+            "fatal": fatal,
+        },
+        "results": results,
+    }
+    with open(os.path.join(ROOT, "wide-results.json"), "w") as fh:
+        json.dump(authority, fh, indent=1)
+        fh.write("\n")
     return 1 if fatal or ok_c < ok_i else 0
 
 
