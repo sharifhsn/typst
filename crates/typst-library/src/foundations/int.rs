@@ -13,12 +13,13 @@ use crate::foundations::{
 
 /// An integer: a positive whole number, a negative whole number, or zero.
 ///
-/// #let twos = link.with("https://en.wikipedia.org/wiki/Two%27s_complement")
+/// #let wiki(name, body) = link("https://en.wikipedia.org/wiki/" + name, body)
 ///
-/// Typst stores signed integers with the #twos[two's complement] representation
-/// in 64 bits. This allows storing numbers up to $2^63-1$ or
-/// `{9223372036854775807}`, and down to $-2^63$ or `{-9223372036854775808}`.
-/// These values are accessible as `{int.max}` and `{int.min}`.
+/// Typst stores signed integers with the #wiki("Two%27s_complement")[two's
+/// complement] representation in 64 bits. This allows storing numbers up to
+/// $2^63-1$ or `{9223372036854775807}`, and down to $-2^63$ or
+/// `{-9223372036854775808}`. These values are accessible as `{int.max}` and
+/// `{int.min}`.
 ///
 /// Integers can also be specified as hexadecimal, octal, or binary by starting
 /// with the prefixes: `0x`, `0o`, or `0b`.
