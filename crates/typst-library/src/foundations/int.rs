@@ -40,7 +40,31 @@ use crate::foundations::{
 /// / Max: #int.max
 /// / Min: #int.min
 /// ```
-#[ty(scope, cast, name = "int", title = "Integer")]
+///
+/// = Syntax <syntax>
+/// Typst integers can be entered in code mode using the decimal digits 0--9. In
+/// addition, if a lone digit 0 is followed by `x`, `o`, or `b` (`0x`, `0o`,
+/// `0b`), Typst will treat following digits as a
+/// #wiki("Hexadecimal")[hexadecimal] (base 16), #wiki("Octal")[octal] (base 8),
+/// or #wiki("Binary_number")[binary] (base 2) number.
+///
+/// Hexadecimal numbers use the letters a--f or A--F for the values 10--15.
+///
+/// Typst will error if an integer is written that is larger than `int.max` or
+/// smaller than `int.min`. If this happens, you may want to use a
+/// @float[floating point number] instead by appending a period to the end of
+/// the number.
+///
+/// Typst differs from some other programming languages by not treating negative
+/// integers as individual tokens in its syntax. Instead, input like `{-6}` is
+/// treated as the negation operator applied to the positive integer `6`. This
+/// may cause an issue when trying to write the minimum negative integer
+/// `{-9223372036854775808}`, as `{9223372036854775808}` is larger than
+/// `{int.max}`. To write the minimum negative integer, use `{int.min}` instead.
+///
+/// This also means that if you want to embed a negative integer in markup, you
+/// will need to use parentheses to group the negation operator: `[#(-6)]`.
+#[ty(scope, cast, name = "int", title = "Integer", since = "forever")]
 type i64;
 
 #[scope(ext)]
@@ -70,7 +94,7 @@ impl i64 {
     /// #(int("27") + int("4")) \
     /// #int("beef", base: 16)
     /// ```
-    #[func(constructor)]
+    #[func(constructor, since = "forever")]
     pub fn construct(
         /// The value that should be converted to an integer.
         value: Spanned<ToInt>,
@@ -131,7 +155,7 @@ impl i64 {
     /// #(-5).signum() \
     /// #(0).signum()
     /// ```
-    #[func]
+    #[func(since = "0.11.0")]
     pub fn signum(self) -> i64 {
         i64::signum(self)
     }
@@ -145,7 +169,7 @@ impl i64 {
     /// #4.bit-not() \
     /// #(-1).bit-not()
     /// ```
-    #[func(title = "Bitwise NOT")]
+    #[func(title = "Bitwise NOT", since = "0.11.0")]
     pub fn bit_not(self) -> i64 {
         !self
     }
@@ -158,7 +182,7 @@ impl i64 {
     /// ```example
     /// #128.bit-and(192)
     /// ```
-    #[func(title = "Bitwise AND")]
+    #[func(title = "Bitwise AND", since = "0.11.0")]
     pub fn bit_and(
         self,
         /// The right-hand operand of the bitwise AND.
@@ -175,7 +199,7 @@ impl i64 {
     /// ```example
     /// #64.bit-or(32)
     /// ```
-    #[func(title = "Bitwise OR")]
+    #[func(title = "Bitwise OR", since = "0.11.0")]
     pub fn bit_or(
         self,
         /// The right-hand operand of the bitwise OR.
@@ -192,7 +216,7 @@ impl i64 {
     /// ```example
     /// #64.bit-xor(96)
     /// ```
-    #[func(title = "Bitwise XOR")]
+    #[func(title = "Bitwise XOR", since = "0.11.0")]
     pub fn bit_xor(
         self,
         /// The right-hand operand of the bitwise XOR.
@@ -211,7 +235,7 @@ impl i64 {
     /// #33.bit-lshift(2) \
     /// #(-1).bit-lshift(3)
     /// ```
-    #[func(title = "Bitwise Left Shift")]
+    #[func(title = "Bitwise Left Shift", since = "0.11.0")]
     pub fn bit_lshift(
         self,
         /// The amount of bits to shift. Must not be negative.
@@ -233,7 +257,7 @@ impl i64 {
     /// #(-8).bit-rshift(2) \
     /// #(-8).bit-rshift(2, logical: true)
     /// ```
-    #[func(title = "Bitwise Right Shift")]
+    #[func(title = "Bitwise Right Shift", since = "0.11.0")]
     pub fn bit_rshift(
         self,
         /// The amount of bits to shift. Must not be negative.
@@ -287,7 +311,7 @@ impl i64 {
     /// #int.from-bytes(bytes((0, 0, 0, 0, 0, 0, 0, 1))) \
     /// #int.from-bytes(bytes((1, 0, 0, 0, 0, 0, 0, 0)), endian: "big")
     /// ```
-    #[func]
+    #[func(since = "0.12.0")]
     pub fn from_bytes(
         /// The bytes that should be converted to an integer.
         ///
@@ -353,7 +377,7 @@ impl i64 {
     /// #array(10000.to-bytes(endian: "big")) \
     /// #array(10000.to-bytes(size: 4))
     /// ```
-    #[func]
+    #[func(since = "0.12.0")]
     pub fn to_bytes(
         self,
         /// The endianness of the conversion.

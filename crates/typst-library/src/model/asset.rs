@@ -50,7 +50,7 @@ use crate::introspection::Locatable;
 /// ```
 ///
 /// This function may only be used in the @reference:bundle[bundle] target.
-#[elem(Locatable)]
+#[elem(since = "0.15.0", Locatable)]
 pub struct AssetElem {
     /// The path in the bundle at which the asset will be placed.
     ///

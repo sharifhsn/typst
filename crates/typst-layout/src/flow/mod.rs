@@ -72,8 +72,12 @@ pub fn layout_fragment(
         locator.track(),
         styles,
         regions,
-        NonZeroUsize::ONE,
-        ColumnLayout::default(),
+        ColumnOptions {
+            count: NonZeroUsize::ONE,
+            balanced: false,
+            gutter: Rel::zero(),
+        },
+        None,
     )
 }
 
@@ -100,17 +104,18 @@ pub fn layout_columns(
         locator.track(),
         styles,
         regions,
-        elem.count.get(styles),
-        ColumnLayout {
+        ColumnOptions {
+            count: elem.count.get(styles),
+            balanced: elem.balanced.get(styles),
             gutter: elem.gutter.resolve(styles),
-            region_span: Some(elem.span()),
         },
+        Some(elem.span()),
     )
 }
 
 /// The cached, internal implementation of [`layout_fragment`].
 #[comemo::memoize]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn layout_fragment_impl(
     world: Tracked<dyn World + '_>,
     library: &LazyHash<Library>,
@@ -122,8 +127,8 @@ fn layout_fragment_impl(
     locator: Tracked<Locator>,
     styles: StyleChain,
     regions: Regions,
-    columns: NonZeroUsize,
-    column_layout: ColumnLayout,
+    column: ColumnOptions,
+    column_region_span: Option<Span>,
 ) -> SourceResult<Fragment> {
     if !regions.size.x.is_finite() && regions.expand.x {
         bail!(content.span(), "cannot expand into infinite width");
@@ -163,9 +168,8 @@ fn layout_fragment_impl(
         &mut locator,
         styles,
         regions,
-        columns,
-        column_layout.gutter,
-        column_layout.region_span,
+        column,
+        column_region_span,
         kind.into(),
     )
 }
@@ -192,21 +196,19 @@ impl From<FragmentKind> for FlowMode {
 }
 
 /// Lays out realized content into regions, potentially with columns.
-#[allow(clippy::too_many_arguments)]
 pub fn layout_flow<'a>(
     engine: &mut Engine,
     children: &[Pair<'a>],
     locator: &mut SplitLocator<'a>,
     shared: StyleChain<'a>,
     mut regions: Regions,
-    columns: NonZeroUsize,
-    column_gutter: Rel<Abs>,
+    column: ColumnOptions,
     column_region_span: Option<Span>,
     mode: FlowMode,
 ) -> SourceResult<Fragment> {
     // Prepare configuration that is shared across the whole flow.
-    let config =
-        configuration(shared, regions, columns, column_gutter, column_region_span, mode);
+    let mut config = configuration(shared, regions, column, mode);
+    config.column_region_span = column_region_span;
 
     // Collect the elements into pre-processed children. These are much easier
     // to handle than the raw elements.
@@ -245,25 +247,29 @@ pub fn layout_flow<'a>(
 fn configuration<'x>(
     shared: StyleChain<'x>,
     regions: Regions,
-    columns: NonZeroUsize,
-    column_gutter: Rel<Abs>,
-    column_region_span: Option<Span>,
+    column: ColumnOptions,
     mode: FlowMode,
 ) -> Config<'x> {
     Config {
+        column_region_span: None,
         mode,
         shared,
-        column_region_span,
         columns: {
-            let mut count = columns.get();
+            let mut count = column.count.get();
             if !regions.size.x.is_finite() {
                 count = 1;
             }
 
-            let gutter = column_gutter.relative_to(regions.base().x);
+            let gutter = column.gutter.relative_to(regions.base().x);
             let width = (regions.size.x - gutter * (count - 1) as f64) / count as f64;
             let dir = shared.resolve(TextElem::dir);
-            ColumnConfig { count, width, gutter, dir }
+            ColumnConfig {
+                count,
+                width,
+                gutter,
+                dir,
+                balanced: column.balanced,
+            }
         },
         footnote: FootnoteConfig {
             separator: shared
@@ -301,6 +307,7 @@ fn configuration<'x>(
 /// - 'b is that of the collected/prepared children
 #[derive(Clone)]
 struct Work<'a, 'b> {
+    manual_column_break: bool,
     /// Children that we haven't processed yet. This slice shrinks over time.
     children: &'b [Child<'a>],
     /// Leftovers from a breakable block.
@@ -313,9 +320,6 @@ struct Work<'a, 'b> {
     footnote_spill: Option<std::vec::IntoIter<Frame>>,
     /// Queued tags that will be attached to the next frame.
     tags: EcoVec<&'a Tag>,
-    /// Whether the most recently completed region ended at an explicit
-    /// `#colbreak()` rather than through automatic overflow.
-    manual_column_break: bool,
     /// Identifies floats and footnotes that can be skipped if visited because
     /// they were already handled and incorporated as column or page level
     /// insertions.
@@ -326,13 +330,13 @@ impl<'a, 'b> Work<'a, 'b> {
     /// Create the initial work state from a list of children.
     fn new(children: &'b [Child<'a>]) -> Self {
         Self {
+            manual_column_break: false,
             children,
             spill: None,
             floats: EcoVec::new(),
             footnotes: EcoVec::new(),
             footnote_spill: None,
             tags: EcoVec::new(),
-            manual_column_break: false,
             skips: Rc::new(FxHashSet::default()),
         }
     }
@@ -365,35 +369,32 @@ impl<'a, 'b> Work<'a, 'b> {
     }
 }
 
+/// Options defining the column layout.
+#[derive(Hash)]
+pub struct ColumnOptions {
+    /// The number of columns.
+    pub count: NonZeroUsize,
+    /// Whether column heights are to be equalized.
+    pub balanced: bool,
+    /// The spacing between columns.
+    pub gutter: Rel<Abs>,
+}
+
 /// Shared configuration for the whole flow.
 struct Config<'x> {
+    column_region_span: Option<Span>,
     /// Whether this is the root flow, which can host footnotes and line
     /// numbers.
     mode: FlowMode,
     /// The styles shared by the whole flow. This is used for footnotes and line
     /// numbers.
     shared: StyleChain<'x>,
-    /// Span of an explicit `columns` element whose physical region should be
-    /// marked for post-layout consumers.
-    column_region_span: Option<Span>,
     /// Settings for columns.
     columns: ColumnConfig,
     /// Settings for footnotes.
     footnote: FootnoteConfig,
     /// Settings for line numbers.
     line_numbers: Option<LineNumberConfig>,
-}
-
-#[derive(Debug, Copy, Clone, Hash)]
-struct ColumnLayout {
-    gutter: Rel<Abs>,
-    region_span: Option<Span>,
-}
-
-impl Default for ColumnLayout {
-    fn default() -> Self {
-        Self { gutter: Rel::zero(), region_span: None }
-    }
 }
 
 /// Configuration of footnotes.
@@ -419,6 +420,8 @@ struct ColumnConfig {
     /// The horizontal direction in which columns progress. Defined by
     /// `text.dir`.
     dir: Dir,
+    /// Whether to equalize the height of columns by breaking columns early.
+    balanced: bool,
 }
 
 /// Configuration of line numbers.
