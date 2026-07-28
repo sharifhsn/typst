@@ -1,8 +1,4 @@
-# v0.15.0-office.3 — draft release notes
-
-> **DRAFT.** Not published. Do not tag or cut a release from this draft yet.
-> A fresh post-fix corpus authority and Microsoft Office consumer validation
-> remain release blockers; the former TOC page-cache blocker is fixed.
+# v0.15.1-office.3 — release notes
 
 Supersedes `v0.15.0-office.2` (2026-07-04). Like both prior releases, this
 remains **experimental preview** software: Typst can export `.docx` and
@@ -28,6 +24,9 @@ for the full current verdict.
   back to Word's default link formatting.
 - Text boxes can now carry gradient fills natively.
 - Licensed fonts are embedded when their OpenType permissions allow it.
+- Native table packages now use the schema-required PresentationML transform
+  namespace and table-cell property order. This was found by a real PowerPoint
+  repair prompt, reproduced with the Open XML SDK, and fixed before release.
 - Corpus-driven hardening pass: a large batch of real-document fallback and
   classification fixes landed together as part of consolidating the combined
   DOCX branch history (see "Corpus and validation" below).
@@ -67,6 +66,12 @@ for the full current verdict.
   flatter linear approximation, for both DOCX and PPTX.
 - OOXML stroke handling now distinguishes dashed strokes from dotted strokes
   instead of collapsing them to the same preset.
+- `typst import` can experimentally convert arbitrary DOCX and PPTX packages
+  into Typst source plus assets, with bounded package parsing, no-overwrite
+  output, and optional machine-readable loss reports.
+- The separate browser demo can compile folder or ZIP projects entirely in
+  WASM, including relative imports, project-local fonts, SVGs, and vendored
+  packages, and download DOCX or PPTX without uploading the project.
 
 ### Documentation
 
@@ -84,8 +89,6 @@ document's verified-gaps section — this list is intentionally not exhaustive;
 see that document for the complete picture.
 
 **DOCX:**
-- A fresh, unfiltered full public-corpus authority after the latest fixes is
-  not yet complete; the existing 1,408-record authority is a pre-fix baseline.
 - Real low-fidelity documents remain, including `presentation/sleiden-lei`
   (page growth, displaced content, missing text).
 - Headers/footers that vary beyond Word's first/even/default model freeze to
@@ -110,23 +113,36 @@ see that document for the complete picture.
   list with a following shape, and rendered one inline equation less
   faithfully. This confirms package validity but is not a general
   visual-fidelity claim.
+- Current corpus text auditing still finds one lost external link among ten
+  link-bearing decks. PPTX import does not decode EMF/WMF media, animations,
+  transitions, or embedded OLE objects.
 
 **Pandoc target:** retained as known-incomplete historical/development code.
 It is not a supported preview and is not a release gate.
 
 ## Validation
 
-Carried forward as a pre-fix baseline from revision
-`c07adc99b70f`, 1,408-document public corpus, manifest SHA-256
-`9b92ee3092b97c9c600547722ccb2397a5d21a1eea1d224418d1c57d1a9e99af`):
+The final validated code revision is `cc556061`; the local release-mode binary
+identified that revision and had SHA-256
+`d13cb92c7999498b5d7d1668dc68e79c62cb25faf8df33ca1b6dafeb6e1f69d6`.
 
-- DOCX: 1,407/1,408 packages valid; mean LibreOffice visual similarity
-  `0.954462` across 1,397 scored renders.
-- PPTX: all 120 compilable presentation templates exported valid OOXML with
-  zero export errors; mean LibreOffice visual similarity `0.992` across all
-  120 decks.
-- DOCX integration (212), PPTX integration (65), and DOCX review round-trip (22)
-  test suites passed; strict Clippy passed with warnings denied.
+- The full Rust workspace passes 1,214 tests across 61 suites, with 13 ignored.
+  Rustfmt is clean and workspace/all-targets/all-features Clippy passes with
+  warnings denied.
+- The checked-in DOCX validator passes 2/2. The corrected export audit finds
+  zero OOXML invariant violations in 150 DOCX exports and 60 PPTX exports; its
+  42 planted-defect canaries and both 91-cell document/presentation generative
+  matrices pass.
+- The immutable wide DOCX corpus imports 2,435/2,463 packages and compiles all
+  2,435 generated Typst documents; all 28 refusals are clean and there are no
+  fatal failures. The POI corpus imports 111/128 and compiles all 111, with
+  98.6% mean and 100% median text coverage across 91 measurable documents.
+- The frozen PPTX corpus imports 519/539 and compiles all 519, with no fatal
+  failures. A 60-deck import/re-export run completes 60/60 with 97.7% mean and
+  100% median text retention.
+- Microsoft Word opens and renders the current DOCX smoke. Microsoft PowerPoint
+  opens the six-slide native-table regression deck without repair, renders all
+  six slides, and the package has zero Microsoft Open XML SDK validation errors.
 
 See
 [`docs/dev/office-export-shipping-readiness.md`](office-export-shipping-readiness.md)
@@ -134,7 +150,7 @@ for full detail, including why a fresh authority is required before classifying
 the aggregate DOCX pagination delta against v12 on current HEAD.
 
 <details>
-<summary>Commit-level detail (`v0.15.0-office.2..HEAD`, docs/CI-only commits omitted from the summary above)</summary>
+<summary>Historical commit detail from the first Office.3 development slice</summary>
 
 ```
 14d36e2 pptx: remap links in filtered exports

@@ -23,6 +23,12 @@ the rationale behind each disposition and the catalogue of noise.
 > but not a substitute for the current cross-export issue register and design in
 > [`../../docs/dev/office-export-architecture.md`](../../docs/dev/office-export-architecture.md),
 > or for a fresh run of the checked-in validator above.
+> Test claims inside numbered entries are likewise contemporaneous. In
+> particular, references to focused DOCX/PPTX WASM checks record the checks that
+> existed for that increment; later entries correctly recorded that no
+> executable in-repository gate was then discoverable. Current executable WASM
+> evidence lives in the separate `typst-office` demo and is summarized in
+> [`../../docs/dev/office-export-shipping-readiness.md`](../../docs/dev/office-export-shipping-readiness.md).
 
 ## Current rearchitecture foundation
 

@@ -1,7 +1,6 @@
 # Office export shipping readiness
 
-Status date: 2026-07-18, revised 2026-07-22. Release-hygiene addendum:
-2026-07-27.
+Status date: 2026-07-18, revised 2026-07-27.
 
 > **How to read this document.** The detailed corpus numbers and validation
 > narrative below are preserved dated evidence, mostly frozen at the revisions
@@ -48,6 +47,76 @@ DOCX/PPTX import is available through `typst import`, with explicit loss
 reports.** Do not claim arbitrary-document fidelity, production support, or
 browser import yet.
 
+## 2026-07-27 exact-code release authority
+
+The current release candidate is based on Typst 0.15.1. The validated code
+revision is `cc556061`; its release-mode binary identifies that revision and has
+SHA-256
+`d13cb92c7999498b5d7d1668dc68e79c62cb25faf8df33ca1b6dafeb6e1f69d6`.
+Documentation-only commits may follow this revision without changing the
+validated executable code.
+Unlike the dated visual campaigns retained below, these checks were rerun after
+the final semantic-placement, CLI import, audit-harness, and native-consumer
+changes:
+
+- The full Rust workspace passes 1,214 tests across 61 suites, with 13 ignored;
+  stable rustfmt is clean and workspace/all-targets/all-features Clippy passes
+  with warnings denied. Restored Typst 0.15.1 math references are pixel-identical
+  to the release references.
+- The supported Rust suites pass: 338 DOCX integration tests, 77 PPTX
+  integration tests, 368 DOCX-import tests, 32 PPTX-import tests, and 28 CLI
+  tests. The supported crates are clean under warnings-denied Clippy.
+- The DOCX fixture validator passes 2/2 with no failed or unverified records.
+  On the pinned Apache POI set, 111/128 packages import and all 111 results
+  compile; the 17 refusals are malformed, encrypted, unsafe-external-entity,
+  truncated, or deliberately adversarial packages. There are no crashes or
+  compile-after-import failures. Across 91 measurable documents in this exact
+  rerun, recovered text
+  coverage has 98.6% mean and 100% median.
+- The new immutable wide-DOCX authority freezes exact commits and per-file
+  hashes from eight independent upstream suites. Of 2,463 unique documents,
+  2,435 import and all 2,435 generated Typst sources compile. The other 28 are
+  clean refusals; there are zero crashes, timeouts, or compile-after-import
+  failures. Its manifest SHA-256 is
+  `caba5dd0cd22dd5f04efa61f558429f96065db946c8f8792c41286316c04491c`.
+- On the pinned 539-file PPTX import corpus, 519 presentations import and all
+  519 generated Typst sources compile. Twenty malformed, encrypted, truncated,
+  or fuzzer packages are cleanly refused; there are no fatal failures. A
+  60-presentation import/re-export sample completes 60/60. Text retention has
+  97.7% mean and 100% median, but the 25% minimum and incomplete picture
+  retention show why this remains a preview. EMF/WMF media are a known import
+  gap rather than silently decoded through an unsafe or unmaintained GDI stack.
+- The corrected presentation export audit finds no OOXML invariant violations
+  in 60/60 decks. Its text/order signal has 92.5% median and 54.6% minimum
+  sequence retention; 16 decks merit fidelity inspection, and one of ten
+  link-bearing decks loses one external link. Those are honest richness gaps,
+  not package-validity failures.
+- The audit's 42 planted-defect canaries all fire correctly, and its 13-by-7
+  generative construct/context matrix completes all 91 cells with no export,
+  invariant, or sentinel-loss finding. The corrected document sweep finds no
+  OOXML invariant violation in 150/150 exports.
+- The same 150-document DOCX text/order sweep has 96.0% median and 28.6%
+  minimum sequence retention; none crosses the audit's catastrophic-loss
+  threshold of 25%. Fifty-six documents have at least one advisory text or
+  formatting signal, including eight run-format collapse signals. Three of 79
+  link-bearing documents lose at least one external link. These findings are a
+  prioritized richness backlog, not evidence that the packages fail to open.
+- Fresh packages open and render unattended through installed Microsoft Word
+  and Microsoft PowerPoint on macOS. This is one current-head native smoke per
+  format, not a claim that a broad native-Office consumer matrix has run.
+- The native PowerPoint smoke caught and fixed two table-schema violations that
+  permissive readers had accepted: graphic frames now use `p:xfrm`, and table
+  cell borders precede fills in `a:tcPr`. The six-slide regression deck now
+  opens without repair, validates with zero Microsoft Open XML SDK errors, and
+  renders all six slides through PowerPoint with a 0.994 whole-page similarity
+  score against the Typst PDF.
+
+This evidence is sufficient to publish the hosted tool as an **experimental
+preview**. It does not justify “any Typst document, perfectly converted.” Exact
+pagination is intentionally not a release objective: a one-page reflow is
+ordinary cross-engine behavior. Gross page divergence remains useful because it
+can reveal a deeper sizing, wrapping, or fallback defect.
+
 ## What works now
 
 ### DOCX
@@ -91,7 +160,7 @@ The target emits typed Pandoc JSON for headings, paragraphs, inline formatting,
 lists, tables, links, footnotes, code, figures, math, citations, and metadata. It can
 write a bibliography sidecar and rasterize visual content that has no Pandoc node.
 
-## Verified gaps and shipping blockers
+## Verified gaps and preview boundaries
 
 ### DOCX
 
@@ -674,28 +743,35 @@ branch. A browser-hosted WASM export surface is the preferred distribution goal;
 a native installer is optional. Release archives remain a useful fallback, but
 installer polish is not a prerequisite for the next hosted-preview campaign.
 
-The separate `typst-office` demo now imports folders or bounded ZIP projects,
-loads project-local fonts, resolves relative modules, and maps vendored packages
-from `packages/<namespace>/<name>/<version>/...` into Typst's package namespace.
-Its local WASM smoke exports both DOCX and PPTX with relative and `@local` imports.
-The deployed GitHub Pages path currently serves the browser JS and WASM with the
-correct `application/wasm` content type, and the exact CI smoke path passes locally.
-Three newer project-import/package/filename commits still need to reach the remote;
-arbitrary Typst Universe/proprietary-app project compatibility is not yet proven.
+The separate `typst-office` demo imports source files, folders, or bounded ZIP
+projects; loads project-local fonts; resolves relative modules; and maps vendored
+packages from `packages/<namespace>/<name>/<version>/...` into Typst's package
+namespace. Folder and ZIP paths are canonicalized and bounded before they reach
+the in-browser compiler. Its exact CI smoke compiles a durable project fixture
+with a relative import, nested `@local` package, SVG, and project-local font to
+both DOCX and PPTX, then validates the generated OOXML relationships and semantic
+sentinels. The compiler and files stay in the browser.
 
-## Remaining release gates
+The GitHub Pages deployment at <https://sharifhsn.github.io/typst-office/> is the
+primary distribution surface. It is export-only: native `typst import`, DOCX
+review round trips, host font discovery, and online Typst Universe/private-package
+resolution are not browser features.
 
-1. Re-run the full consumer lane to establish the focused 5/5 timeout recovery as
-   corpus-wide authority, then address the deterministic LibreOffice conversion
-   failure and incomplete raster evidence.
-2. Run a new authority after the post-`1bf829900` paragraph-spacing and checker
-   changes and establish it as the new reproducible baseline; do not use the
-   unretained v12 aggregate for causal claims.
-3. Add real Microsoft PowerPoint testing to the new 120-deck PPTX authority,
-   including save-and-reopen behavior for transparent recovered text.
-4. Prove the DOCX/PPTX export path in the intended browser/WASM hosting architecture,
-   including fonts, packages, filesystem inputs, memory bounds, and file download.
-5. Run accessibility and target-version checks in Microsoft Word and PowerPoint for
-   the supported consumer matrix.
+## Deliberate preview limitations and post-preview work
 
-Until those gates pass, ship only behind explicit experimental/preview wording.
+These are not blockers to posting the explicitly experimental preview, but they
+bound what may be promised:
+
+1. Native Word and PowerPoint have current-head smoke coverage, not a broad
+   version/OS/save-and-reopen corpus. LibreOffice corpus evidence remains a proxy.
+2. Accessibility metadata and target-version compatibility need their own native
+   Office matrix before any production-support claim.
+3. Complex transformed visuals, dense canvases, and unsupported math/layout
+   regions can remain approximate or rasterized. Preserve semantics where the
+   OOXML model is tractable; do not replace correct dense editable content merely
+   to make Word faster without an explicit policy option.
+4. Office import remains native-only. PPTX EMF/WMF, animation/transitions, OLE,
+   and exact text-box baselines are documented import gaps.
+5. Browser projects must vendor non-bundled fonts and packages and stay within
+   the documented file/byte limits. Projects tied to proprietary editor state
+   beyond their downloaded source archive are outside the demo's contract.
