@@ -12,10 +12,17 @@ The fourth corner of the Office interop set, and the mirror of
                          resolve/ (masters, layouts, theme colours)
 ```
 
+```sh
+typst import deck.pptx out.typ
+typst import deck.pptx out.typ --pptx-fidelity=idiomatic
+typst import deck.pptx out.typ --report=import-report.json
 ```
-cargo run -p typst-pptx-import --example import -- deck.pptx out.typ
-cargo run -p typst-pptx-import --example import -- --idiomatic deck.pptx out.typ
-```
+
+Extracted media is written beside the `.typ`. The command refuses to
+overwrite the source, assets, or report; the crate's `import` example remains
+available for API development. The shared OOXML reader rejects archives above
+128 MiB and independently bounds expanded data, part sizes, entry count, XML
+depth, and external-entity declarations.
 
 ## Why this is not the Word importer with the nouns changed
 

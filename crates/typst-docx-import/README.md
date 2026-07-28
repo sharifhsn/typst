@@ -11,12 +11,17 @@ WPS, whatever produced it — and raises it to readable Typst.
 > is recorded in an `ImportReport`, so the loss is auditable rather than silent.
 
 ```sh
-cargo run -p typst-docx-import --example import -- in.docx out.typ
-cargo run -p typst-docx-import --example import -- --charts=plot in.docx out.typ
+typst import in.docx out.typ
+typst import in.docx out.typ --docx-charts=plot --docx-tracked=accept
+typst import in.docx out.typ --report=import-report.json
 ```
 
 Some constructs — images, and a recovered bibliography — are written *beside*
 the `.typ` as assets, so the emitted source only compiles next to them.
+The command refuses to overwrite the source, assets, sidecars, or report. The
+crate's `import` example remains available for API development. The shared
+OOXML reader rejects archives above 128 MiB and independently bounds expanded
+data, part sizes, entry count, XML depth, and external-entity declarations.
 
 ## Two IRs
 

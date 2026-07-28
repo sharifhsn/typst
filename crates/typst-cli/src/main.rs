@@ -6,6 +6,7 @@ mod download;
 mod eval;
 mod fonts;
 mod greet;
+mod import;
 mod info;
 mod init;
 mod packages;
@@ -70,6 +71,7 @@ fn main() -> ExitCode {
 fn dispatch() -> HintedStrResult<()> {
     match &ARGS.command {
         Command::Compile(command) => crate::compile::compile(command)?,
+        Command::Import(command) => crate::import::import(command)?,
         Command::Review(command) => crate::review::review(command)?,
         Command::Watch(command) => crate::watch::watch(command)?,
         Command::Init(command) => crate::init::init(command)?,

@@ -19,6 +19,70 @@ fn test_help() {
 }
 
 #[test]
+fn test_import_office_documents() {
+    let project = tempfs();
+    project.write("tiger.jpg", typst_dev_assets::get_by_name("tiger.jpg").unwrap());
+    let source = project.write("office.typ", "Hello Office\n#image(\"tiger.jpg\")");
+
+    let docx = project.resolve("office.docx");
+    exec().arg("compile").arg(&source).arg(&docx).must_succeed();
+    let imported_docx = project.resolve("from-docx.typ");
+    let docx_report = project.resolve("docx-report.json");
+    exec()
+        .arg("import")
+        .arg(&docx)
+        .arg(&imported_docx)
+        .arg("--report")
+        .arg(&docx_report)
+        .must_succeed();
+    project.read("from-docx.typ").must_contain("Hello Office");
+    assert_eq!(
+        std::fs::read_dir(project.resolve("assets")).unwrap().count(),
+        1,
+        "the imported DOCX image should be extracted beside the Typst source"
+    );
+    project
+        .read("docx-report.json")
+        .must_contain("\"format\": \"docx\"")
+        .must_contain("\"entries\":");
+
+    let slides = project.write("slides.typ", "Hello Office");
+    let pptx = project.resolve("office.pptx");
+    exec().arg("compile").arg(&slides).arg(&pptx).must_succeed();
+    let imported_pptx = project.resolve("from-pptx.typ");
+    exec()
+        .arg("import")
+        .arg(&pptx)
+        .arg(&imported_pptx)
+        .arg("--pptx-fidelity=idiomatic")
+        .must_succeed();
+    project
+        .read("from-pptx.typ")
+        .must_contain("Hello Office")
+        .must_contain("@preview/touying:");
+}
+
+#[test]
+fn test_import_refuses_overwrites_and_unknown_formats() {
+    let project = tempfs();
+    let source = project.write("office.typ", "Original");
+    let docx = project.resolve("office.docx");
+    exec().arg("compile").arg(&source).arg(&docx).must_succeed();
+
+    let output = project.write("existing.typ", "do not replace");
+    exec().arg("import").arg(&docx).arg(&output).must_fail();
+    project.read("existing.typ").must_contain("do not replace");
+
+    let unknown = project.write("office.pdf", b"not an Office package");
+    let failure = exec()
+        .arg("import")
+        .arg(&unknown)
+        .arg(project.resolve("unknown.typ"))
+        .must_fail();
+    failure.stderr.must_contain("expected a .docx or .pptx input");
+}
+
+#[test]
 fn test_compile_pdf() {
     let project = tempfs();
     let title = "Hello from CLI";

@@ -83,6 +83,9 @@ pub enum Command {
     #[command(visible_alias = "c")]
     Compile(CompileCommand),
 
+    /// Imports a Word document or PowerPoint presentation into Typst source.
+    Import(ImportCommand),
+
     /// Reviews edits from a tagged DOCX and optionally applies them to Typst sources.
     Review(ReviewCommand),
 
@@ -112,6 +115,61 @@ pub enum Command {
 
     /// Displays debugging information about Typst.
     Info(InfoCommand),
+}
+
+/// Imports an Office document into Typst source and extracted assets.
+#[derive(Debug, Clone, Parser)]
+pub struct ImportCommand {
+    /// Word (.docx) or PowerPoint (.pptx) file to import.
+    #[clap(value_hint = ValueHint::FilePath)]
+    pub input: PathBuf,
+
+    /// Typst source file to create. Existing files are never overwritten.
+    #[clap(value_hint = ValueHint::FilePath)]
+    pub output: PathBuf,
+
+    /// How to import charts from a Word document.
+    #[clap(long, value_enum, default_value_t)]
+    pub docx_charts: DocxChartMode,
+
+    /// How to handle tracked changes in a Word document.
+    #[clap(long, value_enum, default_value_t)]
+    pub docx_tracked: DocxTrackedMode,
+
+    /// How to reconstruct PowerPoint slide geometry.
+    #[clap(long, value_enum, default_value_t)]
+    pub pptx_fidelity: PptxFidelityMode,
+
+    /// Write a machine-readable JSON loss report to a file, or `-` for stdout.
+    #[clap(long, value_hint = ValueHint::FilePath)]
+    pub report: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, ValueEnum)]
+pub enum DocxChartMode {
+    /// Preserve chart data as an editable table with no package dependency.
+    #[default]
+    Table,
+    /// Recreate charts with the `lilaq` Typst package.
+    Plot,
+}
+
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, ValueEnum)]
+pub enum DocxTrackedMode {
+    /// Keep invisible metadata containing revision history.
+    #[default]
+    Preserve,
+    /// Accept revisions and discard their history.
+    Accept,
+}
+
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, ValueEnum)]
+pub enum PptxFidelityMode {
+    /// Preserve authored positions and sizes for round-trip fidelity.
+    #[default]
+    Placed,
+    /// Promote placeholders into more idiomatic, flowing Typst source.
+    Idiomatic,
 }
 
 /// Compiles an input file into a supported output format.

@@ -21,6 +21,7 @@ doc = false
 typst = { workspace = true }
 typst-bundle = { workspace = true }
 typst-docx = { workspace = true }
+typst-docx-import = { workspace = true }
 typst-docx-roundtrip = { path = "../typst-docx-roundtrip" }
 typst-export-common = { workspace = true }
 typst-pandoc = { workspace = true }
@@ -30,6 +31,7 @@ typst-html = { workspace = true }
 typst-macros = { workspace = true }
 typst-pdf = { workspace = true }
 typst-pptx = { workspace = true }
+typst-pptx-import = { workspace = true }
 typst-render = { workspace = true }
 typst-svg = { workspace = true }
 typst-timing = { workspace = true }

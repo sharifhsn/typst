@@ -43,10 +43,14 @@ consider signing up to our [collaborative online editor][app] for free.
 > **PowerPoint (`.pptx`)** — one page per editable slide with live text, native
 > shapes, gradients and images; best for slide-shaped decks
 > (`typst compile deck.typ deck.pptx`).
+> **Office import** — recover a DOCX or PPTX into Typst source, extracted
+> assets, and an optional machine-readable loss report
+> (`typst import file.docx recovered.typ --report=loss.json`).
 > Both are **experimental previews** (like Typst's own HTML export); see
 > **[Word export](#word-export-this-fork)** and
-> **[PowerPoint export](#powerpoint-export-this-fork)** below for how to build
-> them, what maps natively, and the honest limitations. A consolidated
+> **[PowerPoint export](#powerpoint-export-this-fork)** below, plus
+> **[Office import](#office-import-this-fork)**, for how to build and use them,
+> what maps natively, and the honest limitations. A consolidated
 > [Pandoc-AST target](crates/typst-pandoc/README.md) remains in the source tree,
 > but it is known incomplete, is not a supported preview, and is not a release
 > gate for this fork.
@@ -336,6 +340,37 @@ The per-feature notes and honest limitations are in
 [`crates/typst-pptx/README.md`](crates/typst-pptx/README.md), and a measured
 head-to-head against the existing conversion tools (typ2pptx, typ2docx,
 touying-exporter, pandoc) is in [`COMPARISON.md`](COMPARISON.md).
+
+## Office import (this fork)
+
+The same binary can recover arbitrary DOCX and PPTX packages into Typst source.
+The output path is explicit and existing source, assets, sidecars, or reports
+are never overwritten:
+
+```sh
+target/release/typst import report.docx recovered.typ
+target/release/typst import report.docx recovered.typ \
+  --docx-charts=plot --docx-tracked=accept --report=docx-loss.json
+target/release/typst import slides.pptx recovered-slides.typ \
+  --pptx-fidelity=placed --report=pptx-loss.json
+```
+
+DOCX import is content-oriented: it recovers headings, paragraphs, lists,
+tables, notes, math, comments, revisions, citations, many drawings, and media
+into readable Typst plus assets. It does not promise Word's pagination or exact
+layout. PPTX import defaults to coordinate-preserving Touying source; the
+`idiomatic` fidelity mode promotes recognized placeholders into more flowing
+slide source at the cost of exact authored geometry.
+
+Both importers validate the OOXML package with shared archive, expanded-size,
+part-count, XML-depth, and XXE limits. Every known approximation or drop is
+reported on stderr and can be serialized with `--report`. Important current
+gaps include EMF/WMF media, PowerPoint animation and transitions, embedded OLE
+objects, and exact PPTX text-box vertical baselines. See the exhaustive
+[`DOCX import matrix`](crates/typst-docx-import/DOCX_SUPPORT_MATRIX.md) and
+[`PPTX import matrix`](crates/typst-pptx-import/README.md#support-matrix) before
+using the recovered source as an archival substitute for the original Office
+file.
 
 ## Pandoc export (this fork)
 
