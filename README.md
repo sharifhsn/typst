@@ -58,7 +58,7 @@ consider signing up to our [collaborative online editor][app] for free.
 > This fork is **not affiliated with or endorsed by the Typst maintainers**, and
 > the export code is not part of upstream Typst. The canonical development
 > branch is `codex/office-export`; the latest release is `v0.15.0-office.2`,
-> with a `v0.15.0-office.3` release in progress.
+> with a `v0.15.1-office.3` release in progress.
 
 ## Example
 A [gentle introduction][tutorial] to Typst is available in our documentation.
