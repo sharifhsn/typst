@@ -168,9 +168,11 @@ fn layout_fragment_impl(
         &mut locator,
         styles,
         regions,
-        column,
-        column_region_span,
-        kind.into(),
+        FlowOptions {
+            columns: column,
+            column_region_span,
+            mode: kind.into(),
+        },
     )
 }
 
@@ -202,12 +204,12 @@ pub fn layout_flow<'a>(
     locator: &mut SplitLocator<'a>,
     shared: StyleChain<'a>,
     mut regions: Regions,
-    column: ColumnOptions,
-    column_region_span: Option<Span>,
-    mode: FlowMode,
+    options: FlowOptions,
 ) -> SourceResult<Fragment> {
+    let FlowOptions { columns, column_region_span, mode } = options;
+
     // Prepare configuration that is shared across the whole flow.
-    let mut config = configuration(shared, regions, column, mode);
+    let mut config = configuration(shared, regions, columns, mode);
     config.column_region_span = column_region_span;
 
     // Collect the elements into pre-processed children. These are much easier
@@ -378,6 +380,20 @@ pub struct ColumnOptions {
     pub balanced: bool,
     /// The spacing between columns.
     pub gutter: Rel<Abs>,
+}
+
+/// Options defining a complete flow layout invocation.
+///
+/// Column geometry remains separate because it is also assembled by cached
+/// fragment layout. The source span is semantic provenance for Office column
+/// regions, while the mode controls root-only layout capabilities.
+pub struct FlowOptions {
+    /// The column geometry and balancing policy.
+    pub columns: ColumnOptions,
+    /// The source span that owns a semantic multi-column region, if any.
+    pub column_region_span: Option<Span>,
+    /// Whether this is a root, block, or inline flow.
+    pub mode: FlowMode,
 }
 
 /// Shared configuration for the whole flow.
